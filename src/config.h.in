@@ -1,0 +1,25 @@
+/*
+ * config.h - Build configuration for ai-glib
+ *
+ * Copyright (C) 2025
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * This file is part of ai-glib.
+ */
+
+#pragma once
+
+/* Package information */
+#define AI_GLIB_PACKAGE_NAME "@PACKAGE_NAME@"
+#define AI_GLIB_PACKAGE_VERSION "@PACKAGE_VERSION@"
+#define AI_GLIB_PACKAGE_BUGREPORT "@PACKAGE_BUGREPORT@"
+
+/* Installation directories */
+#define AI_GLIB_PREFIX "@PREFIX@"
+#define AI_GLIB_LIBDIR "@LIBDIR@"
+#define AI_GLIB_INCLUDEDIR "@INCLUDEDIR@"
+
+/* Build options */
+#ifdef DEBUG
+#define AI_GLIB_DEBUG 1
+#endif

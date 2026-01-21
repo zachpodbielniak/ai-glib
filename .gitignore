@@ -1,0 +1,68 @@
+# Build output
+build/
+*.o
+*.a
+*.so
+*.so.*
+
+# Generated files
+config.h
+ai-version.h
+*.pc
+
+# Editor/IDE files
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+*.kate-swp
+.*.sw?
+
+# Tags
+tags
+TAGS
+.tags
+cscope.*
+
+# Debug files
+*.dSYM/
+core
+core.*
+vgcore.*
+
+# Test output
+*.log
+*.trs
+
+# GObject Introspection
+*.gir
+*.typelib
+
+# Documentation generation
+docs/_build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.orig
+*.backup
+
+# Compiled examples (if run outside build/)
+examples/simple-chat-*
+examples/multi-provider
+examples/streaming-chat
+examples/tool-use
+!examples/*.c
+
+# pkg-config generated
+ai-glib-*.pc
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/

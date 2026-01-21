@@ -1,0 +1,58 @@
+/*
+ * ai-version.h - Version information for ai-glib
+ *
+ * Copyright (C) 2025
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * This file is part of ai-glib.
+ */
+
+#pragma once
+
+#if !defined(AI_GLIB_INSIDE) && !defined(AI_GLIB_COMPILATION)
+#error "Only <ai-glib.h> can be included directly."
+#endif
+
+/**
+ * AI_GLIB_MAJOR_VERSION:
+ *
+ * The major version number of the ai-glib library.
+ */
+#define AI_GLIB_MAJOR_VERSION (@AI_GLIB_MAJOR_VERSION@)
+
+/**
+ * AI_GLIB_MINOR_VERSION:
+ *
+ * The minor version number of the ai-glib library.
+ */
+#define AI_GLIB_MINOR_VERSION (@AI_GLIB_MINOR_VERSION@)
+
+/**
+ * AI_GLIB_MICRO_VERSION:
+ *
+ * The micro version number of the ai-glib library.
+ */
+#define AI_GLIB_MICRO_VERSION (@AI_GLIB_MICRO_VERSION@)
+
+/**
+ * AI_GLIB_VERSION_STRING:
+ *
+ * The version string of the ai-glib library.
+ */
+#define AI_GLIB_VERSION_STRING "@AI_GLIB_VERSION@"
+
+/**
+ * AI_GLIB_CHECK_VERSION:
+ * @major: major version number
+ * @minor: minor version number
+ * @micro: micro version number
+ *
+ * Checks whether the ai-glib library version is at least the specified version.
+ *
+ * Returns: %TRUE if the version is at least the specified version
+ */
+#define AI_GLIB_CHECK_VERSION(major, minor, micro) \
+    (AI_GLIB_MAJOR_VERSION > (major) || \
+     (AI_GLIB_MAJOR_VERSION == (major) && AI_GLIB_MINOR_VERSION > (minor)) || \
+     (AI_GLIB_MAJOR_VERSION == (major) && AI_GLIB_MINOR_VERSION == (minor) && \
+      AI_GLIB_MICRO_VERSION >= (micro)))
