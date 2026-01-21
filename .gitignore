@@ -27,8 +27,8 @@ cscope.*
 
 # Debug files
 *.dSYM/
-core
-core.*
+/core
+core.[0-9]*
 vgcore.*
 
 # Test output
