@@ -509,6 +509,283 @@ ai_gemini_client_provider_init(AiProviderInterface *iface)
     iface->list_models_finish = ai_gemini_client_list_models_finish;
 }
 
+/*
+ * AiStreamable interface implementation
+ *
+ * Gemini uses SSE with streamGenerateContent endpoint.
+ * Each chunk is a JSON object with candidates[0].content.parts[0].text
+ */
+
+typedef struct
+{
+    AiGeminiClient   *client;
+    GTask            *task;
+    SoupMessage      *msg;
+    GInputStream     *input_stream;
+    GDataInputStream *data_stream;
+    GCancellable     *cancellable;
+
+    AiResponse       *response;
+    GString          *current_text;
+
+    gboolean          stream_started;
+} GeminiStreamData;
+
+static void
+gemini_stream_data_free(GeminiStreamData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->msg);
+    g_clear_object(&data->input_stream);
+    g_clear_object(&data->data_stream);
+    g_clear_object(&data->cancellable);
+    g_clear_object(&data->response);
+
+    if (data->current_text != NULL)
+    {
+        g_string_free(data->current_text, TRUE);
+    }
+
+    g_slice_free(GeminiStreamData, data);
+}
+
+static void
+gemini_process_stream_chunk(
+    GeminiStreamData *data,
+    const gchar      *json_str
+){
+    g_autoptr(JsonParser) parser = NULL;
+    g_autoptr(GError) error = NULL;
+    JsonNode *root;
+    JsonObject *obj;
+
+    if (json_str == NULL || json_str[0] == '\0')
+    {
+        return;
+    }
+
+    parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, json_str, -1, &error))
+    {
+        return;
+    }
+
+    root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(root))
+    {
+        return;
+    }
+
+    obj = json_node_get_object(root);
+
+    if (!data->stream_started)
+    {
+        data->response = ai_response_new("", "");
+        data->current_text = g_string_new("");
+        data->stream_started = TRUE;
+
+        g_signal_emit_by_name(data->client, "stream-start");
+    }
+
+    /* Parse candidates */
+    if (json_object_has_member(obj, "candidates"))
+    {
+        JsonArray *candidates = json_object_get_array_member(obj, "candidates");
+
+        if (json_array_get_length(candidates) > 0)
+        {
+            JsonObject *candidate = json_array_get_object_element(candidates, 0);
+            const gchar *finish_reason = json_object_get_string_member_with_default(
+                candidate, "finishReason", "");
+
+            if (g_strcmp0(finish_reason, "STOP") == 0)
+            {
+                ai_response_set_stop_reason(data->response, AI_STOP_REASON_END_TURN);
+            }
+            else if (g_strcmp0(finish_reason, "MAX_TOKENS") == 0)
+            {
+                ai_response_set_stop_reason(data->response, AI_STOP_REASON_MAX_TOKENS);
+            }
+
+            if (json_object_has_member(candidate, "content"))
+            {
+                JsonObject *content = json_object_get_object_member(candidate, "content");
+
+                if (json_object_has_member(content, "parts"))
+                {
+                    JsonArray *parts = json_object_get_array_member(content, "parts");
+                    guint len = json_array_get_length(parts);
+                    guint i;
+
+                    for (i = 0; i < len; i++)
+                    {
+                        JsonObject *part = json_array_get_object_element(parts, i);
+
+                        if (json_object_has_member(part, "text"))
+                        {
+                            const gchar *text = json_object_get_string_member(part, "text");
+                            if (text != NULL)
+                            {
+                                g_string_append(data->current_text, text);
+                                g_signal_emit_by_name(data->client, "delta", text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Parse usage */
+    if (json_object_has_member(obj, "usageMetadata"))
+    {
+        JsonObject *usage_obj = json_object_get_object_member(obj, "usageMetadata");
+        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "promptTokenCount", 0);
+        gint output_tokens = json_object_get_int_member_with_default(usage_obj, "candidatesTokenCount", 0);
+        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+
+        ai_response_set_usage(data->response, usage);
+    }
+}
+
+static void gemini_read_next_line(GeminiStreamData *data);
+
+static void
+on_gemini_line_read(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    GeminiStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *line = NULL;
+    gsize length;
+
+    (void)source;
+
+    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
+
+    if (error != NULL)
+    {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+            g_task_return_error(data->task, g_steal_pointer(&error));
+            gemini_stream_data_free(data);
+        }
+        return;
+    }
+
+    if (line == NULL)
+    {
+        /* EOF - finalize response */
+        if (data->response != NULL)
+        {
+            if (data->current_text != NULL && data->current_text->len > 0)
+            {
+                g_autoptr(AiTextContent) content = ai_text_content_new(data->current_text->str);
+                ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
+            }
+
+            g_signal_emit_by_name(data->client, "stream-end", data->response);
+            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                    "Stream ended without valid response");
+        }
+        gemini_stream_data_free(data);
+        return;
+    }
+
+    /* Gemini streaming returns SSE format: data: {json} */
+    if (g_str_has_prefix(line, "data: "))
+    {
+        gemini_process_stream_chunk(data, line + 6);
+    }
+
+    gemini_read_next_line(data);
+}
+
+static void
+gemini_read_next_line(GeminiStreamData *data)
+{
+    g_data_input_stream_read_line_async(
+        data->data_stream,
+        G_PRIORITY_DEFAULT,
+        data->cancellable,
+        on_gemini_line_read,
+        data);
+}
+
+static void
+on_gemini_stream_ready(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    GeminiStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+
+    data->input_stream = soup_session_send_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)),
+        result,
+        &error);
+
+    if (data->input_stream == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        gemini_stream_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(data->msg)))
+    {
+        guint status = soup_message_get_status(data->msg);
+
+        if (status == 401 || status == 403)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
+                                    "Authentication failed (HTTP %u)", status);
+        }
+        else if (status == 429)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
+                                    "Rate limited (HTTP %u)", status);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                    "Request failed (HTTP %u)", status);
+        }
+        gemini_stream_data_free(data);
+        return;
+    }
+
+    data->data_stream = g_data_input_stream_new(data->input_stream);
+    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
+
+    gemini_read_next_line(data);
+}
+
+static gchar *
+ai_gemini_client_get_stream_endpoint_url(AiClient *client)
+{
+    AiConfig *config = ai_client_get_config(client);
+    const gchar *base_url = ai_config_get_base_url(config, AI_PROVIDER_GEMINI);
+    const gchar *model = ai_client_get_model(client);
+    const gchar *api_key = ai_config_get_api_key(config, AI_PROVIDER_GEMINI);
+
+    if (model == NULL)
+    {
+        model = AI_GEMINI_DEFAULT_MODEL;
+    }
+
+    /* Use streamGenerateContent instead of generateContent */
+    return g_strdup_printf("%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s",
+                           base_url, model, api_key != NULL ? api_key : "");
+}
+
 static void
 ai_gemini_client_chat_stream_async(
     AiStreamable        *streamable,
@@ -520,8 +797,61 @@ ai_gemini_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    ai_gemini_client_chat_async(AI_PROVIDER(streamable), messages, system_prompt,
-                                max_tokens, tools, cancellable, callback, user_data);
+    AiGeminiClient *self = AI_GEMINI_CLIENT(streamable);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    gsize request_len;
+    GeminiStreamData *data;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    request_json = klass->build_request(AI_CLIENT(self), messages, system_prompt,
+                                        max_tokens, tools);
+
+    if (request_json == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Failed to build request");
+        g_object_unref(task);
+        return;
+    }
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    /* Use streaming endpoint */
+    url = ai_gemini_client_get_stream_endpoint_url(AI_CLIENT(self));
+
+    msg = soup_message_new("POST", url);
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Content-Type", "application/json");
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Accept", "text/event-stream");
+
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+
+    data = g_slice_new0(GeminiStreamData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
+    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
+    data->stream_started = FALSE;
+
+    soup_session_send_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_gemini_stream_ready,
+        data);
 }
 
 static AiResponse *
@@ -530,7 +860,8 @@ ai_gemini_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    return ai_gemini_client_chat_finish(AI_PROVIDER(streamable), result, error);
+    (void)streamable;
+    return g_task_propagate_pointer(G_TASK(result), error);
 }
 
 static void

@@ -521,6 +521,435 @@ ai_grok_client_provider_init(AiProviderInterface *iface)
     iface->list_models_finish = ai_grok_client_list_models_finish;
 }
 
+/*
+ * AiStreamable interface implementation
+ *
+ * Grok uses OpenAI-compatible SSE streaming format.
+ */
+
+typedef struct
+{
+    AiGrokClient     *client;
+    GTask            *task;
+    SoupMessage      *msg;
+    GInputStream     *input_stream;
+    GDataInputStream *data_stream;
+    GCancellable     *cancellable;
+
+    AiResponse       *response;
+    GString          *current_text;
+    GHashTable       *tool_calls;
+
+    gboolean          stream_started;
+} GrokStreamData;
+
+typedef struct
+{
+    gchar   *name;
+    GString *arguments;
+} GrokToolCall;
+
+static void
+grok_tool_call_free(GrokToolCall *tc)
+{
+    g_free(tc->name);
+    if (tc->arguments != NULL)
+    {
+        g_string_free(tc->arguments, TRUE);
+    }
+    g_slice_free(GrokToolCall, tc);
+}
+
+static void
+grok_stream_data_free(GrokStreamData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->msg);
+    g_clear_object(&data->input_stream);
+    g_clear_object(&data->data_stream);
+    g_clear_object(&data->cancellable);
+    g_clear_object(&data->response);
+
+    if (data->current_text != NULL)
+    {
+        g_string_free(data->current_text, TRUE);
+    }
+    if (data->tool_calls != NULL)
+    {
+        g_hash_table_destroy(data->tool_calls);
+    }
+
+    g_slice_free(GrokStreamData, data);
+}
+
+static void
+grok_process_stream_chunk(
+    GrokStreamData *data,
+    const gchar    *json_str
+){
+    g_autoptr(JsonParser) parser = NULL;
+    g_autoptr(GError) error = NULL;
+    JsonNode *root;
+    JsonObject *obj;
+
+    if (json_str == NULL || json_str[0] == '\0')
+    {
+        return;
+    }
+
+    if (g_strcmp0(json_str, "[DONE]") == 0)
+    {
+        if (data->current_text != NULL && data->current_text->len > 0)
+        {
+            g_autoptr(AiTextContent) content = ai_text_content_new(data->current_text->str);
+            ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
+        }
+
+        if (data->tool_calls != NULL)
+        {
+            GHashTableIter iter;
+            gpointer key, value;
+
+            g_hash_table_iter_init(&iter, data->tool_calls);
+            while (g_hash_table_iter_next(&iter, &key, &value))
+            {
+                const gchar *tc_id = key;
+                GrokToolCall *tc = value;
+                g_autoptr(AiToolUse) tool_use = ai_tool_use_new_from_json_string(
+                    tc_id, tc->name, tc->arguments->str);
+                ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&tool_use));
+            }
+        }
+
+        g_signal_emit_by_name(data->client, "stream-end", data->response);
+        return;
+    }
+
+    parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, json_str, -1, &error))
+    {
+        return;
+    }
+
+    root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(root))
+    {
+        return;
+    }
+
+    obj = json_node_get_object(root);
+
+    if (!data->stream_started)
+    {
+        const gchar *id = json_object_get_string_member_with_default(obj, "id", "");
+        const gchar *model = json_object_get_string_member_with_default(obj, "model", "");
+
+        data->response = ai_response_new(id, model);
+        data->current_text = g_string_new("");
+        data->stream_started = TRUE;
+
+        g_signal_emit_by_name(data->client, "stream-start");
+    }
+
+    if (json_object_has_member(obj, "choices"))
+    {
+        JsonArray *choices = json_object_get_array_member(obj, "choices");
+
+        if (json_array_get_length(choices) > 0)
+        {
+            JsonObject *choice = json_array_get_object_element(choices, 0);
+
+            if (json_object_has_member(choice, "finish_reason"))
+            {
+                JsonNode *fr_node = json_object_get_member(choice, "finish_reason");
+                if (!JSON_NODE_HOLDS_NULL(fr_node))
+                {
+                    const gchar *finish_reason = json_node_get_string(fr_node);
+                    ai_response_set_stop_reason(data->response,
+                        ai_stop_reason_from_string(finish_reason));
+                }
+            }
+
+            if (json_object_has_member(choice, "delta"))
+            {
+                JsonObject *delta = json_object_get_object_member(choice, "delta");
+
+                if (json_object_has_member(delta, "content"))
+                {
+                    JsonNode *content_node = json_object_get_member(delta, "content");
+                    if (JSON_NODE_HOLDS_VALUE(content_node))
+                    {
+                        const gchar *content = json_node_get_string(content_node);
+                        if (content != NULL)
+                        {
+                            g_string_append(data->current_text, content);
+                            g_signal_emit_by_name(data->client, "delta", content);
+                        }
+                    }
+                }
+
+                if (json_object_has_member(delta, "tool_calls"))
+                {
+                    JsonArray *tool_calls = json_object_get_array_member(delta, "tool_calls");
+                    guint len = json_array_get_length(tool_calls);
+                    guint i;
+
+                    if (data->tool_calls == NULL)
+                    {
+                        data->tool_calls = g_hash_table_new_full(
+                            g_str_hash, g_str_equal,
+                            g_free, (GDestroyNotify)grok_tool_call_free);
+                    }
+
+                    for (i = 0; i < len; i++)
+                    {
+                        JsonObject *tc = json_array_get_object_element(tool_calls, i);
+                        gint index = json_object_get_int_member_with_default(tc, "index", 0);
+                        g_autofree gchar *index_key = g_strdup_printf("%d", index);
+                        GrokToolCall *existing;
+
+                        existing = g_hash_table_lookup(data->tool_calls, index_key);
+                        if (existing == NULL)
+                        {
+                            existing = g_slice_new0(GrokToolCall);
+                            existing->arguments = g_string_new("");
+
+                            if (json_object_has_member(tc, "id"))
+                            {
+                                g_free(index_key);
+                                index_key = g_strdup(json_object_get_string_member(tc, "id"));
+                            }
+
+                            g_hash_table_insert(data->tool_calls, g_strdup(index_key), existing);
+                        }
+
+                        if (json_object_has_member(tc, "function"))
+                        {
+                            JsonObject *func = json_object_get_object_member(tc, "function");
+
+                            if (json_object_has_member(func, "name"))
+                            {
+                                g_free(existing->name);
+                                existing->name = g_strdup(json_object_get_string_member(func, "name"));
+                            }
+
+                            if (json_object_has_member(func, "arguments"))
+                            {
+                                const gchar *args = json_object_get_string_member(func, "arguments");
+                                g_string_append(existing->arguments, args);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (json_object_has_member(obj, "usage"))
+    {
+        JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
+        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "prompt_tokens", 0);
+        gint completion_tokens = json_object_get_int_member_with_default(usage_obj, "completion_tokens", 0);
+        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, completion_tokens);
+
+        ai_response_set_usage(data->response, usage);
+    }
+}
+
+static void grok_read_next_line(GrokStreamData *data);
+
+static void
+on_grok_line_read(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    GrokStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *line = NULL;
+    gsize length;
+
+    (void)source;
+
+    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
+
+    if (error != NULL)
+    {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+            g_task_return_error(data->task, g_steal_pointer(&error));
+            grok_stream_data_free(data);
+        }
+        return;
+    }
+
+    if (line == NULL)
+    {
+        if (data->response != NULL)
+        {
+            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                    "Stream ended without valid response");
+        }
+        grok_stream_data_free(data);
+        return;
+    }
+
+    if (g_str_has_prefix(line, "data: "))
+    {
+        grok_process_stream_chunk(data, line + 6);
+    }
+
+    grok_read_next_line(data);
+}
+
+static void
+grok_read_next_line(GrokStreamData *data)
+{
+    g_data_input_stream_read_line_async(
+        data->data_stream,
+        G_PRIORITY_DEFAULT,
+        data->cancellable,
+        on_grok_line_read,
+        data);
+}
+
+static void
+on_grok_stream_ready(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    GrokStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+
+    data->input_stream = soup_session_send_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)),
+        result,
+        &error);
+
+    if (data->input_stream == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        grok_stream_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(data->msg)))
+    {
+        guint status = soup_message_get_status(data->msg);
+
+        if (status == 401 || status == 403)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
+                                    "Authentication failed (HTTP %u)", status);
+        }
+        else if (status == 429)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
+                                    "Rate limited (HTTP %u)", status);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                    "Request failed (HTTP %u)", status);
+        }
+        grok_stream_data_free(data);
+        return;
+    }
+
+    data->data_stream = g_data_input_stream_new(data->input_stream);
+    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
+
+    grok_read_next_line(data);
+}
+
+static JsonNode *
+ai_grok_client_build_stream_request(
+    AiClient    *client,
+    GList       *messages,
+    const gchar *system_prompt,
+    gint         max_tokens,
+    GList       *tools
+){
+    g_autoptr(JsonBuilder) builder = json_builder_new();
+    const gchar *model;
+    GList *l;
+
+    model = ai_client_get_model(client);
+    if (model == NULL)
+    {
+        model = AI_GROK_DEFAULT_MODEL;
+    }
+
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "model");
+    json_builder_add_string_value(builder, model);
+
+    json_builder_set_member_name(builder, "stream");
+    json_builder_add_boolean_value(builder, TRUE);
+
+    if (max_tokens > 0)
+    {
+        json_builder_set_member_name(builder, "max_tokens");
+        json_builder_add_int_value(builder, max_tokens);
+    }
+
+    json_builder_set_member_name(builder, "messages");
+    json_builder_begin_array(builder);
+
+    if (system_prompt != NULL && system_prompt[0] != '\0')
+    {
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "role");
+        json_builder_add_string_value(builder, "system");
+        json_builder_set_member_name(builder, "content");
+        json_builder_add_string_value(builder, system_prompt);
+        json_builder_end_object(builder);
+    }
+
+    for (l = messages; l != NULL; l = l->next)
+    {
+        AiMessage *msg = l->data;
+        g_autoptr(JsonNode) msg_node = ai_message_to_json(msg);
+        json_builder_add_value(builder, g_steal_pointer(&msg_node));
+    }
+
+    json_builder_end_array(builder);
+
+    if (tools != NULL)
+    {
+        json_builder_set_member_name(builder, "tools");
+        json_builder_begin_array(builder);
+
+        for (l = tools; l != NULL; l = l->next)
+        {
+            AiTool *tool = l->data;
+            g_autoptr(JsonNode) tool_node = ai_tool_to_json(tool, AI_PROVIDER_GROK);
+            json_builder_add_value(builder, g_steal_pointer(&tool_node));
+        }
+
+        json_builder_end_array(builder);
+    }
+
+    {
+        gdouble temp = ai_client_get_temperature(client);
+        if (temp != 1.0)
+        {
+            json_builder_set_member_name(builder, "temperature");
+            json_builder_add_double_value(builder, temp);
+        }
+    }
+
+    json_builder_end_object(builder);
+
+    return json_builder_get_root(builder);
+}
+
 static void
 ai_grok_client_chat_stream_async(
     AiStreamable        *streamable,
@@ -532,8 +961,62 @@ ai_grok_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    ai_grok_client_chat_async(AI_PROVIDER(streamable), messages, system_prompt,
-                              max_tokens, tools, cancellable, callback, user_data);
+    AiGrokClient *self = AI_GROK_CLIENT(streamable);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    gsize request_len;
+    GrokStreamData *data;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    request_json = ai_grok_client_build_stream_request(
+        AI_CLIENT(self), messages, system_prompt, max_tokens, tools);
+
+    if (request_json == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Failed to build request");
+        g_object_unref(task);
+        return;
+    }
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    url = klass->get_endpoint_url(AI_CLIENT(self));
+
+    msg = soup_message_new("POST", url);
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Content-Type", "application/json");
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Accept", "text/event-stream");
+
+    klass->add_auth_headers(AI_CLIENT(self), msg);
+
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+
+    data = g_slice_new0(GrokStreamData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
+    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
+    data->stream_started = FALSE;
+
+    soup_session_send_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_grok_stream_ready,
+        data);
 }
 
 static AiResponse *
@@ -542,7 +1025,8 @@ ai_grok_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    return ai_grok_client_chat_finish(AI_PROVIDER(streamable), result, error);
+    (void)streamable;
+    return g_task_propagate_pointer(G_TASK(result), error);
 }
 
 static void

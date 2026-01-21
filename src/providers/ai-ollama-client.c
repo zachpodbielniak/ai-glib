@@ -483,6 +483,336 @@ ai_ollama_client_provider_init(AiProviderInterface *iface)
     iface->list_models_finish = ai_ollama_client_list_models_finish;
 }
 
+/*
+ * AiStreamable interface implementation
+ *
+ * Ollama uses NDJSON (newline-delimited JSON) streaming.
+ * Each line is a complete JSON object with message.content delta.
+ * Last message has done: true
+ */
+
+typedef struct
+{
+    AiOllamaClient   *client;
+    GTask            *task;
+    SoupMessage      *msg;
+    GInputStream     *input_stream;
+    GDataInputStream *data_stream;
+    GCancellable     *cancellable;
+
+    AiResponse       *response;
+    GString          *current_text;
+
+    gboolean          stream_started;
+} OllamaStreamData;
+
+static void
+ollama_stream_data_free(OllamaStreamData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->msg);
+    g_clear_object(&data->input_stream);
+    g_clear_object(&data->data_stream);
+    g_clear_object(&data->cancellable);
+    g_clear_object(&data->response);
+
+    if (data->current_text != NULL)
+    {
+        g_string_free(data->current_text, TRUE);
+    }
+
+    g_slice_free(OllamaStreamData, data);
+}
+
+static void
+ollama_process_stream_chunk(
+    OllamaStreamData *data,
+    const gchar      *json_str
+){
+    g_autoptr(JsonParser) parser = NULL;
+    g_autoptr(GError) error = NULL;
+    JsonNode *root;
+    JsonObject *obj;
+
+    if (json_str == NULL || json_str[0] == '\0')
+    {
+        return;
+    }
+
+    parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, json_str, -1, &error))
+    {
+        return;
+    }
+
+    root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(root))
+    {
+        return;
+    }
+
+    obj = json_node_get_object(root);
+
+    if (!data->stream_started)
+    {
+        const gchar *model = json_object_get_string_member_with_default(obj, "model", "");
+
+        data->response = ai_response_new("", model);
+        data->current_text = g_string_new("");
+        data->stream_started = TRUE;
+
+        g_signal_emit_by_name(data->client, "stream-start");
+    }
+
+    /* Parse message content delta */
+    if (json_object_has_member(obj, "message"))
+    {
+        JsonObject *message = json_object_get_object_member(obj, "message");
+        const gchar *content = json_object_get_string_member_with_default(
+            message, "content", "");
+
+        if (content != NULL && content[0] != '\0')
+        {
+            g_string_append(data->current_text, content);
+            g_signal_emit_by_name(data->client, "delta", content);
+        }
+    }
+
+    /* Check if done */
+    if (json_object_get_boolean_member_with_default(obj, "done", FALSE))
+    {
+        const gchar *done_reason = json_object_get_string_member_with_default(
+            obj, "done_reason", "");
+
+        if (g_strcmp0(done_reason, "length") == 0)
+        {
+            ai_response_set_stop_reason(data->response, AI_STOP_REASON_MAX_TOKENS);
+        }
+        else
+        {
+            ai_response_set_stop_reason(data->response, AI_STOP_REASON_END_TURN);
+        }
+
+        /* Parse usage from final message */
+        {
+            gint prompt_tokens = json_object_get_int_member_with_default(obj, "prompt_eval_count", 0);
+            gint output_tokens = json_object_get_int_member_with_default(obj, "eval_count", 0);
+
+            if (prompt_tokens > 0 || output_tokens > 0)
+            {
+                g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+                ai_response_set_usage(data->response, usage);
+            }
+        }
+
+        /* Finalize response */
+        if (data->current_text != NULL && data->current_text->len > 0)
+        {
+            g_autoptr(AiTextContent) text_content = ai_text_content_new(data->current_text->str);
+            ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&text_content));
+        }
+
+        g_signal_emit_by_name(data->client, "stream-end", data->response);
+    }
+}
+
+static void ollama_read_next_line(OllamaStreamData *data);
+
+static void
+on_ollama_line_read(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OllamaStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *line = NULL;
+    gsize length;
+
+    (void)source;
+
+    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
+
+    if (error != NULL)
+    {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+            g_task_return_error(data->task, g_steal_pointer(&error));
+            ollama_stream_data_free(data);
+        }
+        return;
+    }
+
+    if (line == NULL)
+    {
+        /* EOF */
+        if (data->response != NULL)
+        {
+            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                    "Stream ended without valid response");
+        }
+        ollama_stream_data_free(data);
+        return;
+    }
+
+    /* Ollama uses NDJSON - each line is a complete JSON object */
+    if (length > 0)
+    {
+        ollama_process_stream_chunk(data, line);
+    }
+
+    ollama_read_next_line(data);
+}
+
+static void
+ollama_read_next_line(OllamaStreamData *data)
+{
+    g_data_input_stream_read_line_async(
+        data->data_stream,
+        G_PRIORITY_DEFAULT,
+        data->cancellable,
+        on_ollama_line_read,
+        data);
+}
+
+static void
+on_ollama_stream_ready(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OllamaStreamData *data = user_data;
+    g_autoptr(GError) error = NULL;
+
+    data->input_stream = soup_session_send_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)),
+        result,
+        &error);
+
+    if (data->input_stream == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        ollama_stream_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(data->msg)))
+    {
+        guint status = soup_message_get_status(data->msg);
+
+        if (status == 401 || status == 403)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
+                                    "Authentication failed (HTTP %u)", status);
+        }
+        else if (status == 429)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
+                                    "Rate limited (HTTP %u)", status);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                    "Request failed (HTTP %u)", status);
+        }
+        ollama_stream_data_free(data);
+        return;
+    }
+
+    data->data_stream = g_data_input_stream_new(data->input_stream);
+    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
+
+    ollama_read_next_line(data);
+}
+
+static JsonNode *
+ai_ollama_client_build_stream_request(
+    AiClient    *client,
+    GList       *messages,
+    const gchar *system_prompt,
+    gint         max_tokens,
+    GList       *tools
+){
+    g_autoptr(JsonBuilder) builder = json_builder_new();
+    const gchar *model;
+    GList *l;
+
+    (void)tools; /* TODO: Implement tool support */
+
+    model = ai_client_get_model(client);
+    if (model == NULL)
+    {
+        model = AI_OLLAMA_DEFAULT_MODEL;
+    }
+
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "model");
+    json_builder_add_string_value(builder, model);
+
+    json_builder_set_member_name(builder, "messages");
+    json_builder_begin_array(builder);
+
+    if (system_prompt != NULL && system_prompt[0] != '\0')
+    {
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "role");
+        json_builder_add_string_value(builder, "system");
+        json_builder_set_member_name(builder, "content");
+        json_builder_add_string_value(builder, system_prompt);
+        json_builder_end_object(builder);
+    }
+
+    for (l = messages; l != NULL; l = l->next)
+    {
+        AiMessage *msg = l->data;
+        AiRole role = ai_message_get_role(msg);
+        g_autofree gchar *text = ai_message_get_text(msg);
+
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "role");
+        json_builder_add_string_value(builder, ai_role_to_string(role));
+        json_builder_set_member_name(builder, "content");
+        json_builder_add_string_value(builder, text != NULL ? text : "");
+        json_builder_end_object(builder);
+    }
+
+    json_builder_end_array(builder);
+
+    /* Enable streaming */
+    json_builder_set_member_name(builder, "stream");
+    json_builder_add_boolean_value(builder, TRUE);
+
+    /* Options */
+    json_builder_set_member_name(builder, "options");
+    json_builder_begin_object(builder);
+
+    if (max_tokens > 0)
+    {
+        json_builder_set_member_name(builder, "num_predict");
+        json_builder_add_int_value(builder, max_tokens);
+    }
+
+    {
+        gdouble temp = ai_client_get_temperature(client);
+        if (temp != 1.0)
+        {
+            json_builder_set_member_name(builder, "temperature");
+            json_builder_add_double_value(builder, temp);
+        }
+    }
+
+    json_builder_end_object(builder);
+
+    json_builder_end_object(builder);
+
+    return json_builder_get_root(builder);
+}
+
 static void
 ai_ollama_client_chat_stream_async(
     AiStreamable        *streamable,
@@ -494,8 +824,58 @@ ai_ollama_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    ai_ollama_client_chat_async(AI_PROVIDER(streamable), messages, system_prompt,
-                                max_tokens, tools, cancellable, callback, user_data);
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(streamable);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    gsize request_len;
+    OllamaStreamData *data;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    request_json = ai_ollama_client_build_stream_request(
+        AI_CLIENT(self), messages, system_prompt, max_tokens, tools);
+
+    if (request_json == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Failed to build request");
+        g_object_unref(task);
+        return;
+    }
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    url = klass->get_endpoint_url(AI_CLIENT(self));
+
+    msg = soup_message_new("POST", url);
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Content-Type", "application/json");
+
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+
+    data = g_slice_new0(OllamaStreamData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
+    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
+    data->stream_started = FALSE;
+
+    soup_session_send_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_ollama_stream_ready,
+        data);
 }
 
 static AiResponse *
@@ -504,7 +884,8 @@ ai_ollama_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    return ai_ollama_client_chat_finish(AI_PROVIDER(streamable), result, error);
+    (void)streamable;
+    return g_task_propagate_pointer(G_TASK(result), error);
 }
 
 static void
