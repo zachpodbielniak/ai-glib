@@ -22,6 +22,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-provider.h \
 	$(SRCDIR)/core/ai-streamable.h \
 	$(SRCDIR)/core/ai-client.h \
+	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
@@ -34,7 +35,9 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-openai-client.h \
 	$(SRCDIR)/providers/ai-grok-client.h \
 	$(SRCDIR)/providers/ai-gemini-client.h \
-	$(SRCDIR)/providers/ai-ollama-client.h
+	$(SRCDIR)/providers/ai-ollama-client.h \
+	$(SRCDIR)/providers/ai-claude-code-client.h \
+	$(SRCDIR)/providers/ai-opencode-client.h
 
 # Library source files
 LIB_SOURCES = \
@@ -44,6 +47,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-provider.c \
 	$(SRCDIR)/core/ai-streamable.c \
 	$(SRCDIR)/core/ai-client.c \
+	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
@@ -56,7 +60,9 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-openai-client.c \
 	$(SRCDIR)/providers/ai-grok-client.c \
 	$(SRCDIR)/providers/ai-gemini-client.c \
-	$(SRCDIR)/providers/ai-ollama-client.c
+	$(SRCDIR)/providers/ai-ollama-client.c \
+	$(SRCDIR)/providers/ai-claude-code-client.c \
+	$(SRCDIR)/providers/ai-opencode-client.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))

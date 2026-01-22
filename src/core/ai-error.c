@@ -64,6 +64,9 @@ ai_error_get_type(void)
             { AI_ERROR_SERIALIZATION_ERROR, "AI_ERROR_SERIALIZATION_ERROR", "serialization-error" },
             { AI_ERROR_STREAMING_ERROR, "AI_ERROR_STREAMING_ERROR", "streaming-error" },
             { AI_ERROR_TOOL_ERROR, "AI_ERROR_TOOL_ERROR", "tool-error" },
+            { AI_ERROR_CLI_NOT_FOUND, "AI_ERROR_CLI_NOT_FOUND", "cli-not-found" },
+            { AI_ERROR_CLI_EXECUTION, "AI_ERROR_CLI_EXECUTION", "cli-execution" },
+            { AI_ERROR_CLI_PARSE_ERROR, "AI_ERROR_CLI_PARSE_ERROR", "cli-parse-error" },
             { AI_ERROR_UNKNOWN, "AI_ERROR_UNKNOWN", "unknown" },
             { 0, NULL, NULL }
         };

@@ -48,6 +48,9 @@ G_BEGIN_DECLS
  * @AI_ERROR_SERIALIZATION_ERROR: Error serializing or deserializing data.
  * @AI_ERROR_STREAMING_ERROR: Error during streaming response.
  * @AI_ERROR_TOOL_ERROR: Error related to tool use.
+ * @AI_ERROR_CLI_NOT_FOUND: CLI executable not found.
+ * @AI_ERROR_CLI_EXECUTION: CLI execution failed.
+ * @AI_ERROR_CLI_PARSE_ERROR: Failed to parse CLI output.
  * @AI_ERROR_UNKNOWN: An unknown error occurred.
  *
  * Error codes for ai-glib operations.
@@ -73,6 +76,9 @@ typedef enum
     AI_ERROR_SERIALIZATION_ERROR,
     AI_ERROR_STREAMING_ERROR,
     AI_ERROR_TOOL_ERROR,
+    AI_ERROR_CLI_NOT_FOUND,
+    AI_ERROR_CLI_EXECUTION,
+    AI_ERROR_CLI_PARSE_ERROR,
     AI_ERROR_UNKNOWN
 } AiError;
 

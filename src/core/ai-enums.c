@@ -28,6 +28,8 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_GEMINI, "AI_PROVIDER_GEMINI", "gemini" },
             { AI_PROVIDER_GROK, "AI_PROVIDER_GROK", "grok" },
             { AI_PROVIDER_OLLAMA, "AI_PROVIDER_OLLAMA", "ollama" },
+            { AI_PROVIDER_CLAUDE_CODE, "AI_PROVIDER_CLAUDE_CODE", "claude-code" },
+            { AI_PROVIDER_OPENCODE, "AI_PROVIDER_OPENCODE", "opencode" },
             { 0, NULL, NULL }
         };
 
@@ -281,6 +283,10 @@ ai_provider_type_to_string(AiProviderType provider)
             return "grok";
         case AI_PROVIDER_OLLAMA:
             return "ollama";
+        case AI_PROVIDER_CLAUDE_CODE:
+            return "claude-code";
+        case AI_PROVIDER_OPENCODE:
+            return "opencode";
         default:
             return "unknown";
     }
@@ -325,6 +331,15 @@ ai_provider_type_from_string(const gchar *str)
     else if (g_ascii_strcasecmp(str, "ollama") == 0)
     {
         return AI_PROVIDER_OLLAMA;
+    }
+    else if (g_ascii_strcasecmp(str, "claude-code") == 0 ||
+             g_ascii_strcasecmp(str, "claude_code") == 0)
+    {
+        return AI_PROVIDER_CLAUDE_CODE;
+    }
+    else if (g_ascii_strcasecmp(str, "opencode") == 0)
+    {
+        return AI_PROVIDER_OPENCODE;
     }
 
     return AI_PROVIDER_CLAUDE;

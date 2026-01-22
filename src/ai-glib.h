@@ -27,6 +27,7 @@
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
 #include "core/ai-client.h"
+#include "core/ai-cli-client.h"
 
 /* Model classes */
 #include "model/ai-usage.h"
@@ -38,11 +39,15 @@
 #include "model/ai-message.h"
 #include "model/ai-response.h"
 
-/* Provider implementations */
+/* Provider implementations (HTTP API) */
 #include "providers/ai-claude-client.h"
 #include "providers/ai-openai-client.h"
 #include "providers/ai-grok-client.h"
 #include "providers/ai-gemini-client.h"
 #include "providers/ai-ollama-client.h"
+
+/* Provider implementations (CLI wrappers) */
+#include "providers/ai-claude-code-client.h"
+#include "providers/ai-opencode-client.h"
 
 #undef AI_GLIB_INSIDE

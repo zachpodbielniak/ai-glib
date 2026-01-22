@@ -19,11 +19,13 @@ G_BEGIN_DECLS
 
 /**
  * AiProviderType:
- * @AI_PROVIDER_CLAUDE: Anthropic Claude
- * @AI_PROVIDER_OPENAI: OpenAI GPT
- * @AI_PROVIDER_GEMINI: Google Gemini
- * @AI_PROVIDER_GROK: xAI Grok
- * @AI_PROVIDER_OLLAMA: Ollama (local)
+ * @AI_PROVIDER_CLAUDE: Anthropic Claude (HTTP API)
+ * @AI_PROVIDER_OPENAI: OpenAI GPT (HTTP API)
+ * @AI_PROVIDER_GEMINI: Google Gemini (HTTP API)
+ * @AI_PROVIDER_GROK: xAI Grok (HTTP API)
+ * @AI_PROVIDER_OLLAMA: Ollama (local HTTP API)
+ * @AI_PROVIDER_CLAUDE_CODE: Claude Code CLI wrapper
+ * @AI_PROVIDER_OPENCODE: OpenCode CLI wrapper
  *
  * Enumeration of supported AI providers.
  */
@@ -33,7 +35,9 @@ typedef enum
     AI_PROVIDER_OPENAI,
     AI_PROVIDER_GEMINI,
     AI_PROVIDER_GROK,
-    AI_PROVIDER_OLLAMA
+    AI_PROVIDER_OLLAMA,
+    AI_PROVIDER_CLAUDE_CODE,
+    AI_PROVIDER_OPENCODE
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);
