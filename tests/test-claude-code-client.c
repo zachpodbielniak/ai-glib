@@ -115,15 +115,21 @@ test_claude_code_client_session_management(void)
 	session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
 	g_assert_null(session_id);
 
+	/* Default persistence is now TRUE */
 	persist = ai_cli_client_get_session_persistence(AI_CLI_CLIENT(client));
-	g_assert_false(persist);
+	g_assert_true(persist);
 
 	/* Set session ID */
 	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "test-session-123");
 	session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
 	g_assert_cmpstr(session_id, ==, "test-session-123");
 
-	/* Set persistence */
+	/* Disable persistence */
+	ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), FALSE);
+	persist = ai_cli_client_get_session_persistence(AI_CLI_CLIENT(client));
+	g_assert_false(persist);
+
+	/* Re-enable persistence */
 	ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), TRUE);
 	persist = ai_cli_client_get_session_persistence(AI_CLI_CLIENT(client));
 	g_assert_true(persist);

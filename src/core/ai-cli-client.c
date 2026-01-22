@@ -272,7 +272,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
         g_param_spec_boolean("session-persistence",
                              "Session Persistence",
                              "Whether to persist sessions",
-                             FALSE,
+                             TRUE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
@@ -352,7 +352,7 @@ ai_cli_client_init(AiCliClient *self)
     priv->executable_path = NULL;
     priv->session_id = NULL;
     priv->max_tokens = 4096;
-    priv->session_persistence = FALSE;
+    priv->session_persistence = TRUE;
 }
 
 /**

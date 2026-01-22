@@ -152,15 +152,14 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup(system_prompt));
     }
 
-    /* Session management */
+    /* Session management - only resume if persistence is enabled */
+    persist = ai_cli_client_get_session_persistence(client);
     session_id = ai_cli_client_get_session_id(client);
-    if (session_id != NULL && session_id[0] != '\0')
+    if (persist && session_id != NULL && session_id[0] != '\0')
     {
         g_ptr_array_add(args, g_strdup("--resume"));
         g_ptr_array_add(args, g_strdup(session_id));
     }
-
-    persist = ai_cli_client_get_session_persistence(client);
     if (!persist)
     {
         g_ptr_array_add(args, g_strdup("--no-session-persistence"));
@@ -273,8 +272,8 @@ ai_claude_code_client_parse_json_output(
     response = ai_response_new(session_id, ai_cli_client_get_model(client));
     ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
 
-    /* Store session ID for continuity */
-    if (session_id[0] != '\0')
+    /* Store session ID for continuity - ONLY if persistence is enabled */
+    if (session_id[0] != '\0' && ai_cli_client_get_session_persistence(client))
     {
         ai_cli_client_set_session_id(client, session_id);
     }
@@ -373,8 +372,8 @@ ai_claude_code_client_parse_stream_line(
         const gchar *result_text = json_object_get_string_member_with_default(obj, "result", "");
         const gchar *session_id = json_object_get_string_member_with_default(obj, "session_id", "");
 
-        /* Store session ID */
-        if (session_id[0] != '\0')
+        /* Store session ID - ONLY if persistence is enabled */
+        if (session_id[0] != '\0' && ai_cli_client_get_session_persistence(client))
         {
             ai_cli_client_set_session_id(client, session_id);
         }
