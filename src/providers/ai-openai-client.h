@@ -113,6 +113,14 @@ G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClie
 #define AI_OPENAI_MODEL_FAST                AI_OPENAI_MODEL_GPT_4O_MINI
 #define AI_OPENAI_MODEL_REASONING           AI_OPENAI_MODEL_O3
 
+/*
+ * Image Generation Models
+ */
+#define AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1   "gpt-image-1"
+#define AI_OPENAI_IMAGE_MODEL_DALL_E_3      "dall-e-3"
+#define AI_OPENAI_IMAGE_MODEL_DALL_E_2      "dall-e-2"
+#define AI_OPENAI_IMAGE_DEFAULT_MODEL       AI_OPENAI_IMAGE_MODEL_DALL_E_3
+
 /**
  * ai_openai_client_new:
  *

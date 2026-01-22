@@ -202,4 +202,170 @@ ai_content_type_to_string(AiContentType content_type);
 AiContentType
 ai_content_type_from_string(const gchar *str);
 
+/**
+ * AiImageSize:
+ * @AI_IMAGE_SIZE_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_SIZE_256: 256x256 pixels
+ * @AI_IMAGE_SIZE_512: 512x512 pixels
+ * @AI_IMAGE_SIZE_1024: 1024x1024 pixels
+ * @AI_IMAGE_SIZE_1024_1792: 1024x1792 pixels (portrait)
+ * @AI_IMAGE_SIZE_1792_1024: 1792x1024 pixels (landscape)
+ * @AI_IMAGE_SIZE_CUSTOM: Custom size specified by string
+ *
+ * Enumeration of supported image sizes for generation.
+ */
+typedef enum
+{
+    AI_IMAGE_SIZE_AUTO = 0,
+    AI_IMAGE_SIZE_256,
+    AI_IMAGE_SIZE_512,
+    AI_IMAGE_SIZE_1024,
+    AI_IMAGE_SIZE_1024_1792,
+    AI_IMAGE_SIZE_1792_1024,
+    AI_IMAGE_SIZE_CUSTOM
+} AiImageSize;
+
+GType ai_image_size_get_type(void);
+#define AI_TYPE_IMAGE_SIZE (ai_image_size_get_type())
+
+/**
+ * AiImageQuality:
+ * @AI_IMAGE_QUALITY_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_QUALITY_STANDARD: Standard quality
+ * @AI_IMAGE_QUALITY_HD: High definition quality
+ *
+ * Enumeration of image quality levels.
+ */
+typedef enum
+{
+    AI_IMAGE_QUALITY_AUTO = 0,
+    AI_IMAGE_QUALITY_STANDARD,
+    AI_IMAGE_QUALITY_HD
+} AiImageQuality;
+
+GType ai_image_quality_get_type(void);
+#define AI_TYPE_IMAGE_QUALITY (ai_image_quality_get_type())
+
+/**
+ * AiImageStyle:
+ * @AI_IMAGE_STYLE_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_STYLE_VIVID: Vivid, dramatic style
+ * @AI_IMAGE_STYLE_NATURAL: Natural, realistic style
+ *
+ * Enumeration of image generation styles.
+ */
+typedef enum
+{
+    AI_IMAGE_STYLE_AUTO = 0,
+    AI_IMAGE_STYLE_VIVID,
+    AI_IMAGE_STYLE_NATURAL
+} AiImageStyle;
+
+GType ai_image_style_get_type(void);
+#define AI_TYPE_IMAGE_STYLE (ai_image_style_get_type())
+
+/**
+ * AiImageResponseFormat:
+ * @AI_IMAGE_RESPONSE_URL: Return URL to the generated image
+ * @AI_IMAGE_RESPONSE_BASE64: Return base64-encoded image data
+ *
+ * Enumeration of response formats for generated images.
+ */
+typedef enum
+{
+    AI_IMAGE_RESPONSE_URL = 0,
+    AI_IMAGE_RESPONSE_BASE64
+} AiImageResponseFormat;
+
+GType ai_image_response_format_get_type(void);
+#define AI_TYPE_IMAGE_RESPONSE_FORMAT (ai_image_response_format_get_type())
+
+/**
+ * ai_image_size_to_string:
+ * @size: an #AiImageSize
+ *
+ * Converts an #AiImageSize to its string representation for API serialization.
+ *
+ * Returns: (transfer none): the string representation (e.g., "1024x1024")
+ */
+const gchar *
+ai_image_size_to_string(AiImageSize size);
+
+/**
+ * ai_image_size_from_string:
+ * @str: a size string (e.g., "1024x1024")
+ *
+ * Converts a string to an #AiImageSize.
+ *
+ * Returns: the #AiImageSize, or %AI_IMAGE_SIZE_AUTO if not recognized
+ */
+AiImageSize
+ai_image_size_from_string(const gchar *str);
+
+/**
+ * ai_image_quality_to_string:
+ * @quality: an #AiImageQuality
+ *
+ * Converts an #AiImageQuality to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_quality_to_string(AiImageQuality quality);
+
+/**
+ * ai_image_quality_from_string:
+ * @str: a quality string
+ *
+ * Converts a string to an #AiImageQuality.
+ *
+ * Returns: the #AiImageQuality, or %AI_IMAGE_QUALITY_AUTO if not recognized
+ */
+AiImageQuality
+ai_image_quality_from_string(const gchar *str);
+
+/**
+ * ai_image_style_to_string:
+ * @style: an #AiImageStyle
+ *
+ * Converts an #AiImageStyle to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_style_to_string(AiImageStyle style);
+
+/**
+ * ai_image_style_from_string:
+ * @str: a style string
+ *
+ * Converts a string to an #AiImageStyle.
+ *
+ * Returns: the #AiImageStyle, or %AI_IMAGE_STYLE_AUTO if not recognized
+ */
+AiImageStyle
+ai_image_style_from_string(const gchar *str);
+
+/**
+ * ai_image_response_format_to_string:
+ * @format: an #AiImageResponseFormat
+ *
+ * Converts an #AiImageResponseFormat to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_response_format_to_string(AiImageResponseFormat format);
+
+/**
+ * ai_image_response_format_from_string:
+ * @str: a format string
+ *
+ * Converts a string to an #AiImageResponseFormat.
+ *
+ * Returns: the #AiImageResponseFormat, or %AI_IMAGE_RESPONSE_URL if not recognized
+ */
+AiImageResponseFormat
+ai_image_response_format_from_string(const gchar *str);
+
 G_END_DECLS

@@ -68,6 +68,12 @@ G_DECLARE_FINAL_TYPE(AiGrokClient, ai_grok_client, AI, GROK_CLIENT, AiClient)
 #define AI_GROK_MODEL_FAST                  AI_GROK_MODEL_4_1_FAST_NON_REASONING
 #define AI_GROK_MODEL_CODE                  AI_GROK_MODEL_CODE_FAST_1
 
+/*
+ * Image Generation Models
+ */
+#define AI_GROK_IMAGE_MODEL_GROK_2_IMAGE    "grok-2-image"
+#define AI_GROK_IMAGE_DEFAULT_MODEL         AI_GROK_IMAGE_MODEL_GROK_2_IMAGE
+
 /**
  * ai_grok_client_new:
  *

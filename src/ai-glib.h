@@ -26,6 +26,7 @@
 #include "core/ai-config.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-image-generator.h"
 #include "core/ai-client.h"
 #include "core/ai-cli-client.h"
 
@@ -38,6 +39,9 @@
 #include "model/ai-tool-result.h"
 #include "model/ai-message.h"
 #include "model/ai-response.h"
+#include "model/ai-image-request.h"
+#include "model/ai-generated-image.h"
+#include "model/ai-image-response.h"
 
 /* Provider implementations (HTTP API) */
 #include "providers/ai-claude-client.h"

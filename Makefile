@@ -21,6 +21,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-config.h \
 	$(SRCDIR)/core/ai-provider.h \
 	$(SRCDIR)/core/ai-streamable.h \
+	$(SRCDIR)/core/ai-image-generator.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/model/ai-usage.h \
@@ -31,6 +32,9 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/model/ai-tool-result.h \
 	$(SRCDIR)/model/ai-message.h \
 	$(SRCDIR)/model/ai-response.h \
+	$(SRCDIR)/model/ai-image-request.h \
+	$(SRCDIR)/model/ai-generated-image.h \
+	$(SRCDIR)/model/ai-image-response.h \
 	$(SRCDIR)/providers/ai-claude-client.h \
 	$(SRCDIR)/providers/ai-openai-client.h \
 	$(SRCDIR)/providers/ai-grok-client.h \
@@ -46,6 +50,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \
 	$(SRCDIR)/core/ai-streamable.c \
+	$(SRCDIR)/core/ai-image-generator.c \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/model/ai-usage.c \
@@ -56,6 +61,9 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-tool-result.c \
 	$(SRCDIR)/model/ai-message.c \
 	$(SRCDIR)/model/ai-response.c \
+	$(SRCDIR)/model/ai-image-request.c \
+	$(SRCDIR)/model/ai-generated-image.c \
+	$(SRCDIR)/model/ai-image-response.c \
 	$(SRCDIR)/providers/ai-claude-client.c \
 	$(SRCDIR)/providers/ai-openai-client.c \
 	$(SRCDIR)/providers/ai-grok-client.c \

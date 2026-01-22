@@ -38,6 +38,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [API Reference Index](api-reference/index.md) - Complete API documentation
 - [AiClient](api-reference/ai-client.md) - Base client class
 - [AiProvider](api-reference/ai-provider.md) - Provider interface
+- [AiImageGenerator](api-reference/ai-image-generator.md) - Image generation interface
 - [AiMessage](api-reference/ai-message.md) - Message class
 - [AiResponse](api-reference/ai-response.md) - Response class
 - [AiTool](api-reference/ai-tool.md) - Tool definition
@@ -51,6 +52,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [Multi-Provider](examples/multi-provider.md) - Using multiple providers
 - [Streaming](examples/streaming.md) - Streaming responses
 - [Tool Use](examples/tool-use.md) - Function calling
+- [Image Generation](examples/image-generation.md) - Generate images from text
 
 ### Contributing
 

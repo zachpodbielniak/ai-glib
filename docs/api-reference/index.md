@@ -16,6 +16,7 @@ Complete API documentation for ai-glib.
 |-----------|-------------|
 | [AiProvider](ai-provider.md) | Core provider interface |
 | AiStreamable | Streaming response interface |
+| [AiImageGenerator](ai-image-generator.md) | Image generation interface |
 
 ## Model Classes
 
@@ -25,6 +26,9 @@ Complete API documentation for ai-glib.
 | [AiResponse](ai-response.md) | API response |
 | [AiTool](ai-tool.md) | Tool/function definition |
 | AiUsage | Token usage (boxed type) |
+| AiImageRequest | Image generation request (boxed type) |
+| AiImageResponse | Image generation response (boxed type) |
+| AiGeneratedImage | Generated image data (boxed type) |
 
 ## Content Block Classes
 
@@ -96,6 +100,57 @@ typedef enum {
     AI_CONTENT_TYPE_TOOL_USE,
     AI_CONTENT_TYPE_TOOL_RESULT
 } AiContentType;
+```
+
+### AiImageSize
+
+Image generation sizes:
+
+```c
+typedef enum {
+    AI_IMAGE_SIZE_AUTO,       /* Provider default */
+    AI_IMAGE_SIZE_256,        /* 256x256 */
+    AI_IMAGE_SIZE_512,        /* 512x512 */
+    AI_IMAGE_SIZE_1024,       /* 1024x1024 */
+    AI_IMAGE_SIZE_1024_1792,  /* 1024x1792 (portrait) */
+    AI_IMAGE_SIZE_1792_1024,  /* 1792x1024 (landscape) */
+    AI_IMAGE_SIZE_CUSTOM      /* Custom size string */
+} AiImageSize;
+```
+
+### AiImageQuality
+
+Image quality levels:
+
+```c
+typedef enum {
+    AI_IMAGE_QUALITY_AUTO,     /* Provider default */
+    AI_IMAGE_QUALITY_STANDARD, /* Standard quality */
+    AI_IMAGE_QUALITY_HD        /* High definition */
+} AiImageQuality;
+```
+
+### AiImageStyle
+
+Image generation styles:
+
+```c
+typedef enum {
+    AI_IMAGE_STYLE_AUTO,    /* Provider default */
+    AI_IMAGE_STYLE_VIVID,   /* Vivid, dramatic */
+    AI_IMAGE_STYLE_NATURAL  /* Natural, realistic */
+} AiImageStyle;
+```
+
+### AiImageResponseFormat
+
+Image response formats:
+
+```c
+typedef enum {
+    AI_IMAGE_RESPONSE_URL,    /* Return URL */
+    AI_IMAGE_RESPONSE_BASE64  /* Return base64 data */
+} AiImageResponseFormat;
 ```
 
 ## Type Macros

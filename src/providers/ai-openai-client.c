@@ -11,10 +11,15 @@
 
 #include "providers/ai-openai-client.h"
 #include "core/ai-error.h"
+#include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-image-request.h"
+#include "model/ai-generated-image.h"
+#include "model/ai-image-response.h"
 
 #define OPENAI_COMPLETIONS_ENDPOINT "/v1/chat/completions"
+#define OPENAI_IMAGES_ENDPOINT "/v1/images/generations"
 
 /*
  * Private structure for AiOpenAIClient.
@@ -29,12 +34,15 @@ struct _AiOpenAIClient
  */
 static void ai_openai_client_provider_init(AiProviderInterface *iface);
 static void ai_openai_client_streamable_init(AiStreamableInterface *iface);
+static void ai_openai_client_image_generator_init(AiImageGeneratorInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiOpenAIClient, ai_openai_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
                                               ai_openai_client_provider_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
-                                              ai_openai_client_streamable_init))
+                                              ai_openai_client_streamable_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_IMAGE_GENERATOR,
+                                              ai_openai_client_image_generator_init))
 
 /*
  * Build the JSON request body for OpenAI's Chat Completions API.
@@ -1086,6 +1094,388 @@ ai_openai_client_streamable_init(AiStreamableInterface *iface)
 {
     iface->chat_stream_async = ai_openai_client_chat_stream_async;
     iface->chat_stream_finish = ai_openai_client_chat_stream_finish;
+}
+
+/*
+ * AiImageGenerator interface implementation
+ *
+ * OpenAI supports image generation via the DALL-E models and gpt-image-1.
+ * Endpoint: POST /v1/images/generations
+ */
+
+typedef struct
+{
+    AiOpenAIClient *client;
+    GTask          *task;
+    SoupMessage    *msg;
+} OpenAIImageGenData;
+
+static void
+openai_image_gen_data_free(OpenAIImageGenData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->msg);
+    g_slice_free(OpenAIImageGenData, data);
+}
+
+/*
+ * Build the JSON request for OpenAI image generation.
+ */
+static JsonNode *
+ai_openai_client_build_image_request(
+    AiOpenAIClient *self,
+    AiImageRequest *request
+){
+    g_autoptr(JsonBuilder) builder = json_builder_new();
+    const gchar *model;
+    const gchar *size_str;
+    const gchar *quality_str;
+    const gchar *style_str;
+    const gchar *format_str;
+
+    (void)self;
+
+    json_builder_begin_object(builder);
+
+    /* Prompt (required) */
+    json_builder_set_member_name(builder, "prompt");
+    json_builder_add_string_value(builder, ai_image_request_get_prompt(request));
+
+    /* Model */
+    model = ai_image_request_get_model(request);
+    if (model == NULL)
+    {
+        model = AI_OPENAI_IMAGE_DEFAULT_MODEL;
+    }
+    json_builder_set_member_name(builder, "model");
+    json_builder_add_string_value(builder, model);
+
+    /* Size */
+    {
+        AiImageSize size = ai_image_request_get_size(request);
+        if (size == AI_IMAGE_SIZE_CUSTOM)
+        {
+            size_str = ai_image_request_get_custom_size(request);
+        }
+        else
+        {
+            size_str = ai_image_size_to_string(size);
+        }
+
+        if (size_str != NULL)
+        {
+            json_builder_set_member_name(builder, "size");
+            json_builder_add_string_value(builder, size_str);
+        }
+    }
+
+    /* Quality */
+    quality_str = ai_image_quality_to_string(ai_image_request_get_quality(request));
+    if (quality_str != NULL)
+    {
+        json_builder_set_member_name(builder, "quality");
+        json_builder_add_string_value(builder, quality_str);
+    }
+
+    /* Style */
+    style_str = ai_image_style_to_string(ai_image_request_get_style(request));
+    if (style_str != NULL)
+    {
+        json_builder_set_member_name(builder, "style");
+        json_builder_add_string_value(builder, style_str);
+    }
+
+    /* Number of images */
+    {
+        gint count = ai_image_request_get_count(request);
+        if (count > 1)
+        {
+            json_builder_set_member_name(builder, "n");
+            json_builder_add_int_value(builder, count);
+        }
+    }
+
+    /* Response format */
+    format_str = ai_image_response_format_to_string(ai_image_request_get_response_format(request));
+    json_builder_set_member_name(builder, "response_format");
+    json_builder_add_string_value(builder, format_str);
+
+    /* User (optional) */
+    {
+        const gchar *user = ai_image_request_get_user(request);
+        if (user != NULL)
+        {
+            json_builder_set_member_name(builder, "user");
+            json_builder_add_string_value(builder, user);
+        }
+    }
+
+    json_builder_end_object(builder);
+
+    return json_builder_get_root(builder);
+}
+
+/*
+ * Parse OpenAI image generation response.
+ */
+static AiImageResponse *
+ai_openai_client_parse_image_response(
+    JsonNode  *json,
+    GError   **error
+){
+    JsonObject *obj;
+    gint64 created;
+    g_autoptr(AiImageResponse) response = NULL;
+    JsonArray *data_array;
+    guint i;
+    guint len;
+
+    if (!JSON_NODE_HOLDS_OBJECT(json))
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                    "Expected JSON object in response");
+        return NULL;
+    }
+
+    obj = json_node_get_object(json);
+
+    /* Check for error response */
+    if (json_object_has_member(obj, "error"))
+    {
+        JsonObject *err_obj = json_object_get_object_member(obj, "error");
+        const gchar *err_msg = json_object_get_string_member_with_default(
+            err_obj, "message", "Unknown error");
+
+        g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
+        return NULL;
+    }
+
+    created = json_object_get_int_member_with_default(obj, "created", 0);
+    response = ai_image_response_new(NULL, created);
+
+    /* Parse data array */
+    if (json_object_has_member(obj, "data"))
+    {
+        data_array = json_object_get_array_member(obj, "data");
+        len = json_array_get_length(data_array);
+
+        for (i = 0; i < len; i++)
+        {
+            JsonObject *img_obj = json_array_get_object_element(data_array, i);
+            AiGeneratedImage *image = NULL;
+
+            if (json_object_has_member(img_obj, "url"))
+            {
+                const gchar *url = json_object_get_string_member(img_obj, "url");
+                image = ai_generated_image_new_from_url(url);
+            }
+            else if (json_object_has_member(img_obj, "b64_json"))
+            {
+                const gchar *b64 = json_object_get_string_member(img_obj, "b64_json");
+                image = ai_generated_image_new_from_base64(b64, "image/png");
+            }
+
+            if (image != NULL)
+            {
+                /* Set revised prompt if present */
+                if (json_object_has_member(img_obj, "revised_prompt"))
+                {
+                    const gchar *revised = json_object_get_string_member(img_obj, "revised_prompt");
+                    ai_generated_image_set_revised_prompt(image, revised);
+                }
+
+                ai_image_response_add_image(response, image);
+            }
+        }
+    }
+
+    return (AiImageResponse *)g_steal_pointer(&response);
+}
+
+static void
+on_openai_image_response(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OpenAIImageGenData *data = user_data;
+    g_autoptr(GBytes) response_bytes = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonParser) parser = NULL;
+    SoupMessage *msg = data->msg;
+    const gchar *response_data;
+    gsize response_len;
+    JsonNode *response_json;
+    AiImageResponse *response;
+
+    (void)source;
+
+    response_bytes = soup_session_send_and_read_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)), result, &error);
+
+    if (response_bytes == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        openai_image_gen_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(msg)))
+    {
+        guint status = soup_message_get_status(msg);
+
+        if (status == 401 || status == 403)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
+                                    "Authentication failed (HTTP %u)", status);
+        }
+        else if (status == 429)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
+                                    "Rate limited (HTTP %u)", status);
+        }
+        else
+        {
+            /* Try to parse error message from response body */
+            response_data = g_bytes_get_data(response_bytes, &response_len);
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_SERVER_ERROR,
+                                    "Request failed (HTTP %u): %.*s", status,
+                                    (int)MIN(response_len, 200), response_data);
+        }
+
+        openai_image_gen_data_free(data);
+        return;
+    }
+
+    response_data = g_bytes_get_data(response_bytes, &response_len);
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, response_data, response_len, &error))
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        openai_image_gen_data_free(data);
+        return;
+    }
+
+    response_json = json_parser_get_root(parser);
+    response = ai_openai_client_parse_image_response(response_json, &error);
+
+    if (response == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+    }
+    else
+    {
+        g_task_return_pointer(data->task, response, (GDestroyNotify)ai_image_response_free);
+    }
+
+    openai_image_gen_data_free(data);
+}
+
+static void
+ai_openai_client_generate_image_async(
+    AiImageGenerator    *generator,
+    AiImageRequest      *request,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    AiOpenAIClient *self = AI_OPENAI_CLIENT(generator);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    gsize request_len;
+    AiConfig *config;
+    const gchar *base_url;
+    OpenAIImageGenData *data;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    request_json = ai_openai_client_build_image_request(self, request);
+    if (request_json == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Failed to build image request");
+        g_object_unref(task);
+        return;
+    }
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    config = ai_client_get_config(AI_CLIENT(self));
+    base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
+    url = g_strconcat(base_url, OPENAI_IMAGES_ENDPOINT, NULL);
+
+    msg = soup_message_new("POST", url);
+    soup_message_headers_append(soup_message_get_request_headers(msg),
+                                "Content-Type", "application/json");
+
+    klass->add_auth_headers(AI_CLIENT(self), msg);
+
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+
+    data = g_slice_new0(OpenAIImageGenData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
+
+    soup_session_send_and_read_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_openai_image_response,
+        data);
+}
+
+static AiImageResponse *
+ai_openai_client_generate_image_finish(
+    AiImageGenerator  *generator,
+    GAsyncResult      *result,
+    GError           **error
+){
+    (void)generator;
+    return g_task_propagate_pointer(G_TASK(result), error);
+}
+
+static GList *
+ai_openai_client_get_supported_sizes(AiImageGenerator *generator)
+{
+    GList *sizes = NULL;
+
+    (void)generator;
+
+    sizes = g_list_append(sizes, g_strdup("256x256"));
+    sizes = g_list_append(sizes, g_strdup("512x512"));
+    sizes = g_list_append(sizes, g_strdup("1024x1024"));
+    sizes = g_list_append(sizes, g_strdup("1024x1792"));
+    sizes = g_list_append(sizes, g_strdup("1792x1024"));
+
+    return sizes;
+}
+
+static const gchar *
+ai_openai_client_get_image_default_model(AiImageGenerator *generator)
+{
+    (void)generator;
+    return AI_OPENAI_IMAGE_DEFAULT_MODEL;
+}
+
+static void
+ai_openai_client_image_generator_init(AiImageGeneratorInterface *iface)
+{
+    iface->generate_image_async = ai_openai_client_generate_image_async;
+    iface->generate_image_finish = ai_openai_client_generate_image_finish;
+    iface->get_supported_sizes = ai_openai_client_get_supported_sizes;
+    iface->get_default_model = ai_openai_client_get_image_default_model;
 }
 
 /*

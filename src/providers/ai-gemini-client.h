@@ -87,6 +87,27 @@ G_DECLARE_FINAL_TYPE(AiGeminiClient, ai_gemini_client, AI, GEMINI_CLIENT, AiClie
 #define AI_GEMINI_MODEL_FLASH               AI_GEMINI_MODEL_2_5_FLASH
 #define AI_GEMINI_MODEL_PRO                 AI_GEMINI_MODEL_2_5_PRO
 
+/*
+ * Image Generation Models (Nano Banana / Native Gemini Image)
+ *
+ * Nano Banana is the codename for Gemini's native image generation.
+ * - Nano Banana (gemini-2.5-flash-image): Fast, efficient, up to 1K resolution
+ * - Nano Banana Pro (gemini-3-pro-image-preview): Professional, up to 4K resolution
+ */
+#define AI_GEMINI_IMAGE_MODEL_NANO_BANANA       "gemini-2.5-flash-image"
+#define AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO   "gemini-3-pro-image-preview"
+
+/*
+ * Image Generation Models (Imagen - Legacy)
+ */
+#define AI_GEMINI_IMAGE_MODEL_IMAGEN_4      "imagen-4.0-generate-001"
+#define AI_GEMINI_IMAGE_MODEL_IMAGEN_3      "imagen-3.0-generate-001"
+
+/*
+ * Default image model (Nano Banana for native generation)
+ */
+#define AI_GEMINI_IMAGE_DEFAULT_MODEL       AI_GEMINI_IMAGE_MODEL_NANO_BANANA
+
 /**
  * ai_gemini_client_new:
  *

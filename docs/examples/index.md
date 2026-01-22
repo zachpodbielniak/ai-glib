@@ -10,6 +10,7 @@ Code examples and tutorials for ai-glib.
 | [Multi-Provider](multi-provider.md) | Using multiple providers in one application |
 | [Streaming](streaming.md) | Real-time streaming responses |
 | [Tool Use](tool-use.md) | Function calling / tool use |
+| [Image Generation](image-generation.md) | Generate images from text prompts |
 
 ## Building Examples
 
@@ -38,6 +39,14 @@ The library includes simple chat examples for each provider:
 | `simple-chat-gemini.c` | Gemini | `GEMINI_API_KEY` |
 | `simple-chat-grok.c` | Grok | `XAI_API_KEY` |
 | `simple-chat-ollama.c` | Ollama | Ollama server running |
+
+## Image Generation Examples
+
+| File | Provider | Requires |
+|------|----------|----------|
+| `image-gen-openai.c` | OpenAI DALL-E | `OPENAI_API_KEY` |
+| `image-gen-grok.c` | Grok Image | `XAI_API_KEY` |
+| `image-gen-gemini.c` | Gemini Nano Banana | `GEMINI_API_KEY` |
 
 ## Common Patterns
 

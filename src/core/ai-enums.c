@@ -406,3 +406,332 @@ ai_content_type_from_string(const gchar *str)
 
     return AI_CONTENT_TYPE_TEXT;
 }
+
+/*
+ * GType registration for AiImageSize.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_image_size_get_type(void)
+{
+    static GType image_size_type = 0;
+
+    if (g_once_init_enter(&image_size_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_SIZE_AUTO, "AI_IMAGE_SIZE_AUTO", "auto" },
+            { AI_IMAGE_SIZE_256, "AI_IMAGE_SIZE_256", "256x256" },
+            { AI_IMAGE_SIZE_512, "AI_IMAGE_SIZE_512", "512x512" },
+            { AI_IMAGE_SIZE_1024, "AI_IMAGE_SIZE_1024", "1024x1024" },
+            { AI_IMAGE_SIZE_1024_1792, "AI_IMAGE_SIZE_1024_1792", "1024x1792" },
+            { AI_IMAGE_SIZE_1792_1024, "AI_IMAGE_SIZE_1792_1024", "1792x1024" },
+            { AI_IMAGE_SIZE_CUSTOM, "AI_IMAGE_SIZE_CUSTOM", "custom" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageSize", values);
+        g_once_init_leave(&image_size_type, type);
+    }
+
+    return image_size_type;
+}
+
+/*
+ * GType registration for AiImageQuality.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_image_quality_get_type(void)
+{
+    static GType image_quality_type = 0;
+
+    if (g_once_init_enter(&image_quality_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_QUALITY_AUTO, "AI_IMAGE_QUALITY_AUTO", "auto" },
+            { AI_IMAGE_QUALITY_STANDARD, "AI_IMAGE_QUALITY_STANDARD", "standard" },
+            { AI_IMAGE_QUALITY_HD, "AI_IMAGE_QUALITY_HD", "hd" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageQuality", values);
+        g_once_init_leave(&image_quality_type, type);
+    }
+
+    return image_quality_type;
+}
+
+/*
+ * GType registration for AiImageStyle.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_image_style_get_type(void)
+{
+    static GType image_style_type = 0;
+
+    if (g_once_init_enter(&image_style_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_STYLE_AUTO, "AI_IMAGE_STYLE_AUTO", "auto" },
+            { AI_IMAGE_STYLE_VIVID, "AI_IMAGE_STYLE_VIVID", "vivid" },
+            { AI_IMAGE_STYLE_NATURAL, "AI_IMAGE_STYLE_NATURAL", "natural" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageStyle", values);
+        g_once_init_leave(&image_style_type, type);
+    }
+
+    return image_style_type;
+}
+
+/*
+ * GType registration for AiImageResponseFormat.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_image_response_format_get_type(void)
+{
+    static GType image_response_format_type = 0;
+
+    if (g_once_init_enter(&image_response_format_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_RESPONSE_URL, "AI_IMAGE_RESPONSE_URL", "url" },
+            { AI_IMAGE_RESPONSE_BASE64, "AI_IMAGE_RESPONSE_BASE64", "b64_json" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageResponseFormat", values);
+        g_once_init_leave(&image_response_format_type, type);
+    }
+
+    return image_response_format_type;
+}
+
+/**
+ * ai_image_size_to_string:
+ * @size: an #AiImageSize
+ *
+ * Converts an #AiImageSize to its string representation for API serialization.
+ *
+ * Returns: (transfer none): the string representation (e.g., "1024x1024")
+ */
+const gchar *
+ai_image_size_to_string(AiImageSize size)
+{
+    switch (size)
+    {
+        case AI_IMAGE_SIZE_AUTO:
+            return NULL;
+        case AI_IMAGE_SIZE_256:
+            return "256x256";
+        case AI_IMAGE_SIZE_512:
+            return "512x512";
+        case AI_IMAGE_SIZE_1024:
+            return "1024x1024";
+        case AI_IMAGE_SIZE_1024_1792:
+            return "1024x1792";
+        case AI_IMAGE_SIZE_1792_1024:
+            return "1792x1024";
+        case AI_IMAGE_SIZE_CUSTOM:
+            return NULL;
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_size_from_string:
+ * @str: a size string (e.g., "1024x1024")
+ *
+ * Converts a string to an #AiImageSize.
+ *
+ * Returns: the #AiImageSize, or %AI_IMAGE_SIZE_AUTO if not recognized
+ */
+AiImageSize
+ai_image_size_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_SIZE_AUTO;
+    }
+
+    if (g_strcmp0(str, "256x256") == 0)
+    {
+        return AI_IMAGE_SIZE_256;
+    }
+    else if (g_strcmp0(str, "512x512") == 0)
+    {
+        return AI_IMAGE_SIZE_512;
+    }
+    else if (g_strcmp0(str, "1024x1024") == 0)
+    {
+        return AI_IMAGE_SIZE_1024;
+    }
+    else if (g_strcmp0(str, "1024x1792") == 0)
+    {
+        return AI_IMAGE_SIZE_1024_1792;
+    }
+    else if (g_strcmp0(str, "1792x1024") == 0)
+    {
+        return AI_IMAGE_SIZE_1792_1024;
+    }
+
+    return AI_IMAGE_SIZE_AUTO;
+}
+
+/**
+ * ai_image_quality_to_string:
+ * @quality: an #AiImageQuality
+ *
+ * Converts an #AiImageQuality to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_quality_to_string(AiImageQuality quality)
+{
+    switch (quality)
+    {
+        case AI_IMAGE_QUALITY_AUTO:
+            return NULL;
+        case AI_IMAGE_QUALITY_STANDARD:
+            return "standard";
+        case AI_IMAGE_QUALITY_HD:
+            return "hd";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_quality_from_string:
+ * @str: a quality string
+ *
+ * Converts a string to an #AiImageQuality.
+ *
+ * Returns: the #AiImageQuality, or %AI_IMAGE_QUALITY_AUTO if not recognized
+ */
+AiImageQuality
+ai_image_quality_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_QUALITY_AUTO;
+    }
+
+    if (g_strcmp0(str, "standard") == 0)
+    {
+        return AI_IMAGE_QUALITY_STANDARD;
+    }
+    else if (g_strcmp0(str, "hd") == 0)
+    {
+        return AI_IMAGE_QUALITY_HD;
+    }
+
+    return AI_IMAGE_QUALITY_AUTO;
+}
+
+/**
+ * ai_image_style_to_string:
+ * @style: an #AiImageStyle
+ *
+ * Converts an #AiImageStyle to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_style_to_string(AiImageStyle style)
+{
+    switch (style)
+    {
+        case AI_IMAGE_STYLE_AUTO:
+            return NULL;
+        case AI_IMAGE_STYLE_VIVID:
+            return "vivid";
+        case AI_IMAGE_STYLE_NATURAL:
+            return "natural";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_style_from_string:
+ * @str: a style string
+ *
+ * Converts a string to an #AiImageStyle.
+ *
+ * Returns: the #AiImageStyle, or %AI_IMAGE_STYLE_AUTO if not recognized
+ */
+AiImageStyle
+ai_image_style_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_STYLE_AUTO;
+    }
+
+    if (g_strcmp0(str, "vivid") == 0)
+    {
+        return AI_IMAGE_STYLE_VIVID;
+    }
+    else if (g_strcmp0(str, "natural") == 0)
+    {
+        return AI_IMAGE_STYLE_NATURAL;
+    }
+
+    return AI_IMAGE_STYLE_AUTO;
+}
+
+/**
+ * ai_image_response_format_to_string:
+ * @format: an #AiImageResponseFormat
+ *
+ * Converts an #AiImageResponseFormat to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_response_format_to_string(AiImageResponseFormat format)
+{
+    switch (format)
+    {
+        case AI_IMAGE_RESPONSE_URL:
+            return "url";
+        case AI_IMAGE_RESPONSE_BASE64:
+            return "b64_json";
+        default:
+            return "url";
+    }
+}
+
+/**
+ * ai_image_response_format_from_string:
+ * @str: a format string
+ *
+ * Converts a string to an #AiImageResponseFormat.
+ *
+ * Returns: the #AiImageResponseFormat, or %AI_IMAGE_RESPONSE_URL if not recognized
+ */
+AiImageResponseFormat
+ai_image_response_format_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_RESPONSE_URL;
+    }
+
+    if (g_strcmp0(str, "url") == 0)
+    {
+        return AI_IMAGE_RESPONSE_URL;
+    }
+    else if (g_strcmp0(str, "b64_json") == 0 || g_strcmp0(str, "base64") == 0)
+    {
+        return AI_IMAGE_RESPONSE_BASE64;
+    }
+
+    return AI_IMAGE_RESPONSE_URL;
+}

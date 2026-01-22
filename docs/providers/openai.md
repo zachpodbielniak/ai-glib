@@ -213,6 +213,107 @@ int main(void)
 - **Tool Use**: Full support for function calling
 - **Vision**: Supported on GPT-4o and GPT-4-turbo
 - **System Prompts**: Full support
+- **Image Generation**: Full support via `AiImageGenerator` interface
+
+## Image Generation
+
+OpenAI provides comprehensive image generation through DALL-E models.
+
+### Image Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_IMAGE_MODEL_DALL_E_3` | dall-e-3 | Best quality (default) |
+| `AI_OPENAI_IMAGE_MODEL_DALL_E_2` | dall-e-2 | Faster, lower cost |
+| `AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1` | gpt-image-1 | GPT-based image model |
+
+### Default Model
+
+```c
+#define AI_OPENAI_IMAGE_DEFAULT_MODEL  AI_OPENAI_IMAGE_MODEL_DALL_E_3
+```
+
+### Supported Parameters
+
+OpenAI supports all image generation parameters:
+
+| Parameter | Support | Notes |
+|-----------|---------|-------|
+| size | Yes | 256, 512, 1024, 1024x1792, 1792x1024 |
+| quality | Yes | standard, hd |
+| style | Yes | vivid, natural |
+| count | Yes | 1-10 images |
+| response_format | Yes | url or b64_json |
+
+### Image Generation Example
+
+```c
+#include <ai-glib.h>
+
+static void
+on_image_complete(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    GMainLoop *loop = user_data;
+    g_autoptr(AiImageResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+
+    response = ai_image_generator_generate_image_finish(
+        AI_IMAGE_GENERATOR(source), result, &error);
+
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+
+    /* DALL-E 3 may revise the prompt for better results */
+    const gchar *revised = ai_generated_image_get_revised_prompt(image);
+    if (revised != NULL)
+    {
+        g_print("Revised prompt: %s\n", revised);
+    }
+
+    ai_generated_image_save_to_file(image, "dalle-output.png", NULL);
+    g_print("Image saved!\n");
+
+    g_main_loop_quit(loop);
+}
+
+int main(void)
+{
+    g_autoptr(AiOpenAIClient) client = ai_openai_client_new();
+    g_autoptr(AiImageRequest) request = ai_image_request_new(
+        "a futuristic city with flying cars at sunset"
+    );
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+    /* Configure for best quality */
+    ai_image_request_set_model(request, AI_OPENAI_IMAGE_MODEL_DALL_E_3);
+    ai_image_request_set_size(request, AI_IMAGE_SIZE_1024);
+    ai_image_request_set_quality(request, AI_IMAGE_QUALITY_HD);
+    ai_image_request_set_style(request, AI_IMAGE_STYLE_VIVID);
+
+    ai_image_generator_generate_image_async(
+        AI_IMAGE_GENERATOR(client),
+        request,
+        NULL,
+        on_image_complete,
+        loop
+    );
+
+    g_main_loop_run(loop);
+    return 0;
+}
+```
+
+### Notes
+
+- DALL-E 3 automatically revises prompts for better results; the revised prompt is available via `ai_generated_image_get_revised_prompt()`
+- DALL-E 3 only supports generating 1 image at a time; use DALL-E 2 for multiple images
+- HD quality is only available with DALL-E 3
 
 ## Links
 

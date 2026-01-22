@@ -180,6 +180,106 @@ Gemini models offer large context windows:
 | Gemini 1.5 Pro | 1M tokens (2M available) |
 | Gemini 1.5 Flash | 1M tokens |
 
+## Image Generation
+
+Gemini supports image generation through the `AiImageGenerator` interface. Two APIs are available:
+
+### Nano Banana (Recommended)
+
+Nano Banana is Google's native image generation built into Gemini models. It's faster and more integrated than Imagen.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_IMAGE_MODEL_NANO_BANANA` | gemini-2.5-flash-image | Fast, up to 1K resolution |
+| `AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO` | gemini-3-pro-image-preview | Pro, up to 4K resolution |
+
+### Imagen (Legacy)
+
+The original dedicated image generation models:
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_IMAGE_MODEL_IMAGEN_4` | imagen-4.0-generate-001 | Imagen 4 |
+| `AI_GEMINI_IMAGE_MODEL_IMAGEN_3` | imagen-3.0-generate-001 | Imagen 3 |
+
+### Default Model
+
+```c
+#define AI_GEMINI_IMAGE_DEFAULT_MODEL  AI_GEMINI_IMAGE_MODEL_NANO_BANANA
+```
+
+### Image Generation Example
+
+```c
+#include <ai-glib.h>
+
+static void
+on_image_complete(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    GMainLoop *loop = user_data;
+    g_autoptr(AiImageResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+
+    response = ai_image_generator_generate_image_finish(
+        AI_IMAGE_GENERATOR(source), result, &error);
+
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+    ai_generated_image_save_to_file(image, "gemini-output.png", NULL);
+    g_print("Image saved!\n");
+
+    g_main_loop_quit(loop);
+}
+
+int main(void)
+{
+    g_autoptr(AiGeminiClient) client = ai_gemini_client_new();
+    g_autoptr(AiImageRequest) request = ai_image_request_new(
+        "a cat wearing a space helmet floating in space"
+    );
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+    /* Use Nano Banana for native Gemini image generation */
+    ai_image_request_set_model(request, AI_GEMINI_IMAGE_MODEL_NANO_BANANA);
+
+    /* Size maps to aspect ratio (1024 = 1:1 square) */
+    ai_image_request_set_size(request, AI_IMAGE_SIZE_1024);
+
+    ai_image_generator_generate_image_async(
+        AI_IMAGE_GENERATOR(client),
+        request,
+        NULL,
+        on_image_complete,
+        loop
+    );
+
+    g_main_loop_run(loop);
+    return 0;
+}
+```
+
+### Size to Aspect Ratio Mapping
+
+Gemini uses aspect ratios instead of pixel dimensions:
+
+| AiImageSize | Aspect Ratio |
+|-------------|--------------|
+| `AI_IMAGE_SIZE_1024` | 1:1 (square) |
+| `AI_IMAGE_SIZE_1024_1792` | 9:16 (portrait) |
+| `AI_IMAGE_SIZE_1792_1024` | 16:9 (landscape) |
+
+### Notes
+
+- Gemini image generation always returns base64-encoded images
+- Quality and style parameters are ignored (not supported)
+- The library automatically detects whether to use Nano Banana or Imagen API based on model name
+
 ## Links
 
 - [Google AI Studio](https://aistudio.google.com/)

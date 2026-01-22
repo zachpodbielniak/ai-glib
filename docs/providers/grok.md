@@ -162,6 +162,96 @@ Grok uses an OpenAI-compatible API:
 - **Vision**: Supported on vision models
 - **Real-time Info**: Access to X (Twitter) data
 - **System Prompts**: Full support
+- **Image Generation**: Basic support via `AiImageGenerator` interface
+
+## Image Generation
+
+Grok provides basic image generation through an OpenAI-compatible API.
+
+### Image Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GROK_IMAGE_MODEL_GROK_2_IMAGE` | grok-2-image | Grok 2 image generation |
+
+### Default Model
+
+```c
+#define AI_GROK_IMAGE_DEFAULT_MODEL  AI_GROK_IMAGE_MODEL_GROK_2_IMAGE
+```
+
+### Supported Parameters
+
+Grok's image generation is basic and ignores most parameters:
+
+| Parameter | Support | Notes |
+|-----------|---------|-------|
+| prompt | Yes | Required |
+| model | Yes | Only grok-2-image |
+| size | No | Ignored |
+| quality | No | Ignored |
+| style | No | Ignored |
+| count | Yes | Number of images |
+| response_format | Yes | url or b64_json |
+
+### Image Generation Example
+
+```c
+#include <ai-glib.h>
+
+static void
+on_image_complete(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    GMainLoop *loop = user_data;
+    g_autoptr(AiImageResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+
+    response = ai_image_generator_generate_image_finish(
+        AI_IMAGE_GENERATOR(source), result, &error);
+
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+    ai_generated_image_save_to_file(image, "grok-output.png", NULL);
+    g_print("Image saved!\n");
+
+    g_main_loop_quit(loop);
+}
+
+int main(void)
+{
+    g_autoptr(AiGrokClient) client = ai_grok_client_new();
+    g_autoptr(AiImageRequest) request = ai_image_request_new(
+        "a robot playing chess in a park"
+    );
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+    /* Model is optional - defaults to grok-2-image */
+    ai_image_request_set_model(request, AI_GROK_IMAGE_MODEL_GROK_2_IMAGE);
+
+    ai_image_generator_generate_image_async(
+        AI_IMAGE_GENERATOR(client),
+        request,
+        NULL,
+        on_image_complete,
+        loop
+    );
+
+    g_main_loop_run(loop);
+    return 0;
+}
+```
+
+### Notes
+
+- Grok image generation uses an OpenAI-compatible endpoint
+- Size, quality, and style parameters are accepted but ignored
+- Images are typically returned as URLs
 
 ## Links
 
