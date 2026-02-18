@@ -12,8 +12,8 @@ VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)
 
 # Installation paths
 PREFIX ?= /usr/local
-INCLUDEDIR = $(PREFIX)/include
-LIBDIR = $(PREFIX)/lib
+INCLUDEDIR ?= $(PREFIX)/include
+LIBDIR ?= $(PREFIX)/lib
 PKGCONFIGDIR = $(LIBDIR)/pkgconfig
 
 # Compiler settings
