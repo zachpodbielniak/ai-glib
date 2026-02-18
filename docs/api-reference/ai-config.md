@@ -11,7 +11,7 @@ GObject
 
 ## Description
 
-`AiConfig` manages configuration for all AI providers, including API keys, base URLs, timeouts, and retry settings. It automatically reads environment variables and allows programmatic overrides.
+`AiConfig` manages configuration for all AI providers, including API keys, base URLs, timeouts, retry settings, and default provider/model selection. It automatically loads YAML configuration files from a 3-path fallback chain (`/usr/share/ai-glib/`, `/etc/ai-glib/`, `~/.config/ai-glib/`), reads environment variables, and allows programmatic overrides.
 
 ## Environment Variables
 
@@ -26,6 +26,8 @@ GObject
 Additional variables:
 - `OPENAI_BASE_URL` - Custom base URL for OpenAI-compatible APIs
 - `OLLAMA_HOST` - Ollama server URL (default: `http://localhost:11434`)
+- `AI_GLIB_DEFAULT_PROVIDER` - Default provider name (e.g., `ollama`, `claude`, `openai`)
+- `AI_GLIB_DEFAULT_MODEL` - Default model name (e.g., `qwen2.5:7b`, `claude-sonnet-4-20250514`)
 
 ## Functions
 
@@ -211,6 +213,139 @@ Validates configuration for a specific provider.
 
 **Returns:** TRUE if valid, FALSE if configuration is incomplete
 
+---
+
+### ai_config_load_from_file
+
+```c
+gboolean
+ai_config_load_from_file(
+    AiConfig     *self,
+    const gchar  *path,
+    GError      **error
+);
+```
+
+Loads configuration from a YAML file. Values in the file overlay onto existing
+configuration (later calls override earlier ones).
+
+**Parameters:**
+- `self`: an AiConfig
+- `path`: path to the YAML config file
+- `error`: `(out) (optional)`: return location for error
+
+**Returns:** TRUE on success, FALSE on parse error or missing file
+
+---
+
+### ai_config_get_default_provider
+
+```c
+AiProviderType
+ai_config_get_default_provider(AiConfig *self);
+```
+
+Gets the default provider type. Checks the following sources in priority order:
+
+1. Programmatic value set via `ai_config_set_default_provider()`
+2. `AI_GLIB_DEFAULT_PROVIDER` environment variable
+3. `default_provider` key from YAML config files
+4. Built-in default (`AI_PROVIDER_CLAUDE`)
+
+**Parameters:**
+- `self`: an AiConfig
+
+**Returns:** the default AiProviderType
+
+---
+
+### ai_config_set_default_provider
+
+```c
+void
+ai_config_set_default_provider(
+    AiConfig       *self,
+    AiProviderType  provider
+);
+```
+
+Sets the default provider type programmatically. This takes the highest
+priority, overriding both `AI_GLIB_DEFAULT_PROVIDER` environment variable
+and config file values.
+
+**Parameters:**
+- `self`: an AiConfig
+- `provider`: the provider type
+
+---
+
+### ai_config_get_default_model
+
+```c
+const gchar *
+ai_config_get_default_model(AiConfig *self);
+```
+
+Gets the default model name. Checks the following sources in priority order:
+
+1. Programmatic value set via `ai_config_set_default_model()`
+2. `AI_GLIB_DEFAULT_MODEL` environment variable
+3. `default_model` key from YAML config files
+4. Built-in default (NULL)
+
+**Parameters:**
+- `self`: an AiConfig
+
+**Returns:** `(transfer none) (nullable)`: the default model, or NULL
+
+---
+
+### ai_config_set_default_model
+
+```c
+void
+ai_config_set_default_model(
+    AiConfig    *self,
+    const gchar *model
+);
+```
+
+Sets the default model name programmatically. This takes the highest
+priority, overriding both `AI_GLIB_DEFAULT_MODEL` environment variable
+and config file values.
+
+**Parameters:**
+- `self`: an AiConfig
+- `model`: the model name
+
+---
+
+## YAML Config File Format
+
+`ai_config_new()` automatically loads YAML config files from a 3-path
+fallback chain:
+
+1. `/usr/share/ai-glib/config.yaml` — distro defaults (lowest priority)
+2. `/etc/ai-glib/config.yaml` — system admin
+3. `~/.config/ai-glib/config.yaml` — user overrides (highest file priority)
+
+```yaml
+default_provider: ollama
+default_model: qwen2.5:7b
+
+providers:
+  claude:
+    api_key: sk-ant-...
+  openai:
+    api_key: sk-...
+    base_url: https://api.openai.com
+  ollama:
+    base_url: http://localhost:11434
+
+timeout: 120
+max_retries: 3
+```
+
 ## Example
 
 ```c
@@ -261,11 +396,15 @@ When looking up configuration values, the following order is used:
 2. **Environment variables**
    - Read automatically from the environment
 
-3. **Default values** (lowest priority)
-   - Built-in defaults (e.g., Ollama host = localhost:11434)
+3. **Config files**
+   - YAML files loaded from the 3-path fallback chain
+
+4. **Built-in defaults** (lowest priority)
+   - Hardcoded defaults (e.g., Ollama host = localhost:11434)
 
 ## See Also
 
+- [AiSimple](ai-simple.md) - Convenience API that uses config automatically
 - [AiClient](ai-client.md) - Base client class
 - [Configuration Guide](../configuration.md) - Detailed configuration reference
 - [AiError](ai-error.md) - Error codes for validation failures

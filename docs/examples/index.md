@@ -6,7 +6,8 @@ Code examples and tutorials for ai-glib.
 
 | Example | Description |
 |---------|-------------|
-| [Simple Chat](simple-chat.md) | Basic chat completion with any provider |
+| [AiSimple Usage](ai-simple-usage.md) | Easiest way to call an LLM (3 lines of C) |
+| [Simple Chat](simple-chat.md) | Full async chat completion with any provider |
 | [Multi-Provider](multi-provider.md) | Using multiple providers in one application |
 | [Streaming](streaming.md) | Real-time streaming responses |
 | [Tool Use](tool-use.md) | Function calling / tool use |

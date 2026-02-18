@@ -48,6 +48,7 @@ $(BUILDDIR)/examples/%: $(EXAMPLEDIR)/%.c $(LIB_SHARED)
 clean:
 	rm -rf $(BUILDDIR)
 	rm -f $(PROJECT_NAME)-1.0.pc
+	$(MAKE) -C $(YAML_GLIB_DIR) clean 2>/dev/null || true
 
 # Distclean rule
 .PHONY: distclean

@@ -36,6 +36,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 ### API Reference
 
 - [API Reference Index](api-reference/index.md) - Complete API documentation
+- [AiSimple](api-reference/ai-simple.md) - Simple convenience API (start here)
 - [AiClient](api-reference/ai-client.md) - Base client class
 - [AiProvider](api-reference/ai-provider.md) - Provider interface
 - [AiImageGenerator](api-reference/ai-image-generator.md) - Image generation interface
@@ -58,7 +59,25 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 
 - [Contributing](contributing.md) - How to contribute to ai-glib
 
-## Quick Example
+## Quick Example (Simple API)
+
+The simplest way to call an LLM — just 3 lines:
+
+```c
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiSimple) ai = ai_simple_new();
+    g_autofree gchar *answer = ai_simple_prompt(ai, "Hello!", NULL, NULL);
+    g_print("Response: %s\n", answer);
+    return 0;
+}
+```
+
+## Full API Example
+
+For async operations, streaming, and tool use, use the full provider API:
 
 ```c
 #include <ai-glib.h>

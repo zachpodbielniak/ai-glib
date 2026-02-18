@@ -32,7 +32,39 @@ make
 make test
 ```
 
-## Basic Usage
+## Quick Start (Simple API)
+
+The fastest way to call an LLM from C:
+
+```c
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiSimple) ai = ai_simple_new();
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *answer = NULL;
+
+    answer = ai_simple_prompt(ai, "What is the capital of France?", NULL, &error);
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        return 1;
+    }
+
+    g_print("%s\n", answer);
+    return 0;
+}
+```
+
+`ai_simple_new()` reads the default provider and model from
+`~/.config/ai-glib/config.yaml` and environment variables. See
+[AiSimple](api-reference/ai-simple.md) for multi-turn conversations
+and more options.
+
+## Full API Usage
+
+For async operations, streaming, and tool use, use the full provider API.
 
 ### 1. Include the header
 
@@ -127,6 +159,16 @@ alternative environment variable names (listed in order of precedence):
 | Gemini   | `GEMINI_API_KEY` | |
 | Grok     | `XAI_API_KEY`, `GROK_API_KEY` | |
 | Ollama   | `OLLAMA_API_KEY` | Optional - also supports `OLLAMA_HOST` (default: http://localhost:11434) |
+
+Additionally, the default provider and model can be set via environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `AI_GLIB_DEFAULT_PROVIDER` | Default provider name (e.g., `ollama`, `claude`) |
+| `AI_GLIB_DEFAULT_MODEL` | Default model name (e.g., `qwen2.5:7b`) |
+
+These override config file values but are overridden by programmatic `set_*()` calls.
+See [Configuration](configuration.md) for the full priority chain.
 
 ## Next Steps
 

@@ -41,7 +41,8 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-gemini-client.h \
 	$(SRCDIR)/providers/ai-ollama-client.h \
 	$(SRCDIR)/providers/ai-claude-code-client.h \
-	$(SRCDIR)/providers/ai-opencode-client.h
+	$(SRCDIR)/providers/ai-opencode-client.h \
+	$(SRCDIR)/convenience/ai-simple.h
 
 # Library source files
 LIB_SOURCES = \
@@ -70,7 +71,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-gemini-client.c \
 	$(SRCDIR)/providers/ai-ollama-client.c \
 	$(SRCDIR)/providers/ai-claude-code-client.c \
-	$(SRCDIR)/providers/ai-opencode-client.c
+	$(SRCDIR)/providers/ai-opencode-client.c \
+	$(SRCDIR)/convenience/ai-simple.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
@@ -85,6 +87,12 @@ EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(BUILDDIR)/examples/%,$(EXAMPLE
 
 # Include common rules
 include rules.mk
+
+# Build bundled yaml-glib static library
+$(YAML_GLIB_STATIC):
+	@echo "Building yaml-glib..."
+	@mkdir -p $(YAML_GLIB_DIR)/build
+	$(MAKE) -C $(YAML_GLIB_DIR) lib-static
 
 # Default target
 .PHONY: all
@@ -125,8 +133,8 @@ $(LIB_STATIC): $(LIB_OBJECTS) | $(BUILDDIR)
 	@echo "Creating static library..."
 	$(AR) rcs $@ $(LIB_OBJECTS)
 
-# Ensure config.h and ai-version.h exist before compiling
-$(LIB_OBJECTS): $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
+# Ensure config.h, ai-version.h, and yaml-glib exist before compiling
+$(LIB_OBJECTS): $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h $(YAML_GLIB_STATIC)
 
 # pkg-config file
 $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in
@@ -198,6 +206,7 @@ install: all
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers
+	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience
 	install -d $(DESTDIR)$(PKGCONFIGDIR)
 	install -m 644 $(LIB_SHARED) $(DESTDIR)$(LIBDIR)/
 	install -m 644 $(LIB_STATIC) $(DESTDIR)$(LIBDIR)/
@@ -209,6 +218,7 @@ install: all
 	install -m 644 $(SRCDIR)/core/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core/
 	install -m 644 $(SRCDIR)/model/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
 	install -m 644 $(SRCDIR)/providers/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
+	install -m 644 $(SRCDIR)/convenience/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience/
 	install -m 644 $(PROJECT_NAME)-1.0.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	@echo "Installation complete!"
 

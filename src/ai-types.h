@@ -74,6 +74,10 @@ typedef struct _AiGrokClient  AiGrokClient;
 typedef struct _AiOllamaClient  AiOllamaClient;
 /* AiOllamaClient is final */
 
+/* Convenience types */
+typedef struct _AiSimple  AiSimple;
+/* AiSimple is final */
+
 /* Interface types */
 typedef struct _AiProvider           AiProvider;
 typedef struct _AiProviderInterface  AiProviderInterface;

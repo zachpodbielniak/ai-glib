@@ -2,6 +2,12 @@
 
 Complete API documentation for ai-glib.
 
+## Convenience API
+
+| Class | Description |
+|-------|-------------|
+| [AiSimple](ai-simple.md) | Simple convenience wrapper — call an LLM in 3 lines of C |
+
 ## Core Classes
 
 | Class | Description |
@@ -39,7 +45,7 @@ Complete API documentation for ai-glib.
 | AiToolUse | Tool use content block |
 | AiToolResult | Tool result content block |
 
-## Provider Clients
+## Provider Clients (HTTP API)
 
 | Class | Provider |
 |-------|----------|
@@ -48,6 +54,13 @@ Complete API documentation for ai-glib.
 | AiGeminiClient | Google Gemini |
 | AiGrokClient | xAI Grok |
 | AiOllamaClient | Ollama (local) |
+
+## Provider Clients (CLI Wrappers)
+
+| Class | Provider |
+|-------|----------|
+| AiClaudeCodeClient | Claude Code CLI |
+| AiOpenCodeClient | OpenCode CLI |
 
 ## Enumerations
 
@@ -61,7 +74,9 @@ typedef enum {
     AI_PROVIDER_OPENAI,
     AI_PROVIDER_GEMINI,
     AI_PROVIDER_GROK,
-    AI_PROVIDER_OLLAMA
+    AI_PROVIDER_OLLAMA,
+    AI_PROVIDER_CLAUDE_CODE,
+    AI_PROVIDER_OPENCODE
 } AiProviderType;
 ```
 

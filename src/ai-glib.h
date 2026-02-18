@@ -54,4 +54,7 @@
 #include "providers/ai-claude-code-client.h"
 #include "providers/ai-opencode-client.h"
 
+/* Convenience API */
+#include "convenience/ai-simple.h"
+
 #undef AI_GLIB_INSIDE

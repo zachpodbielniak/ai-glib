@@ -39,9 +39,15 @@ ai-glib/
       ai-grok-client.h/.c    # xAI Grok
       ai-gemini-client.h/.c  # Google Gemini
       ai-ollama-client.h/.c  # Ollama (local)
+      ai-claude-code-client.h/.c  # Claude Code CLI
+      ai-opencode-client.h/.c     # OpenCode CLI
+    convenience/       # High-level convenience wrappers
+      ai-simple.h/.c   # Simple LLM interface (3 lines of C)
   tests/               # Unit tests
   examples/            # Example programs
   docs/                # Documentation
+  deps/                # Bundled dependencies
+    yaml-glib/         # YAML parser (built as static lib)
 ```
 
 ## Type Hierarchy
@@ -49,6 +55,7 @@ ai-glib/
 ```
 GObject
   AiConfig         (final)
+  AiSimple         (final) — convenience wrapper
   AiTool           (final)
   AiMessage        (final)
   AiResponse       (final)
@@ -62,6 +69,9 @@ GObject
     AiGrokClient   (final)
     AiGeminiClient (final)
     AiOllamaClient (final)
+  AiCliClient      (derivable, implements AiProvider, AiStreamable)
+    AiClaudeCodeClient (final)
+    AiOpenCodeClient   (final)
 
 GBoxed
   AiUsage
@@ -69,6 +79,7 @@ GBoxed
 GInterface
   AiProvider
   AiStreamable
+  AiImageGenerator
 ```
 
 ## Interfaces

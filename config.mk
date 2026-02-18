@@ -5,8 +5,8 @@
 
 # Project information
 PROJECT_NAME = ai-glib
-VERSION_MAJOR = 1
-VERSION_MINOR = 0
+VERSION_MAJOR = 0
+VERSION_MINOR = 2
 VERSION_MICRO = 0
 VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)
 
@@ -29,6 +29,12 @@ PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKG_DEPS))
 PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS))
 
+# yaml-glib (bundled under deps/yaml-glib, built as static lib)
+YAML_GLIB_DIR = deps/yaml-glib
+YAML_GLIB_STATIC = $(YAML_GLIB_DIR)/build/libyaml-glib.a
+YAML_GLIB_CFLAGS = -I$(YAML_GLIB_DIR)/src
+YAML_GLIB_LIBS = $(YAML_GLIB_STATIC) $(shell pkg-config --libs yaml-0.1)
+
 # Build type configuration
 ifdef DEBUG
     CFLAGS_OPT = -O0 -g3 -DDEBUG
@@ -48,13 +54,14 @@ endif
 
 # Combined flags
 CFLAGS = $(CFLAGS_BASE) $(CFLAGS_OPT) $(CFLAGS_SAN) $(PKG_CFLAGS) \
+         $(YAML_GLIB_CFLAGS) \
          -DAI_GLIB_COMPILATION \
          -DAI_VERSION_MAJOR=$(VERSION_MAJOR) \
          -DAI_VERSION_MINOR=$(VERSION_MINOR) \
          -DAI_VERSION_MICRO=$(VERSION_MICRO) \
          -I$(SRCDIR) -Ibuild
 
-LDFLAGS = $(LDFLAGS_SAN) $(PKG_LIBS)
+LDFLAGS = $(LDFLAGS_SAN) $(YAML_GLIB_LIBS) $(PKG_LIBS)
 
 # Directory structure
 SRCDIR = src
