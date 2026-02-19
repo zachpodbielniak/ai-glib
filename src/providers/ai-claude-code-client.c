@@ -175,20 +175,30 @@ ai_claude_code_client_build_argv(
     g_ptr_array_add(args, g_strdup("--model"));
     g_ptr_array_add(args, g_strdup(model));
 
-    /* System prompt */
-    if (system_prompt != NULL && system_prompt[0] != '\0')
-    {
-        g_ptr_array_add(args, g_strdup("--system-prompt"));
-        g_ptr_array_add(args, g_strdup(system_prompt));
-    }
-
-    /* Session management - only resume if persistence is enabled */
+    /* Session management - resolve session_id before system prompt */
     persist = ai_cli_client_get_session_persistence(client);
     session_id = ai_cli_client_get_session_id(client);
     if (persist && session_id != NULL && session_id[0] != '\0')
     {
+        /*
+         * Resume an existing session. Do NOT pass --system-prompt
+         * because the session already has it from the initial call.
+         * Re-sending it wastes tokens and re-injects the full prompt.
+         */
         g_ptr_array_add(args, g_strdup("--resume"));
         g_ptr_array_add(args, g_strdup(session_id));
+    }
+    else
+    {
+        /*
+         * New session — pass the system prompt to prime it.
+         * Only sent on the first call; subsequent calls use --resume.
+         */
+        if (system_prompt != NULL && system_prompt[0] != '\0')
+        {
+            g_ptr_array_add(args, g_strdup("--system-prompt"));
+            g_ptr_array_add(args, g_strdup(system_prompt));
+        }
     }
     if (!persist)
     {
