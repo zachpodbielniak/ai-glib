@@ -21,7 +21,8 @@ struct _AiClaudeCodeClient
 {
     AiCliClient parent_instance;
 
-    gdouble total_cost;
+    gdouble  total_cost;
+    gboolean skip_permissions;
 };
 
 /*
@@ -43,6 +44,7 @@ enum
 {
     PROP_0,
     PROP_TOTAL_COST,
+    PROP_SKIP_PERMISSIONS,
     N_PROPS
 };
 
@@ -61,6 +63,29 @@ ai_claude_code_client_get_property(
     {
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
+            break;
+        case PROP_SKIP_PERMISSIONS:
+            g_value_set_boolean(value, self->skip_permissions);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+            break;
+    }
+}
+
+static void
+ai_claude_code_client_set_property(
+    GObject      *object,
+    guint         prop_id,
+    const GValue *value,
+    GParamSpec   *pspec
+){
+    AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(object);
+
+    switch (prop_id)
+    {
+        case PROP_SKIP_PERMISSIONS:
+            self->skip_permissions = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -122,6 +147,12 @@ ai_claude_code_client_build_argv(
 
     /* Print mode (required for non-interactive use) */
     g_ptr_array_add(args, g_strdup("--print"));
+
+    /* Skip permissions if enabled (allows tool use without interactive approval) */
+    if (self->skip_permissions)
+    {
+        g_ptr_array_add(args, g_strdup("--dangerously-skip-permissions"));
+    }
 
     /* Output format */
     if (streaming)
@@ -415,6 +446,7 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     AiCliClientClass *cli_class = AI_CLI_CLIENT_CLASS(klass);
 
     object_class->get_property = ai_claude_code_client_get_property;
+    object_class->set_property = ai_claude_code_client_set_property;
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_claude_code_client_get_executable_path;
@@ -434,6 +466,20 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
                             0.0, G_MAXDOUBLE, 0.0,
                             G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiClaudeCodeClient:skip-permissions:
+     *
+     * Whether to pass --dangerously-skip-permissions to the claude CLI.
+     * When enabled, the CLI will not prompt for tool-use approval,
+     * allowing fully autonomous operation.
+     */
+    properties[PROP_SKIP_PERMISSIONS] =
+        g_param_spec_boolean("skip-permissions",
+                             "Skip Permissions",
+                             "Whether to pass --dangerously-skip-permissions to the CLI",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -441,6 +487,7 @@ static void
 ai_claude_code_client_init(AiClaudeCodeClient *self)
 {
     self->total_cost = 0.0;
+    self->skip_permissions = FALSE;
 
     /* Set default model */
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_CODE_DEFAULT_MODEL);
@@ -974,4 +1021,41 @@ ai_claude_code_client_get_total_cost(AiClaudeCodeClient *self)
     g_return_val_if_fail(AI_IS_CLAUDE_CODE_CLIENT(self), 0.0);
 
     return self->total_cost;
+}
+
+/**
+ * ai_claude_code_client_get_skip_permissions:
+ * @self: an #AiClaudeCodeClient
+ *
+ * Gets whether --dangerously-skip-permissions is enabled.
+ *
+ * Returns: %TRUE if skip permissions is enabled
+ */
+gboolean
+ai_claude_code_client_get_skip_permissions(AiClaudeCodeClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_CODE_CLIENT(self), FALSE);
+
+    return self->skip_permissions;
+}
+
+/**
+ * ai_claude_code_client_set_skip_permissions:
+ * @self: an #AiClaudeCodeClient
+ * @skip: whether to pass --dangerously-skip-permissions
+ *
+ * Sets whether to pass --dangerously-skip-permissions to the
+ * claude CLI. When enabled, the CLI will not prompt for
+ * tool-use approval, allowing fully autonomous operation.
+ */
+void
+ai_claude_code_client_set_skip_permissions(
+    AiClaudeCodeClient *self,
+    gboolean            skip
+){
+    g_return_if_fail(AI_IS_CLAUDE_CODE_CLIENT(self));
+
+    self->skip_permissions = skip;
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_SKIP_PERMISSIONS]);
 }

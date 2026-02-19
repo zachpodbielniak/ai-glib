@@ -73,4 +73,30 @@ ai_claude_code_client_new_with_config(AiConfig *config);
 gdouble
 ai_claude_code_client_get_total_cost(AiClaudeCodeClient *self);
 
+/**
+ * ai_claude_code_client_get_skip_permissions:
+ * @self: an #AiClaudeCodeClient
+ *
+ * Gets whether --dangerously-skip-permissions is enabled.
+ *
+ * Returns: %TRUE if skip permissions is enabled
+ */
+gboolean
+ai_claude_code_client_get_skip_permissions(AiClaudeCodeClient *self);
+
+/**
+ * ai_claude_code_client_set_skip_permissions:
+ * @self: an #AiClaudeCodeClient
+ * @skip: whether to pass --dangerously-skip-permissions
+ *
+ * Sets whether to pass --dangerously-skip-permissions to the
+ * claude CLI. When enabled, the CLI will not prompt for
+ * tool-use approval, allowing fully autonomous operation.
+ */
+void
+ai_claude_code_client_set_skip_permissions(
+    AiClaudeCodeClient *self,
+    gboolean            skip
+);
+
 G_END_DECLS
