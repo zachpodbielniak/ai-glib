@@ -9,6 +9,8 @@
 
 #include "config.h"
 
+#include <string.h>
+
 #include "providers/ai-claude-code-client.h"
 #include "core/ai-error.h"
 #include "model/ai-text-content.h"
@@ -134,10 +136,7 @@ ai_claude_code_client_build_argv(
     const gchar *model;
     const gchar *session_id;
     gboolean persist;
-    GString *prompt;
-    GList *l;
 
-    (void)self;
     (void)max_tokens;  /* Claude Code CLI doesn't have a max tokens flag */
 
     args = g_ptr_array_new();
@@ -197,10 +196,31 @@ ai_claude_code_client_build_argv(
     }
 
     /*
-     * Build the prompt from messages.
-     * For multi-turn conversations, we concatenate them into a single prompt
-     * since the CLI handles its own message history via sessions.
+     * Prompt is piped via stdin (build_stdin) to avoid ARG_MAX limits
+     * on large prompts. Do not append it to argv.
      */
+
+    /* NULL terminate */
+    g_ptr_array_add(args, NULL);
+
+    return (gchar **)g_ptr_array_free(args, FALSE);
+}
+
+/*
+ * Build the prompt string to pipe via stdin to the claude CLI.
+ * This avoids the ARG_MAX limit for large prompts. The claude CLI
+ * reads from stdin when no positional prompt argument is given.
+ */
+static gchar *
+ai_claude_code_client_build_stdin(
+    AiCliClient *client,
+    GList       *messages
+){
+    GString *prompt;
+    GList *l;
+
+    (void)client;
+
     prompt = g_string_new("");
     for (l = messages; l != NULL; l = l->next)
     {
@@ -227,12 +247,7 @@ ai_claude_code_client_build_argv(
         }
     }
 
-    g_ptr_array_add(args, g_string_free(prompt, FALSE));
-
-    /* NULL terminate */
-    g_ptr_array_add(args, NULL);
-
-    return (gchar **)g_ptr_array_free(args, FALSE);
+    return g_string_free(prompt, FALSE);
 }
 
 /*
@@ -451,6 +466,7 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     /* Override virtual methods */
     cli_class->get_executable_path = ai_claude_code_client_get_executable_path;
     cli_class->build_argv = ai_claude_code_client_build_argv;
+    cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;
     cli_class->parse_stream_line = ai_claude_code_client_parse_stream_line;
 
@@ -526,6 +542,7 @@ typedef struct
     AiClaudeCodeClient *client;
     GTask              *task;
     GSubprocess        *subprocess;
+    gchar              *stdin_data;
 } ChatAsyncData;
 
 static void
@@ -533,6 +550,7 @@ chat_async_data_free(ChatAsyncData *data)
 {
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
+    g_clear_pointer(&data->stdin_data, g_free);
     g_slice_free(ChatAsyncData, data);
 }
 
@@ -609,9 +627,11 @@ ai_claude_code_client_chat_async(
     g_autoptr(GError) error = NULL;
     g_autofree gchar *executable = NULL;
     g_auto(GStrv) argv = NULL;
+    gchar *stdin_data = NULL;
     g_autoptr(GSubprocess) subprocess = NULL;
     ChatAsyncData *data;
     GTask *task;
+    GSubprocessFlags flags;
 
     (void)tools;  /* Tools not yet supported via CLI */
 
@@ -637,17 +657,28 @@ ai_claude_code_client_chat_async(
         return;
     }
 
+    /* Build stdin data if subclass provides it */
+    if (klass->build_stdin != NULL)
+    {
+        stdin_data = klass->build_stdin(AI_CLI_CLIENT(self), messages);
+    }
+
     /* Replace first element with resolved executable path */
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
-    /* Spawn subprocess */
+    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
+    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
+    if (stdin_data != NULL)
+    {
+        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
+    }
+
     subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                   &error);
+                                   flags, &error);
     if (subprocess == NULL)
     {
+        g_free(stdin_data);
         g_task_return_error(task, g_steal_pointer(&error));
         g_object_unref(task);
         return;
@@ -658,9 +689,11 @@ ai_claude_code_client_chat_async(
     data->client = g_object_ref(self);
     data->task = task;
     data->subprocess = g_object_ref(subprocess);
+    data->stdin_data = stdin_data;  /* ownership transferred */
 
-    /* Start async communication */
-    g_subprocess_communicate_utf8_async(subprocess, NULL, cancellable,
+    /* Start async communication — pipe prompt via stdin */
+    g_subprocess_communicate_utf8_async(subprocess, data->stdin_data,
+                                        cancellable,
                                         on_chat_communicate_complete, data);
 }
 
@@ -733,6 +766,7 @@ typedef struct
     AiResponse         *response;
     GString            *accumulated_text;
     gboolean            stream_started;
+    gchar              *stdin_data;
 } StreamAsyncData;
 
 static void
@@ -743,6 +777,7 @@ stream_async_data_free(StreamAsyncData *data)
     g_clear_object(&data->data_stream);
     g_clear_object(&data->cancellable);
     g_clear_object(&data->response);
+    g_clear_pointer(&data->stdin_data, g_free);
 
     if (data->accumulated_text != NULL)
     {
@@ -853,9 +888,34 @@ on_stream_subprocess_started(
     StreamAsyncData *data = user_data;
     g_autoptr(GError) error = NULL;
     GInputStream *stdout_stream;
+    GOutputStream *stdin_stream;
 
     (void)source;
     (void)result;
+
+    /*
+     * Write stdin data to the subprocess if provided, then close
+     * the stdin pipe so the CLI knows input is complete.
+     */
+    if (data->stdin_data != NULL)
+    {
+        stdin_stream = g_subprocess_get_stdin_pipe(data->subprocess);
+        if (stdin_stream != NULL)
+        {
+            g_output_stream_write_all(stdin_stream,
+                                       data->stdin_data,
+                                       strlen(data->stdin_data),
+                                       NULL, NULL, &error);
+            g_output_stream_close(stdin_stream, NULL, NULL);
+        }
+
+        if (error != NULL)
+        {
+            g_task_return_error(data->task, g_steal_pointer(&error));
+            stream_async_data_free(data);
+            return;
+        }
+    }
 
     /* Get stdout pipe */
     stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
@@ -895,9 +955,11 @@ ai_claude_code_client_chat_stream_async(
     g_autoptr(GError) error = NULL;
     g_autofree gchar *executable = NULL;
     g_auto(GStrv) argv = NULL;
+    gchar *stdin_data = NULL;
     g_autoptr(GSubprocess) subprocess = NULL;
     StreamAsyncData *data;
     GTask *task;
+    GSubprocessFlags flags;
 
     (void)tools;  /* Tools not yet supported via CLI */
 
@@ -923,17 +985,28 @@ ai_claude_code_client_chat_stream_async(
         return;
     }
 
+    /* Build stdin data if subclass provides it */
+    if (klass->build_stdin != NULL)
+    {
+        stdin_data = klass->build_stdin(AI_CLI_CLIENT(self), messages);
+    }
+
     /* Replace first element with resolved executable path */
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
-    /* Spawn subprocess */
+    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
+    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
+    if (stdin_data != NULL)
+    {
+        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
+    }
+
     subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                   &error);
+                                   flags, &error);
     if (subprocess == NULL)
     {
+        g_free(stdin_data);
         g_task_return_error(task, g_steal_pointer(&error));
         g_object_unref(task);
         return;
@@ -946,8 +1019,9 @@ ai_claude_code_client_chat_stream_async(
     data->subprocess = g_object_ref(subprocess);
     data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
     data->stream_started = FALSE;
+    data->stdin_data = stdin_data;  /* ownership transferred */
 
-    /* Use idle to start reading (subprocess is already running) */
+    /* Write stdin and start reading stdout */
     on_stream_subprocess_started(NULL, NULL, data);
 }
 

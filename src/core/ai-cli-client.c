@@ -189,6 +189,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
     klass->build_argv = NULL;
     klass->parse_json_output = NULL;
     klass->parse_stream_line = NULL;
+    klass->build_stdin = NULL;
 
     /**
      * AiCliClient:config:
@@ -730,10 +731,12 @@ ai_cli_client_chat_sync(
     AiCliClientPrivate *priv;
     g_autofree gchar *executable = NULL;
     g_auto(GStrv) argv = NULL;
+    g_autofree gchar *stdin_data = NULL;
     g_autoptr(GSubprocess) subprocess = NULL;
     g_autofree gchar *stdout_data = NULL;
     g_autofree gchar *stderr_data = NULL;
     AiResponse *response;
+    GSubprocessFlags flags;
 
     g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
 
@@ -760,15 +763,25 @@ ai_cli_client_chat_sync(
         return NULL;
     }
 
+    /* Build stdin data if subclass provides it (e.g. for large prompts) */
+    if (klass->build_stdin != NULL)
+    {
+        stdin_data = klass->build_stdin(self, messages);
+    }
+
     /* Replace first element with resolved executable path */
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
-    /* Spawn subprocess */
+    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
+    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
+    if (stdin_data != NULL)
+    {
+        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
+    }
+
     subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                   error);
+                                   flags, error);
     if (subprocess == NULL)
     {
         return NULL;
@@ -776,7 +789,7 @@ ai_cli_client_chat_sync(
 
     /* Wait for completion and capture output */
     if (!g_subprocess_communicate_utf8(subprocess,
-                                       NULL,  /* stdin */
+                                       stdin_data,  /* pipe prompt via stdin */
                                        cancellable,
                                        &stdout_data,
                                        &stderr_data,

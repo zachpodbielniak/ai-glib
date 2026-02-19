@@ -36,6 +36,8 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  * @build_argv: builds the command line arguments for the CLI
  * @parse_json_output: parses the JSON output from the CLI
  * @parse_stream_line: parses a single NDJSON line from streaming output
+ * @build_stdin: builds the stdin data to pipe to the CLI subprocess,
+ *   or returns %NULL if the prompt is passed via argv instead
  * @_reserved: reserved for future expansion
  *
  * Class structure for #AiCliClient.
@@ -61,9 +63,11 @@ struct _AiCliClientClass
                                          AiResponse     *response,
                                          gchar         **delta_text,
                                          GError        **error);
+    gchar *      (*build_stdin)         (AiCliClient    *self,
+                                         GList          *messages);
 
     /* Reserved for future expansion */
-    gpointer _reserved[8];
+    gpointer _reserved[7];
 };
 
 /**
