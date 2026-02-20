@@ -226,6 +226,32 @@ ai_cli_client_set_session_persistence(
 );
 
 /**
+ * ai_cli_client_get_working_directory:
+ * @self: an #AiCliClient
+ *
+ * Gets the working directory for the CLI subprocess.
+ *
+ * Returns: (transfer none) (nullable): the working directory path
+ */
+const gchar *
+ai_cli_client_get_working_directory(AiCliClient *self);
+
+/**
+ * ai_cli_client_set_working_directory:
+ * @self: an #AiCliClient
+ * @directory: (nullable): the working directory path, or %NULL to inherit
+ *
+ * Sets the working directory for the CLI subprocess. When set, the
+ * subprocess will be spawned with this as its current working directory.
+ * When %NULL, the subprocess inherits the parent process working directory.
+ */
+void
+ai_cli_client_set_working_directory(
+    AiCliClient *self,
+    const gchar *directory
+);
+
+/**
  * ai_cli_client_chat_sync:
  * @self: an #AiCliClient
  * @messages: (element-type AiMessage): the conversation messages

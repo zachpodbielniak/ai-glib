@@ -23,6 +23,7 @@ typedef struct
     gchar    *system_prompt;
     gchar    *executable_path;
     gchar    *session_id;
+    gchar    *working_directory;
     gint      max_tokens;
     gboolean  session_persistence;
 } AiCliClientPrivate;
@@ -42,6 +43,7 @@ enum
     PROP_EXECUTABLE_PATH,
     PROP_SESSION_ID,
     PROP_SESSION_PERSISTENCE,
+    PROP_WORKING_DIRECTORY,
     N_PROPS
 };
 
@@ -72,6 +74,7 @@ ai_cli_client_finalize(GObject *object)
     g_clear_pointer(&priv->system_prompt, g_free);
     g_clear_pointer(&priv->executable_path, g_free);
     g_clear_pointer(&priv->session_id, g_free);
+    g_clear_pointer(&priv->working_directory, g_free);
 
     G_OBJECT_CLASS(ai_cli_client_parent_class)->finalize(object);
 }
@@ -108,6 +111,9 @@ ai_cli_client_get_property(
             break;
         case PROP_SESSION_PERSISTENCE:
             g_value_set_boolean(value, priv->session_persistence);
+            break;
+        case PROP_WORKING_DIRECTORY:
+            g_value_set_string(value, priv->working_directory);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -152,6 +158,10 @@ ai_cli_client_set_property(
             break;
         case PROP_SESSION_PERSISTENCE:
             priv->session_persistence = g_value_get_boolean(value);
+            break;
+        case PROP_WORKING_DIRECTORY:
+            g_clear_pointer(&priv->working_directory, g_free);
+            priv->working_directory = g_value_dup_string(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -276,6 +286,18 @@ ai_cli_client_class_init(AiCliClientClass *klass)
                              TRUE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiCliClient:working-directory:
+     *
+     * The working directory for the CLI subprocess.
+     */
+    properties[PROP_WORKING_DIRECTORY] =
+        g_param_spec_string("working-directory",
+                            "Working Directory",
+                            "The working directory for the CLI subprocess",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -354,6 +376,7 @@ ai_cli_client_init(AiCliClient *self)
     priv->session_id = NULL;
     priv->max_tokens = 4096;
     priv->session_persistence = TRUE;
+    priv->working_directory = NULL;
 }
 
 /**
@@ -626,6 +649,51 @@ ai_cli_client_set_session_persistence(
 }
 
 /**
+ * ai_cli_client_get_working_directory:
+ * @self: an #AiCliClient
+ *
+ * Gets the working directory for the CLI subprocess.
+ *
+ * Returns: (transfer none) (nullable): the working directory path
+ */
+const gchar *
+ai_cli_client_get_working_directory(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->working_directory;
+}
+
+/**
+ * ai_cli_client_set_working_directory:
+ * @self: an #AiCliClient
+ * @directory: (nullable): the working directory path, or %NULL to inherit
+ *
+ * Sets the working directory for the CLI subprocess. When set, the
+ * subprocess will be spawned with this as its current working directory.
+ * When %NULL, the subprocess inherits the parent process working directory.
+ */
+void
+ai_cli_client_set_working_directory(
+    AiCliClient *self,
+    const gchar *directory
+)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    priv = ai_cli_client_get_instance_private(self);
+    g_clear_pointer(&priv->working_directory, g_free);
+    priv->working_directory = g_strdup(directory);
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_WORKING_DIRECTORY]);
+}
+
+/**
  * ai_cli_client_resolve_executable:
  * @self: an #AiCliClient
  * @error: (out) (optional): return location for a #GError
@@ -780,8 +848,22 @@ ai_cli_client_chat_sync(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   flags, error);
+    /* Use GSubprocessLauncher when a working directory is set */
+    if (priv->working_directory != NULL)
+    {
+        g_autoptr(GSubprocessLauncher) launcher = NULL;
+
+        launcher = g_subprocess_launcher_new(flags);
+        g_subprocess_launcher_set_cwd(launcher, priv->working_directory);
+        subprocess = g_subprocess_launcher_spawnv(
+            launcher, (const gchar * const *)argv, error);
+    }
+    else
+    {
+        subprocess = g_subprocess_newv((const gchar * const *)argv,
+                                       flags, error);
+    }
+
     if (subprocess == NULL)
     {
         return NULL;
