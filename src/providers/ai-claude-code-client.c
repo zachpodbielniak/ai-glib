@@ -25,6 +25,7 @@ struct _AiClaudeCodeClient
 
     gdouble  total_cost;
     gboolean skip_permissions;
+    gint     last_input_tokens;  /* tracks input tokens for compaction detection */
 };
 
 /*
@@ -51,6 +52,17 @@ enum
 };
 
 static GParamSpec *properties[N_PROPS];
+
+/*
+ * Signal IDs for AiClaudeCodeClient-specific events.
+ */
+enum
+{
+    SIGNAL_CONTEXT_COMPACTED,
+    N_CC_SIGNALS
+};
+
+static guint cc_signals[N_CC_SIGNALS];
 
 static void
 ai_claude_code_client_get_property(
@@ -261,6 +273,29 @@ ai_claude_code_client_build_stdin(
 }
 
 /*
+ * check_and_emit_compaction:
+ * @self: an #AiClaudeCodeClient
+ * @input_tokens: the input token count from the current response
+ *
+ * Compares the current input token count against the previously
+ * stored value. If the count has dropped, a context window
+ * compaction is inferred and the "context-compacted" signal is
+ * emitted. The stored value is always updated afterwards.
+ */
+static void
+check_and_emit_compaction(
+    AiClaudeCodeClient *self,
+    gint                input_tokens
+){
+    if (self->last_input_tokens > 0 && input_tokens < self->last_input_tokens)
+    {
+        g_signal_emit(self, cc_signals[SIGNAL_CONTEXT_COMPACTED], 0,
+                      self->last_input_tokens, input_tokens);
+    }
+    self->last_input_tokens = input_tokens;
+}
+
+/*
  * Parse JSON output from the claude CLI.
  *
  * Expected format:
@@ -342,7 +377,7 @@ ai_claude_code_client_parse_json_output(
         ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
     }
 
-    /* Parse usage */
+    /* Parse usage and check for context compaction */
     if (json_object_has_member(obj, "usage"))
     {
         JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
@@ -351,6 +386,7 @@ ai_claude_code_client_parse_json_output(
         g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
         ai_response_set_usage(response, usage);
+        check_and_emit_compaction(self, input_tokens);
     }
 
     /* Store total cost */
@@ -441,7 +477,7 @@ ai_claude_code_client_parse_stream_line(
             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
         }
 
-        /* Update usage */
+        /* Update usage and check for context compaction */
         if (json_object_has_member(obj, "usage"))
         {
             JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
@@ -450,6 +486,7 @@ ai_claude_code_client_parse_stream_line(
             g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
             ai_response_set_usage(response, usage);
+            check_and_emit_compaction(self, input_tokens);
         }
 
         /* Store total cost */
@@ -507,6 +544,28 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
+
+    /**
+     * AiClaudeCodeClient::context-compacted:
+     * @self: the client that detected compaction
+     * @previous_tokens: the input token count before compaction
+     * @current_tokens: the input token count after compaction
+     *
+     * Emitted when the context window appears to have been compacted.
+     * Detected by inference: input_tokens dropped between consecutive
+     * calls on the same session. This fires during both synchronous
+     * and streaming chat calls, from within the response parsing path.
+     */
+    cc_signals[SIGNAL_CONTEXT_COMPACTED] =
+        g_signal_new("context-compacted",
+                     G_TYPE_FROM_CLASS(klass),
+                     G_SIGNAL_RUN_LAST,
+                     0,
+                     NULL, NULL,
+                     NULL,
+                     G_TYPE_NONE, 2,
+                     G_TYPE_INT,
+                     G_TYPE_INT);
 }
 
 static void
@@ -514,6 +573,7 @@ ai_claude_code_client_init(AiClaudeCodeClient *self)
 {
     self->total_cost = 0.0;
     self->skip_permissions = FALSE;
+    self->last_input_tokens = -1;
 
     /* Set default model */
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_CODE_DEFAULT_MODEL);

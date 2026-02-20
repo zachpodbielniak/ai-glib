@@ -40,6 +40,21 @@ G_DECLARE_FINAL_TYPE(AiClaudeCodeClient, ai_claude_code_client, AI, CLAUDE_CODE_
 #define AI_CLAUDE_CODE_MODEL_HAIKU      "haiku"
 
 /**
+ * AiClaudeCodeClient::context-compacted:
+ * @self: the client that detected compaction
+ * @previous_tokens: the input token count before compaction
+ * @current_tokens: the input token count after compaction
+ *
+ * Emitted when the context window appears to have been compacted.
+ * Detected by inference: input_tokens dropped between consecutive
+ * calls on the same session.
+ *
+ * This signal fires during both synchronous (chat_sync) and
+ * streaming (chat_stream_async) calls, from within the response
+ * parsing path. Handlers run synchronously in the calling thread.
+ */
+
+/**
  * ai_claude_code_client_new:
  *
  * Creates a new #AiClaudeCodeClient.
