@@ -83,6 +83,8 @@ By default, `ai_config_new()` reads API keys from environment variables.
 Multiple environment variable names are supported for some providers,
 checked in order of precedence:
 
+#### HTTP API Providers
+
 | Provider | Environment Variables (in order of precedence) |
 |----------|-----------------------------------------------|
 | Claude   | `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY` |
@@ -90,6 +92,17 @@ checked in order of precedence:
 | Gemini   | `GEMINI_API_KEY` |
 | Grok     | `XAI_API_KEY`, `GROK_API_KEY` |
 | Ollama   | `OLLAMA_API_KEY` (optional) |
+
+#### CLI Wrapper Providers
+
+CLI providers (`AiClaudeCodeClient`, `AiOpenCodeClient`) do not use
+API keys directly — they delegate authentication to their respective
+CLI tools. Optional environment variables:
+
+| Provider | Environment Variable | Description |
+|----------|---------------------|-------------|
+| Claude Code | `CLAUDE_CODE_PATH` | Override path to `claude` executable |
+| OpenCode | `OPENCODE_PATH` | Override path to `opencode` executable |
 
 ### Programmatic Configuration
 
@@ -105,7 +118,7 @@ override config file values but are overridden by programmatic `set_*()` calls:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `AI_GLIB_DEFAULT_PROVIDER` | Default provider name | `ollama`, `claude`, `openai`, `gemini`, `grok` |
+| `AI_GLIB_DEFAULT_PROVIDER` | Default provider name | `ollama`, `claude`, `openai`, `gemini`, `grok`, `claude-code`, `opencode` |
 | `AI_GLIB_DEFAULT_MODEL` | Default model name | `qwen2.5:7b`, `claude-sonnet-4-20250514` |
 
 ```bash

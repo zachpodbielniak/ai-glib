@@ -152,6 +152,8 @@ gcc -o myprogram myprogram.c \
 Set these environment variables to configure API keys. Some providers support
 alternative environment variable names (listed in order of precedence):
 
+### HTTP API Providers
+
 | Provider | Environment Variables | Notes |
 |----------|----------------------|-------|
 | Claude   | `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY` | |
@@ -159,6 +161,17 @@ alternative environment variable names (listed in order of precedence):
 | Gemini   | `GEMINI_API_KEY` | |
 | Grok     | `XAI_API_KEY`, `GROK_API_KEY` | |
 | Ollama   | `OLLAMA_API_KEY` | Optional - also supports `OLLAMA_HOST` (default: http://localhost:11434) |
+
+### CLI Wrapper Providers
+
+CLI providers use their own tool's authentication and don't require
+API key environment variables in ai-glib. You can optionally override
+the executable path:
+
+| Provider | Environment Variables | Notes |
+|----------|----------------------|-------|
+| Claude Code | `CLAUDE_CODE_PATH` | Optional path override for `claude` CLI |
+| OpenCode | `OPENCODE_PATH` | Optional path override for `opencode` CLI |
 
 Additionally, the default provider and model can be set via environment variables:
 

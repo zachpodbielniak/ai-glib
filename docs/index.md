@@ -8,6 +8,8 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 
 ## Supported Providers
 
+### HTTP API
+
 | Provider | Description | Default Model |
 |----------|-------------|---------------|
 | [Claude](providers/claude.md) | Anthropic's Claude models | claude-sonnet-4-20250514 |
@@ -15,6 +17,13 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [Gemini](providers/gemini.md) | Google's Gemini models | gemini-2.0-flash |
 | [Grok](providers/grok.md) | xAI's Grok models | grok-4-1-fast-reasoning |
 | [Ollama](providers/ollama.md) | Local models via Ollama | gpt-oss:20b |
+
+### CLI Wrappers
+
+| Provider | Description | Default Model |
+|----------|-------------|---------------|
+| [Claude Code](providers/claude-code.md) | Anthropic's Claude Code CLI | sonnet |
+| [OpenCode](providers/opencode.md) | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-4-20250514 |
 
 ## Documentation
 
@@ -27,11 +36,13 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 ### Providers
 
 - [Providers Overview](providers/index.md) - Common provider interface
-- [Claude](providers/claude.md) - Anthropic Claude specifics
-- [OpenAI](providers/openai.md) - OpenAI GPT specifics
-- [Gemini](providers/gemini.md) - Google Gemini specifics
-- [Grok](providers/grok.md) - xAI Grok specifics
-- [Ollama](providers/ollama.md) - Local Ollama specifics
+- [Claude](providers/claude.md) - Anthropic Claude HTTP API
+- [OpenAI](providers/openai.md) - OpenAI GPT HTTP API
+- [Gemini](providers/gemini.md) - Google Gemini HTTP API
+- [Grok](providers/grok.md) - xAI Grok HTTP API
+- [Ollama](providers/ollama.md) - Local Ollama HTTP API
+- [Claude Code](providers/claude-code.md) - Claude Code CLI wrapper
+- [OpenCode](providers/opencode.md) - OpenCode CLI wrapper (multi-provider)
 
 ### API Reference
 

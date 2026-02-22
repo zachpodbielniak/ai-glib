@@ -4,6 +4,8 @@ ai-glib provides a unified interface to multiple AI providers through the `AiPro
 
 ## Supported Providers
 
+### HTTP API Providers
+
 | Provider | Client Class | Environment Variable | Default Model |
 |----------|--------------|---------------------|---------------|
 | [Claude](claude.md) | `AiClaudeClient` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | claude-sonnet-4-20250514 |
@@ -11,6 +13,13 @@ ai-glib provides a unified interface to multiple AI providers through the `AiPro
 | [Gemini](gemini.md) | `AiGeminiClient` | `GEMINI_API_KEY` | gemini-2.0-flash |
 | [Grok](grok.md) | `AiGrokClient` | `XAI_API_KEY` or `GROK_API_KEY` | grok-4-1-fast-reasoning |
 | [Ollama](ollama.md) | `AiOllamaClient` | `OLLAMA_HOST` (optional) | gpt-oss:20b |
+
+### CLI Wrapper Providers
+
+| Provider | Client Class | Environment Variable | Default Model |
+|----------|--------------|---------------------|---------------|
+| [Claude Code](claude-code.md) | `AiClaudeCodeClient` | `CLAUDE_CODE_PATH` (optional) | sonnet |
+| [OpenCode](opencode.md) | `AiOpenCodeClient` | `OPENCODE_PATH` (optional) | anthropic/claude-sonnet-4-20250514 |
 
 ## Common Interface
 
@@ -70,14 +79,15 @@ ai_client_set_model(AI_CLIENT(client), "claude-3-5-haiku-20241022");
 
 ## Provider Comparison
 
-| Feature | Claude | OpenAI | Gemini | Grok | Ollama |
-|---------|--------|--------|--------|------|--------|
-| Chat Completion | Yes | Yes | Yes | Yes | Yes |
-| Streaming | Yes | Yes | Yes | Yes | Yes |
-| Tool Use | Yes | Yes | Partial | Yes | Partial |
-| Vision | Yes | Yes | Yes | Yes | Model-dependent |
-| Local | No | No | No | No | Yes |
-| API Key Required | Yes | Yes | Yes | Yes | No |
+| Feature | Claude | OpenAI | Gemini | Grok | Ollama | Claude Code | OpenCode |
+|---------|--------|--------|--------|------|--------|-------------|----------|
+| Chat Completion | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Streaming | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Tool Use | Yes | Yes | Partial | Yes | Partial | Yes | Model-dependent |
+| Vision | Yes | Yes | Yes | Yes | Model-dependent | Yes | Model-dependent |
+| Local | No | No | No | No | Yes | No | No |
+| API Key Required | Yes | Yes | Yes | Yes | No | No (uses CLI auth) | No (uses CLI auth) |
+| Multi-Provider | No | No | No | No | No | No | Yes |
 
 ## Error Handling
 

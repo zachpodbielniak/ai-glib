@@ -42,7 +42,11 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-ollama-client.h \
 	$(SRCDIR)/providers/ai-claude-code-client.h \
 	$(SRCDIR)/providers/ai-opencode-client.h \
-	$(SRCDIR)/convenience/ai-simple.h
+	$(SRCDIR)/convenience/ai-simple.h \
+	$(SRCDIR)/convenience/ai-search-provider.h \
+	$(SRCDIR)/convenience/ai-bing-search.h \
+	$(SRCDIR)/convenience/ai-brave-search.h \
+	$(SRCDIR)/convenience/ai-tool-executor.h
 
 # Library source files
 LIB_SOURCES = \
@@ -72,7 +76,11 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-ollama-client.c \
 	$(SRCDIR)/providers/ai-claude-code-client.c \
 	$(SRCDIR)/providers/ai-opencode-client.c \
-	$(SRCDIR)/convenience/ai-simple.c
+	$(SRCDIR)/convenience/ai-simple.c \
+	$(SRCDIR)/convenience/ai-search-provider.c \
+	$(SRCDIR)/convenience/ai-bing-search.c \
+	$(SRCDIR)/convenience/ai-brave-search.c \
+	$(SRCDIR)/convenience/ai-tool-executor.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))

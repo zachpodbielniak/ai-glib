@@ -78,6 +78,19 @@ typedef struct _AiOllamaClient  AiOllamaClient;
 typedef struct _AiSimple  AiSimple;
 /* AiSimple is final */
 
+typedef struct _AiToolExecutor  AiToolExecutor;
+/* AiToolExecutor is final */
+
+/* Search provider interface and implementations */
+typedef struct _AiSearchProvider           AiSearchProvider;
+typedef struct _AiSearchProviderInterface  AiSearchProviderInterface;
+
+typedef struct _AiBingSearch  AiBingSearch;
+/* AiBingSearch is final */
+
+typedef struct _AiBraveSearch  AiBraveSearch;
+/* AiBraveSearch is final */
+
 /* Interface types */
 typedef struct _AiProvider           AiProvider;
 typedef struct _AiProviderInterface  AiProviderInterface;

@@ -366,6 +366,10 @@ on_grok_chat_response(
     if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(msg)))
     {
         guint status = soup_message_get_status(msg);
+        gsize body_len = 0;
+        const gchar *body = g_bytes_get_data(response_bytes, &body_len);
+
+        g_warning("xAI API error (HTTP %u): %.*s", status, (int)body_len, body);
 
         if (status == 401 || status == 403)
         {
@@ -449,6 +453,7 @@ ai_grok_client_chat_async(
         g_autoptr(JsonGenerator) gen = json_generator_new();
         json_generator_set_root(gen, request_json);
         request_body = json_generator_to_data(gen, NULL);
+        g_debug("xAI request body: %s", request_body);
     }
 
     url = klass->get_endpoint_url(AI_CLIENT(self));

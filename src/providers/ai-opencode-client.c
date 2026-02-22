@@ -59,8 +59,8 @@ ai_opencode_client_get_executable_path(AiCliClient *client)
 /*
  * Build command line arguments for the opencode CLI.
  *
- * Command: opencode run --format json --model <model> "prompt"
- * Streaming: opencode run --format stream-json --model <model> "prompt"
+ * Command: opencode run --format json --model <model>
+ * Prompt is piped via stdin (build_stdin) to avoid ARG_MAX limits.
  */
 static gchar **
 ai_opencode_client_build_argv(
@@ -72,11 +72,11 @@ ai_opencode_client_build_argv(
 ){
     GPtrArray *args;
     const gchar *model;
-    GString *prompt;
-    GList *l;
+    const gchar *session_id;
 
-    (void)max_tokens;  /* OpenCode CLI doesn't have a max tokens flag */
-    (void)system_prompt;  /* OpenCode handles system prompts differently */
+    (void)messages;       /* prompt goes via stdin */
+    (void)max_tokens;     /* opencode has no max tokens flag */
+    (void)system_prompt;  /* handled in build_stdin */
 
     args = g_ptr_array_new();
 
@@ -86,31 +86,60 @@ ai_opencode_client_build_argv(
     /* Run command */
     g_ptr_array_add(args, g_strdup("run"));
 
-    /* Output format */
+    /* Output format — opencode only supports "json", not "stream-json" */
     g_ptr_array_add(args, g_strdup("--format"));
-    if (streaming)
-    {
-        g_ptr_array_add(args, g_strdup("stream-json"));
-    }
-    else
-    {
-        g_ptr_array_add(args, g_strdup("json"));
-    }
+    g_ptr_array_add(args, g_strdup("json"));
+
+    (void)streaming;
 
     /* Model */
     model = ai_cli_client_get_model(client);
     if (model == NULL)
-    {
         model = AI_OPENCODE_DEFAULT_MODEL;
-    }
     g_ptr_array_add(args, g_strdup("--model"));
     g_ptr_array_add(args, g_strdup(model));
 
-    /*
-     * Build the prompt from messages.
-     * For multi-turn conversations, we concatenate them into a single prompt.
-     */
+    /* Session continuation */
+    session_id = ai_cli_client_get_session_id(client);
+    if (session_id != NULL && session_id[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--session"));
+        g_ptr_array_add(args, g_strdup(session_id));
+    }
+
+    /* NULL terminate — no positional prompt, stdin is used */
+    g_ptr_array_add(args, NULL);
+
+    return (gchar **)g_ptr_array_free(args, FALSE);
+}
+
+/*
+ * Build the prompt string to pipe via stdin to the opencode CLI.
+ * opencode reads from stdin when no positional prompt argument is given.
+ * System prompt is prepended in <system> tags since opencode has no
+ * --system-prompt flag.
+ */
+static gchar *
+ai_opencode_client_build_stdin(
+    AiCliClient *client,
+    GList       *messages
+){
+    GString *prompt;
+    const gchar *sys_prompt;
+    GList *l;
+
     prompt = g_string_new("");
+
+    /* Prepend system prompt if set */
+    sys_prompt = ai_cli_client_get_system_prompt(client);
+    if (sys_prompt != NULL && sys_prompt[0] != '\0')
+    {
+        g_string_append(prompt, "<system>\n");
+        g_string_append(prompt, sys_prompt);
+        g_string_append(prompt, "\n</system>\n\n");
+    }
+
+    /* Concatenate user messages */
     for (l = messages; l != NULL; l = l->next)
     {
         AiMessage *msg = l->data;
@@ -119,29 +148,19 @@ ai_opencode_client_build_argv(
 
         if (text != NULL && text[0] != '\0')
         {
-            if (prompt->len > 0)
-            {
-                g_string_append(prompt, "\n\n");
-            }
-
-            /* Add role prefix for multi-message conversations */
             if (role == AI_ROLE_USER)
             {
                 g_string_append(prompt, text);
             }
             else if (role == AI_ROLE_ASSISTANT)
             {
-                g_string_append_printf(prompt, "Previous assistant response: %s", text);
+                g_string_append_printf(prompt,
+                    "\n\nPrevious assistant response: %s", text);
             }
         }
     }
 
-    g_ptr_array_add(args, g_string_free(prompt, FALSE));
-
-    /* NULL terminate */
-    g_ptr_array_add(args, NULL);
-
-    return (gchar **)g_ptr_array_free(args, FALSE);
+    return g_string_free(prompt, FALSE);
 }
 
 /*
@@ -211,6 +230,17 @@ ai_opencode_client_parse_json_output(
                         "CLI error: %s", err_msg);
             g_strfreev(lines);
             return NULL;
+        }
+
+        /* Capture sessionID for session persistence */
+        if (json_object_has_member(obj, "sessionID"))
+        {
+            const gchar *sid = json_object_get_string_member_with_default(
+                obj, "sessionID", "");
+            if (sid[0] != '\0' && ai_cli_client_get_session_persistence(client))
+            {
+                ai_cli_client_set_session_id(client, sid);
+            }
         }
 
         type = json_object_get_string_member_with_default(obj, "type", "");
@@ -367,6 +397,7 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     /* Override virtual methods */
     cli_class->get_executable_path = ai_opencode_client_get_executable_path;
     cli_class->build_argv = ai_opencode_client_build_argv;
+    cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;
     cli_class->parse_stream_line = ai_opencode_client_parse_stream_line;
 }
