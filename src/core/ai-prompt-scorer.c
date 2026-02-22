@@ -72,6 +72,7 @@ struct _AiScoringResult {
     gdouble      confidence;
     gdouble      agentic_score;
     GPtrArray   *signals;        /* (element-type utf8) */
+    guint        estimated_tokens; /* rough input token estimate (chars/4) */
 };
 
 AiScoringResult *
@@ -95,11 +96,12 @@ ai_scoring_result_copy(const AiScoringResult *r)
     g_return_val_if_fail(r != NULL, NULL);
 
     c = ai_scoring_result_new();
-    c->score         = r->score;
-    c->tier          = r->tier;
-    c->ambiguous     = r->ambiguous;
-    c->confidence    = r->confidence;
-    c->agentic_score = r->agentic_score;
+    c->score            = r->score;
+    c->tier             = r->tier;
+    c->ambiguous        = r->ambiguous;
+    c->confidence       = r->confidence;
+    c->agentic_score    = r->agentic_score;
+    c->estimated_tokens = r->estimated_tokens;
 
     for (i = 0; i < r->signals->len; i++)
         g_ptr_array_add(c->signals,
@@ -154,6 +156,13 @@ ai_scoring_result_get_agentic_score(const AiScoringResult *r)
 {
     g_return_val_if_fail(r != NULL, 0.0);
     return r->agentic_score;
+}
+
+guint
+ai_scoring_result_get_estimated_tokens(const AiScoringResult *r)
+{
+    g_return_val_if_fail(r != NULL, 0);
+    return r->estimated_tokens;
 }
 
 GPtrArray *
@@ -726,8 +735,9 @@ ai_prompt_scorer_classify(const gchar          *prompt,
 
     /* Build result */
     result = ai_scoring_result_new();
-    result->score         = weighted_score;
-    result->agentic_score = agentic_score;
+    result->score            = weighted_score;
+    result->agentic_score    = agentic_score;
+    result->estimated_tokens = estimated_tokens;
 
     /* Collect signals */
     for (i = 0; i < ndims; i++) {

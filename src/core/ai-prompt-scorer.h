@@ -76,6 +76,7 @@ AiPromptTier ai_scoring_result_get_tier(const AiScoringResult *r);
 gboolean     ai_scoring_result_get_tier_is_ambiguous(const AiScoringResult *r);
 gdouble      ai_scoring_result_get_confidence(const AiScoringResult *r);
 gdouble      ai_scoring_result_get_agentic_score(const AiScoringResult *r);
+guint        ai_scoring_result_get_estimated_tokens(const AiScoringResult *r);
 
 /**
  * ai_scoring_result_get_signals:
