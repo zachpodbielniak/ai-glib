@@ -29,6 +29,7 @@
 #include "core/ai-image-generator.h"
 #include "core/ai-client.h"
 #include "core/ai-cli-client.h"
+#include "core/ai-prompt-scorer.h"
 
 /* Model classes */
 #include "model/ai-usage.h"

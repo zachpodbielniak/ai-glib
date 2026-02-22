@@ -24,6 +24,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-image-generator.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
+	$(SRCDIR)/core/ai-prompt-scorer.h \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
@@ -58,6 +59,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-image-generator.c \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-cli-client.c \
+	$(SRCDIR)/core/ai-prompt-scorer.c \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
