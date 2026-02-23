@@ -331,11 +331,42 @@ ai_opencode_client_parse_json_output(
 
         obj = json_node_get_object(root);
 
-        /* Check for error */
+        /* Check for error — the "error" field may be a plain string or
+         * a JSON object with a "message" sub-field (e.g. opencode
+         * permission errors).  Handle both forms gracefully. */
         if (json_object_has_member(obj, "error"))
         {
-            const gchar *err_msg = json_object_get_string_member_with_default(
-                obj, "error", "Unknown error");
+            JsonNode *err_node = json_object_get_member(obj, "error");
+            const gchar *err_msg = NULL;
+            g_autofree gchar *err_msg_tmp = NULL;
+
+            if (JSON_NODE_HOLDS_VALUE(err_node) &&
+                json_node_get_value_type(err_node) == G_TYPE_STRING)
+            {
+                err_msg = json_node_get_string(err_node);
+            }
+            else if (JSON_NODE_HOLDS_OBJECT(err_node))
+            {
+                JsonObject *err_obj = json_node_get_object(err_node);
+                /* Try "message" first (most common), then "error" */
+                err_msg = json_object_get_string_member_with_default(
+                    err_obj, "message", NULL);
+                if (err_msg == NULL)
+                    err_msg = json_object_get_string_member_with_default(
+                        err_obj, "error", NULL);
+                if (err_msg == NULL)
+                {
+                    /* Last resort: serialise the object so logs are useful */
+                    g_autoptr(JsonGenerator) gen = json_generator_new();
+                    json_generator_set_root(gen, err_node);
+                    err_msg_tmp = json_generator_to_data(gen, NULL);
+                    err_msg = err_msg_tmp;
+                }
+            }
+
+            if (err_msg == NULL)
+                err_msg = "Unknown error";
+
             g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
                         "CLI error: %s", err_msg);
             g_strfreev(lines);
@@ -928,6 +959,7 @@ ai_opencode_client_chat_async(
     AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
     g_autoptr(GError) error = NULL;
     g_autofree gchar *executable = NULL;
+    g_autofree gchar *stdin_buf = NULL;
     g_auto(GStrv) argv = NULL;
     g_autoptr(GSubprocess) subprocess = NULL;
     ChatAsyncData *data;
@@ -961,10 +993,15 @@ ai_opencode_client_chat_async(
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
+    /* Build prompt to send to opencode via stdin */
+    stdin_buf = klass->build_stdin(AI_CLI_CLIENT(self), messages);
+
     /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
     subprocess = ai_opencode_client_spawn(
         self, (const gchar *const *)argv,
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+        G_SUBPROCESS_FLAGS_STDIN_PIPE |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+        G_SUBPROCESS_FLAGS_STDERR_PIPE,
         &error);
     if (subprocess == NULL)
     {
@@ -979,8 +1016,8 @@ ai_opencode_client_chat_async(
     data->task = task;
     data->subprocess = g_object_ref(subprocess);
 
-    /* Start async communication */
-    g_subprocess_communicate_utf8_async(subprocess, NULL, cancellable,
+    /* Start async communication — stdin_buf is the prompt piped to opencode */
+    g_subprocess_communicate_utf8_async(subprocess, stdin_buf, cancellable,
                                         on_chat_communicate_complete, data);
 }
 
@@ -1259,13 +1296,30 @@ ai_opencode_client_chat_stream_async(
     /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
     subprocess = ai_opencode_client_spawn(
         self, (const gchar *const *)argv,
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+        G_SUBPROCESS_FLAGS_STDIN_PIPE |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+        G_SUBPROCESS_FLAGS_STDERR_PIPE,
         &error);
     if (subprocess == NULL)
     {
         g_task_return_error(task, g_steal_pointer(&error));
         g_object_unref(task);
         return;
+    }
+
+    /* Write the prompt to stdin and close it so opencode can start */
+    {
+        g_autofree gchar *stdin_buf =
+            klass->build_stdin(AI_CLI_CLIENT(self), messages);
+        GOutputStream *stdin_pipe = g_subprocess_get_stdin_pipe(subprocess);
+
+        if (stdin_buf != NULL && stdin_pipe != NULL)
+        {
+            g_output_stream_write_all(stdin_pipe, stdin_buf, strlen(stdin_buf),
+                                      NULL, NULL, NULL);
+        }
+        if (stdin_pipe != NULL)
+            g_output_stream_close(stdin_pipe, NULL, NULL);
     }
 
     /* Set up callback data */
