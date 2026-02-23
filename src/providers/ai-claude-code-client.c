@@ -26,6 +26,10 @@ struct _AiClaudeCodeClient
     gdouble  total_cost;
     gboolean skip_permissions;
     gint     last_input_tokens;  /* tracks input tokens for compaction detection */
+
+    /* Cached summary for the re-prompt fallback when the AI
+     * produces no text (empty "result" with tool use only). */
+    gchar *last_tool_summary;
 };
 
 /*
@@ -269,6 +273,12 @@ ai_claude_code_client_build_stdin(
         }
     }
 
+    /* Instruct the AI to always produce a plain text response */
+    g_string_append(prompt,
+        "\n\nIMPORTANT: Always include a plain text response. "
+        "Tool use is fine, but you MUST provide a text summary of "
+        "your work when finished. Never end your turn on tool calls alone.");
+
     return g_string_free(prompt, FALSE);
 }
 
@@ -375,6 +385,18 @@ ai_claude_code_client_parse_json_output(
     {
         g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
         ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
+    }
+    else
+    {
+        /*
+         * Empty result — Claude finished with tool calls but produced no
+         * text summary. Store a flag so the completion callback can attempt
+         * a re-prompt for synthesized text. If that also fails we return
+         * this generic message as a last resort.
+         */
+        g_free(self->last_tool_summary);
+        self->last_tool_summary = g_strdup(
+            "(completed tool operations — no text summary was provided)");
     }
 
     /* Parse usage and check for context compaction */
@@ -501,12 +523,26 @@ ai_claude_code_client_parse_stream_line(
     return TRUE;
 }
 
+/*
+ * Destructor — free instance data.
+ */
+static void
+ai_claude_code_client_finalize(GObject *object)
+{
+    AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(object);
+
+    g_free(self->last_tool_summary);
+
+    G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
+}
+
 static void
 ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     AiCliClientClass *cli_class = AI_CLI_CLIENT_CLASS(klass);
 
+    object_class->finalize     = ai_claude_code_client_finalize;
     object_class->get_property = ai_claude_code_client_get_property;
     object_class->set_property = ai_claude_code_client_set_property;
 
@@ -624,6 +660,158 @@ chat_async_data_free(ChatAsyncData *data)
     g_slice_free(ChatAsyncData, data);
 }
 
+/*
+ * Retry data — used when the AI made tool calls but produced no text.
+ * We re-prompt asking for a plain-text summary; if that also fails we
+ * fall back to the generic tool_summary string.
+ */
+typedef struct
+{
+    AiClaudeCodeClient *client;
+    GTask              *task;
+    GSubprocess        *subprocess;
+    gchar              *tool_summary;
+} RetryAsyncData;
+
+static void
+retry_async_data_free(RetryAsyncData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->subprocess);
+    g_free(data->tool_summary);
+    g_slice_free(RetryAsyncData, data);
+}
+
+static void
+on_retry_communicate_complete(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    RetryAsyncData *data = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *stdout_data = NULL;
+    g_autofree gchar *stderr_data = NULL;
+    AiCliClientClass *klass;
+    AiResponse *response = NULL;
+
+    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
+                                               &stdout_data, &stderr_data,
+                                               &error))
+    {
+        goto fallback;
+    }
+
+    if (!g_subprocess_get_successful(data->subprocess))
+        goto fallback;
+
+    if (stdout_data == NULL || stdout_data[0] == '\0')
+        goto fallback;
+
+    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
+    response = klass->parse_json_output(AI_CLI_CLIENT(data->client),
+                                         stdout_data, &error);
+
+    if (response != NULL &&
+        ai_response_get_content_blocks(response) != NULL)
+    {
+        /* Re-prompt succeeded — return the synthesized text */
+        g_task_return_pointer(data->task, response, g_object_unref);
+        retry_async_data_free(data);
+        return;
+    }
+
+    g_clear_object(&response);
+
+fallback:
+    g_clear_error(&error);
+    g_warning("claude-code: re-prompt failed, using tool summary as fallback");
+
+    response = ai_response_new("",
+        ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
+    {
+        g_autoptr(AiTextContent) tc = ai_text_content_new(data->tool_summary);
+        ai_response_add_content_block(response,
+            (AiContentBlock *)g_steal_pointer(&tc));
+    }
+    ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
+    g_task_return_pointer(data->task, response, g_object_unref);
+    retry_async_data_free(data);
+}
+
+/*
+ * Attempt to re-prompt Claude for a plain-text summary of its tool work.
+ * Returns TRUE if the retry subprocess was spawned (task ownership
+ * transferred to the retry callback), FALSE if it could not start.
+ * Requires an active session ID to resume the conversation.
+ */
+static gboolean
+attempt_text_retry(
+    AiClaudeCodeClient *client,
+    GTask              *task,
+    const gchar        *tool_summary
+){
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *exe = NULL;
+    g_autoptr(GPtrArray) rargs = NULL;
+    GSubprocess *rproc;
+    RetryAsyncData *retry;
+    const gchar *model;
+    const gchar *sid;
+
+    exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(client), &err);
+    if (exe == NULL)
+        return FALSE;
+
+    model = ai_cli_client_get_model(AI_CLI_CLIENT(client));
+    sid   = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
+
+    /* Can only re-prompt if we have a session to resume */
+    if (sid == NULL || sid[0] == '\0')
+        return FALSE;
+
+    rargs = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(rargs, g_strdup(exe));
+    g_ptr_array_add(rargs, g_strdup("--print"));
+    if (client->skip_permissions)
+        g_ptr_array_add(rargs, g_strdup("--dangerously-skip-permissions"));
+    g_ptr_array_add(rargs, g_strdup("--output-format"));
+    g_ptr_array_add(rargs, g_strdup("json"));
+    g_ptr_array_add(rargs, g_strdup("--model"));
+    g_ptr_array_add(rargs,
+        g_strdup(model ? model : AI_CLAUDE_CODE_DEFAULT_MODEL));
+    g_ptr_array_add(rargs, g_strdup("--resume"));
+    g_ptr_array_add(rargs, g_strdup(sid));
+    g_ptr_array_add(rargs, NULL);
+
+    rproc = g_subprocess_newv(
+        (const gchar *const *)rargs->pdata,
+        G_SUBPROCESS_FLAGS_STDIN_PIPE |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+        G_SUBPROCESS_FLAGS_STDERR_PIPE,
+        &err);
+
+    if (rproc == NULL)
+        return FALSE;
+
+    retry = g_slice_new0(RetryAsyncData);
+    retry->client       = g_object_ref(client);
+    retry->task         = task;
+    retry->subprocess   = rproc;   /* takes ownership */
+    retry->tool_summary = g_strdup(tool_summary);
+
+    g_warning("claude-code: no text in response, re-prompting for summary "
+              "(session=%s)", sid);
+
+    g_subprocess_communicate_utf8_async(
+        rproc,
+        "Provide a concise plain-text summary of what you just did. "
+        "Do NOT use any tools.",
+        NULL, on_retry_communicate_complete, retry);
+
+    return TRUE;
+}
+
 static void
 on_chat_communicate_complete(
     GObject      *source,
@@ -672,12 +860,38 @@ on_chat_communicate_complete(
     if (response == NULL)
     {
         g_task_return_error(data->task, g_steal_pointer(&error));
-    }
-    else
-    {
-        g_task_return_pointer(data->task, response, g_object_unref);
+        chat_async_data_free(data);
+        return;
     }
 
+    /*
+     * If the AI only made tool calls without synthesizing text, attempt
+     * a follow-up prompt asking it to summarize; fall back to the generic
+     * tool_summary message if the retry can't start.
+     */
+    if (ai_response_get_content_blocks(response) == NULL &&
+        data->client->last_tool_summary != NULL)
+    {
+        if (attempt_text_retry(data->client, data->task,
+                                data->client->last_tool_summary))
+        {
+            g_object_unref(response);
+            data->task = NULL;   /* retry owns the task now */
+            chat_async_data_free(data);
+            return;
+        }
+
+        /* Retry couldn't start — inject tool_summary as text directly */
+        g_warning("claude-code: re-prompt could not start, using fallback text");
+        {
+            g_autoptr(AiTextContent) tc = ai_text_content_new(
+                data->client->last_tool_summary);
+            ai_response_add_content_block(response,
+                (AiContentBlock *)g_steal_pointer(&tc));
+        }
+    }
+
+    g_task_return_pointer(data->task, response, g_object_unref);
     chat_async_data_free(data);
 }
 
