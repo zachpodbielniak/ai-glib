@@ -75,4 +75,32 @@ ai_opencode_client_new(void);
 AiOpenCodeClient *
 ai_opencode_client_new_with_config(AiConfig *config);
 
+/**
+ * ai_opencode_client_get_skip_permissions:
+ * @self: an #AiOpenCodeClient
+ *
+ * Gets whether permission auto-approval is enabled.
+ *
+ * Returns: %TRUE if skip permissions is enabled
+ */
+gboolean
+ai_opencode_client_get_skip_permissions(AiOpenCodeClient *self);
+
+/**
+ * ai_opencode_client_set_skip_permissions:
+ * @self: an #AiOpenCodeClient
+ * @skip: whether to auto-approve all permission prompts
+ *
+ * Sets whether to auto-approve all opencode permission prompts by
+ * injecting the OPENCODE_PERMISSION environment variable into the
+ * child process. When enabled, the opencode CLI will not prompt for
+ * approval on any operation (including external directory access),
+ * allowing fully autonomous headless operation.
+ */
+void
+ai_opencode_client_set_skip_permissions(
+    AiOpenCodeClient *self,
+    gboolean          skip
+);
+
 G_END_DECLS

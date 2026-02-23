@@ -21,10 +21,31 @@ struct _AiOpenCodeClient
 {
     AiCliClient parent_instance;
 
+    gboolean skip_permissions;
+
     /* Cached tool-call summary from the last response, used for
      * the re-prompt fallback when the AI produces no text. */
     gchar *last_tool_summary;
 };
+
+/*
+ * Property IDs.
+ */
+enum
+{
+    PROP_0,
+    PROP_SKIP_PERMISSIONS,
+    N_PROPS
+};
+
+static GParamSpec *oc_properties[N_PROPS];
+
+/*
+ * The JSON value set as OPENCODE_PERMISSION when skip_permissions is
+ * enabled. This auto-approves every permission category including
+ * external_directory and doom_loop (the only two that default to "ask").
+ */
+#define OPENCODE_PERMISSION_ALLOW_ALL "{\"*\":\"allow\"}"
 
 /*
  * Interface implementations forward declarations.
@@ -37,6 +58,83 @@ G_DEFINE_TYPE_WITH_CODE(AiOpenCodeClient, ai_opencode_client, AI_TYPE_CLI_CLIENT
                                               ai_opencode_client_provider_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
                                               ai_opencode_client_streamable_init))
+
+static void
+ai_opencode_client_get_property(
+    GObject    *object,
+    guint       prop_id,
+    GValue     *value,
+    GParamSpec *pspec
+){
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(object);
+
+    switch (prop_id)
+    {
+        case PROP_SKIP_PERMISSIONS:
+            g_value_set_boolean(value, self->skip_permissions);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+            break;
+    }
+}
+
+static void
+ai_opencode_client_set_property(
+    GObject      *object,
+    guint         prop_id,
+    const GValue *value,
+    GParamSpec   *pspec
+){
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(object);
+
+    switch (prop_id)
+    {
+        case PROP_SKIP_PERMISSIONS:
+            self->skip_permissions = g_value_get_boolean(value);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+            break;
+    }
+}
+
+/*
+ * Spawn an opencode subprocess. When skip_permissions is enabled we must
+ * use GSubprocessLauncher so we can inject the OPENCODE_PERMISSION env
+ * var into the child environment. Otherwise we fall back to the simpler
+ * g_subprocess_newv().
+ */
+static GSubprocess *
+ai_opencode_client_spawn(
+    AiOpenCodeClient       *self,
+    const gchar *const     *argv,
+    GSubprocessFlags        flags,
+    GError                **error
+){
+    if (self->skip_permissions)
+    {
+        g_autoptr(GSubprocessLauncher) launcher = NULL;
+        const gchar *cwd;
+
+        launcher = g_subprocess_launcher_new(flags);
+        g_subprocess_launcher_setenv(launcher,
+                                      "OPENCODE_PERMISSION",
+                                      OPENCODE_PERMISSION_ALLOW_ALL,
+                                      TRUE);
+
+        /* Honour the working directory if one was set on the base class */
+        cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+        if (cwd != NULL)
+        {
+            g_subprocess_launcher_set_cwd(launcher, cwd);
+        }
+
+        return g_subprocess_launcher_spawnv(launcher, argv, error);
+    }
+
+    return g_subprocess_newv(argv, flags, error);
+}
 
 /*
  * Get the executable path for the opencode CLI.
@@ -497,7 +595,9 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     AiCliClientClass *cli_class = AI_CLI_CLIENT_CLASS(klass);
 
-    object_class->finalize = ai_opencode_client_finalize;
+    object_class->finalize     = ai_opencode_client_finalize;
+    object_class->get_property = ai_opencode_client_get_property;
+    object_class->set_property = ai_opencode_client_set_property;
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_opencode_client_get_executable_path;
@@ -505,6 +605,24 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;
     cli_class->parse_stream_line = ai_opencode_client_parse_stream_line;
+
+    /**
+     * AiOpenCodeClient:skip-permissions:
+     *
+     * Whether to set OPENCODE_PERMISSION to auto-approve all
+     * permission prompts. When enabled, the opencode subprocess
+     * inherits an environment variable that allows every operation
+     * (including external_directory access) without interactive
+     * approval, enabling fully autonomous headless operation.
+     */
+    oc_properties[PROP_SKIP_PERMISSIONS] =
+        g_param_spec_boolean("skip-permissions",
+                             "Skip Permissions",
+                             "Whether to auto-approve all opencode permission prompts",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    g_object_class_install_properties(object_class, N_PROPS, oc_properties);
 }
 
 static void
@@ -681,8 +799,8 @@ attempt_text_retry(
     }
     g_ptr_array_add(rargs, NULL);
 
-    rproc = g_subprocess_newv(
-        (const gchar *const *)rargs->pdata,
+    rproc = ai_opencode_client_spawn(
+        client, (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
         G_SUBPROCESS_FLAGS_STDERR_PIPE,
@@ -843,11 +961,11 @@ ai_opencode_client_chat_async(
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
-    /* Spawn subprocess */
-    subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                   &error);
+    /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
+    subprocess = ai_opencode_client_spawn(
+        self, (const gchar *const *)argv,
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+        &error);
     if (subprocess == NULL)
     {
         g_task_return_error(task, g_steal_pointer(&error));
@@ -1138,11 +1256,11 @@ ai_opencode_client_chat_stream_async(
     g_free(argv[0]);
     argv[0] = g_steal_pointer(&executable);
 
-    /* Spawn subprocess */
-    subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                   &error);
+    /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
+    subprocess = ai_opencode_client_spawn(
+        self, (const gchar *const *)argv,
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+        &error);
     if (subprocess == NULL)
     {
         g_task_return_error(task, g_steal_pointer(&error));
@@ -1216,4 +1334,46 @@ ai_opencode_client_new_with_config(AiConfig *config)
                                                      NULL);
 
     return (AiOpenCodeClient *)g_steal_pointer(&self);
+}
+
+/**
+ * ai_opencode_client_get_skip_permissions:
+ * @self: an #AiOpenCodeClient
+ *
+ * Gets whether permission auto-approval is enabled.
+ *
+ * Returns: %TRUE if skip permissions is enabled
+ */
+gboolean
+ai_opencode_client_get_skip_permissions(AiOpenCodeClient *self)
+{
+    g_return_val_if_fail(AI_IS_OPENCODE_CLIENT(self), FALSE);
+
+    return self->skip_permissions;
+}
+
+/**
+ * ai_opencode_client_set_skip_permissions:
+ * @self: an #AiOpenCodeClient
+ * @skip: whether to auto-approve all permission prompts
+ *
+ * Sets whether to auto-approve all opencode permission prompts by
+ * injecting the OPENCODE_PERMISSION environment variable into the
+ * child process. When enabled, the opencode CLI will not prompt for
+ * approval on any operation (including external directory access),
+ * allowing fully autonomous headless operation.
+ */
+void
+ai_opencode_client_set_skip_permissions(
+    AiOpenCodeClient *self,
+    gboolean          skip
+){
+    g_return_if_fail(AI_IS_OPENCODE_CLIENT(self));
+
+    if (self->skip_permissions != skip)
+    {
+        self->skip_permissions = skip;
+        g_object_notify_by_pspec(G_OBJECT(self),
+                                  oc_properties[PROP_SKIP_PERMISSIONS]);
+    }
 }
