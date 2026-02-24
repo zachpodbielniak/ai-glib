@@ -20,7 +20,7 @@
 
 static const GEnumValue prompt_tier_values[] = {
     { AI_PROMPT_TIER_SIMPLE,    "AI_PROMPT_TIER_SIMPLE",    "simple"    },
-    { AI_PROMPT_TIER_MEDIUM,    "AI_PROMPT_TIER_MEDIUM",    "medium"    },
+    { AI_PROMPT_TIER_MODERATE,    "AI_PROMPT_TIER_MODERATE",    "moderate"  },
     { AI_PROMPT_TIER_COMPLEX,   "AI_PROMPT_TIER_COMPLEX",   "complex"   },
     { AI_PROMPT_TIER_REASONING, "AI_PROMPT_TIER_REASONING", "reasoning" },
     { 0, NULL, NULL }
@@ -43,7 +43,7 @@ ai_prompt_tier_to_string(AiPromptTier tier)
 {
     switch (tier) {
     case AI_PROMPT_TIER_SIMPLE:    return "SIMPLE";
-    case AI_PROMPT_TIER_MEDIUM:    return "MEDIUM";
+    case AI_PROMPT_TIER_MODERATE:    return "MODERATE";
     case AI_PROMPT_TIER_COMPLEX:   return "COMPLEX";
     case AI_PROMPT_TIER_REASONING: return "REASONING";
     default:                       return "UNKNOWN";
@@ -53,12 +53,12 @@ ai_prompt_tier_to_string(AiPromptTier tier)
 AiPromptTier
 ai_prompt_tier_from_string(const gchar *str)
 {
-    if (str == NULL) return AI_PROMPT_TIER_MEDIUM;
+    if (str == NULL) return AI_PROMPT_TIER_MODERATE;
     if (g_ascii_strcasecmp(str, "simple")    == 0) return AI_PROMPT_TIER_SIMPLE;
-    if (g_ascii_strcasecmp(str, "medium")    == 0) return AI_PROMPT_TIER_MEDIUM;
+    if (g_ascii_strcasecmp(str, "moderate")  == 0) return AI_PROMPT_TIER_MODERATE;
     if (g_ascii_strcasecmp(str, "complex")   == 0) return AI_PROMPT_TIER_COMPLEX;
     if (g_ascii_strcasecmp(str, "reasoning") == 0) return AI_PROMPT_TIER_REASONING;
-    return AI_PROMPT_TIER_MEDIUM;
+    return AI_PROMPT_TIER_MODERATE;
 }
 
 /* ================================================================== */
@@ -81,7 +81,7 @@ ai_scoring_result_new(void)
     AiScoringResult *r;
 
     r = g_slice_new0(AiScoringResult);
-    r->tier      = AI_PROMPT_TIER_MEDIUM;
+    r->tier      = AI_PROMPT_TIER_MODERATE;
     r->signals   = g_ptr_array_new_with_free_func(g_free);
 
     return r;
@@ -133,7 +133,7 @@ ai_scoring_result_get_score(const AiScoringResult *r)
 AiPromptTier
 ai_scoring_result_get_tier(const AiScoringResult *r)
 {
-    g_return_val_if_fail(r != NULL, AI_PROMPT_TIER_MEDIUM);
+    g_return_val_if_fail(r != NULL, AI_PROMPT_TIER_MODERATE);
     return r->tier;
 }
 
@@ -773,7 +773,7 @@ ai_prompt_scorer_classify(const gchar          *prompt,
         result->tier = AI_PROMPT_TIER_SIMPLE;
         distance = config->simple_medium - weighted_score;
     } else if (weighted_score < config->medium_complex) {
-        result->tier = AI_PROMPT_TIER_MEDIUM;
+        result->tier = AI_PROMPT_TIER_MODERATE;
         distance = fmin(weighted_score - config->simple_medium,
                         config->medium_complex - weighted_score);
     } else if (weighted_score < config->complex_reasoning) {
@@ -792,7 +792,7 @@ ai_prompt_scorer_classify(const gchar          *prompt,
     if (result->confidence < config->confidence_threshold) {
         result->ambiguous = TRUE;
         /* Default ambiguous to MEDIUM */
-        result->tier = AI_PROMPT_TIER_MEDIUM;
+        result->tier = AI_PROMPT_TIER_MODERATE;
     }
 
     return result;

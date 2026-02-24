@@ -44,7 +44,7 @@ test_scorer_medium_code(void)
     g_assert_nonnull(r);
     /* Should be at least MEDIUM */
     g_assert_cmpint(ai_scoring_result_get_tier(r), >=,
-                    AI_PROMPT_TIER_MEDIUM);
+                    AI_PROMPT_TIER_MODERATE);
 }
 
 static void
@@ -77,7 +77,7 @@ test_scorer_complex_scores_higher_than_simple(void)
                       ai_scoring_result_get_score(simple));
     /* And tier must be at least MEDIUM */
     g_assert_cmpint(ai_scoring_result_get_tier(complex), >=,
-                    AI_PROMPT_TIER_MEDIUM);
+                    AI_PROMPT_TIER_MODERATE);
 }
 
 static void
@@ -268,8 +268,8 @@ test_scorer_tier_to_string(void)
     /* to_string returns uppercase */
     g_assert_cmpstr(ai_prompt_tier_to_string(AI_PROMPT_TIER_SIMPLE),
                     ==, "SIMPLE");
-    g_assert_cmpstr(ai_prompt_tier_to_string(AI_PROMPT_TIER_MEDIUM),
-                    ==, "MEDIUM");
+    g_assert_cmpstr(ai_prompt_tier_to_string(AI_PROMPT_TIER_MODERATE),
+                    ==, "MODERATE");
     g_assert_cmpstr(ai_prompt_tier_to_string(AI_PROMPT_TIER_COMPLEX),
                     ==, "COMPLEX");
     g_assert_cmpstr(ai_prompt_tier_to_string(AI_PROMPT_TIER_REASONING),
@@ -281,15 +281,15 @@ test_scorer_tier_from_string(void)
 {
     g_assert_cmpint(ai_prompt_tier_from_string("simple"), ==,
                     AI_PROMPT_TIER_SIMPLE);
-    g_assert_cmpint(ai_prompt_tier_from_string("medium"), ==,
-                    AI_PROMPT_TIER_MEDIUM);
+    g_assert_cmpint(ai_prompt_tier_from_string("moderate"), ==,
+                    AI_PROMPT_TIER_MODERATE);
     g_assert_cmpint(ai_prompt_tier_from_string("complex"), ==,
                     AI_PROMPT_TIER_COMPLEX);
     g_assert_cmpint(ai_prompt_tier_from_string("reasoning"), ==,
                     AI_PROMPT_TIER_REASONING);
-    /* Unknown string should default to MEDIUM */
+    /* Unknown string should default to MODERATE */
     g_assert_cmpint(ai_prompt_tier_from_string("bogus"), ==,
-                    AI_PROMPT_TIER_MEDIUM);
+                    AI_PROMPT_TIER_MODERATE);
 }
 
 /* ================================================================== */

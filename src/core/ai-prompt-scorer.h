@@ -31,7 +31,7 @@ G_BEGIN_DECLS
 /**
  * AiPromptTier:
  * @AI_PROMPT_TIER_SIMPLE: trivial / lookup / greeting
- * @AI_PROMPT_TIER_MEDIUM: moderate code, summaries
+ * @AI_PROMPT_TIER_MODERATE: moderate code, summaries
  * @AI_PROMPT_TIER_COMPLEX: architecture, debugging, multi-file
  * @AI_PROMPT_TIER_REASONING: proofs, formal logic, chain-of-thought
  *
@@ -39,7 +39,7 @@ G_BEGIN_DECLS
  */
 typedef enum {
     AI_PROMPT_TIER_SIMPLE = 0,
-    AI_PROMPT_TIER_MEDIUM,
+    AI_PROMPT_TIER_MODERATE,
     AI_PROMPT_TIER_COMPLEX,
     AI_PROMPT_TIER_REASONING
 } AiPromptTier;
