@@ -9,12 +9,15 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c | $(OBJDIR)/core
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/model/%.o: $(SRCDIR)/model/%.c | $(OBJDIR)/model
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c | $(OBJDIR)/providers
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Create build directories
