@@ -25,6 +25,10 @@ $(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c | $(OBJDIR)/providers $(BUILDDI
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJDIR)/convenience/%.o: $(SRCDIR)/convenience/%.c | $(OBJDIR)/convenience $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Create build directories
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -40,6 +44,9 @@ $(OBJDIR)/model:
 
 $(OBJDIR)/providers:
 	mkdir -p $(OBJDIR)/providers
+
+$(OBJDIR)/convenience:
+	mkdir -p $(OBJDIR)/convenience
 
 # Test compilation rule
 $(BUILDDIR)/tests/%: $(TESTDIR)/%.c $(LIB_SHARED)
