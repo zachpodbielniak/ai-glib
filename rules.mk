@@ -4,19 +4,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Pattern rules for object files
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+#
+# NOTE: $(BUILDDIR)/config.h and $(BUILDDIR)/ai-version.h are listed as
+# order-only prerequisites here to prevent a parallel build race condition.
+# They are also listed as regular prerequisites via the $(LIB_OBJECTS) rule
+# in Makefile so that changes to those headers still trigger recompilation.
+$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR) $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c | $(OBJDIR)/core
+$(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c | $(OBJDIR)/core $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/model/%.o: $(SRCDIR)/model/%.c | $(OBJDIR)/model
+$(OBJDIR)/model/%.o: $(SRCDIR)/model/%.c | $(OBJDIR)/model $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c | $(OBJDIR)/providers
+$(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c | $(OBJDIR)/providers $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
