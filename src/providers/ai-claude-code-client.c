@@ -837,7 +837,20 @@ on_chat_communicate_complete(
     if (!g_subprocess_get_successful(data->subprocess))
     {
         gint exit_status = g_subprocess_get_exit_status(data->subprocess);
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+        gint error_code = AI_ERROR_CLI_EXECUTION;
+
+        /* Check if this is a context-window-full error */
+        if (stderr_data != NULL &&
+            (strstr(stderr_data, "context") != NULL ||
+             strstr(stderr_data, "window") != NULL ||
+             strstr(stderr_data, "tokens") != NULL ||
+             strstr(stderr_data, "max_tokens") != NULL ||
+             strstr(stderr_data, "maximum tokens") != NULL))
+        {
+            error_code = AI_ERROR_CONTEXT_LENGTH_EXCEEDED;
+        }
+
+        g_task_return_new_error(data->task, AI_ERROR, error_code,
                                 "CLI exited with status %d: %s",
                                 exit_status,
                                 stderr_data != NULL ? stderr_data : "Unknown error");
