@@ -336,3 +336,14 @@ ai_simple_get_provider(AiSimple *self)
 
     return AI_PROVIDER(self->provider);
 }
+
+void
+ai_simple_set_working_directory(
+    AiSimple    *self,
+    const gchar *dir
+){
+    g_return_if_fail(AI_IS_SIMPLE(self));
+
+    if (AI_IS_CLI_CLIENT(self->provider))
+        ai_cli_client_set_working_directory(AI_CLI_CLIENT(self->provider), dir);
+}

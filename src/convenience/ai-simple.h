@@ -166,4 +166,25 @@ ai_simple_clear_history(AiSimple *self);
 AiProvider *
 ai_simple_get_provider(AiSimple *self);
 
+/**
+ * ai_simple_set_working_directory:
+ * @self: an #AiSimple
+ * @dir: (nullable): absolute path to use as the working directory for
+ *   CLI-backed providers (claude-code, opencode), or %NULL to inherit
+ *   the parent process working directory.
+ *
+ * Sets the subprocess working directory for CLI-based providers.
+ * Has no effect for API-based providers (claude, openai, etc.).
+ * Call before ai_simple_prompt() or ai_simple_chat().
+ *
+ * This is useful when the process CWD contains agent configuration
+ * files (e.g. CLAUDE.md) that would cause the CLI tool to bootstrap
+ * itself rather than answering the prompt directly.
+ */
+void
+ai_simple_set_working_directory(
+    AiSimple    *self,
+    const gchar *dir
+);
+
 G_END_DECLS
