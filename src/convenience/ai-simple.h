@@ -187,4 +187,31 @@ ai_simple_set_working_directory(
     const gchar *dir
 );
 
+/**
+ * ai_simple_set_effort_level:
+ * @self: an #AiSimple
+ * @effort_level: (nullable): effort level string (low/medium/high/max),
+ *   or %NULL to reset to default (medium)
+ *
+ * Sets the reasoning effort level for CLI-based providers.
+ * Maps to --effort for Claude Code and --variant for OpenCode.
+ * Has no effect for API-based providers.
+ */
+void
+ai_simple_set_effort_level(
+    AiSimple    *self,
+    const gchar *effort_level
+);
+
+/**
+ * ai_simple_get_effort_level:
+ * @self: an #AiSimple
+ *
+ * Gets the current reasoning effort level.
+ *
+ * Returns: (transfer none) (nullable): the effort level string
+ */
+const gchar *
+ai_simple_get_effort_level(AiSimple *self);
+
 G_END_DECLS

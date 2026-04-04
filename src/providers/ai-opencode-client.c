@@ -209,6 +209,16 @@ ai_opencode_client_build_argv(
         g_ptr_array_add(args, g_strdup(session_id));
     }
 
+    /* Variant (effort level) */
+    {
+        const gchar *effort = ai_cli_client_get_effort_level(client);
+        if (effort != NULL && effort[0] != '\0')
+        {
+            g_ptr_array_add(args, g_strdup("--variant"));
+            g_ptr_array_add(args, g_strdup(effort));
+        }
+    }
+
     /* NULL terminate — no positional prompt, stdin is used */
     g_ptr_array_add(args, NULL);
 

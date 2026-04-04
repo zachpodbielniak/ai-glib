@@ -221,6 +221,16 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup("--no-session-persistence"));
     }
 
+    /* Effort level */
+    {
+        const gchar *effort = ai_cli_client_get_effort_level(client);
+        if (effort != NULL && effort[0] != '\0')
+        {
+            g_ptr_array_add(args, g_strdup("--effort"));
+            g_ptr_array_add(args, g_strdup(effort));
+        }
+    }
+
     /*
      * Prompt is piped via stdin (build_stdin) to avoid ARG_MAX limits
      * on large prompts. Do not append it to argv.

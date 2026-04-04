@@ -408,6 +408,97 @@ ai_content_type_from_string(const gchar *str)
 }
 
 /*
+ * GType registration for AiEffortLevel.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_effort_level_get_type(void)
+{
+    static GType effort_level_type = 0;
+
+    if (g_once_init_enter(&effort_level_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_EFFORT_LOW, "AI_EFFORT_LOW", "low" },
+            { AI_EFFORT_MEDIUM, "AI_EFFORT_MEDIUM", "medium" },
+            { AI_EFFORT_HIGH, "AI_EFFORT_HIGH", "high" },
+            { AI_EFFORT_MAX, "AI_EFFORT_MAX", "max" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiEffortLevel", values);
+        g_once_init_leave(&effort_level_type, type);
+    }
+
+    return effort_level_type;
+}
+
+/**
+ * ai_effort_level_to_string:
+ * @level: an #AiEffortLevel
+ *
+ * Converts an #AiEffortLevel to its string representation.
+ *
+ * Returns: (transfer none): the string representation of the effort level
+ */
+const gchar *
+ai_effort_level_to_string(AiEffortLevel level)
+{
+    switch (level)
+    {
+        case AI_EFFORT_LOW:
+            return "low";
+        case AI_EFFORT_MEDIUM:
+            return "medium";
+        case AI_EFFORT_HIGH:
+            return "high";
+        case AI_EFFORT_MAX:
+            return "max";
+        default:
+            return "medium";
+    }
+}
+
+/**
+ * ai_effort_level_from_string:
+ * @str: an effort level string
+ *
+ * Converts a string to an #AiEffortLevel.
+ * Accepts both effort names and variant aliases.
+ *
+ * Returns: the #AiEffortLevel, or %AI_EFFORT_MEDIUM if not recognized
+ */
+AiEffortLevel
+ai_effort_level_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_EFFORT_MEDIUM;
+    }
+
+    if (g_ascii_strcasecmp(str, "low") == 0 ||
+        g_ascii_strcasecmp(str, "min") == 0)
+    {
+        return AI_EFFORT_LOW;
+    }
+    else if (g_ascii_strcasecmp(str, "medium") == 0 ||
+             g_ascii_strcasecmp(str, "med") == 0)
+    {
+        return AI_EFFORT_MEDIUM;
+    }
+    else if (g_ascii_strcasecmp(str, "high") == 0)
+    {
+        return AI_EFFORT_HIGH;
+    }
+    else if (g_ascii_strcasecmp(str, "max") == 0)
+    {
+        return AI_EFFORT_MAX;
+    }
+
+    return AI_EFFORT_MEDIUM;
+}
+
+/*
  * GType registration for AiImageSize.
  * Registers the enumeration values with the GLib type system for introspection.
  */

@@ -252,6 +252,32 @@ ai_cli_client_set_working_directory(
 );
 
 /**
+ * ai_cli_client_get_effort_level:
+ * @self: an #AiCliClient
+ *
+ * Gets the reasoning effort level.
+ *
+ * Returns: (transfer none) (nullable): the effort level string
+ */
+const gchar *
+ai_cli_client_get_effort_level(AiCliClient *self);
+
+/**
+ * ai_cli_client_set_effort_level:
+ * @self: an #AiCliClient
+ * @effort_level: (nullable): the effort level (low/medium/high/max),
+ *   or %NULL to reset to default (medium)
+ *
+ * Sets the reasoning effort level. Maps to --effort for Claude Code
+ * and --variant for OpenCode.
+ */
+void
+ai_cli_client_set_effort_level(
+    AiCliClient *self,
+    const gchar *effort_level
+);
+
+/**
  * ai_cli_client_chat_sync:
  * @self: an #AiCliClient
  * @messages: (element-type AiMessage): the conversation messages
