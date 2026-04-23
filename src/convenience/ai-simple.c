@@ -347,3 +347,25 @@ ai_simple_set_working_directory(
     if (AI_IS_CLI_CLIENT(self->provider))
         ai_cli_client_set_working_directory(AI_CLI_CLIENT(self->provider), dir);
 }
+
+void
+ai_simple_set_effort_level(
+    AiSimple    *self,
+    const gchar *effort_level
+){
+    g_return_if_fail(AI_IS_SIMPLE(self));
+
+    if (AI_IS_CLI_CLIENT(self->provider))
+        ai_cli_client_set_effort_level(AI_CLI_CLIENT(self->provider), effort_level);
+}
+
+const gchar *
+ai_simple_get_effort_level(AiSimple *self)
+{
+    g_return_val_if_fail(AI_IS_SIMPLE(self), "medium");
+
+    if (AI_IS_CLI_CLIENT(self->provider))
+        return ai_cli_client_get_effort_level(AI_CLI_CLIENT(self->provider));
+
+    return "medium";
+}

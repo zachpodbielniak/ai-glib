@@ -252,6 +252,32 @@ ai_cli_client_set_working_directory(
 );
 
 /**
+ * ai_cli_client_get_effort_level:
+ * @self: an #AiCliClient
+ *
+ * Gets the reasoning effort level.
+ *
+ * Returns: (transfer none) (nullable): the effort level string
+ */
+const gchar *
+ai_cli_client_get_effort_level(AiCliClient *self);
+
+/**
+ * ai_cli_client_set_effort_level:
+ * @self: an #AiCliClient
+ * @effort_level: (nullable): the effort level (low/medium/high/max),
+ *   or %NULL to reset to default (medium)
+ *
+ * Sets the reasoning effort level. Maps to --effort for Claude Code
+ * and --variant for OpenCode.
+ */
+void
+ai_cli_client_set_effort_level(
+    AiCliClient *self,
+    const gchar *effort_level
+);
+
+/**
  * ai_cli_client_chat_sync:
  * @self: an #AiCliClient
  * @messages: (element-type AiMessage): the conversation messages
@@ -284,6 +310,38 @@ gchar *
 ai_cli_client_resolve_executable(
     AiCliClient  *self,
     GError      **error
+);
+
+/**
+ * ai_cli_client_format_exit_error:
+ * @exit_status: the CLI's non-zero exit status
+ * @stderr_data: (nullable): captured stderr content (may be empty string)
+ * @stdout_data: (nullable): captured stdout content (may be empty string)
+ *
+ * Formats a human-readable error message describing a failed CLI
+ * subprocess invocation.  Exposed primarily for unit testing the
+ * stderr / stdout / sentinel fallback logic.
+ *
+ * Detail selection (first non-empty wins):
+ *   1. @stderr_data, if it is non-%NULL AND not the empty string
+ *   2. @stdout_data, if it is non-%NULL AND not the empty string
+ *   3. The literal sentinel "(no output on stderr or stdout)"
+ *
+ * The empty-string check on stderr fixes a long-standing issue where
+ * a CLI that exits non-zero with no stderr would produce the message
+ * "CLI exited with status N: " (trailing empty), hiding the real
+ * cause.  By falling back to stdout we often recover the actual
+ * diagnostic — CLIs that print usage-on-error or error-JSON to stdout
+ * are now surfaced.
+ *
+ * Returns: (transfer full): a newly-allocated error message string.
+ *   Free with g_free().
+ */
+gchar *
+ai_cli_client_format_exit_error(
+    gint         exit_status,
+    const gchar *stderr_data,
+    const gchar *stdout_data
 );
 
 G_END_DECLS

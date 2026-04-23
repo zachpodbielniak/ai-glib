@@ -24,6 +24,7 @@ typedef struct
     gchar    *executable_path;
     gchar    *session_id;
     gchar    *working_directory;
+    gchar    *effort_level;
     gint      max_tokens;
     gboolean  session_persistence;
 } AiCliClientPrivate;
@@ -44,6 +45,7 @@ enum
     PROP_SESSION_ID,
     PROP_SESSION_PERSISTENCE,
     PROP_WORKING_DIRECTORY,
+    PROP_EFFORT_LEVEL,
     N_PROPS
 };
 
@@ -75,6 +77,7 @@ ai_cli_client_finalize(GObject *object)
     g_clear_pointer(&priv->executable_path, g_free);
     g_clear_pointer(&priv->session_id, g_free);
     g_clear_pointer(&priv->working_directory, g_free);
+    g_clear_pointer(&priv->effort_level, g_free);
 
     G_OBJECT_CLASS(ai_cli_client_parent_class)->finalize(object);
 }
@@ -114,6 +117,9 @@ ai_cli_client_get_property(
             break;
         case PROP_WORKING_DIRECTORY:
             g_value_set_string(value, priv->working_directory);
+            break;
+        case PROP_EFFORT_LEVEL:
+            g_value_set_string(value, priv->effort_level);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -162,6 +168,10 @@ ai_cli_client_set_property(
         case PROP_WORKING_DIRECTORY:
             g_clear_pointer(&priv->working_directory, g_free);
             priv->working_directory = g_value_dup_string(value);
+            break;
+        case PROP_EFFORT_LEVEL:
+            g_clear_pointer(&priv->effort_level, g_free);
+            priv->effort_level = g_value_dup_string(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -298,6 +308,20 @@ ai_cli_client_class_init(AiCliClientClass *klass)
                             NULL,
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiCliClient:effort-level:
+     *
+     * The reasoning effort level for the CLI provider.
+     * Maps to --effort for Claude Code and --variant for OpenCode.
+     * Accepts: "low", "medium", "high", "max". Defaults to "medium".
+     */
+    properties[PROP_EFFORT_LEVEL] =
+        g_param_spec_string("effort-level",
+                            "Effort Level",
+                            "Reasoning effort level (low/medium/high/max)",
+                            "medium",
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -377,6 +401,44 @@ ai_cli_client_init(AiCliClient *self)
     priv->max_tokens = 4096;
     priv->session_persistence = TRUE;
     priv->working_directory = NULL;
+    priv->effort_level = g_strdup("medium");
+}
+
+/**
+ * ai_cli_client_format_exit_error:
+ *
+ * See header for documentation.
+ */
+gchar *
+ai_cli_client_format_exit_error(
+    gint         exit_status,
+    const gchar *stderr_data,
+    const gchar *stdout_data
+){
+    const gchar *detail;
+
+    /* Prefer stderr — that is where CLIs conventionally write errors.
+     * But some CLIs exit non-zero with empty stderr and an error
+     * message on stdout (notably anything that prints usage-on-error
+     * or a JSON error envelope).  A previous version of this code
+     * only checked for stderr being non-NULL, which produced the
+     * unhelpful message "CLI exited with status N: " when stderr was
+     * an empty string.  The empty-string check below is the fix. */
+    if (stderr_data != NULL && stderr_data[0] != '\0')
+    {
+        detail = stderr_data;
+    }
+    else if (stdout_data != NULL && stdout_data[0] != '\0')
+    {
+        detail = stdout_data;
+    }
+    else
+    {
+        detail = "(no output on stderr or stdout)";
+    }
+
+    return g_strdup_printf("CLI exited with status %d: %s",
+                           exit_status, detail);
 }
 
 /**
@@ -694,6 +756,51 @@ ai_cli_client_set_working_directory(
 }
 
 /**
+ * ai_cli_client_get_effort_level:
+ * @self: an #AiCliClient
+ *
+ * Gets the reasoning effort level.
+ *
+ * Returns: (transfer none) (nullable): the effort level string
+ */
+const gchar *
+ai_cli_client_get_effort_level(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), "medium");
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->effort_level;
+}
+
+/**
+ * ai_cli_client_set_effort_level:
+ * @self: an #AiCliClient
+ * @effort_level: (nullable): the effort level (low/medium/high/max),
+ *   or %NULL to reset to default (medium)
+ *
+ * Sets the reasoning effort level. Maps to --effort for Claude Code
+ * and --variant for OpenCode.
+ */
+void
+ai_cli_client_set_effort_level(
+    AiCliClient *self,
+    const gchar *effort_level
+)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    priv = ai_cli_client_get_instance_private(self);
+    g_clear_pointer(&priv->effort_level, g_free);
+    priv->effort_level = g_strdup(effort_level != NULL ? effort_level : "medium");
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_EFFORT_LEVEL]);
+}
+
+/**
  * ai_cli_client_resolve_executable:
  * @self: an #AiCliClient
  * @error: (out) (optional): return location for a #GError
@@ -883,11 +990,14 @@ ai_cli_client_chat_sync(
     /* Check exit status */
     if (!g_subprocess_get_successful(subprocess))
     {
-        gint exit_status = g_subprocess_get_exit_status(subprocess);
-        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                    "CLI exited with status %d: %s",
-                    exit_status,
-                    stderr_data != NULL ? stderr_data : "Unknown error");
+        gint              exit_status;
+        g_autofree gchar *msg = NULL;
+
+        exit_status = g_subprocess_get_exit_status(subprocess);
+        msg = ai_cli_client_format_exit_error(exit_status,
+                                              stderr_data,
+                                              stdout_data);
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, msg);
         return NULL;
     }
 

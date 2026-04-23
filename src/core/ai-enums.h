@@ -203,6 +203,50 @@ AiContentType
 ai_content_type_from_string(const gchar *str);
 
 /**
+ * AiEffortLevel:
+ * @AI_EFFORT_LOW: Low effort / minimal reasoning
+ * @AI_EFFORT_MEDIUM: Medium effort (default)
+ * @AI_EFFORT_HIGH: High effort / extended reasoning
+ * @AI_EFFORT_MAX: Maximum effort / deepest reasoning
+ *
+ * Enumeration of reasoning effort levels for AI providers.
+ * Maps to --effort for Claude Code and --variant for OpenCode.
+ */
+typedef enum
+{
+    AI_EFFORT_LOW = 0,
+    AI_EFFORT_MEDIUM,
+    AI_EFFORT_HIGH,
+    AI_EFFORT_MAX
+} AiEffortLevel;
+
+GType ai_effort_level_get_type(void);
+#define AI_TYPE_EFFORT_LEVEL (ai_effort_level_get_type())
+
+/**
+ * ai_effort_level_to_string:
+ * @level: an #AiEffortLevel
+ *
+ * Converts an #AiEffortLevel to its string representation.
+ *
+ * Returns: (transfer none): the string representation of the effort level
+ */
+const gchar *
+ai_effort_level_to_string(AiEffortLevel level);
+
+/**
+ * ai_effort_level_from_string:
+ * @str: an effort level string
+ *
+ * Converts a string to an #AiEffortLevel. Accepts both effort names
+ * (low/medium/high/max) and variant aliases used by some providers.
+ *
+ * Returns: the #AiEffortLevel, or %AI_EFFORT_MEDIUM if not recognized
+ */
+AiEffortLevel
+ai_effort_level_from_string(const gchar *str);
+
+/**
  * AiImageSize:
  * @AI_IMAGE_SIZE_AUTO: Let the provider choose (default)
  * @AI_IMAGE_SIZE_256: 256x256 pixels
