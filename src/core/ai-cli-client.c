@@ -405,6 +405,43 @@ ai_cli_client_init(AiCliClient *self)
 }
 
 /**
+ * ai_cli_client_format_exit_error:
+ *
+ * See header for documentation.
+ */
+gchar *
+ai_cli_client_format_exit_error(
+    gint         exit_status,
+    const gchar *stderr_data,
+    const gchar *stdout_data
+){
+    const gchar *detail;
+
+    /* Prefer stderr — that is where CLIs conventionally write errors.
+     * But some CLIs exit non-zero with empty stderr and an error
+     * message on stdout (notably anything that prints usage-on-error
+     * or a JSON error envelope).  A previous version of this code
+     * only checked for stderr being non-NULL, which produced the
+     * unhelpful message "CLI exited with status N: " when stderr was
+     * an empty string.  The empty-string check below is the fix. */
+    if (stderr_data != NULL && stderr_data[0] != '\0')
+    {
+        detail = stderr_data;
+    }
+    else if (stdout_data != NULL && stdout_data[0] != '\0')
+    {
+        detail = stdout_data;
+    }
+    else
+    {
+        detail = "(no output on stderr or stdout)";
+    }
+
+    return g_strdup_printf("CLI exited with status %d: %s",
+                           exit_status, detail);
+}
+
+/**
  * ai_cli_client_get_config:
  * @self: an #AiCliClient
  *
@@ -953,11 +990,14 @@ ai_cli_client_chat_sync(
     /* Check exit status */
     if (!g_subprocess_get_successful(subprocess))
     {
-        gint exit_status = g_subprocess_get_exit_status(subprocess);
-        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                    "CLI exited with status %d: %s",
-                    exit_status,
-                    stderr_data != NULL ? stderr_data : "Unknown error");
+        gint              exit_status;
+        g_autofree gchar *msg = NULL;
+
+        exit_status = g_subprocess_get_exit_status(subprocess);
+        msg = ai_cli_client_format_exit_error(exit_status,
+                                              stderr_data,
+                                              stdout_data);
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, msg);
         return NULL;
     }
 
