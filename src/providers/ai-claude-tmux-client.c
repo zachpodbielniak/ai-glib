@@ -52,6 +52,10 @@ struct _AiClaudeTmuxClient
     gboolean  dismiss_resume_prompt;     /* press Enter once on resume to
                                           * clear claude's resume-mode
                                           * picker (default TRUE) */
+    gint      turn_active;          /* atomic flag: 1 while this client
+                                     * owns a live tmux session (a turn
+                                     * is in flight), 0 otherwise — gates
+                                     * orphaned-session reaping */
     gdouble   total_cost;           /* last parsed cost in USD */
 };
 
@@ -1186,6 +1190,7 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->prompt_resend_interval_ms = 2000;  /* 2 sec */
     self->max_prompt_send_attempts = 5;
     self->dismiss_resume_prompt = TRUE;
+    self->turn_active = 0;
     self->total_cost = 0.0;
 
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_TMUX_DEFAULT_MODEL);
@@ -1415,6 +1420,50 @@ ai_claude_tmux_client_chat_sync_real(
         return NULL;
     }
 
+    /*
+     * ---------- reap an orphaned tmux session ----------
+     * tmux_session_name is derived from session_id, which is stable
+     * across turns AND across libreclaw restarts.  If a previous
+     * libreclaw process was killed hard — its restart SIGUSR1 never
+     * caught, no clean shutdown — it can leave this tmux session
+     * alive with nobody managing it.  `tmux new-session` would then
+     * fail with "duplicate session".
+     *
+     * If this client has no turn in flight (turn_active == 0) and a
+     * session with our name nonetheless exists, it can only be such
+     * an orphan: kill it before creating the fresh one.  The
+     * turn_active guard is what stops a genuinely concurrent turn on
+     * the same client from reaping its own live session.
+     */
+    if (g_atomic_int_get(&self->turn_active) == 0)
+    {
+        const gchar *has_argv[] = {
+            tmux_bin, "has-session", "-t", tmux_session_name, NULL
+        };
+        /* has-session exits 0 iff the session exists; any non-zero
+         * (no such session, no server running) means nothing to reap. */
+        if (run_command_sync(has_argv, NULL, NULL))
+        {
+            const gchar *kill_argv[] = {
+                tmux_bin, "kill-session", "-t", tmux_session_name, NULL
+            };
+            g_warning("claude-tmux: reaping orphaned tmux session '%s' "
+                      "(no turn in flight — likely a prior libreclaw "
+                      "process that exited without cleaning up) before "
+                      "spawning a fresh one", tmux_session_name);
+            /* Best-effort: if it vanished between the check and now,
+             * kill-session just fails harmlessly. */
+            run_command_sync(kill_argv, NULL, NULL);
+        }
+    }
+
+    /*
+     * Claim session ownership BEFORE spawning: from here until the
+     * cleanup paths clear it, a concurrent call (or re-entry) on this
+     * client sees turn_active == 1 and leaves our session alone.
+     */
+    g_atomic_int_set(&self->turn_active, 1);
+
     /* ---------- assemble argv for `tmux new-session -d -s NAME -- CMD ARGS` ---------- */
     {
         g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
@@ -1474,6 +1523,8 @@ ai_claude_tmux_client_chat_sync_real(
             (const gchar * const *)argv->pdata, NULL, error);
         if (!ok)
         {
+            /* Never got a session — release the ownership claim. */
+            g_atomic_int_set(&self->turn_active, 0);
             g_prefix_error(error, "Failed to start tmux session: ");
             if (!self->keep_artifacts)
             {
@@ -1855,6 +1906,7 @@ ai_claude_tmux_client_chat_sync_real(
         g_unlink(settings_path);
     }
 
+    g_atomic_int_set(&self->turn_active, 0);
     return g_steal_pointer(&response);
 
 cleanup_and_fail:
@@ -1878,6 +1930,7 @@ cleanup_and_fail:
         g_unlink(sentinel_path);
         g_unlink(settings_path);
     }
+    g_atomic_int_set(&self->turn_active, 0);
     return NULL;
 }
 
