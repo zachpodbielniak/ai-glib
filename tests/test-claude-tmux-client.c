@@ -132,7 +132,7 @@ test_timeouts(void)
     g_assert_cmpint(ai_claude_tmux_client_get_turn_timeout_ms(c), ==,
                     600000);
     g_assert_cmpint(ai_claude_tmux_client_get_startup_timeout_ms(c), ==,
-                    30000);
+                    15000);
 
     ai_claude_tmux_client_set_turn_timeout_ms(c, 1234);
     g_assert_cmpint(ai_claude_tmux_client_get_turn_timeout_ms(c), ==, 1234);
@@ -160,6 +160,50 @@ test_keep_artifacts(void)
     g_assert_false(ai_claude_tmux_client_get_keep_artifacts(c));
     ai_claude_tmux_client_set_keep_artifacts(c, TRUE);
     g_assert_true(ai_claude_tmux_client_get_keep_artifacts(c));
+}
+
+static void
+test_prompt_resend_interval(void)
+{
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+
+    /* Default: 2 sec — the per-attempt wait for a user entry to show
+     * up in the transcript before re-pressing Enter. */
+    g_assert_cmpint(ai_claude_tmux_client_get_prompt_resend_interval_ms(c),
+                    ==, 2000);
+
+    ai_claude_tmux_client_set_prompt_resend_interval_ms(c, 750);
+    g_assert_cmpint(ai_claude_tmux_client_get_prompt_resend_interval_ms(c),
+                    ==, 750);
+}
+
+static void
+test_max_prompt_send_attempts(void)
+{
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+
+    /* Default: 5 Enter keystrokes before the turn fails. */
+    g_assert_cmpint(ai_claude_tmux_client_get_max_prompt_send_attempts(c),
+                    ==, 5);
+
+    ai_claude_tmux_client_set_max_prompt_send_attempts(c, 12);
+    g_assert_cmpint(ai_claude_tmux_client_get_max_prompt_send_attempts(c),
+                    ==, 12);
+}
+
+static void
+test_dismiss_resume_prompt(void)
+{
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+
+    /* Default: on — claude's resume-mode picker is auto-dismissed. */
+    g_assert_true(ai_claude_tmux_client_get_dismiss_resume_prompt(c));
+
+    ai_claude_tmux_client_set_dismiss_resume_prompt(c, FALSE);
+    g_assert_false(ai_claude_tmux_client_get_dismiss_resume_prompt(c));
+
+    ai_claude_tmux_client_set_dismiss_resume_prompt(c, TRUE);
+    g_assert_true(ai_claude_tmux_client_get_dismiss_resume_prompt(c));
 }
 
 static void
@@ -757,6 +801,127 @@ test_parse_jsonl_null_content(void)
 }
 
 /* ================================================================== */
+/* jsonl_has_accepted_prompt                                           */
+/* ================================================================== */
+
+/*
+ * The submit-Enter loop polls this to decide whether the Enter
+ * keystroke registered.  Acceptance has two shapes: a real
+ * (non-compaction-summary) type:"user" entry, OR a
+ * queue-operation/enqueue entry — the prompt was submitted while
+ * claude was busy (e.g. auto-compacting a large resumed session) and
+ * is safely queued.  Mistaking the queued case for a swallowed
+ * keystroke is what caused us to retry 5x and kill claude
+ * mid-compaction.
+ */
+
+static void
+test_accepted_prompt_user_entry(void)
+{
+    /* claude was idle: the prompt became a real user turn. */
+    const gchar *slice =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+        "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n";
+    g_assert_true(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_enqueued(void)
+{
+    /* claude was busy: the prompt was queued, not lost.  This is the
+     * exact entry shape that previously read as "not ingested". */
+    const gchar *slice =
+        "{\"type\":\"queue-operation\",\"operation\":\"enqueue\","
+        "\"content\":\"Current time: ...\\n\\nclawdbot: you alive?\"}\n";
+    g_assert_true(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_compact_summary_excluded(void)
+{
+    /* A finished auto-compaction logs its summary as type:"user" with
+     * isCompactSummary:true — claude talking to itself, NOT our
+     * prompt landing.  Must not count as acceptance. */
+    const gchar *slice =
+        "{\"type\":\"system\",\"subtype\":\"compact_boundary\","
+        "\"compactMetadata\":{\"trigger\":\"auto\"}}\n"
+        "{\"type\":\"user\",\"isCompactSummary\":true,"
+        "\"message\":{\"role\":\"user\",\"content\":\"<summary>\"}}\n";
+    g_assert_false(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_dequeue_not_accepted(void)
+{
+    /* Only enqueue is acceptance; a dequeue marker alone is not. */
+    const gchar *slice =
+        "{\"type\":\"queue-operation\",\"operation\":\"dequeue\"}\n";
+    g_assert_false(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_metadata_only(void)
+{
+    /* Resume-time metadata churn with no submission — not accepted. */
+    const gchar *slice =
+        "{\"type\":\"ai-title\",\"aiTitle\":\"Some title\"}\n"
+        "{\"type\":\"permission-mode\","
+        "\"permissionMode\":\"bypassPermissions\"}\n";
+    g_assert_false(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_regression_slice(void)
+{
+    /* The actual post-watermark slice from the logged failure: a
+     * queue-operation/enqueue followed by ai-title + permission-mode
+     * metadata.  The old check looked only for type:"user" and so
+     * declared the prompt lost; this must now read as accepted. */
+    const gchar *slice =
+        "{\"type\":\"queue-operation\",\"operation\":\"enqueue\","
+        "\"timestamp\":\"2026-05-14T18:58:08.875Z\","
+        "\"content\":\"clawdbot: you alive buddy?\"}\n"
+        "{\"type\":\"ai-title\","
+        "\"aiTitle\":\"Merge attachment download feature\"}\n"
+        "{\"type\":\"permission-mode\","
+        "\"permissionMode\":\"bypassPermissions\"}\n";
+    g_assert_true(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_tolerates_corrupt_line(void)
+{
+    /* A half-written line (we tail-read a file claude writes
+     * incrementally) must be skipped, not abort the scan. */
+    const gchar *slice =
+        "{\"type\":\"queue-operation\",\"operati\n"   /* truncated */
+        "{\"type\":\"queue-operation\",\"operation\":\"enqueue\","
+        "\"content\":\"x\"}\n";
+    g_assert_true(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+static void
+test_accepted_prompt_empty(void)
+{
+    /* Empty slice — nothing written past the watermark yet. */
+    g_assert_false(ai_claude_tmux_client_jsonl_has_accepted_prompt(""));
+}
+
+static void
+test_accepted_prompt_summary_then_real_prompt(void)
+{
+    /* A compaction finishes (summary) and THEN our queued prompt is
+     * dequeued into a real user turn — acceptance, found past the
+     * compaction summary that precedes it. */
+    const gchar *slice =
+        "{\"type\":\"user\",\"isCompactSummary\":true,"
+        "\"message\":{\"role\":\"user\",\"content\":\"<summary>\"}}\n"
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\","
+        "\"content\":[{\"type\":\"text\",\"text\":\"the real prompt\"}]}}\n";
+    g_assert_true(ai_claude_tmux_client_jsonl_has_accepted_prompt(slice));
+}
+
+/* ================================================================== */
 /* main                                                                */
 /* ================================================================== */
 
@@ -779,6 +944,12 @@ main(int argc, char *argv[])
     g_test_add_func("/claude-tmux/prop/skip-permissions",
                     test_skip_permissions);
     g_test_add_func("/claude-tmux/prop/keep-artifacts", test_keep_artifacts);
+    g_test_add_func("/claude-tmux/prop/prompt-resend-interval",
+                    test_prompt_resend_interval);
+    g_test_add_func("/claude-tmux/prop/max-prompt-send-attempts",
+                    test_max_prompt_send_attempts);
+    g_test_add_func("/claude-tmux/prop/dismiss-resume-prompt",
+                    test_dismiss_resume_prompt);
     g_test_add_func("/claude-tmux/prop/total-cost-initial",
                     test_total_cost_initial);
 
@@ -849,6 +1020,26 @@ main(int argc, char *argv[])
                     test_parse_jsonl_wrong_role_skipped);
     g_test_add_func("/claude-tmux/parse/null-content-rejected",
                     test_parse_jsonl_null_content);
+
+    /* jsonl_has_accepted_prompt */
+    g_test_add_func("/claude-tmux/accepted-prompt/user-entry",
+                    test_accepted_prompt_user_entry);
+    g_test_add_func("/claude-tmux/accepted-prompt/enqueued",
+                    test_accepted_prompt_enqueued);
+    g_test_add_func("/claude-tmux/accepted-prompt/compact-summary-excluded",
+                    test_accepted_prompt_compact_summary_excluded);
+    g_test_add_func("/claude-tmux/accepted-prompt/dequeue-not-accepted",
+                    test_accepted_prompt_dequeue_not_accepted);
+    g_test_add_func("/claude-tmux/accepted-prompt/metadata-only",
+                    test_accepted_prompt_metadata_only);
+    g_test_add_func("/claude-tmux/accepted-prompt/regression-slice",
+                    test_accepted_prompt_regression_slice);
+    g_test_add_func("/claude-tmux/accepted-prompt/tolerates-corrupt-line",
+                    test_accepted_prompt_tolerates_corrupt_line);
+    g_test_add_func("/claude-tmux/accepted-prompt/empty",
+                    test_accepted_prompt_empty);
+    g_test_add_func("/claude-tmux/accepted-prompt/summary-then-real-prompt",
+                    test_accepted_prompt_summary_then_real_prompt);
 
     return g_test_run();
 }

@@ -253,6 +253,96 @@ ai_claude_tmux_client_set_debug_preserve_tmux(
     gboolean            reserve
 );
 
+/**
+ * ai_claude_tmux_client_get_prompt_resend_interval_ms:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: how long the client waits for a `user` entry to appear in
+ *   the transcript after pressing Enter before deciding the keystroke
+ *   was swallowed and re-sending it (milliseconds).
+ */
+gint
+ai_claude_tmux_client_get_prompt_resend_interval_ms(AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_prompt_resend_interval_ms:
+ * @self: an #AiClaudeTmuxClient
+ * @interval_ms: per-attempt wait in milliseconds; must be > 0
+ *
+ * tmux occasionally fails to land the submit Enter against the claude
+ * TUI, leaving the pasted prompt un-submitted.  After pressing Enter
+ * the client polls the transcript for a new `user` entry; if none
+ * appears within @interval_ms it re-presses Enter.  Default 2000 ms.
+ */
+void
+ai_claude_tmux_client_set_prompt_resend_interval_ms(
+    AiClaudeTmuxClient *self,
+    gint                interval_ms
+);
+
+/**
+ * ai_claude_tmux_client_get_max_prompt_send_attempts:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: the maximum number of Enter keystrokes the client will
+ *   deliver while trying to get the claude TUI to accept the pasted
+ *   prompt, before failing the turn.
+ */
+gint
+ai_claude_tmux_client_get_max_prompt_send_attempts(AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_max_prompt_send_attempts:
+ * @self: an #AiClaudeTmuxClient
+ * @attempts: maximum Enter keystrokes; must be > 0
+ *
+ * If the prompt is still not ingested after this many Enter
+ * keystrokes (each followed by a prompt-resend-interval-ms wait), the
+ * turn fails with %AI_ERROR_CLI_EXECUTION rather than blocking on a
+ * Stop hook that will never fire.  Default 5.
+ */
+void
+ai_claude_tmux_client_set_max_prompt_send_attempts(
+    AiClaudeTmuxClient *self,
+    gint                attempts
+);
+
+/**
+ * ai_claude_tmux_client_get_dismiss_resume_prompt:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: %TRUE if, when resuming an existing session, the client
+ *   types "2" ("resume as-is") before delivering the prompt to clear
+ *   claude's interactive resume-mode picker.  Default %TRUE.
+ */
+gboolean
+ai_claude_tmux_client_get_dismiss_resume_prompt(AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_dismiss_resume_prompt:
+ * @self: an #AiClaudeTmuxClient
+ * @dismiss: %TRUE to type "2" ("resume as-is") on resume
+ *
+ * When resuming an existing session, claude's TUI can stop on an
+ * interactive picker asking whether to resume "with a summary",
+ * "as-is", or "clear" — which blocks prompt delivery.  With this
+ * enabled the client types "2" after the TUI is ready, selecting
+ * "resume as-is"; the picker's default ("with a summary") would
+ * instead trigger a compaction that can run for minutes.  It then
+ * waits prompt-resend-interval-ms for the picker to tear down and the
+ * input box to settle before delivering the prompt.
+ *
+ * Only takes effect on resume; fresh sessions never show the picker.
+ * Worst case — no picker is actually shown — the "2" lands as a
+ * literal character prepended to the pasted prompt, an accepted
+ * cosmetic trade-off.  Default %TRUE.
+ */
+void
+ai_claude_tmux_client_set_dismiss_resume_prompt(
+    AiClaudeTmuxClient *self,
+    gboolean            dismiss
+);
+
 /* ================================================================== */
 /* Pure-function helpers — exposed primarily for unit testing.        */
 /* ================================================================== */
@@ -324,5 +414,25 @@ ai_claude_tmux_client_parse_jsonl(
     gdouble      *total_cost_out,
     GError      **error
 );
+
+/**
+ * ai_claude_tmux_client_jsonl_has_accepted_prompt:
+ * @jsonl_slice: the transcript JSONL text written after the
+ *   pre-prompt watermark (must not be %NULL)
+ *
+ * Returns %TRUE if @jsonl_slice shows claude accepted a
+ * freshly-submitted prompt: either a real `type:"user"` entry (one
+ * that is not a compaction summary), or a `type:"queue-operation"`
+ * entry with `operation:"enqueue"` (the prompt was submitted while
+ * claude was busy — e.g. auto-compacting a large resumed session —
+ * and is safely queued).  Lines that fail to parse are skipped.
+ *
+ * This is the signal the submit-Enter loop polls on: its absence
+ * means the Enter keystroke never registered and should be re-sent.
+ *
+ * Returns: %TRUE if the slice shows the prompt was accepted.
+ */
+gboolean
+ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice);
 
 G_END_DECLS

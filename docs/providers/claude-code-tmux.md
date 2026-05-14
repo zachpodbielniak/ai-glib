@@ -41,15 +41,16 @@ The Claude Code CLI uses simplified aliases — same as the non-tmux client:
 
 Each call to `ai_provider_chat_sync()` (or its async equivalent) goes through this sequence:
 
-1. **Generate a session UUID** (or reuse the configured one).
-2. **Write the prompt** to a temp file atomically so the TUI can ingest it via Claude Code's `@<path>` file-reference syntax.
-3. **Spawn** `tmux new-session -d -s <name> claude --session-id <uuid> --settings '<inline-json>' [args]`. The inline settings install a `Stop` hook that touches a per-session sentinel file when claude finishes a turn, and a `SessionStart` hook that touches a ready sentinel when claude's TUI is initialized.
-4. **Wait** for the JSONL transcript file to appear under `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`.
-5. **Capture the byte offset** of the JSONL file as `jsonl_size_before` — this is the high-water mark for "everything written by previous turns."
-6. **Send the prompt** via `tmux send-keys -l '@<prompt-path>'` followed by Enter.
-7. **Poll the JSONL** waiting for a **terminal assistant entry** to land past `jsonl_size_before` (see below).
-8. **Parse** the JSONL: extract the last assistant entry's text blocks and usage, return as `AiResponse`.
-9. **Tear down**: kill the tmux session, unlink the prompt + sentinel files. (Optionally preserved — see `debug-preserve-tmux` below.)
+1. **Generate a session UUID** (or reuse the configured one). If a transcript already exists for that UUID the session is *resumed* (`claude --resume`) rather than created fresh (`claude --session-id`).
+2. **Write the prompt** to a temp file atomically.
+3. **Spawn** `tmux new-session -d -s <name> -- claude [--session-id|--resume] <uuid> --settings '<json>' [args]`. The settings install a `Stop` hook that touches a per-session sentinel file when claude finishes a turn, and a `SessionStart` hook that touches a *ready* sentinel once claude's TUI is initialized.
+4. **Wait** for the `SessionStart` ready sentinel — proof the TUI is live and able to receive input.
+5. **Dismiss the resume-mode picker** (resumed sessions only) — see *Resume-mode picker* below.
+6. **Capture the byte offset** of the JSONL file as `jsonl_size_before` — the high-water mark for "everything written before this turn."
+7. **Deliver the prompt**: load it into a tmux paste-buffer and paste it into the TUI as a bracketed-paste event (multi-line safe), then send a **verified** Enter — see *Verified submit* below.
+8. **Wait** for the `Stop`-hook sentinel, then poll the JSONL for a **terminal assistant entry** past `jsonl_size_before` — see *Stop-hook / JSONL flush race* below.
+9. **Parse** the JSONL: extract the last assistant entry's text blocks and usage, return as `AiResponse`.
+10. **Tear down**: kill the tmux session, unlink the prompt + sentinel files. (Optionally preserved — see `debug-preserve-tmux` below.)
 
 ### Stop-hook / JSONL flush race
 
@@ -61,6 +62,27 @@ The poll loop therefore parses the slice of JSONL past `jsonl_size_before` and w
 - `message.stop_reason` is set and is **not** `"tool_use"`.
 
 `tool_use` stop reasons are intermediate; the Stop hook only fires on terminal reasons (`end_turn`, `stop_sequence`, `max_tokens`), so we're guaranteed to converge.
+
+### Verified submit
+
+`tmux send-keys` is not perfectly reliable at landing the submit Enter against the claude TUI — a keypress can be swallowed while the input box is mid-render. A swallowed Enter means claude never receives the prompt, so the client would otherwise burn the whole turn timeout waiting on a `Stop` hook that never fires.
+
+So the Enter is treated as unconfirmed until proven otherwise. After pressing it, the client polls the JSONL slice past `jsonl_size_before` for proof that claude **accepted** the submission, which has two shapes:
+
+- a real `type:"user"` entry (not a compaction summary) — claude was idle and started the turn immediately; or
+- a `type:"queue-operation"` entry with `operation:"enqueue"` — claude was **busy** (running a turn, or auto-compacting a large resumed session) and *queued* the prompt. It is not lost: it runs as soon as claude is free, and the (deliberately generous) turn timeout covers the wait.
+
+If neither shape appears within `prompt-resend-interval-ms`, the Enter is re-sent, up to `max-prompt-send-attempts` times before the turn fails with `AI_ERROR_CLI_EXECUTION`. Recognising the *queued* shape matters: an earlier cut looked only for `type:"user"`, mistook a queued prompt for a swallowed keystroke, and tore the tmux session down mid-compaction with the message still in claude's queue. `type:"user"` entries flagged `isCompactSummary` (a finished compaction's own summary) are excluded — they would be a false positive.
+
+The classification is a pure function, `ai_claude_tmux_client_jsonl_has_accepted_prompt()`, exported so it can be unit-tested without spawning `claude`.
+
+### Resume-mode picker
+
+When a session is resumed, claude's TUI can stop on an interactive picker asking whether to resume "with a summary", "as-is", or "clear". Because this client always kills the tmux session at the end of a turn (claude never exits cleanly on its own), every resumed session looks "interrupted" to claude — which is what triggers the picker. There is no CLI flag or settings-file key to suppress it.
+
+Left alone, the picker swallows the pasted prompt as raw keystrokes. With `dismiss-resume-prompt` enabled (the default), the client types `2` — the "resume as-is" option — then waits `prompt-resend-interval-ms` for the TUI to settle before pasting. Plain Enter would take the picker's *default*, "resume with a summary", which kicks off a re-summarisation (a compaction) that on a large session can run for minutes; "resume as-is" skips that.
+
+If no picker is actually shown, the `2` lands as a literal character prepended to the pasted prompt — an accepted cosmetic trade-off. The dismissal only runs on resumed sessions; fresh sessions never show the picker.
 
 ## Usage
 
@@ -111,13 +133,31 @@ ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_TMUX_MODEL_OPUS);
 
 The two relevant timeouts:
 
-- **Startup timeout** — how long to wait for the JSONL transcript to appear after launch. Default: 15s.
-- **Turn timeout** — how long to wait for the Stop-hook sentinel before declaring the turn timed out. Default: 120s.
+- **Startup timeout** — how long to wait for claude's TUI to become ready (the `SessionStart` hook) after launch. Default: 15s.
+- **Turn timeout** — how long to wait for the Stop-hook sentinel before declaring the turn timed out. Default: 600s (10 minutes) — generous on purpose, so it can ride out an auto-compaction on a large resumed session.
 
 ```c
 ai_claude_tmux_client_set_startup_timeout_ms(client, 30000);  /* 30s */
 ai_claude_tmux_client_set_turn_timeout_ms(client, 180000);    /* 3m  */
 ```
+
+### Reliability tuning
+
+Three properties control the prompt-delivery machinery (see *Verified submit* and *Resume-mode picker* above):
+
+| Property | Default | Effect |
+|----------|---------|--------|
+| `dismiss-resume-prompt` | `TRUE` | On a resumed session, type `2` ("resume as-is") to clear claude's resume-mode picker before pasting the prompt. |
+| `prompt-resend-interval-ms` | `2000` | Per-attempt wait for the prompt to be accepted after an Enter — also the settle wait after the resume-picker keystroke. |
+| `max-prompt-send-attempts` | `5` | How many Enter keystrokes to try before failing the turn with `AI_ERROR_CLI_EXECUTION`. |
+
+```c
+ai_claude_tmux_client_set_dismiss_resume_prompt(client, TRUE);
+ai_claude_tmux_client_set_prompt_resend_interval_ms(client, 2000);
+ai_claude_tmux_client_set_max_prompt_send_attempts(client, 5);
+```
+
+The defaults suit normal use; you'd typically only raise `prompt-resend-interval-ms` / `max-prompt-send-attempts` on a very slow host.
 
 ### Skip Permissions
 

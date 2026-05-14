@@ -45,6 +45,13 @@ struct _AiClaudeTmuxClient
     gboolean  skip_permissions;     /* --dangerously-skip-permissions */
     gboolean  keep_artifacts;       /* leave prompt/sentinel on disk */
     gboolean  debug_preserve_tmux;   /* keep tmux session + artifacts alive */
+    gint      prompt_resend_interval_ms; /* wait-for-user-entry window before
+                                          * re-pressing Enter (default 2 sec) */
+    gint      max_prompt_send_attempts;  /* max Enter keystrokes to land the
+                                          * prompt before failing (default 5) */
+    gboolean  dismiss_resume_prompt;     /* press Enter once on resume to
+                                          * clear claude's resume-mode
+                                          * picker (default TRUE) */
     gdouble   total_cost;           /* last parsed cost in USD */
 };
 
@@ -58,6 +65,9 @@ enum
     PROP_SKIP_PERMISSIONS,
     PROP_KEEP_ARTIFACTS,
     PROP_DEBUG_PRESERVE_TMUX,
+    PROP_PROMPT_RESEND_INTERVAL_MS,
+    PROP_MAX_PROMPT_SEND_ATTEMPTS,
+    PROP_DISMISS_RESUME_PROMPT,
     PROP_TOTAL_COST,
     N_PROPS
 };
@@ -181,6 +191,134 @@ extract_text_from_content(JsonArray *content_arr)
         return NULL;
     }
     return g_string_free(out, FALSE);
+}
+
+/*
+ * ai_claude_tmux_client_jsonl_has_accepted_prompt:
+ *
+ * Returns TRUE if @jsonl_slice (the transcript bytes written after the
+ * pre-prompt watermark) shows that claude ACCEPTED a freshly-submitted
+ * prompt — i.e. the submit Enter registered.  Acceptance has two
+ * distinct shapes, and recognising both is the whole point of this
+ * function:
+ *
+ *   - a `type:"user"` entry that is NOT a compaction summary.  This
+ *     is the "claude was idle, started the turn immediately" case.
+ *     The compaction-summary exclusion matters: when claude finishes
+ *     an auto-compaction it logs its summary as a `type:"user"` entry
+ *     with `isCompactSummary:true` — that is claude talking to
+ *     itself, not our prompt landing, and counting it is a false
+ *     positive.
+ *
+ *   - a `type:"queue-operation"` entry with `operation:"enqueue"`.
+ *     claude's TUI writes this when a message is submitted while it
+ *     is BUSY — running a turn, or (the case that bit us) auto-
+ *     compacting a large resumed session.  The prompt is queued, not
+ *     lost; it runs the moment claude is free.  The original code
+ *     only looked for `type:"user"` and so mistook this for a
+ *     swallowed keystroke: it re-sent Enter five times, gave up, and
+ *     killed claude mid-compaction with our message still queued.
+ *
+ * Its ABSENCE — after we've pressed Enter and given the TUI a beat —
+ * means the keystroke really was swallowed (tmux send-keys racing the
+ * TUI's input-box render) and the pasted prompt is still sitting
+ * un-submitted.  That is the cue to press Enter again.
+ *
+ * Parsing is per-line and tolerant: a partial / corrupt line (claude
+ * writes the transcript incrementally and we tail-read it) simply
+ * fails to parse and is skipped — the next poll re-reads once more
+ * bytes land.  A bare "did the file grow?" check would be fooled by
+ * exactly such a partial write, or by an unrelated metadata entry.
+ *
+ * Exposed (non-static) primarily so the acceptance logic can be unit
+ * tested without spawning a real claude.
+ */
+gboolean
+ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice)
+{
+    g_auto(GStrv) lines = NULL;
+    guint i;
+
+    g_return_val_if_fail(jsonl_slice != NULL, FALSE);
+
+    lines = g_strsplit(jsonl_slice, "\n", -1);
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        g_autoptr(JsonParser) parser = NULL;
+        JsonNode *root;
+        JsonObject *obj;
+        const gchar *type;
+
+        if (lines[i][0] == '\0')
+        {
+            continue;
+        }
+        parser = json_parser_new();
+        if (!json_parser_load_from_data(parser, lines[i], -1, NULL))
+        {
+            /* Partial / corrupt line — keep walking; the next poll
+             * iteration will re-read once more bytes land. */
+            continue;
+        }
+        root = json_parser_get_root(parser);
+        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        {
+            continue;
+        }
+        obj = json_node_get_object(root);
+        type = json_object_get_string_member_with_default(obj, "type", "");
+
+        if (g_strcmp0(type, "user") == 0)
+        {
+            /* A real user prompt counts; a compaction summary (also
+             * logged as type:"user") does not. */
+            if (!json_object_get_boolean_member_with_default(
+                    obj, "isCompactSummary", FALSE))
+            {
+                return TRUE;
+            }
+        }
+        else if (g_strcmp0(type, "queue-operation") == 0)
+        {
+            /* Submitted while claude was busy — queued, not lost. */
+            const gchar *op;
+            op = json_object_get_string_member_with_default(
+                obj, "operation", "");
+            if (g_strcmp0(op, "enqueue") == 0)
+            {
+                return TRUE;
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+/*
+ * File-I/O wrapper around ai_claude_tmux_client_jsonl_has_accepted_prompt:
+ * reads @jsonl_path and hands the bytes after @from_offset (the
+ * pre-prompt watermark) to the pure checker.  A file that doesn't
+ * exist yet, or hasn't grown past the watermark, trivially shows no
+ * accepted prompt.
+ */
+static gboolean
+slice_has_accepted_prompt(
+    const gchar *jsonl_path,
+    goffset      from_offset
+){
+    g_autofree gchar *content = NULL;
+    gsize content_len = 0;
+
+    if (!g_file_get_contents(jsonl_path, &content, &content_len, NULL))
+    {
+        return FALSE;
+    }
+    if ((goffset)content_len <= from_offset)
+    {
+        return FALSE;
+    }
+    return ai_claude_tmux_client_jsonl_has_accepted_prompt(
+        content + from_offset);
 }
 
 /*
@@ -835,6 +973,15 @@ ai_claude_tmux_client_get_property(
         case PROP_DEBUG_PRESERVE_TMUX:
             g_value_set_boolean(value, self->debug_preserve_tmux);
             break;
+        case PROP_PROMPT_RESEND_INTERVAL_MS:
+            g_value_set_int(value, self->prompt_resend_interval_ms);
+            break;
+        case PROP_MAX_PROMPT_SEND_ATTEMPTS:
+            g_value_set_int(value, self->max_prompt_send_attempts);
+            break;
+        case PROP_DISMISS_RESUME_PROMPT:
+            g_value_set_boolean(value, self->dismiss_resume_prompt);
+            break;
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
             break;
@@ -876,6 +1023,15 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_DEBUG_PRESERVE_TMUX:
             self->debug_preserve_tmux = g_value_get_boolean(value);
+            break;
+        case PROP_PROMPT_RESEND_INTERVAL_MS:
+            self->prompt_resend_interval_ms = g_value_get_int(value);
+            break;
+        case PROP_MAX_PROMPT_SEND_ATTEMPTS:
+            self->max_prompt_send_attempts = g_value_get_int(value);
+            break;
+        case PROP_DISMISS_RESUME_PROMPT:
+            self->dismiss_resume_prompt = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -965,7 +1121,7 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
     properties[PROP_STARTUP_TIMEOUT_MS] = g_param_spec_int(
         "startup-timeout-ms", "Startup Timeout (ms)",
         "Max time to wait for claude to create its JSONL transcript",
-        1, G_MAXINT, 30000,
+        1, G_MAXINT, 15000,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_SKIP_PERMISSIONS] = g_param_spec_boolean(
@@ -983,6 +1139,30 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "Skip the tmux kill-session and artifact cleanup so the "
         "session can be inspected post-mortem.  Implies keep-artifacts.",
         FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_PROMPT_RESEND_INTERVAL_MS] = g_param_spec_int(
+        "prompt-resend-interval-ms", "Prompt Resend Interval (ms)",
+        "How long to wait for a user entry to appear in the transcript "
+        "after pressing Enter before deciding the keystroke was "
+        "swallowed and re-sending it",
+        1, G_MAXINT, 2000,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_MAX_PROMPT_SEND_ATTEMPTS] = g_param_spec_int(
+        "max-prompt-send-attempts", "Max Prompt Send Attempts",
+        "Maximum number of Enter keystrokes to deliver while trying to "
+        "get the claude TUI to accept the pasted prompt, before failing",
+        1, G_MAXINT, 5,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_DISMISS_RESUME_PROMPT] = g_param_spec_boolean(
+        "dismiss-resume-prompt", "Dismiss Resume Prompt",
+        "When resuming an existing session, type \"2\" before "
+        "delivering the prompt to pick \"resume as-is\" on claude's "
+        "interactive resume-mode picker (whose default, \"resume with "
+        "a summary\", would trigger a multi-minute compaction), then "
+        "wait prompt-resend-interval-ms for the TUI to settle",
+        TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_TOTAL_COST] = g_param_spec_double(
         "total-cost", "Total Cost",
@@ -1003,6 +1183,9 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->skip_permissions = FALSE;
     self->keep_artifacts = FALSE;
     self->debug_preserve_tmux = FALSE;
+    self->prompt_resend_interval_ms = 2000;  /* 2 sec */
+    self->max_prompt_send_attempts = 5;
+    self->dismiss_resume_prompt = TRUE;
     self->total_cost = 0.0;
 
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_TMUX_DEFAULT_MODEL);
@@ -1318,12 +1501,77 @@ ai_claude_tmux_client_chat_sync_real(
     }
 
     /*
-     * Snapshot the transcript size BEFORE sending the prompt.  When
-     * the Stop hook fires after the turn, we'll verify the file
-     * actually grew — if it didn't, the hook fired without a real
-     * turn (e.g. resume-time idle fire) and the last assistant entry
-     * is stale.  Returning that as the "response" would echo our
-     * previous reply back to the user.
+     * ---------- dismiss the resume-mode picker ----------
+     * When claude is launched with --resume its TUI can stop on an
+     * interactive picker asking how to resume the conversation:
+     *   1. resume with a summary   2. resume as-is   3. clear
+     * We always kill the tmux session at the end of a turn (claude
+     * never exits cleanly on its own), so from claude's point of view
+     * every resumed session was interrupted mid-flight — which is
+     * what makes this picker appear.  There is no CLI flag or
+     * settings.json key to suppress it (checked against claude 2.1.x),
+     * so the only lever we have is the keyboard.
+     *
+     * Left alone, the picker swallows the bracketed paste below as raw
+     * keystrokes and the prompt never reaches the input box.
+     *
+     * We type "2" — the picker's "resume as-is" option.  Plain Enter
+     * would take the picker's DEFAULT, which is "resume with a
+     * summary": that kicks off a re-summarisation (a compaction) that
+     * on a large session runs for one to two MINUTES, during which
+     * claude is busy and our prompt just sits queued.  "Resume as-is"
+     * skips that.  Typing the digit also doesn't need a confirming
+     * Enter — it activates the option directly — and it targets a
+     * static, idle picker, so the single keystroke lands reliably
+     * (unlike the post-paste submit-Enter, which races the TUI's
+     * input-box re-render and needs the verified retry loop below).
+     * We then wait prompt_resend_interval_ms for claude to tear the
+     * picker down and settle into the input box before pasting.
+     *
+     * (claude may still auto-compact a huge resumed context on its
+     * own — but the submit loop below now recognises a queued prompt
+     * and lets the Stop-hook wait ride the compaction out, rather
+     * than giving up.  Here we just avoid triggering an avoidable
+     * one.)
+     *
+     * Gated on resuming_existing_session: a fresh --session-id run
+     * never shows the picker.  Worst case, dismiss_resume_prompt is on
+     * but no picker is actually up — then the "2" lands as a literal
+     * character in the empty input box and gets prepended to the
+     * pasted prompt.  That cosmetic blemish is a deliberate, accepted
+     * trade, far cheaper than an unwanted multi-minute compaction.
+     */
+    if (resuming_existing_session && self->dismiss_resume_prompt)
+    {
+        const gchar *dismiss_argv[] = {
+            tmux_bin, "send-keys", "-l", "-t", tmux_session_name,
+            "2", NULL
+        };
+        if (!run_command_sync(dismiss_argv, NULL, error))
+        {
+            g_prefix_error(error,
+                           "tmux send-keys (resume-picker dismiss) "
+                           "failed: ");
+            goto cleanup_and_fail;
+        }
+        g_usleep((gulong)self->prompt_resend_interval_ms * 1000);
+    }
+
+    /*
+     * Snapshot the transcript size BEFORE sending the prompt.  This
+     * watermark is what slice_has_accepted_prompt() and
+     * slice_has_terminal_assistant_entry() slice from, so it must sit
+     * after everything that is not our turn.  In particular it is
+     * taken AFTER the resume-picker dismissal above: the picker
+     * selection — and any resume-time writes claude makes — therefore
+     * stay below the watermark and cannot be mistaken for our
+     * prompt's user entry.
+     *
+     * When the Stop hook fires after the turn, we verify the file
+     * actually grew past this point — if it didn't, the hook fired
+     * without a real turn (e.g. resume-time idle fire) and the last
+     * assistant entry is stale.  Returning that as the "response"
+     * would echo our previous reply back to the user.
      */
     {
         GStatBuf st;
@@ -1376,14 +1624,99 @@ ai_claude_tmux_client_chat_sync_real(
      * message ends up sitting in the input box un-submitted.
      */
     g_usleep(500 * 1000);   /* 500 ms */
+
+    /*
+     * ---------- deliver the submit keystroke, verified ----------
+     * tmux send-keys is occasionally unreliable at landing the Enter
+     * against the claude TUI: the keypress can be swallowed while the
+     * input box is mid-render, leaving the pasted prompt sitting
+     * un-submitted in the draft box.  A swallowed Enter means claude
+     * never receives the prompt at all, so we'd otherwise burn the
+     * entire turn_timeout_ms (minutes) waiting on a Stop hook that is
+     * never going to fire.
+     *
+     * So treat the Enter as unconfirmed until proven otherwise: press
+     * it, then watch the transcript for proof that claude ACCEPTED
+     * the submission.  Acceptance has two shapes — see
+     * ai_claude_tmux_client_jsonl_has_accepted_prompt():
+     *
+     *   - a real `type:"user"` entry: claude was idle and started the
+     *     turn immediately; or
+     *   - a `type:"queue-operation"` / `operation:"enqueue"` entry:
+     *     claude was BUSY (running a turn, or auto-compacting a large
+     *     resumed session) and queued the prompt.  It is NOT lost; it
+     *     runs as soon as claude is free, and the long turn_timeout_ms
+     *     on the Stop-hook wait below covers the wait.  The original
+     *     bug here was treating this case as a swallowed keystroke:
+     *     we re-sent Enter five times, gave up, and killed claude
+     *     mid-compaction with our message still in its queue.
+     *
+     * If neither shape shows up within prompt_resend_interval_ms the
+     * Enter genuinely did not register — press it again, up to
+     * max_prompt_send_attempts times before giving up.
+     *
+     * We re-send only Enter, never the prompt text: the bracketed
+     * paste already deposited the prompt in the draft box, and
+     * re-pasting would duplicate it.  A spurious resend (the prompt
+     * actually did land, the entry was just slow to flush) is
+     * harmless — it hits an empty draft box, which the TUI ignores.
+     */
     {
-        const gchar *argv[] = {
+        const gchar *enter_argv[] = {
             tmux_bin, "send-keys", "-t", tmux_session_name,
             "Enter", NULL
         };
-        if (!run_command_sync(argv, NULL, error))
+        const gint poll_ms = 100;
+        gboolean prompt_accepted = FALSE;
+        gint attempt;
+
+        for (attempt = 1;
+             attempt <= self->max_prompt_send_attempts && !prompt_accepted;
+             attempt++)
         {
-            g_prefix_error(error, "tmux send-keys (Enter) failed: ");
+            gint waited = 0;
+
+            if (attempt > 1)
+            {
+                g_warning("claude-tmux: prompt not accepted %d ms after "
+                          "Enter (attempt %d/%d) — submit keystroke was "
+                          "swallowed by the TUI, re-sending Enter",
+                          self->prompt_resend_interval_ms,
+                          attempt - 1, self->max_prompt_send_attempts);
+            }
+
+            if (!run_command_sync(enter_argv, NULL, error))
+            {
+                g_prefix_error(error,
+                               "tmux send-keys (Enter) failed: ");
+                goto cleanup_and_fail;
+            }
+
+            while (waited < self->prompt_resend_interval_ms)
+            {
+                if (slice_has_accepted_prompt(jsonl_path, jsonl_size_before))
+                {
+                    prompt_accepted = TRUE;
+                    break;
+                }
+                g_usleep(poll_ms * 1000);
+                waited += poll_ms;
+            }
+        }
+
+        if (!prompt_accepted)
+        {
+            g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+                        "Prompt was pasted into the claude TUI but "
+                        "neither a user entry nor a queued submission "
+                        "ever appeared in transcript '%s' after %d "
+                        "Enter keystroke(s) over ~%d ms — the submit "
+                        "keystroke never registered (pre-prompt size "
+                        "%" G_GOFFSET_FORMAT ")",
+                        jsonl_path, self->max_prompt_send_attempts,
+                        self->max_prompt_send_attempts *
+                            self->prompt_resend_interval_ms,
+                        jsonl_size_before);
             goto cleanup_and_fail;
         }
     }
@@ -1871,4 +2204,60 @@ ai_claude_tmux_client_set_debug_preserve_tmux(
         g_object_notify_by_pspec(G_OBJECT(self),
             properties[PROP_DEBUG_PRESERVE_TMUX]);
     }
+}
+
+gint
+ai_claude_tmux_client_get_prompt_resend_interval_ms(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), 0);
+    return self->prompt_resend_interval_ms;
+}
+
+void
+ai_claude_tmux_client_set_prompt_resend_interval_ms(
+    AiClaudeTmuxClient *self,
+    gint                interval_ms
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    g_return_if_fail(interval_ms > 0);
+    self->prompt_resend_interval_ms = interval_ms;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_PROMPT_RESEND_INTERVAL_MS]);
+}
+
+gint
+ai_claude_tmux_client_get_max_prompt_send_attempts(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), 0);
+    return self->max_prompt_send_attempts;
+}
+
+void
+ai_claude_tmux_client_set_max_prompt_send_attempts(
+    AiClaudeTmuxClient *self,
+    gint                attempts
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    g_return_if_fail(attempts > 0);
+    self->max_prompt_send_attempts = attempts;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_MAX_PROMPT_SEND_ATTEMPTS]);
+}
+
+gboolean
+ai_claude_tmux_client_get_dismiss_resume_prompt(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), FALSE);
+    return self->dismiss_resume_prompt;
+}
+
+void
+ai_claude_tmux_client_set_dismiss_resume_prompt(
+    AiClaudeTmuxClient *self,
+    gboolean            dismiss
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    self->dismiss_resume_prompt = dismiss;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_DISMISS_RESUME_PROMPT]);
 }
