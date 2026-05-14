@@ -66,8 +66,20 @@ struct _AiCliClientClass
     gchar *      (*build_stdin)         (AiCliClient    *self,
                                          GList          *messages);
 
+    /*
+     * Subclasses with a fundamentally different chat flow (e.g. the
+     * tmux client, which doesn't directly spawn the CLI) can override
+     * chat_sync to take full control.  When non-NULL, this is called
+     * by ai_cli_client_chat_sync() instead of the default
+     * argv/spawn/parse pipeline.
+     */
+    AiResponse * (*chat_sync)           (AiCliClient    *self,
+                                         GList          *messages,
+                                         GCancellable   *cancellable,
+                                         GError        **error);
+
     /* Reserved for future expansion */
-    gpointer _reserved[7];
+    gpointer _reserved[6];
 };
 
 /**

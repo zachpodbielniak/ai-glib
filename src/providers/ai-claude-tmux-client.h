@@ -231,6 +231,28 @@ ai_claude_tmux_client_set_keep_artifacts(
     gboolean            keep
 );
 
+/**
+ * ai_claude_tmux_client_get_debug_preserve_tmux:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: %TRUE if the tmux session and all per-turn artifacts
+ *   will be left in place after the turn for post-mortem inspection.
+ *   Implies keep-artifacts behaviour.  Default %FALSE.
+ */
+gboolean
+ai_claude_tmux_client_get_debug_preserve_tmux(AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_debug_preserve_tmux:
+ * @self: an #AiClaudeTmuxClient
+ * @reserve: %TRUE to skip tmux kill-session and artifact unlink
+ */
+void
+ai_claude_tmux_client_set_debug_preserve_tmux(
+    AiClaudeTmuxClient *self,
+    gboolean            reserve
+);
+
 /* ================================================================== */
 /* Pure-function helpers — exposed primarily for unit testing.        */
 /* ================================================================== */

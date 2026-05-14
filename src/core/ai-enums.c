@@ -345,7 +345,9 @@ ai_provider_type_from_string(const gchar *str)
         return AI_PROVIDER_OPENCODE;
     }
     else if (g_ascii_strcasecmp(str, "claude-tmux") == 0 ||
-             g_ascii_strcasecmp(str, "claude_tmux") == 0)
+             g_ascii_strcasecmp(str, "claude_tmux") == 0 ||
+             g_ascii_strcasecmp(str, "claude-code-tmux") == 0 ||
+             g_ascii_strcasecmp(str, "claude_code_tmux") == 0)
     {
         return AI_PROVIDER_CLAUDE_TMUX;
     }

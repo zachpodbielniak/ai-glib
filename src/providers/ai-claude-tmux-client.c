@@ -20,6 +20,7 @@
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/ai-error.h"
@@ -43,6 +44,7 @@ struct _AiClaudeTmuxClient
     gint      startup_timeout_ms;   /* default 30 sec */
     gboolean  skip_permissions;     /* --dangerously-skip-permissions */
     gboolean  keep_artifacts;       /* leave prompt/sentinel on disk */
+    gboolean  debug_preserve_tmux;   /* keep tmux session + artifacts alive */
     gdouble   total_cost;           /* last parsed cost in USD */
 };
 
@@ -55,6 +57,7 @@ enum
     PROP_STARTUP_TIMEOUT_MS,
     PROP_SKIP_PERMISSIONS,
     PROP_KEEP_ARTIFACTS,
+    PROP_DEBUG_PRESERVE_TMUX,
     PROP_TOTAL_COST,
     N_PROPS
 };
@@ -178,6 +181,102 @@ extract_text_from_content(JsonArray *content_arr)
         return NULL;
     }
     return g_string_free(out, FALSE);
+}
+
+/*
+ * Returns TRUE if the slice of @jsonl_path starting at byte offset
+ * @from_offset contains a top-level `"type":"assistant"` entry whose
+ * inner `message.stop_reason` is a TERMINAL stop reason (anything
+ * other than `tool_use`).
+ *
+ * We can't rely on either of the simpler signals after the Stop hook
+ * fires:
+ *   - "did the file grow?"   — claude flushes the user-message line
+ *     ahead of its own response in some cases, so the file can grow
+ *     while still containing only the previous turn's last assistant
+ *     entry.  Parsing in that window returns a stale echo.
+ *   - "is there any new assistant entry?" — during a tool_use chain
+ *     intermediate entries are written with stop_reason:"tool_use"
+ *     before the terminal one lands.  We want the terminal entry.
+ *
+ * claude only fires the Stop hook on terminal stop_reasons, so by the
+ * time we get here we WILL eventually see a terminal entry; we just
+ * need to wait out the JSONL flush.  Anything not yet flushed is
+ * "future" — keep polling.
+ */
+static gboolean
+slice_has_terminal_assistant_entry(
+    const gchar *jsonl_path,
+    goffset      from_offset
+){
+    g_autofree gchar *content = NULL;
+    gsize content_len = 0;
+    g_auto(GStrv) lines = NULL;
+    guint i;
+
+    if (!g_file_get_contents(jsonl_path, &content, &content_len, NULL))
+    {
+        return FALSE;
+    }
+    if ((goffset)content_len <= from_offset)
+    {
+        return FALSE;
+    }
+
+    lines = g_strsplit(content + from_offset, "\n", -1);
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        g_autoptr(JsonParser) parser = NULL;
+        JsonNode *root;
+        JsonObject *obj;
+        JsonObject *msg;
+        const gchar *type;
+        const gchar *stop_reason;
+
+        if (lines[i][0] == '\0')
+        {
+            continue;
+        }
+        parser = json_parser_new();
+        if (!json_parser_load_from_data(parser, lines[i], -1, NULL))
+        {
+            /* Partial / corrupt line — keep walking; the next poll
+             * iteration will re-read once more bytes land. */
+            continue;
+        }
+        root = json_parser_get_root(parser);
+        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        {
+            continue;
+        }
+        obj = json_node_get_object(root);
+        type = json_object_get_string_member_with_default(obj, "type", "");
+        if (g_strcmp0(type, "assistant") != 0)
+        {
+            continue;
+        }
+        if (!json_object_has_member(obj, "message"))
+        {
+            continue;
+        }
+        msg = json_object_get_object_member(obj, "message");
+        if (msg == NULL)
+        {
+            continue;
+        }
+        stop_reason = json_object_get_string_member_with_default(
+            msg, "stop_reason", "");
+        /* end_turn, stop_sequence, max_tokens are terminal.  tool_use
+         * is intermediate — keep waiting for the post-tool follow-up
+         * to land. */
+        if (stop_reason != NULL && stop_reason[0] != '\0' &&
+            g_strcmp0(stop_reason, "tool_use") != 0)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 AiResponse *
@@ -441,42 +540,61 @@ write_prompt_file_atomic(
 }
 
 /*
+ * Helper: emit one hook block { "matcher": "", "hooks": [{ type, command }] }.
+ */
+static void
+emit_hook_entry(JsonBuilder *builder, const gchar *shell_cmd)
+{
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "matcher");
+        json_builder_add_string_value(builder, "");
+        json_builder_set_member_name(builder, "hooks");
+        json_builder_begin_array(builder);
+            json_builder_begin_object(builder);
+                json_builder_set_member_name(builder, "type");
+                json_builder_add_string_value(builder, "command");
+                json_builder_set_member_name(builder, "command");
+                json_builder_add_string_value(builder, shell_cmd);
+            json_builder_end_object(builder);
+        json_builder_end_array(builder);
+    json_builder_end_object(builder);
+}
+
+/*
  * Build the JSON blob we pass to claude via --settings.  Configures
- * a Stop hook that touches our sentinel file.
+ * two hooks:
+ *   SessionStart — touches ready_path when claude is initialised and
+ *                  the TUI input box is live.  Used to gate
+ *                  prompt-delivery so we don't fire send-keys into
+ *                  a still-loading TUI.
+ *   Stop         — touches done_path when claude finishes a turn.
  */
 static gchar *
-build_settings_json(const gchar *sentinel_path)
+build_settings_json(const gchar *ready_path, const gchar *done_path)
 {
     g_autoptr(JsonBuilder) builder = NULL;
     g_autoptr(JsonGenerator) gen = NULL;
     g_autoptr(JsonNode) root = NULL;
-    g_autofree gchar *cmd = NULL;
+    g_autofree gchar *ready_cmd = NULL;
+    g_autofree gchar *done_cmd = NULL;
 
-    /* Use printf "" >> as a portable touch.  The Stop hook command
-     * runs in a shell so we have to single-quote the path.  Embedded
-     * single quotes in the path itself would be a problem — we use
-     * a UUID-named sentinel so this never happens in practice. */
-    cmd = g_strdup_printf(": > '%s'", sentinel_path);
+    /* `: > 'path'` is a portable touch — `:` is the no-op builtin and
+     * the redirect creates an empty file.  Paths are single-quoted;
+     * we use UUID-named files so embedded quotes are not possible. */
+    ready_cmd = g_strdup_printf(": > '%s'", ready_path);
+    done_cmd  = g_strdup_printf(": > '%s'", done_path);
 
     builder = json_builder_new();
     json_builder_begin_object(builder);
         json_builder_set_member_name(builder, "hooks");
         json_builder_begin_object(builder);
+            json_builder_set_member_name(builder, "SessionStart");
+            json_builder_begin_array(builder);
+                emit_hook_entry(builder, ready_cmd);
+            json_builder_end_array(builder);
             json_builder_set_member_name(builder, "Stop");
             json_builder_begin_array(builder);
-                json_builder_begin_object(builder);
-                    json_builder_set_member_name(builder, "matcher");
-                    json_builder_add_string_value(builder, "");
-                    json_builder_set_member_name(builder, "hooks");
-                    json_builder_begin_array(builder);
-                        json_builder_begin_object(builder);
-                            json_builder_set_member_name(builder, "type");
-                            json_builder_add_string_value(builder, "command");
-                            json_builder_set_member_name(builder, "command");
-                            json_builder_add_string_value(builder, cmd);
-                        json_builder_end_object(builder);
-                    json_builder_end_array(builder);
-                json_builder_end_object(builder);
+                emit_hook_entry(builder, done_cmd);
             json_builder_end_array(builder);
         json_builder_end_object(builder);
     json_builder_end_object(builder);
@@ -646,16 +764,17 @@ run_command_sync(
     GError              **error
 ){
     g_autoptr(GSubprocess) sub = NULL;
-    GSubprocessFlags flags = G_SUBPROCESS_FLAGS_STDOUT_SILENCE;
+    g_autofree gchar *stderr_owned = NULL;
+    gchar **stderr_dest;
+    GSubprocessFlags flags = G_SUBPROCESS_FLAGS_STDOUT_SILENCE
+                           | G_SUBPROCESS_FLAGS_STDERR_PIPE;
 
-    if (capture_stderr != NULL)
-    {
-        flags |= G_SUBPROCESS_FLAGS_STDERR_PIPE;
-    }
-    else
-    {
-        flags |= G_SUBPROCESS_FLAGS_STDERR_SILENCE;
-    }
+    /*
+     * Always capture stderr so we can include it in the GError on
+     * non-zero exit.  When the caller didn't ask for it, store it in
+     * a local that goes out of scope here.
+     */
+    stderr_dest = capture_stderr != NULL ? capture_stderr : &stderr_owned;
 
     sub = g_subprocess_newv(argv, flags, error);
     if (sub == NULL)
@@ -663,11 +782,21 @@ run_command_sync(
         return FALSE;
     }
     if (!g_subprocess_communicate_utf8(sub, NULL, NULL, NULL,
-                                       capture_stderr, error))
+                                       stderr_dest, error))
     {
         return FALSE;
     }
-    return g_subprocess_get_successful(sub);
+    if (!g_subprocess_get_successful(sub))
+    {
+        const gchar *stderr_str = *stderr_dest != NULL ? *stderr_dest : "";
+        gint exit_status = g_subprocess_get_exit_status(sub);
+        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+                    "Command '%s' exited %d: %s",
+                    argv[0], exit_status,
+                    stderr_str[0] != '\0' ? stderr_str : "(no stderr)");
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -702,6 +831,9 @@ ai_claude_tmux_client_get_property(
             break;
         case PROP_KEEP_ARTIFACTS:
             g_value_set_boolean(value, self->keep_artifacts);
+            break;
+        case PROP_DEBUG_PRESERVE_TMUX:
+            g_value_set_boolean(value, self->debug_preserve_tmux);
             break;
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
@@ -742,6 +874,9 @@ ai_claude_tmux_client_set_property(
         case PROP_KEEP_ARTIFACTS:
             self->keep_artifacts = g_value_get_boolean(value);
             break;
+        case PROP_DEBUG_PRESERVE_TMUX:
+            self->debug_preserve_tmux = g_value_get_boolean(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
     }
@@ -758,14 +893,57 @@ ai_claude_tmux_client_finalize(GObject *object)
     G_OBJECT_CLASS(ai_claude_tmux_client_parent_class)->finalize(object);
 }
 
+static AiResponse *
+ai_claude_tmux_client_chat_sync_real(
+    AiClaudeTmuxClient *self,
+    GList              *messages,
+    GCancellable       *cancellable,
+    GError            **error);
+
+static AiResponse *
+ai_claude_tmux_client_chat_sync_vfunc(
+    AiCliClient   *client,
+    GList         *messages,
+    GCancellable  *cancellable,
+    GError       **error
+){
+    return ai_claude_tmux_client_chat_sync_real(
+        AI_CLAUDE_TMUX_CLIENT(client), messages, cancellable, error);
+}
+
+/*
+ * The "CLI executable" for this client is claude itself — tmux is
+ * the wrapper and is resolved separately via the tmux-path property.
+ * Mirrors AiClaudeCodeClient: honour CLAUDE_CODE_PATH, else search PATH.
+ */
+static gchar *
+ai_claude_tmux_client_get_executable_path(AiCliClient *client)
+{
+    const gchar *env_path;
+
+    (void)client;
+
+    env_path = g_getenv("CLAUDE_CODE_PATH");
+    if (env_path != NULL && env_path[0] != '\0')
+    {
+        return g_strdup(env_path);
+    }
+
+    return g_strdup("claude");
+}
+
 static void
 ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 {
-    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    GObjectClass     *object_class = G_OBJECT_CLASS(klass);
+    AiCliClientClass *cli_class    = AI_CLI_CLIENT_CLASS(klass);
 
     object_class->finalize     = ai_claude_tmux_client_finalize;
     object_class->get_property = ai_claude_tmux_client_get_property;
     object_class->set_property = ai_claude_tmux_client_set_property;
+
+    cli_class->chat_sync           = ai_claude_tmux_client_chat_sync_vfunc;
+    cli_class->get_executable_path = ai_claude_tmux_client_get_executable_path;
 
     properties[PROP_TMUX_PATH] = g_param_spec_string(
         "tmux-path", "Tmux Path",
@@ -800,6 +978,12 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "Leave prompt/sentinel files on disk after the turn",
         FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    properties[PROP_DEBUG_PRESERVE_TMUX] = g_param_spec_boolean(
+        "debug-preserve-tmux", "Debug: Preserve Tmux",
+        "Skip the tmux kill-session and artifact cleanup so the "
+        "session can be inspected post-mortem.  Implies keep-artifacts.",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_TOTAL_COST] = g_param_spec_double(
         "total-cost", "Total Cost",
         "Cost in USD reported by the last response (0.0 if absent)",
@@ -815,9 +999,10 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->tmux_path = NULL;
     self->claude_project_dir = NULL;
     self->turn_timeout_ms = 600000;     /* 10 min */
-    self->startup_timeout_ms = 30000;   /* 30 sec */
+    self->startup_timeout_ms = 15000;   /* 15 sec — TUI ready delay (resume needs more) */
     self->skip_permissions = FALSE;
     self->keep_artifacts = FALSE;
+    self->debug_preserve_tmux = FALSE;
     self->total_cost = 0.0;
 
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_TMUX_DEFAULT_MODEL);
@@ -876,17 +1061,43 @@ build_prompt_text(GList *messages)
 /*
  * Resolve the cwd that claude will report in its transcript.  This is
  * the working_directory property if set, else the process cwd.
+ *
+ * The result is canonicalized via realpath() so it matches what
+ * claude itself derives from getcwd() inside the subprocess.  On
+ * systems where /home is a symlink to /var/home (Silverblue / atomic
+ * Fedora), an unresolved "/home/foo" would encode to
+ * "-home-foo" while claude writes its transcript under
+ * "-var-home-foo".  Canonicalizing both sides closes the gap.
  */
 static gchar *
 resolve_session_cwd(AiClaudeTmuxClient *self)
 {
+    g_autofree gchar *raw = NULL;
+    gchar *canonical;
     const gchar *wd;
+
     wd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
     if (wd != NULL && wd[0] != '\0')
     {
-        return g_strdup(wd);
+        raw = g_strdup(wd);
     }
-    return g_get_current_dir();
+    else
+    {
+        raw = g_get_current_dir();
+    }
+
+    canonical = realpath(raw, NULL);
+    if (canonical != NULL)
+    {
+        /* realpath() uses malloc; hand glib a g_malloc copy. */
+        gchar *out = g_strdup(canonical);
+        free(canonical);
+        return out;
+    }
+
+    /* realpath failed (path doesn't exist yet, etc.) — use the raw
+     * value rather than NULL. */
+    return g_steal_pointer(&raw);
 }
 
 /*
@@ -902,18 +1113,21 @@ ai_claude_tmux_client_chat_sync_real(
     g_autofree gchar *runtime_dir = NULL;
     g_autofree gchar *session_id = NULL;
     g_autofree gchar *prompt_path = NULL;
+    g_autofree gchar *ready_path = NULL;
     g_autofree gchar *sentinel_path = NULL;
+    g_autofree gchar *settings_path = NULL;
     g_autofree gchar *tmux_session_name = NULL;
     g_autofree gchar *cwd = NULL;
     g_autofree gchar *jsonl_path = NULL;
     g_autofree gchar *settings_json = NULL;
     g_autofree gchar *prompt_text = NULL;
-    g_autofree gchar *send_arg = NULL;
     g_autofree gchar *jsonl_contents = NULL;
     g_autofree gchar *claude_exec_path = NULL;
     g_autoptr(AiResponse) response = NULL;
     const gchar *tmux_bin;
     const gchar *configured_session_id;
+    gboolean resuming_existing_session = FALSE;
+    goffset jsonl_size_before = 0;
     gdouble cost = 0.0;
 
     /* ---------- preflight ---------- */
@@ -937,16 +1151,43 @@ ai_claude_tmux_client_chat_sync_real(
     jsonl_path = ai_claude_tmux_client_compute_jsonl_path(
         self->claude_project_dir, cwd, session_id);
 
+    /*
+     * If a transcript already exists for this session_id, claude
+     * must be told to RESUME it rather than create a new session
+     * with the same UUID.  --session-id <existing-uuid> conflicts
+     * with the prior transcript and causes claude to exit on
+     * startup, which then closes the tmux session.
+     */
+    resuming_existing_session =
+        g_file_test(jsonl_path, G_FILE_TEST_EXISTS);
+
     {
         g_autofree gchar *base = g_strconcat("prompt-", session_id, ".md", NULL);
         prompt_path = g_build_filename(runtime_dir, base, NULL);
     }
     {
+        g_autofree gchar *base = g_strconcat("ready-", session_id, NULL);
+        ready_path = g_build_filename(runtime_dir, base, NULL);
+    }
+    {
         g_autofree gchar *base = g_strconcat("done-", session_id, NULL);
         sentinel_path = g_build_filename(runtime_dir, base, NULL);
     }
+    {
+        g_autofree gchar *base = g_strconcat("settings-", session_id, ".json", NULL);
+        settings_path = g_build_filename(runtime_dir, base, NULL);
+    }
 
     tmux_session_name = g_strconcat("claudetmux-", session_id, NULL);
+
+    /*
+     * Defensive: a previous run killed mid-flow may have left stale
+     * sentinels.  wait_for_file() would then return success before
+     * claude has actually fired the hook.  g_unlink on a missing
+     * path is a no-op.
+     */
+    g_unlink(ready_path);
+    g_unlink(sentinel_path);
 
     /* Resolve tmux path. */
     if (self->tmux_path != NULL && self->tmux_path[0] != '\0')
@@ -973,9 +1214,25 @@ ai_claude_tmux_client_chat_sync_real(
         return NULL;
     }
 
-    /* ---------- assemble argv for `tmux new-session -d -s NAME -- CMD ARGS` ---------- */
-    settings_json = build_settings_json(sentinel_path);
+    /*
+     * ---------- write settings file ----------
+     * --settings accepts either inline JSON or a file path.  Use a
+     * file so the JSON braces/quotes are not at risk of being chewed
+     * up by any shell/argv quirks in the tmux invocation chain.
+     */
+    settings_json = build_settings_json(ready_path, sentinel_path);
+    if (!g_file_set_contents(settings_path, settings_json, -1, error))
+    {
+        g_prefix_error(error, "Failed to write settings file '%s': ",
+                       settings_path);
+        if (!self->keep_artifacts)
+        {
+            g_unlink(prompt_path);
+        }
+        return NULL;
+    }
 
+    /* ---------- assemble argv for `tmux new-session -d -s NAME -- CMD ARGS` ---------- */
     {
         g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
         gboolean ok;
@@ -985,12 +1242,28 @@ ai_claude_tmux_client_chat_sync_real(
         g_ptr_array_add(argv, g_strdup("-d"));
         g_ptr_array_add(argv, g_strdup("-s"));
         g_ptr_array_add(argv, g_strdup(tmux_session_name));
+        /*
+         * Anchor the session's start-directory to the resolved
+         * workspace cwd.  Without this tmux (and therefore claude)
+         * inherit libreclaw's process cwd, and claude writes its
+         * transcript under a "wrong" project subdirectory in
+         * ~/.claude/projects — our jsonl_path lookup then misses it.
+         */
+        g_ptr_array_add(argv, g_strdup("-c"));
+        g_ptr_array_add(argv, g_strdup(cwd));
         g_ptr_array_add(argv, g_strdup("--"));
         g_ptr_array_add(argv, g_strdup(claude_exec_path));
-        g_ptr_array_add(argv, g_strdup("--session-id"));
+        if (resuming_existing_session)
+        {
+            g_ptr_array_add(argv, g_strdup("--resume"));
+        }
+        else
+        {
+            g_ptr_array_add(argv, g_strdup("--session-id"));
+        }
         g_ptr_array_add(argv, g_strdup(session_id));
         g_ptr_array_add(argv, g_strdup("--settings"));
-        g_ptr_array_add(argv, g_strdup(settings_json));
+        g_ptr_array_add(argv, g_strdup(settings_path));
 
         {
             const gchar *model = ai_cli_client_get_model(AI_CLI_CLIENT(self));
@@ -1027,30 +1300,82 @@ ai_claude_tmux_client_chat_sync_real(
         }
     }
 
-    /* ---------- wait for JSONL to exist ---------- */
-    if (!wait_for_file(jsonl_path, self->startup_timeout_ms,
+    /*
+     * ---------- wait for claude TUI to be ready ----------
+     * Block on the SessionStart hook firing.  Claude fires this once
+     * its TUI is initialised and the input box is live, so any
+     * subsequent send-keys / paste-buffer will actually land in the
+     * input box rather than being swallowed by a still-loading TUI.
+     */
+    if (!wait_for_file(ready_path, self->startup_timeout_ms,
                        cancellable, error))
     {
         g_prefix_error(error,
-                       "claude failed to create transcript at '%s': ",
-                       jsonl_path);
+                       "claude SessionStart hook never fired (TUI didn't "
+                       "become ready, ready_path='%s'): ",
+                       ready_path);
         goto cleanup_and_fail;
     }
 
-    /* ---------- send the prompt ---------- */
-    send_arg = g_strconcat("@", prompt_path, NULL);
-
+    /*
+     * Snapshot the transcript size BEFORE sending the prompt.  When
+     * the Stop hook fires after the turn, we'll verify the file
+     * actually grew — if it didn't, the hook fired without a real
+     * turn (e.g. resume-time idle fire) and the last assistant entry
+     * is stale.  Returning that as the "response" would echo our
+     * previous reply back to the user.
+     */
     {
-        const gchar *argv[] = {
-            tmux_bin, "send-keys", "-t", tmux_session_name,
-            "-l", send_arg, NULL
-        };
-        if (!run_command_sync(argv, NULL, error))
+        GStatBuf st;
+        if (g_stat(jsonl_path, &st) == 0)
         {
-            g_prefix_error(error, "tmux send-keys (literal) failed: ");
-            goto cleanup_and_fail;
+            jsonl_size_before = (goffset)st.st_size;
+        }
+        else
+        {
+            jsonl_size_before = 0;
         }
     }
+
+    /*
+     * ---------- deliver the prompt ----------
+     * Avoid claude TUI's @<file> syntax — send-keys doesn't trigger
+     * its file-reference expansion reliably.  Instead, load the
+     * prompt text into a tmux paste buffer and paste it: the TUI
+     * receives this as a real paste event (bracketed paste), which
+     * handles multi-line text without each newline being interpreted
+     * as Enter.
+     */
+    {
+        g_autofree gchar *buffer_name = g_strconcat("clawd-", session_id, NULL);
+        const gchar *load_argv[] = {
+            tmux_bin, "load-buffer", "-b", buffer_name, prompt_path, NULL
+        };
+        if (!run_command_sync(load_argv, NULL, error))
+        {
+            g_prefix_error(error, "tmux load-buffer failed: ");
+            goto cleanup_and_fail;
+        }
+        {
+            const gchar *paste_argv[] = {
+                tmux_bin, "paste-buffer", "-b", buffer_name,
+                "-t", tmux_session_name, "-d", NULL  /* -d = delete buffer after */
+            };
+            if (!run_command_sync(paste_argv, NULL, error))
+            {
+                g_prefix_error(error, "tmux paste-buffer failed: ");
+                goto cleanup_and_fail;
+            }
+        }
+    }
+    /*
+     * Give claude TUI a beat to finish ingesting the bracketed-paste
+     * event before we deliver the submit keystroke.  Without this,
+     * an immediate Enter can be swallowed while the input box is
+     * still applying the paste and updating its draft state, and the
+     * message ends up sitting in the input box un-submitted.
+     */
+    g_usleep(500 * 1000);   /* 500 ms */
     {
         const gchar *argv[] = {
             tmux_bin, "send-keys", "-t", tmux_session_name,
@@ -1063,7 +1388,12 @@ ai_claude_tmux_client_chat_sync_real(
         }
     }
 
-    /* ---------- wait for Stop hook sentinel ---------- */
+    /*
+     * ---------- wait for Stop hook sentinel ----------
+     * The Stop hook fires when claude finishes its turn.  By the
+     * time the sentinel appears, the JSONL transcript has been
+     * fully written for this turn.
+     */
     if (!wait_for_file(sentinel_path, self->turn_timeout_ms,
                        cancellable, error))
     {
@@ -1071,6 +1401,75 @@ ai_claude_tmux_client_chat_sync_real(
                        "Stop hook sentinel '%s' never appeared: ",
                        sentinel_path);
         goto cleanup_and_fail;
+    }
+
+    /*
+     * Freshness check: poll the JSONL until a NEW terminal assistant
+     * entry has actually been flushed past the pre-prompt watermark.
+     *
+     * Naive "did the file grow?" is insufficient: claude flushes the
+     * user-prompt + attachment lines AHEAD of the response line, and
+     * the Stop hook can fire — and the sentinel touch can complete —
+     * before the response line itself hits disk.  In that window the
+     * file is larger than `jsonl_size_before` but the LAST
+     * `type:"assistant"` entry visible to the parser is still the
+     * previous turn's response.  Returning that as "the answer" echoes
+     * a stale message back to the caller (this was the actual bug —
+     * a wave got back the prior "startup complete" message).
+     *
+     * Instead, walk the slice after the watermark each time the file
+     * grows and break only once we see an assistant entry whose
+     * `message.stop_reason` is terminal (anything other than
+     * "tool_use").  claude only fires the Stop hook on terminal stop
+     * reasons, so this will always converge — we're just waiting on
+     * the disk flush.
+     */
+    {
+        GStatBuf st;
+        goffset size_after = 0;
+        goffset last_checked_size = jsonl_size_before;
+        const gint poll_ms = 100;
+        const gint max_wait_ms = 10000;
+        gint waited = 0;
+        gboolean found_terminal = FALSE;
+
+        while (waited < max_wait_ms)
+        {
+            if (g_stat(jsonl_path, &st) == 0)
+            {
+                size_after = (goffset)st.st_size;
+                if (size_after > last_checked_size)
+                {
+                    /* Avoid re-parsing the whole file every 100 ms
+                     * when nothing new has landed since the last
+                     * attempt. */
+                    last_checked_size = size_after;
+                    if (slice_has_terminal_assistant_entry(
+                            jsonl_path, jsonl_size_before))
+                    {
+                        found_terminal = TRUE;
+                        break;
+                    }
+                }
+            }
+            g_usleep(poll_ms * 1000);
+            waited += poll_ms;
+        }
+
+        if (!found_terminal)
+        {
+            g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+                        "Stop hook fired but no new terminal "
+                        "assistant entry appeared in transcript "
+                        "'%s' within %d ms (pre-prompt size "
+                        "%" G_GOFFSET_FORMAT ", final size "
+                        "%" G_GOFFSET_FORMAT ") — claude wrote the "
+                        "user prompt but never flushed its response, "
+                        "or the prompt was never delivered",
+                        jsonl_path, max_wait_ms,
+                        jsonl_size_before, size_after);
+            goto cleanup_and_fail;
+        }
     }
 
     /* ---------- read and parse the JSONL ---------- */
@@ -1099,6 +1498,7 @@ ai_claude_tmux_client_chat_sync_real(
     }
 
     /* ---------- cleanup (success path) ---------- */
+    if (!self->debug_preserve_tmux)
     {
         const gchar *argv[] = {
             tmux_bin, "kill-session", "-t", tmux_session_name, NULL
@@ -1107,26 +1507,43 @@ ai_claude_tmux_client_chat_sync_real(
          * exited on its own. */
         run_command_sync(argv, NULL, NULL);
     }
+    else
+    {
+        g_info("debug_preserve_tmux: leaving tmux session '%s' alive "
+               "(attach with: tmux attach -t %s)",
+               tmux_session_name, tmux_session_name);
+    }
 
-    if (!self->keep_artifacts)
+    if (!self->keep_artifacts && !self->debug_preserve_tmux)
     {
         g_unlink(prompt_path);
+        g_unlink(ready_path);
         g_unlink(sentinel_path);
+        g_unlink(settings_path);
     }
 
     return g_steal_pointer(&response);
 
 cleanup_and_fail:
+    if (!self->debug_preserve_tmux)
     {
         const gchar *argv[] = {
             tmux_bin, "kill-session", "-t", tmux_session_name, NULL
         };
         run_command_sync(argv, NULL, NULL);
     }
-    if (!self->keep_artifacts)
+    else
+    {
+        g_info("debug_preserve_tmux: leaving tmux session '%s' alive "
+               "after failure (attach with: tmux attach -t %s)",
+               tmux_session_name, tmux_session_name);
+    }
+    if (!self->keep_artifacts && !self->debug_preserve_tmux)
     {
         g_unlink(prompt_path);
+        g_unlink(ready_path);
         g_unlink(sentinel_path);
+        g_unlink(settings_path);
     }
     return NULL;
 }
@@ -1432,5 +1849,26 @@ ai_claude_tmux_client_set_keep_artifacts(
         self->keep_artifacts = keep;
         g_object_notify_by_pspec(G_OBJECT(self),
             properties[PROP_KEEP_ARTIFACTS]);
+    }
+}
+
+gboolean
+ai_claude_tmux_client_get_debug_preserve_tmux(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), FALSE);
+    return self->debug_preserve_tmux;
+}
+
+void
+ai_claude_tmux_client_set_debug_preserve_tmux(
+    AiClaudeTmuxClient *self,
+    gboolean            preserve
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    if (self->debug_preserve_tmux != preserve)
+    {
+        self->debug_preserve_tmux = preserve;
+        g_object_notify_by_pspec(G_OBJECT(self),
+            properties[PROP_DEBUG_PRESERVE_TMUX]);
     }
 }

@@ -210,6 +210,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
     klass->parse_json_output = NULL;
     klass->parse_stream_line = NULL;
     klass->build_stdin = NULL;
+    klass->chat_sync = NULL;
 
     /**
      * AiCliClient:config:
@@ -917,6 +918,16 @@ ai_cli_client_chat_sync(
 
     klass = AI_CLI_CLIENT_GET_CLASS(self);
     priv = ai_cli_client_get_instance_private(self);
+
+    /*
+     * If a subclass installs its own chat_sync, defer to it entirely.
+     * Used by AiClaudeTmuxClient whose flow (tmux + Stop hook) bears
+     * no resemblance to the default argv/spawn/parse pipeline.
+     */
+    if (klass->chat_sync != NULL)
+    {
+        return klass->chat_sync(self, messages, cancellable, error);
+    }
 
     g_return_val_if_fail(klass->build_argv != NULL, NULL);
     g_return_val_if_fail(klass->parse_json_output != NULL, NULL);

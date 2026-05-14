@@ -19,7 +19,10 @@ ai-glib provides a unified interface to multiple AI providers through the `AiPro
 | Provider | Client Class | Environment Variable | Default Model |
 |----------|--------------|---------------------|---------------|
 | [Claude Code](claude-code.md) | `AiClaudeCodeClient` | `CLAUDE_CODE_PATH` (optional) | sonnet |
+| [Claude Code (tmux)](claude-code-tmux.md) | `AiClaudeTmuxClient` | `CLAUDE_CODE_PATH` (optional) | sonnet |
 | [OpenCode](opencode.md) | `AiOpenCodeClient` | `OPENCODE_PATH` (optional) | anthropic/claude-sonnet-4-20250514 |
+
+The two Claude Code variants drive the same `claude` CLI but differ in billing path: `AiClaudeCodeClient` uses `claude --print` (Agent SDK credits), while `AiClaudeTmuxClient` runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [claude-code-tmux.md](claude-code-tmux.md) for details.
 
 ## Common Interface
 
@@ -79,15 +82,16 @@ ai_client_set_model(AI_CLIENT(client), "claude-3-5-haiku-20241022");
 
 ## Provider Comparison
 
-| Feature | Claude | OpenAI | Gemini | Grok | Ollama | Claude Code | OpenCode |
-|---------|--------|--------|--------|------|--------|-------------|----------|
-| Chat Completion | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Streaming | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Tool Use | Yes | Yes | Partial | Yes | Partial | Yes | Model-dependent |
-| Vision | Yes | Yes | Yes | Yes | Model-dependent | Yes | Model-dependent |
-| Local | No | No | No | No | Yes | No | No |
-| API Key Required | Yes | Yes | Yes | Yes | No | No (uses CLI auth) | No (uses CLI auth) |
-| Multi-Provider | No | No | No | No | No | No | Yes |
+| Feature | Claude | OpenAI | Gemini | Grok | Ollama | Claude Code | Claude Code (tmux) | OpenCode |
+|---------|--------|--------|--------|------|--------|-------------|--------------------|----------|
+| Chat Completion | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Streaming | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes |
+| Tool Use | Yes | Yes | Partial | Yes | Partial | Yes | Yes | Model-dependent |
+| Vision | Yes | Yes | Yes | Yes | Model-dependent | Yes | Yes | Model-dependent |
+| Local | No | No | No | No | Yes | No | No | No |
+| API Key Required | Yes | Yes | Yes | Yes | No | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) |
+| Multi-Provider | No | No | No | No | No | No | No | Yes |
+| Billing Path | API | API | API | API | n/a | Agent SDK | Subscription (TUI) | Agent SDK |
 
 ## Error Handling
 
