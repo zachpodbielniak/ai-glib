@@ -24,8 +24,12 @@ G_BEGIN_DECLS
  * @AI_PROVIDER_GEMINI: Google Gemini (HTTP API)
  * @AI_PROVIDER_GROK: xAI Grok (HTTP API)
  * @AI_PROVIDER_OLLAMA: Ollama (local HTTP API)
- * @AI_PROVIDER_CLAUDE_CODE: Claude Code CLI wrapper
+ * @AI_PROVIDER_CLAUDE_CODE: Claude Code CLI wrapper (--print mode,
+ *   billed against the Agent SDK credit pool from 2026-06-15)
  * @AI_PROVIDER_OPENCODE: OpenCode CLI wrapper
+ * @AI_PROVIDER_CLAUDE_TMUX: Claude Code CLI driven via an ephemeral
+ *   tmux session in interactive TUI mode (billed as normal
+ *   subscription usage, bypassing the Agent SDK credit pool)
  *
  * Enumeration of supported AI providers.
  */
@@ -37,7 +41,8 @@ typedef enum
     AI_PROVIDER_GROK,
     AI_PROVIDER_OLLAMA,
     AI_PROVIDER_CLAUDE_CODE,
-    AI_PROVIDER_OPENCODE
+    AI_PROVIDER_OPENCODE,
+    AI_PROVIDER_CLAUDE_TMUX
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);

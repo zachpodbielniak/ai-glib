@@ -30,6 +30,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_OLLAMA, "AI_PROVIDER_OLLAMA", "ollama" },
             { AI_PROVIDER_CLAUDE_CODE, "AI_PROVIDER_CLAUDE_CODE", "claude-code" },
             { AI_PROVIDER_OPENCODE, "AI_PROVIDER_OPENCODE", "opencode" },
+            { AI_PROVIDER_CLAUDE_TMUX, "AI_PROVIDER_CLAUDE_TMUX", "claude-tmux" },
             { 0, NULL, NULL }
         };
 
@@ -287,6 +288,8 @@ ai_provider_type_to_string(AiProviderType provider)
             return "claude-code";
         case AI_PROVIDER_OPENCODE:
             return "opencode";
+        case AI_PROVIDER_CLAUDE_TMUX:
+            return "claude-tmux";
         default:
             return "unknown";
     }
@@ -340,6 +343,11 @@ ai_provider_type_from_string(const gchar *str)
     else if (g_ascii_strcasecmp(str, "opencode") == 0)
     {
         return AI_PROVIDER_OPENCODE;
+    }
+    else if (g_ascii_strcasecmp(str, "claude-tmux") == 0 ||
+             g_ascii_strcasecmp(str, "claude_tmux") == 0)
+    {
+        return AI_PROVIDER_CLAUDE_TMUX;
     }
 
     return AI_PROVIDER_CLAUDE;

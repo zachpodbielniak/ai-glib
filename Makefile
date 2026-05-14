@@ -42,6 +42,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-gemini-client.h \
 	$(SRCDIR)/providers/ai-ollama-client.h \
 	$(SRCDIR)/providers/ai-claude-code-client.h \
+	$(SRCDIR)/providers/ai-claude-tmux-client.h \
 	$(SRCDIR)/providers/ai-opencode-client.h \
 	$(SRCDIR)/convenience/ai-simple.h \
 	$(SRCDIR)/convenience/ai-search-provider.h \
@@ -77,6 +78,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-gemini-client.c \
 	$(SRCDIR)/providers/ai-ollama-client.c \
 	$(SRCDIR)/providers/ai-claude-code-client.c \
+	$(SRCDIR)/providers/ai-claude-tmux-client.c \
 	$(SRCDIR)/providers/ai-opencode-client.c \
 	$(SRCDIR)/convenience/ai-simple.c \
 	$(SRCDIR)/convenience/ai-search-provider.c \

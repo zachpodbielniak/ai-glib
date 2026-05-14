@@ -53,6 +53,7 @@
 
 /* Provider implementations (CLI wrappers) */
 #include "providers/ai-claude-code-client.h"
+#include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-opencode-client.h"
 
 /* Convenience API */
