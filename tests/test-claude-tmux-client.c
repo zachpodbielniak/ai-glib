@@ -207,6 +207,45 @@ test_dismiss_resume_prompt(void)
 }
 
 static void
+test_prompt_send_exponential_backoff(void)
+{
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+
+    /* Default: on — each retry doubles the per-attempt wait. */
+    g_assert_true(
+        ai_claude_tmux_client_get_prompt_send_exponential_backoff(c));
+
+    ai_claude_tmux_client_set_prompt_send_exponential_backoff(c, FALSE);
+    g_assert_false(
+        ai_claude_tmux_client_get_prompt_send_exponential_backoff(c));
+
+    ai_claude_tmux_client_set_prompt_send_exponential_backoff(c, TRUE);
+    g_assert_true(
+        ai_claude_tmux_client_get_prompt_send_exponential_backoff(c));
+}
+
+static void
+test_prompt_send_exponential_backoff_property(void)
+{
+    /*
+     * Property-bag round-trip — confirms the GParamSpec is installed
+     * and the get_property/set_property handlers reach the right
+     * field.  Necessary because g_object_set/get is how libreclaw
+     * (and external introspection) drives this knob.
+     */
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+    gboolean v;
+
+    g_object_set(c, "prompt-send-exponential-backoff", FALSE, NULL);
+    g_object_get(c, "prompt-send-exponential-backoff", &v, NULL);
+    g_assert_false(v);
+
+    g_object_set(c, "prompt-send-exponential-backoff", TRUE, NULL);
+    g_object_get(c, "prompt-send-exponential-backoff", &v, NULL);
+    g_assert_true(v);
+}
+
+static void
 test_total_cost_initial(void)
 {
     g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
@@ -950,6 +989,10 @@ main(int argc, char *argv[])
                     test_max_prompt_send_attempts);
     g_test_add_func("/claude-tmux/prop/dismiss-resume-prompt",
                     test_dismiss_resume_prompt);
+    g_test_add_func("/claude-tmux/prop/prompt-send-exponential-backoff",
+                    test_prompt_send_exponential_backoff);
+    g_test_add_func("/claude-tmux/prop/prompt-send-exp-backoff-gobject",
+                    test_prompt_send_exponential_backoff_property);
     g_test_add_func("/claude-tmux/prop/total-cost-initial",
                     test_total_cost_initial);
 

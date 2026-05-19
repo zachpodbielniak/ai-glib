@@ -52,6 +52,11 @@ struct _AiClaudeTmuxClient
     gboolean  dismiss_resume_prompt;     /* press Enter once on resume to
                                           * clear claude's resume-mode
                                           * picker (default TRUE) */
+    gboolean  prompt_send_exponential_backoff; /* double the per-attempt
+                                                * wait each retry instead
+                                                * of waiting a fixed
+                                                * prompt_resend_interval_ms
+                                                * every time (default TRUE) */
     gint      turn_active;          /* atomic flag: 1 while this client
                                      * owns a live tmux session (a turn
                                      * is in flight), 0 otherwise — gates
@@ -72,6 +77,7 @@ enum
     PROP_PROMPT_RESEND_INTERVAL_MS,
     PROP_MAX_PROMPT_SEND_ATTEMPTS,
     PROP_DISMISS_RESUME_PROMPT,
+    PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF,
     PROP_TOTAL_COST,
     N_PROPS
 };
@@ -986,6 +992,9 @@ ai_claude_tmux_client_get_property(
         case PROP_DISMISS_RESUME_PROMPT:
             g_value_set_boolean(value, self->dismiss_resume_prompt);
             break;
+        case PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF:
+            g_value_set_boolean(value, self->prompt_send_exponential_backoff);
+            break;
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
             break;
@@ -1036,6 +1045,9 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_DISMISS_RESUME_PROMPT:
             self->dismiss_resume_prompt = g_value_get_boolean(value);
+            break;
+        case PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF:
+            self->prompt_send_exponential_backoff = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -1168,6 +1180,20 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "wait prompt-resend-interval-ms for the TUI to settle",
         TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    properties[PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF] = g_param_spec_boolean(
+        "prompt-send-exponential-backoff",
+        "Prompt-Send Exponential Backoff",
+        "When TRUE (the default), each unconfirmed submit-Enter retry "
+        "doubles the wait before the next attempt: attempt N waits "
+        "(prompt-resend-interval-ms << (N-1)) milliseconds for proof "
+        "of acceptance before re-pressing Enter.  With the default "
+        "interval (2000 ms) and max attempts (5), the total retry "
+        "budget grows from a flat 10 s to ~62 s (2+4+8+16+32 s), "
+        "wide enough to ride out claude auto-compacting a large "
+        "resumed transcript.  When FALSE, every attempt waits the "
+        "static prompt-resend-interval-ms — the pre-0.20.4 behaviour",
+        TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_TOTAL_COST] = g_param_spec_double(
         "total-cost", "Total Cost",
         "Cost in USD reported by the last response (0.0 if absent)",
@@ -1190,6 +1216,7 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->prompt_resend_interval_ms = 2000;  /* 2 sec */
     self->max_prompt_send_attempts = 5;
     self->dismiss_resume_prompt = TRUE;
+    self->prompt_send_exponential_backoff = TRUE;
     self->turn_active = 0;
     self->total_cost = 0.0;
 
@@ -1587,16 +1614,24 @@ ai_claude_tmux_client_chat_sync_real(
      *
      * Gated on resuming_existing_session: a fresh --session-id run
      * never shows the picker.  Worst case, dismiss_resume_prompt is on
-     * but no picker is actually up — then the "2" lands as a literal
-     * character in the empty input box and gets prepended to the
-     * pasted prompt.  That cosmetic blemish is a deliberate, accepted
-     * trade, far cheaper than an unwanted multi-minute compaction.
+     * but no picker is actually up — the "2" lands as a literal
+     * character in the empty input box.  We follow it with a single
+     * BSpace keystroke so that leaked character is rubbed out before
+     * the paste lands, leaving a clean input box either way:
+     *   - picker WAS up   → "2" selected option 2, picker dismissed,
+     *                       BSpace hits the now-empty input box and is
+     *                       a no-op
+     *   - picker was NOT  → "2" landed in input box, BSpace clears it
      */
     if (resuming_existing_session && self->dismiss_resume_prompt)
     {
         const gchar *dismiss_argv[] = {
             tmux_bin, "send-keys", "-l", "-t", tmux_session_name,
             "2", NULL
+        };
+        const gchar *clean_argv[] = {
+            tmux_bin, "send-keys", "-t", tmux_session_name,
+            "BSpace", NULL
         };
         if (!run_command_sync(dismiss_argv, NULL, error))
         {
@@ -1606,6 +1641,13 @@ ai_claude_tmux_client_chat_sync_real(
             goto cleanup_and_fail;
         }
         g_usleep((gulong)self->prompt_resend_interval_ms * 1000);
+        if (!run_command_sync(clean_argv, NULL, error))
+        {
+            g_prefix_error(error,
+                           "tmux send-keys (post-dismiss backspace) "
+                           "failed: ");
+            goto cleanup_and_fail;
+        }
     }
 
     /*
@@ -1720,20 +1762,57 @@ ai_claude_tmux_client_chat_sync_real(
         const gint poll_ms = 100;
         gboolean prompt_accepted = FALSE;
         gint attempt;
+        gint total_waited_ms = 0;
 
         for (attempt = 1;
              attempt <= self->max_prompt_send_attempts && !prompt_accepted;
              attempt++)
         {
+            gint this_wait_ms;
             gint waited = 0;
+
+            /*
+             * Per-attempt wait: exponential when the backoff knob is on
+             * (the default — attempt N waits base << (N-1)), or a flat
+             * base every attempt when it's off.  Exponential is the
+             * pre-flight remedy for large resumed transcripts: claude's
+             * auto-compaction of a 2+ MB JSONL can keep the TUI busy
+             * for tens of seconds, well past the flat 10 s budget the
+             * old loop allowed.
+             */
+            if (self->prompt_send_exponential_backoff)
+            {
+                /*
+                 * Cap the shift count to keep the wait inside gint and
+                 * keep the *total* budget tractable.  We multiply by
+                 * 1 << (attempt-1); with a 2000 ms base, shift 14 is
+                 * already 32 768 × 2 s ≈ 18 hours, so 20 is plenty of
+                 * head-room without risking overflow.
+                 */
+                gint shift = attempt - 1;
+                if (shift > 20) shift = 20;
+                if (G_MAXINT / (1 << shift) < self->prompt_resend_interval_ms)
+                    this_wait_ms = G_MAXINT;
+                else
+                    this_wait_ms = self->prompt_resend_interval_ms
+                                   << shift;
+            }
+            else
+            {
+                this_wait_ms = self->prompt_resend_interval_ms;
+            }
 
             if (attempt > 1)
             {
-                g_warning("claude-tmux: prompt not accepted %d ms after "
-                          "Enter (attempt %d/%d) — submit keystroke was "
-                          "swallowed by the TUI, re-sending Enter",
-                          self->prompt_resend_interval_ms,
-                          attempt - 1, self->max_prompt_send_attempts);
+                g_warning("claude-tmux: prompt not accepted after Enter "
+                          "(attempt %d/%d) — submit keystroke was "
+                          "swallowed by the TUI, re-sending Enter and "
+                          "waiting %d ms for proof of acceptance%s",
+                          attempt - 1, self->max_prompt_send_attempts,
+                          this_wait_ms,
+                          self->prompt_send_exponential_backoff
+                              ? " (exponential backoff)"
+                              : "");
             }
 
             if (!run_command_sync(enter_argv, NULL, error))
@@ -1743,7 +1822,7 @@ ai_claude_tmux_client_chat_sync_real(
                 goto cleanup_and_fail;
             }
 
-            while (waited < self->prompt_resend_interval_ms)
+            while (waited < this_wait_ms)
             {
                 if (slice_has_accepted_prompt(jsonl_path, jsonl_size_before))
                 {
@@ -1753,6 +1832,7 @@ ai_claude_tmux_client_chat_sync_real(
                 g_usleep(poll_ms * 1000);
                 waited += poll_ms;
             }
+            total_waited_ms += waited;
         }
 
         if (!prompt_accepted)
@@ -1765,8 +1845,7 @@ ai_claude_tmux_client_chat_sync_real(
                         "keystroke never registered (pre-prompt size "
                         "%" G_GOFFSET_FORMAT ")",
                         jsonl_path, self->max_prompt_send_attempts,
-                        self->max_prompt_send_attempts *
-                            self->prompt_resend_interval_ms,
+                        total_waited_ms,
                         jsonl_size_before);
             goto cleanup_and_fail;
         }
@@ -2313,4 +2392,23 @@ ai_claude_tmux_client_set_dismiss_resume_prompt(
     self->dismiss_resume_prompt = dismiss;
     g_object_notify_by_pspec(G_OBJECT(self),
         properties[PROP_DISMISS_RESUME_PROMPT]);
+}
+
+gboolean
+ai_claude_tmux_client_get_prompt_send_exponential_backoff(
+    AiClaudeTmuxClient *self
+){
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), FALSE);
+    return self->prompt_send_exponential_backoff;
+}
+
+void
+ai_claude_tmux_client_set_prompt_send_exponential_backoff(
+    AiClaudeTmuxClient *self,
+    gboolean            backoff
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    self->prompt_send_exponential_backoff = backoff;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF]);
 }

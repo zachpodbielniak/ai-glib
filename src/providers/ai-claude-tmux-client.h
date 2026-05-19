@@ -343,6 +343,44 @@ ai_claude_tmux_client_set_dismiss_resume_prompt(
     gboolean            dismiss
 );
 
+/**
+ * ai_claude_tmux_client_get_prompt_send_exponential_backoff:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: %TRUE if the submit-Enter retry loop doubles its
+ *   per-attempt wait each iteration, %FALSE if every attempt waits
+ *   the same prompt-resend-interval-ms.  Default %TRUE.
+ *
+ * Since: 0.20.4
+ */
+gboolean
+ai_claude_tmux_client_get_prompt_send_exponential_backoff(
+    AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_prompt_send_exponential_backoff:
+ * @self: an #AiClaudeTmuxClient
+ * @backoff: %TRUE to double the per-attempt wait each retry
+ *
+ * When %TRUE (the default), the submit-Enter retry loop waits
+ * `prompt-resend-interval-ms << (attempt - 1)` milliseconds between
+ * attempts: 2 s, 4 s, 8 s, 16 s, 32 s by default — a total budget of
+ * ~62 s across the default 5 attempts.  That window is large enough
+ * to ride out claude auto-compacting a multi-megabyte resumed
+ * transcript before the TUI accepts input again.
+ *
+ * When %FALSE, every attempt waits a flat prompt-resend-interval-ms
+ * (the pre-0.20.4 behaviour), giving a fixed total budget of
+ * prompt-resend-interval-ms × max-prompt-send-attempts.
+ *
+ * Since: 0.20.4
+ */
+void
+ai_claude_tmux_client_set_prompt_send_exponential_backoff(
+    AiClaudeTmuxClient *self,
+    gboolean            backoff
+);
+
 /* ================================================================== */
 /* Pure-function helpers — exposed primarily for unit testing.        */
 /* ================================================================== */
