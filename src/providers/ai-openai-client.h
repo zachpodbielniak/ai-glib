@@ -121,36 +121,12 @@ G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClie
 #define AI_OPENAI_IMAGE_MODEL_DALL_E_2      "dall-e-2"
 #define AI_OPENAI_IMAGE_DEFAULT_MODEL       AI_OPENAI_IMAGE_MODEL_DALL_E_3
 
-/**
- * ai_openai_client_new:
- *
- * Creates a new #AiOpenAIClient using the default configuration.
- * The API key will be read from the OPENAI_API_KEY environment variable.
- *
- * Returns: (transfer full): a new #AiOpenAIClient
- */
 AiOpenAIClient *
 ai_openai_client_new(void);
 
-/**
- * ai_openai_client_new_with_config:
- * @config: an #AiConfig
- *
- * Creates a new #AiOpenAIClient with the specified configuration.
- *
- * Returns: (transfer full): a new #AiOpenAIClient
- */
 AiOpenAIClient *
 ai_openai_client_new_with_config(AiConfig *config);
 
-/**
- * ai_openai_client_new_with_key:
- * @api_key: the OpenAI API key
- *
- * Creates a new #AiOpenAIClient with the specified API key.
- *
- * Returns: (transfer full): a new #AiOpenAIClient
- */
 AiOpenAIClient *
 ai_openai_client_new_with_key(const gchar *api_key);
 

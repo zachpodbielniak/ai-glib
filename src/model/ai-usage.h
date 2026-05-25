@@ -37,71 +37,24 @@ typedef struct _AiUsage AiUsage;
 GType
 ai_usage_get_type(void);
 
-/**
- * ai_usage_new:
- * @input_tokens: number of input tokens
- * @output_tokens: number of output tokens
- *
- * Creates a new #AiUsage instance.
- *
- * Returns: (transfer full): a new #AiUsage
- */
 AiUsage *
 ai_usage_new(
     gint input_tokens,
     gint output_tokens
 );
 
-/**
- * ai_usage_copy:
- * @self: an #AiUsage
- *
- * Creates a copy of an #AiUsage.
- *
- * Returns: (transfer full): a copy of @self
- */
 AiUsage *
 ai_usage_copy(const AiUsage *self);
 
-/**
- * ai_usage_free:
- * @self: (nullable): an #AiUsage
- *
- * Frees an #AiUsage instance.
- */
 void
 ai_usage_free(AiUsage *self);
 
-/**
- * ai_usage_get_input_tokens:
- * @self: an #AiUsage
- *
- * Gets the number of input tokens.
- *
- * Returns: the input token count
- */
 gint
 ai_usage_get_input_tokens(const AiUsage *self);
 
-/**
- * ai_usage_get_output_tokens:
- * @self: an #AiUsage
- *
- * Gets the number of output tokens.
- *
- * Returns: the output token count
- */
 gint
 ai_usage_get_output_tokens(const AiUsage *self);
 
-/**
- * ai_usage_get_total_tokens:
- * @self: an #AiUsage
- *
- * Gets the total number of tokens (input + output).
- *
- * Returns: the total token count
- */
 gint
 ai_usage_get_total_tokens(const AiUsage *self);
 

@@ -68,135 +68,48 @@ struct _AiClientClass
     gpointer _reserved[8];
 };
 
-/**
- * ai_client_get_config:
- * @self: an #AiClient
- *
- * Gets the configuration for this client.
- *
- * Returns: (transfer none): the #AiConfig
- */
 AiConfig *
 ai_client_get_config(AiClient *self);
 
-/**
- * ai_client_get_model:
- * @self: an #AiClient
- *
- * Gets the model name.
- *
- * Returns: (transfer none) (nullable): the model name
- */
 const gchar *
 ai_client_get_model(AiClient *self);
 
-/**
- * ai_client_set_model:
- * @self: an #AiClient
- * @model: the model name
- *
- * Sets the model to use for requests.
- */
 void
 ai_client_set_model(
     AiClient    *self,
     const gchar *model
 );
 
-/**
- * ai_client_get_max_tokens:
- * @self: an #AiClient
- *
- * Gets the default max tokens setting.
- *
- * Returns: the max tokens
- */
 gint
 ai_client_get_max_tokens(AiClient *self);
 
-/**
- * ai_client_set_max_tokens:
- * @self: an #AiClient
- * @max_tokens: the max tokens
- *
- * Sets the default max tokens for requests.
- */
 void
 ai_client_set_max_tokens(
     AiClient *self,
     gint      max_tokens
 );
 
-/**
- * ai_client_get_temperature:
- * @self: an #AiClient
- *
- * Gets the temperature setting.
- *
- * Returns: the temperature
- */
 gdouble
 ai_client_get_temperature(AiClient *self);
 
-/**
- * ai_client_set_temperature:
- * @self: an #AiClient
- * @temperature: the temperature (0.0 to 2.0)
- *
- * Sets the temperature for response generation.
- */
 void
 ai_client_set_temperature(
     AiClient *self,
     gdouble   temperature
 );
 
-/**
- * ai_client_get_system_prompt:
- * @self: an #AiClient
- *
- * Gets the default system prompt.
- *
- * Returns: (transfer none) (nullable): the system prompt
- */
 const gchar *
 ai_client_get_system_prompt(AiClient *self);
 
-/**
- * ai_client_set_system_prompt:
- * @self: an #AiClient
- * @system_prompt: (nullable): the system prompt
- *
- * Sets the default system prompt for requests.
- */
 void
 ai_client_set_system_prompt(
     AiClient    *self,
     const gchar *system_prompt
 );
 
-/**
- * ai_client_get_soup_session:
- * @self: an #AiClient
- *
- * Gets the SoupSession used for HTTP requests.
- *
- * Returns: (transfer none): the #SoupSession
- */
 SoupSession *
 ai_client_get_soup_session(AiClient *self);
 
-/**
- * ai_client_chat_sync:
- * @self: an #AiClient
- * @messages: (element-type AiMessage): the conversation messages
- * @cancellable: (nullable): a #GCancellable
- * @error: (out) (optional): return location for a #GError
- *
- * Performs a synchronous chat completion request.
- *
- * Returns: (transfer full) (nullable): the #AiResponse, or %NULL on error
- */
 AiResponse *
 ai_client_chat_sync(
     AiClient      *self,

@@ -23,35 +23,12 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE(AiTextContent, ai_text_content, AI, TEXT_CONTENT, AiContentBlock)
 
-/**
- * ai_text_content_new:
- * @text: the text content
- *
- * Creates a new #AiTextContent with the given text.
- *
- * Returns: (transfer full): a new #AiTextContent
- */
 AiTextContent *
 ai_text_content_new(const gchar *text);
 
-/**
- * ai_text_content_get_text:
- * @self: an #AiTextContent
- *
- * Gets the text content.
- *
- * Returns: (transfer none): the text content
- */
 const gchar *
 ai_text_content_get_text(AiTextContent *self);
 
-/**
- * ai_text_content_set_text:
- * @self: an #AiTextContent
- * @text: the text to set
- *
- * Sets the text content.
- */
 void
 ai_text_content_set_text(
     AiTextContent *self,

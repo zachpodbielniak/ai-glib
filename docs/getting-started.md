@@ -28,9 +28,15 @@ apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev
 ```bash
 git clone https://gitlab.com/your-username/ai-glib.git
 cd ai-glib
-make
-make test
+make                # release build -> build/release/
+make test           # runs the C suite + the GIR-warning gate
 ```
+
+Optional flags:
+- `make DEBUG=1`   → debug build to `build/debug/` (coexists with release)
+- `make GIR=1`     → also generate GObject introspection
+  (`build/<type>/AiGlib-1.0.{gir,typelib}`) for Python/GJS/Vala bindings.
+  See the [Python walkthrough](examples/python-bindings.md).
 
 ## Quick Start (Simple API)
 

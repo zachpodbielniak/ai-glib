@@ -82,23 +82,9 @@ typedef enum
     AI_ERROR_UNKNOWN
 } AiError;
 
-/**
- * ai_error_quark:
- *
- * Gets the ai-glib error quark.
- *
- * Returns: the error quark for ai-glib
- */
 GQuark
 ai_error_quark(void);
 
-/**
- * ai_error_get_type:
- *
- * Gets the #GType for #AiError.
- *
- * Returns: the #GType for #AiError
- */
 GType
 ai_error_get_type(void);
 

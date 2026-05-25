@@ -189,6 +189,7 @@ test: $(TEST_BINARIES)
 		echo "Running $$test..."; \
 		$$test || exit 1; \
 	done
+	@$(MAKE) --no-print-directory test-gir-clean
 	@echo "All tests passed!"
 
 .PHONY: test-verbose
@@ -199,6 +200,42 @@ test-verbose: $(TEST_BINARIES)
 		G_TEST_VERBOSE=1 $$test || exit 1; \
 	done
 	@echo "All tests passed!"
+
+# Run the Python GI binding smoke test. Skips cleanly when PyGObject is
+# not installed on the host.
+.PHONY: test-gi
+test-gi:
+	@if ! /usr/bin/python3 -c "import gi" >/dev/null 2>&1; then \
+		echo "SKIP: python3-gobject not installed (Fedora: python3-gobject, Debian: python3-gi)"; \
+		exit 0; \
+	fi
+	@if [ ! -f $(TYPELIB_FILE) ]; then \
+		echo "Building typelib (GIR=1)..."; \
+		$(MAKE) GIR=1 gir; \
+	fi
+	@echo "Running PyGObject smoke test..."
+	LD_LIBRARY_PATH=$(OUTDIR) GI_TYPELIB_PATH=$(OUTDIR) \
+		/usr/bin/python3 $(TESTDIR)/test-gi-bindings.py
+
+# Assert the g-ir-scanner output is warning-free. CI gate that catches any
+# regression that re-introduces annotation noise. Skips cleanly when
+# gobject-introspection-devel is not installed on the host.
+.PHONY: test-gir-clean
+test-gir-clean:
+	@if ! command -v $(GIR_SCANNER) >/dev/null 2>&1; then \
+		echo "SKIP: $(GIR_SCANNER) not on PATH (install gobject-introspection-devel)"; \
+	else \
+		echo "Checking for GIR scanner warnings..."; \
+		rm -f $(GIR_FILE) $(TYPELIB_FILE); \
+		OUTPUT=$$($(MAKE) GIR=1 gir 2>&1); \
+		WARN=$$(echo "$$OUTPUT" | grep -c "Warning:" || true); \
+		if [ "$$WARN" != "0" ]; then \
+			echo "FAIL: $$WARN GIR scanner warning(s):"; \
+			echo "$$OUTPUT" | grep "Warning:" >&2; \
+			exit 1; \
+		fi; \
+		echo "PASS: GIR scanner is clean (0 warnings)"; \
+	fi
 
 # Examples
 .PHONY: examples

@@ -67,6 +67,8 @@ help:
 	@echo "  static       - Build static library only"
 	@echo "  test         - Build and run tests"
 	@echo "  test-verbose - Build and run tests with verbose output"
+	@echo "  test-gi      - Run the PyGObject binding smoke test (needs python3-gobject)"
+	@echo "  test-gir-clean - Assert g-ir-scanner emits zero warnings"
 	@echo "  examples     - Build example programs"
 	@echo "  gir          - Generate GObject introspection data (requires GIR=1)"
 	@echo "  install      - Install library and headers"

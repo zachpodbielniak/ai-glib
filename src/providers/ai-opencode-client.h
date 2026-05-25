@@ -52,51 +52,15 @@ G_DECLARE_FINAL_TYPE(AiOpenCodeClient, ai_opencode_client, AI, OPENCODE_CLIENT, 
 #define AI_OPENCODE_MODEL_GEMINI_2_FLASH    "google/gemini-2.0-flash"
 #define AI_OPENCODE_MODEL_GEMINI_2_5_PRO    "google/gemini-2.5-pro-preview-05-06"
 
-/**
- * ai_opencode_client_new:
- *
- * Creates a new #AiOpenCodeClient.
- * The opencode CLI must be available in PATH or specified via
- * %OPENCODE_PATH environment variable.
- *
- * Returns: (transfer full): a new #AiOpenCodeClient
- */
 AiOpenCodeClient *
 ai_opencode_client_new(void);
 
-/**
- * ai_opencode_client_new_with_config:
- * @config: an #AiConfig
- *
- * Creates a new #AiOpenCodeClient with the specified configuration.
- *
- * Returns: (transfer full): a new #AiOpenCodeClient
- */
 AiOpenCodeClient *
 ai_opencode_client_new_with_config(AiConfig *config);
 
-/**
- * ai_opencode_client_get_skip_permissions:
- * @self: an #AiOpenCodeClient
- *
- * Gets whether permission auto-approval is enabled.
- *
- * Returns: %TRUE if skip permissions is enabled
- */
 gboolean
 ai_opencode_client_get_skip_permissions(AiOpenCodeClient *self);
 
-/**
- * ai_opencode_client_set_skip_permissions:
- * @self: an #AiOpenCodeClient
- * @skip: whether to auto-approve all permission prompts
- *
- * Sets whether to auto-approve all opencode permission prompts by
- * injecting the OPENCODE_PERMISSION environment variable into the
- * child process. When enabled, the opencode CLI will not prompt for
- * approval on any operation (including external directory access),
- * allowing fully autonomous headless operation.
- */
 void
 ai_opencode_client_set_skip_permissions(
     AiOpenCodeClient *self,

@@ -10,7 +10,9 @@ Thank you for your interest in contributing to ai-glib!
 - GLib >= 2.56
 - libsoup >= 3.0
 - json-glib >= 1.6
-- GObject Introspection (optional, for bindings)
+- GObject Introspection (optional, for bindings — built with `make GIR=1`)
+- PyGObject (`python3-gobject` / `python3-gi`) — optional, used only by
+  `make test-gi` (the binding smoke test skips cleanly if absent)
 
 ### Fedora
 

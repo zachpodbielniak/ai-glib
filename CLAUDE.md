@@ -139,11 +139,26 @@ ai_message_new(AiRole role, const gchar *content)
 
 ### GObject Introspection
 
+The library is fully introspectable. `make test` runs the `test-gir-clean`
+gate which fails on any `g-ir-scanner` warning. `make test-gi` exercises
+the bindings via PyGObject.
+
 All public APIs must include GIR annotations:
-- `(transfer none)` / `(transfer full)` for ownership
+- `(transfer none)` / `(transfer full)` / `(transfer container)` for ownership
 - `(nullable)` for nullable parameters/returns
-- `(out)` for output parameters
-- `(element-type TypeName)` for container types
+- `(out)` / `(out) (optional)` for output parameters
+- `(element-type T)` for `GList` / `GPtrArray` / `GHashTable`
+- For custom callback registration, put all three on the callback param
+  itself (HarfBuzz convention):
+  `(scope notified) (closure user_data) (destroy user_data_free)` —
+  do NOT put `(closure)` on user_data when it directly follows the
+  callback; the scanner auto-detects.
+- Docs above the implementation in `.c` only (avoid duplicating in `.h`,
+  the scanner warns on duplicates).
+
+When adding a new client config knob, prefer
+`g_object_class_install_property` over plain getter/setters so bindings
+get native property syntax (`obj.props.thing = ...`).
 
 ### Ownership Rules
 

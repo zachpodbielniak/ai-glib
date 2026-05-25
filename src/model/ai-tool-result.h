@@ -23,16 +23,6 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE(AiToolResult, ai_tool_result, AI, TOOL_RESULT, AiContentBlock)
 
-/**
- * ai_tool_result_new:
- * @tool_use_id: the ID of the tool use this is responding to
- * @content: the result content
- * @is_error: whether this result indicates an error
- *
- * Creates a new #AiToolResult with the given content.
- *
- * Returns: (transfer full): a new #AiToolResult
- */
 AiToolResult *
 ai_tool_result_new(
     const gchar *tool_use_id,
@@ -40,20 +30,6 @@ ai_tool_result_new(
     gboolean     is_error
 );
 
-/**
- * ai_tool_result_new_with_name:
- * @tool_use_id: the ID of the tool use this is responding to
- * @tool_name: (nullable): the name of the tool whose result this is
- * @content: the result content
- * @is_error: whether this result indicates an error
- *
- * Creates a new #AiToolResult that also carries the originating tool name.
- * The tool name is not used by Anthropic's wire format but is required by
- * Gemini's functionResponse.name field. Providers that need it look it up
- * via ai_tool_result_get_tool_name().
- *
- * Returns: (transfer full): a new #AiToolResult
- */
 AiToolResult *
 ai_tool_result_new_with_name(
     const gchar *tool_use_id,
@@ -62,48 +38,15 @@ ai_tool_result_new_with_name(
     gboolean     is_error
 );
 
-/**
- * ai_tool_result_get_tool_use_id:
- * @self: an #AiToolResult
- *
- * Gets the tool use ID this result corresponds to.
- *
- * Returns: (transfer none): the tool use ID
- */
 const gchar *
 ai_tool_result_get_tool_use_id(AiToolResult *self);
 
-/**
- * ai_tool_result_get_tool_name:
- * @self: an #AiToolResult
- *
- * Gets the originating tool name, if it was supplied when the result was
- * created via ai_tool_result_new_with_name(). Returns %NULL otherwise.
- *
- * Returns: (transfer none) (nullable): the tool name
- */
 const gchar *
 ai_tool_result_get_tool_name(AiToolResult *self);
 
-/**
- * ai_tool_result_get_content:
- * @self: an #AiToolResult
- *
- * Gets the result content.
- *
- * Returns: (transfer none): the result content
- */
 const gchar *
 ai_tool_result_get_content(AiToolResult *self);
 
-/**
- * ai_tool_result_get_is_error:
- * @self: an #AiToolResult
- *
- * Gets whether this result indicates an error.
- *
- * Returns: %TRUE if this is an error result
- */
 gboolean
 ai_tool_result_get_is_error(AiToolResult *self);
 

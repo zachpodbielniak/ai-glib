@@ -78,57 +78,18 @@ G_DECLARE_FINAL_TYPE(AiClaudeClient, ai_claude_client, AI, CLAUDE_CLIENT, AiClie
  */
 #define AI_CLAUDE_API_VERSION "2023-06-01"
 
-/**
- * ai_claude_client_new:
- *
- * Creates a new #AiClaudeClient using the default configuration.
- * The API key will be read from the ANTHROPIC_API_KEY environment variable.
- *
- * Returns: (transfer full): a new #AiClaudeClient
- */
 AiClaudeClient *
 ai_claude_client_new(void);
 
-/**
- * ai_claude_client_new_with_config:
- * @config: an #AiConfig
- *
- * Creates a new #AiClaudeClient with the specified configuration.
- *
- * Returns: (transfer full): a new #AiClaudeClient
- */
 AiClaudeClient *
 ai_claude_client_new_with_config(AiConfig *config);
 
-/**
- * ai_claude_client_new_with_key:
- * @api_key: the Anthropic API key
- *
- * Creates a new #AiClaudeClient with the specified API key.
- *
- * Returns: (transfer full): a new #AiClaudeClient
- */
 AiClaudeClient *
 ai_claude_client_new_with_key(const gchar *api_key);
 
-/**
- * ai_claude_client_get_api_version:
- * @self: an #AiClaudeClient
- *
- * Gets the Anthropic API version being used.
- *
- * Returns: (transfer none): the API version string
- */
 const gchar *
 ai_claude_client_get_api_version(AiClaudeClient *self);
 
-/**
- * ai_claude_client_set_api_version:
- * @self: an #AiClaudeClient
- * @version: the API version string
- *
- * Sets the Anthropic API version to use.
- */
 void
 ai_claude_client_set_api_version(
     AiClaudeClient *self,

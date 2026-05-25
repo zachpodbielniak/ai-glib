@@ -56,16 +56,6 @@ struct _AiImageGeneratorInterface
     gpointer _reserved[8];
 };
 
-/**
- * ai_image_generator_generate_image_async:
- * @self: an #AiImageGenerator
- * @request: the image generation request parameters
- * @cancellable: (nullable): a #GCancellable
- * @callback: (scope async): callback to call when done
- * @user_data: user data for the callback
- *
- * Starts an asynchronous image generation request.
- */
 void
 ai_image_generator_generate_image_async(
     AiImageGenerator    *self,
@@ -75,16 +65,6 @@ ai_image_generator_generate_image_async(
     gpointer             user_data
 );
 
-/**
- * ai_image_generator_generate_image_finish:
- * @self: an #AiImageGenerator
- * @result: the #GAsyncResult
- * @error: (out) (optional): return location for a #GError
- *
- * Finishes an asynchronous image generation request.
- *
- * Returns: (transfer full) (nullable): the #AiImageResponse, or %NULL on error
- */
 AiImageResponse *
 ai_image_generator_generate_image_finish(
     AiImageGenerator  *self,
@@ -92,25 +72,9 @@ ai_image_generator_generate_image_finish(
     GError           **error
 );
 
-/**
- * ai_image_generator_get_supported_sizes:
- * @self: an #AiImageGenerator
- *
- * Gets the list of supported image sizes for this provider.
- *
- * Returns: (transfer full) (element-type utf8): list of size strings
- */
 GList *
 ai_image_generator_get_supported_sizes(AiImageGenerator *self);
 
-/**
- * ai_image_generator_get_default_model:
- * @self: an #AiImageGenerator
- *
- * Gets the default model for image generation.
- *
- * Returns: (transfer none): the default model name
- */
 const gchar *
 ai_image_generator_get_default_model(AiImageGenerator *self);
 

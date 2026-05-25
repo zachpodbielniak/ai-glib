@@ -176,6 +176,55 @@ Sets the default system prompt.
 - `self`: an AiClient
 - `prompt`: `(nullable)`: the system prompt
 
+## Properties
+
+`AiClient` exposes its configuration as GObject properties, so language
+bindings (Python, GJS, Vala, …) can use native property syntax and the
+plain `g_object_set` / `g_object_bind_property` APIs work as expected.
+
+| Property | Type | Default | Equivalent method |
+|----------|------|---------|-------------------|
+| `config` | `AiConfig` | created on demand | `ai_client_get_config` |
+| `model` | `string` (nullable) | NULL | `ai_client_get_model` / `_set_model` |
+| `max-tokens` | `int` (1 to G_MAXINT) | 4096 | `ai_client_get_max_tokens` / `_set_max_tokens` |
+| `temperature` | `double` (0.0 to 2.0) | 1.0 | `ai_client_get_temperature` / `_set_temperature` |
+| `system-prompt` | `string` (nullable) | NULL | `ai_client_get_system_prompt` / `_set_system_prompt` |
+
+All properties are read/write. The plain getter/setter functions remain
+the canonical C API; the properties simply dispatch through them.
+
+From C:
+
+```c
+g_object_set(client,
+             "model", "claude-sonnet-4-5",
+             "max-tokens", 1024,
+             "temperature", 0.7,
+             NULL);
+```
+
+From Python (PyGObject):
+
+```python
+import gi
+gi.require_version("AiGlib", "1.0")
+from gi.repository import AiGlib
+
+client = AiGlib.ClaudeClient.new()
+client.props.model = "claude-sonnet-4-5"
+client.props.max_tokens = 1024
+client.props.temperature = 0.7
+```
+
+From JavaScript (GJS):
+
+```javascript
+const AiGlib = imports.gi.AiGlib;
+const client = new AiGlib.ClaudeClient();
+client.model = "claude-sonnet-4-5";
+client.maxTokens = 1024;
+```
+
 ## Example
 
 ```c

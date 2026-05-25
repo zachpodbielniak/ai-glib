@@ -402,6 +402,24 @@ When looking up configuration values, the following order is used:
 4. **Built-in defaults** (lowest priority)
    - Hardcoded defaults (e.g., Ollama host = localhost:11434)
 
+## Properties
+
+`AiConfig` exposes the request-shared knobs as GObject properties.
+Per-provider settings (API key, base URL) take a `provider_type` argument
+and stay as methods.
+
+| Property | Type | Default | Equivalent method |
+|----------|------|---------|-------------------|
+| `timeout` | `uint` (seconds) | 60 | `ai_config_get_timeout` / `_set_timeout` |
+| `max-retries` | `uint` | 3 | `ai_config_get_max_retries` / `_set_max_retries` |
+
+From Python:
+
+```python
+cfg = AiGlib.Config.new()
+cfg.props.timeout = 90
+```
+
 ## See Also
 
 - [AiSimple](ai-simple.md) - Convenience API that uses config automatically

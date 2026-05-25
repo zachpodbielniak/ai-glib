@@ -140,9 +140,11 @@ ai_tool_executor_execute (
  * @self: an #AiToolExecutor
  * @tool: (transfer none): the #AiTool describing the tool (name, description,
  *    parameters)
- * @callback: function to invoke when the model calls this tool
- * @user_data: (closure): opaque pointer passed to @callback on each call
- * @user_data_free: (nullable): destroy notify for @user_data
+ * @callback: (scope notified) (closure user_data) (destroy user_data_free):
+ *    function to invoke when the model calls this tool
+ * @user_data: opaque pointer passed to @callback on each call
+ * @user_data_free: (nullable): destroy notify invoked when @user_data is
+ *    no longer needed (e.g. on unregister or executor finalize)
  *
  * Registers a user-supplied tool callback. The executor takes a ref on @tool
  * and merges it into its tool list so that ai_tool_executor_get_tools()

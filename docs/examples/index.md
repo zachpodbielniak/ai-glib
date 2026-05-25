@@ -13,6 +13,7 @@ Code examples and tutorials for ai-glib.
 | [Tool Use](tool-use.md) | Function calling / tool use (manual loop, all HTTP providers) |
 | [Tool Use Executor](tool-use-executor.md) | Register custom tool callbacks; loop is automatic |
 | [Image Generation](image-generation.md) | Generate images from text prompts |
+| [Python Bindings](python-bindings.md) | Drive ai-glib from PyGObject (works in any GI-aware language) |
 
 ## Building Examples
 

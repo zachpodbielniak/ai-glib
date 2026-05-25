@@ -39,75 +39,19 @@ G_DECLARE_FINAL_TYPE(AiClaudeCodeClient, ai_claude_code_client, AI, CLAUDE_CODE_
 #define AI_CLAUDE_CODE_MODEL_SONNET     "sonnet"
 #define AI_CLAUDE_CODE_MODEL_HAIKU      "haiku"
 
-/**
- * AiClaudeCodeClient::context-compacted:
- * @self: the client that detected compaction
- * @previous_tokens: the input token count before compaction
- * @current_tokens: the input token count after compaction
- *
- * Emitted when the context window appears to have been compacted.
- * Detected by inference: input_tokens dropped between consecutive
- * calls on the same session.
- *
- * This signal fires during both synchronous (chat_sync) and
- * streaming (chat_stream_async) calls, from within the response
- * parsing path. Handlers run synchronously in the calling thread.
- */
 
-/**
- * ai_claude_code_client_new:
- *
- * Creates a new #AiClaudeCodeClient.
- * The claude CLI must be available in PATH or specified via
- * %CLAUDE_CODE_PATH environment variable.
- *
- * Returns: (transfer full): a new #AiClaudeCodeClient
- */
 AiClaudeCodeClient *
 ai_claude_code_client_new(void);
 
-/**
- * ai_claude_code_client_new_with_config:
- * @config: an #AiConfig
- *
- * Creates a new #AiClaudeCodeClient with the specified configuration.
- *
- * Returns: (transfer full): a new #AiClaudeCodeClient
- */
 AiClaudeCodeClient *
 ai_claude_code_client_new_with_config(AiConfig *config);
 
-/**
- * ai_claude_code_client_get_total_cost:
- * @self: an #AiClaudeCodeClient
- *
- * Gets the total cost in USD from the last response.
- *
- * Returns: the total cost in USD, or 0.0 if not available
- */
 gdouble
 ai_claude_code_client_get_total_cost(AiClaudeCodeClient *self);
 
-/**
- * ai_claude_code_client_get_skip_permissions:
- * @self: an #AiClaudeCodeClient
- *
- * Gets whether --dangerously-skip-permissions is enabled.
- *
- * Returns: %TRUE if skip permissions is enabled
- */
 gboolean
 ai_claude_code_client_get_skip_permissions(AiClaudeCodeClient *self);
 
-/**
- * ai_claude_code_client_set_skip_permissions:
- * @self: an #AiClaudeCodeClient
- * @skip: whether to pass --dangerously-skip-permissions
- *
- * Sets whether to pass --dangerously-skip-permissions to the
- * claude CLI. When enabled, the CLI will not prompt for
- * tool-use approval, allowing fully autonomous operation.
- */
 void
 ai_claude_code_client_set_skip_permissions(
     AiClaudeCodeClient *self,

@@ -119,91 +119,27 @@ GType ai_content_type_get_type(void);
  * These provide string <-> enum conversions for serialization.
  */
 
-/**
- * ai_role_to_string:
- * @role: an #AiRole
- *
- * Converts an #AiRole to its string representation.
- *
- * Returns: (transfer none): the string representation of the role
- */
 const gchar *
 ai_role_to_string(AiRole role);
 
-/**
- * ai_role_from_string:
- * @str: a role string
- *
- * Converts a string to an #AiRole.
- *
- * Returns: the #AiRole, or %AI_ROLE_USER if the string is not recognized
- */
 AiRole
 ai_role_from_string(const gchar *str);
 
-/**
- * ai_stop_reason_to_string:
- * @reason: an #AiStopReason
- *
- * Converts an #AiStopReason to its string representation.
- *
- * Returns: (transfer none): the string representation of the stop reason
- */
 const gchar *
 ai_stop_reason_to_string(AiStopReason reason);
 
-/**
- * ai_stop_reason_from_string:
- * @str: a stop reason string
- *
- * Converts a string to an #AiStopReason.
- *
- * Returns: the #AiStopReason, or %AI_STOP_REASON_NONE if not recognized
- */
 AiStopReason
 ai_stop_reason_from_string(const gchar *str);
 
-/**
- * ai_provider_type_to_string:
- * @provider: an #AiProviderType
- *
- * Converts an #AiProviderType to its string representation.
- *
- * Returns: (transfer none): the string representation of the provider
- */
 const gchar *
 ai_provider_type_to_string(AiProviderType provider);
 
-/**
- * ai_provider_type_from_string:
- * @str: a provider string
- *
- * Converts a string to an #AiProviderType.
- *
- * Returns: the #AiProviderType, or %AI_PROVIDER_CLAUDE if not recognized
- */
 AiProviderType
 ai_provider_type_from_string(const gchar *str);
 
-/**
- * ai_content_type_to_string:
- * @content_type: an #AiContentType
- *
- * Converts an #AiContentType to its string representation.
- *
- * Returns: (transfer none): the string representation of the content type
- */
 const gchar *
 ai_content_type_to_string(AiContentType content_type);
 
-/**
- * ai_content_type_from_string:
- * @str: a content type string
- *
- * Converts a string to an #AiContentType.
- *
- * Returns: the #AiContentType, or %AI_CONTENT_TYPE_TEXT if not recognized
- */
 AiContentType
 ai_content_type_from_string(const gchar *str);
 
@@ -228,26 +164,9 @@ typedef enum
 GType ai_effort_level_get_type(void);
 #define AI_TYPE_EFFORT_LEVEL (ai_effort_level_get_type())
 
-/**
- * ai_effort_level_to_string:
- * @level: an #AiEffortLevel
- *
- * Converts an #AiEffortLevel to its string representation.
- *
- * Returns: (transfer none): the string representation of the effort level
- */
 const gchar *
 ai_effort_level_to_string(AiEffortLevel level);
 
-/**
- * ai_effort_level_from_string:
- * @str: an effort level string
- *
- * Converts a string to an #AiEffortLevel. Accepts both effort names
- * (low/medium/high/max) and variant aliases used by some providers.
- *
- * Returns: the #AiEffortLevel, or %AI_EFFORT_MEDIUM if not recognized
- */
 AiEffortLevel
 ai_effort_level_from_string(const gchar *str);
 
@@ -329,91 +248,27 @@ typedef enum
 GType ai_image_response_format_get_type(void);
 #define AI_TYPE_IMAGE_RESPONSE_FORMAT (ai_image_response_format_get_type())
 
-/**
- * ai_image_size_to_string:
- * @size: an #AiImageSize
- *
- * Converts an #AiImageSize to its string representation for API serialization.
- *
- * Returns: (transfer none): the string representation (e.g., "1024x1024")
- */
 const gchar *
 ai_image_size_to_string(AiImageSize size);
 
-/**
- * ai_image_size_from_string:
- * @str: a size string (e.g., "1024x1024")
- *
- * Converts a string to an #AiImageSize.
- *
- * Returns: the #AiImageSize, or %AI_IMAGE_SIZE_AUTO if not recognized
- */
 AiImageSize
 ai_image_size_from_string(const gchar *str);
 
-/**
- * ai_image_quality_to_string:
- * @quality: an #AiImageQuality
- *
- * Converts an #AiImageQuality to its string representation.
- *
- * Returns: (transfer none): the string representation
- */
 const gchar *
 ai_image_quality_to_string(AiImageQuality quality);
 
-/**
- * ai_image_quality_from_string:
- * @str: a quality string
- *
- * Converts a string to an #AiImageQuality.
- *
- * Returns: the #AiImageQuality, or %AI_IMAGE_QUALITY_AUTO if not recognized
- */
 AiImageQuality
 ai_image_quality_from_string(const gchar *str);
 
-/**
- * ai_image_style_to_string:
- * @style: an #AiImageStyle
- *
- * Converts an #AiImageStyle to its string representation.
- *
- * Returns: (transfer none): the string representation
- */
 const gchar *
 ai_image_style_to_string(AiImageStyle style);
 
-/**
- * ai_image_style_from_string:
- * @str: a style string
- *
- * Converts a string to an #AiImageStyle.
- *
- * Returns: the #AiImageStyle, or %AI_IMAGE_STYLE_AUTO if not recognized
- */
 AiImageStyle
 ai_image_style_from_string(const gchar *str);
 
-/**
- * ai_image_response_format_to_string:
- * @format: an #AiImageResponseFormat
- *
- * Converts an #AiImageResponseFormat to its string representation.
- *
- * Returns: (transfer none): the string representation
- */
 const gchar *
 ai_image_response_format_to_string(AiImageResponseFormat format);
 
-/**
- * ai_image_response_format_from_string:
- * @str: a format string
- *
- * Converts a string to an #AiImageResponseFormat.
- *
- * Returns: the #AiImageResponseFormat, or %AI_IMAGE_RESPONSE_URL if not recognized
- */
 AiImageResponseFormat
 ai_image_response_format_from_string(const gchar *str);
 

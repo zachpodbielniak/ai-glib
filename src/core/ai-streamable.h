@@ -62,21 +62,6 @@ struct _AiStreamableInterface
     gpointer _reserved[8];
 };
 
-/**
- * ai_streamable_chat_stream_async:
- * @self: an #AiStreamable
- * @messages: (element-type AiMessage): the conversation messages
- * @system_prompt: (nullable): system prompt to use
- * @max_tokens: maximum tokens to generate
- * @tools: (nullable) (element-type AiTool): tools available to the model
- * @cancellable: (nullable): a #GCancellable
- * @callback: (scope async): callback to call when done
- * @user_data: user data for the callback
- *
- * Starts an asynchronous streaming chat completion request.
- * Connect to the "delta" signal to receive text as it's generated.
- * Connect to "stream-end" to receive the final response.
- */
 void
 ai_streamable_chat_stream_async(
     AiStreamable        *self,
@@ -89,16 +74,6 @@ ai_streamable_chat_stream_async(
     gpointer             user_data
 );
 
-/**
- * ai_streamable_chat_stream_finish:
- * @self: an #AiStreamable
- * @result: the #GAsyncResult
- * @error: (out) (optional): return location for a #GError
- *
- * Finishes an asynchronous streaming chat completion request.
- *
- * Returns: (transfer full) (nullable): the complete #AiResponse, or %NULL on error
- */
 AiResponse *
 ai_streamable_chat_stream_finish(
     AiStreamable  *self,

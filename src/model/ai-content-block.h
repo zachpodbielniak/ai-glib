@@ -45,25 +45,9 @@ struct _AiContentBlockClass
     gpointer _reserved[8];
 };
 
-/**
- * ai_content_block_get_content_type:
- * @self: an #AiContentBlock
- *
- * Gets the content type of this block.
- *
- * Returns: the #AiContentType of this block
- */
 AiContentType
 ai_content_block_get_content_type(AiContentBlock *self);
 
-/**
- * ai_content_block_to_json:
- * @self: an #AiContentBlock
- *
- * Serializes this content block to JSON.
- *
- * Returns: (transfer full): a #JsonNode representing this block
- */
 JsonNode *
 ai_content_block_to_json(AiContentBlock *self);
 
