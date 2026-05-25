@@ -151,8 +151,8 @@ make test-verbose      # Run with verbose output
 ### Running Specific Tests
 
 ```bash
-./build/tests/test-config
-G_TEST_VERBOSE=1 ./build/tests/test-message
+./build/release/tests/test-config
+G_TEST_VERBOSE=1 ./build/release/tests/test-message
 ```
 
 ### Writing Tests

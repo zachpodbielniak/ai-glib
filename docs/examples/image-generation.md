@@ -266,9 +266,9 @@ The library includes ready-to-run examples:
 make
 
 # Run with appropriate API key
-OPENAI_API_KEY=sk-... ./build/examples/image-gen-openai "a mountain landscape"
-XAI_API_KEY=xai-... ./build/examples/image-gen-grok "a robot"
-GEMINI_API_KEY=AI... ./build/examples/image-gen-gemini "a cat in space"
+OPENAI_API_KEY=sk-... ./build/release/examples/image-gen-openai "a mountain landscape"
+XAI_API_KEY=xai-... ./build/release/examples/image-gen-grok "a robot"
+GEMINI_API_KEY=AI... ./build/release/examples/image-gen-gemini "a cat in space"
 ```
 
 ## Error Handling

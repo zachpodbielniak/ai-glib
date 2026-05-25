@@ -4,13 +4,35 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Usage:
-#   make                 - Build shared and static libraries
-#   make DEBUG=1         - Debug build
+#   make                 - Release build to build/release/
+#   make DEBUG=1         - Debug build to build/debug/
+#   make GIR=1           - Also build GObject introspection (.gir/.typelib)
 #   make test            - Run tests
 #   make install         - Install to PREFIX
 #   make help            - Show all targets
 
+# When clean and build targets appear together (e.g. make clean all -j),
+# serialize them via sub-make so clean finishes before the build starts.
+ifneq ($(filter clean clean-all distclean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out clean clean-all distclean,$(MAKECMDGOALS)),)
+
+.PHONY: $(MAKECMDGOALS) __serialize
+$(MAKECMDGOALS): __serialize ;
+__serialize:
+	$(MAKE) --no-print-directory $(filter clean clean-all distclean,$(MAKECMDGOALS))
+	$(MAKE) --no-print-directory $(filter-out clean clean-all distclean,$(MAKECMDGOALS))
+
+__MIXED := 1
+endif
+endif
+
+ifndef __MIXED
+
 include config.mk
+
+# Make `make` (no args) build everything. Without this, the first target
+# defined by include rules.mk ($(OUTDIR):) would become the default goal.
+.DEFAULT_GOAL := all
 
 # Public headers (to be installed)
 PUBLIC_HEADERS = \
@@ -92,11 +114,11 @@ LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
 
 # Test files
 TEST_SOURCES = $(wildcard $(TESTDIR)/test-*.c)
-TEST_BINARIES = $(patsubst $(TESTDIR)/%.c,$(BUILDDIR)/tests/%,$(TEST_SOURCES))
+TEST_BINARIES = $(patsubst $(TESTDIR)/%.c,$(OUTDIR)/tests/%,$(TEST_SOURCES))
 
 # Example files
 EXAMPLE_SOURCES = $(wildcard $(EXAMPLEDIR)/*.c)
-EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(BUILDDIR)/examples/%,$(EXAMPLE_SOURCES))
+EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(OUTDIR)/examples/%,$(EXAMPLE_SOURCES))
 
 # Include common rules
 include rules.mk
@@ -109,10 +131,10 @@ $(YAML_GLIB_STATIC):
 
 # Default target
 .PHONY: all
-all: $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc
+all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir
 
 # Generate config.h from template
-$(BUILDDIR)/config.h: $(SRCDIR)/config.h.in | $(BUILDDIR)
+$(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
 	@echo "Generating config.h..."
 	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
@@ -121,7 +143,7 @@ $(BUILDDIR)/config.h: $(SRCDIR)/config.h.in | $(BUILDDIR)
 	     $< > $@
 
 # Generate ai-version.h from template
-$(BUILDDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(BUILDDIR)
+$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
 	@echo "Generating ai-version.h..."
 	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
@@ -132,24 +154,25 @@ $(BUILDDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(BUILDDIR)
 .PHONY: shared
 shared: $(LIB_SHARED)
 
-$(LIB_SHARED): $(LIB_OBJECTS) | $(BUILDDIR)
+$(LIB_SHARED): $(LIB_OBJECTS) | $(OUTDIR)
 	@echo "Linking shared library..."
 	$(CC) -shared -Wl,-soname,$(LIB_SONAME) -o $@ $(LIB_OBJECTS) $(LDFLAGS)
-	@cd $(BUILDDIR) && ln -sf $(notdir $(LIB_SHARED)) $(LIB_SONAME) 2>/dev/null || true
-	@cd $(BUILDDIR) && ln -sf $(LIB_SONAME) $(LIB_NAME).so 2>/dev/null || true
+	@cd $(OUTDIR) && ln -sf $(notdir $(LIB_SHARED)) $(LIB_SONAME) 2>/dev/null || true
+	@cd $(OUTDIR) && ln -sf $(LIB_SONAME) $(LIB_NAME).so 2>/dev/null || true
 
 # Static library
 .PHONY: static
 static: $(LIB_STATIC)
 
-$(LIB_STATIC): $(LIB_OBJECTS) | $(BUILDDIR)
+$(LIB_STATIC): $(LIB_OBJECTS) | $(OUTDIR)
 	@echo "Creating static library..."
 	$(AR) rcs $@ $(LIB_OBJECTS)
 
 # Ensure config.h, ai-version.h, and yaml-glib exist before compiling
-$(LIB_OBJECTS): $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h $(YAML_GLIB_STATIC)
+$(LIB_OBJECTS): $(OUTDIR)/config.h $(OUTDIR)/ai-version.h $(YAML_GLIB_STATIC)
 
-# pkg-config file
+# pkg-config file (stays at project root — moving it under $(OUTDIR) would
+# silently break consumers that run `pkg-config --variable pcfiledir`).
 $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in
 	@echo "Generating pkg-config file..."
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
@@ -181,14 +204,19 @@ test-verbose: $(TEST_BINARIES)
 .PHONY: examples
 examples: $(EXAMPLE_BINARIES)
 
-# GObject introspection
+# GObject introspection (opt-in: pass GIR=1).  Defaults off so hosts that
+# lack gobject-introspection-devel can build without setting any flags.
+ifeq ($(GIR),1)
+
 .PHONY: gir
 gir: $(TYPELIB_FILE)
 
-$(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS)
+$(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS) | $(OUTDIR)
 	@echo "Generating GObject introspection data..."
-	g-ir-scanner --namespace=$(GIR_NAMESPACE) \
+	$(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
 		--nsversion=$(GIR_VERSION) \
+		--identifier-prefix=Ai \
+		--symbol-prefix=ai \
 		--warn-all \
 		--include=GLib-2.0 \
 		--include=GObject-2.0 \
@@ -200,19 +228,37 @@ $(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS)
 		--pkg=gio-2.0 \
 		--pkg=libsoup-3.0 \
 		--pkg=json-glib-1.0 \
-		--library=$(LIB_NAME) \
-		--library-path=$(BUILDDIR) \
+		--library=$(PROJECT_NAME)-1.0 \
+		--library-path=$(OUTDIR) \
 		-I$(SRCDIR) \
-		-Ibuild \
+		-I$(OUTDIR) \
 		--output=$@ \
 		$(PUBLIC_HEADERS) $(LIB_SOURCES)
 
 $(TYPELIB_FILE): $(GIR_FILE)
-	g-ir-compiler $< -o $@
+	$(GIR_COMPILER) $< -o $@
+
+# Install .gir and .typelib into standard GI search paths
+.PHONY: install-gir
+install-gir: gir
+	install -d $(DESTDIR)$(LIBDIR)/girepository-1.0
+	install -m 644 $(TYPELIB_FILE) \
+		$(DESTDIR)$(LIBDIR)/girepository-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).typelib
+	install -d $(DESTDIR)$(PREFIX)/share/gir-1.0
+	install -m 644 $(GIR_FILE) \
+		$(DESTDIR)$(PREFIX)/share/gir-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).gir
+
+else
+
+.PHONY: gir install-gir
+gir install-gir:
+	@echo "GIR disabled (GIR=0). Re-build with GIR=1 to produce .gir/.typelib."
+
+endif
 
 # Installation
 .PHONY: install
-install: all
+install: all install-gir
 	@echo "Installing to $(PREFIX)..."
 	install -d $(DESTDIR)$(LIBDIR)
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
@@ -227,7 +273,7 @@ install: all
 	cd $(DESTDIR)$(LIBDIR) && ln -sf $(LIB_SONAME) $(LIB_NAME).so
 	install -m 644 $(SRCDIR)/ai-glib.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
 	install -m 644 $(SRCDIR)/ai-types.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
-	install -m 644 $(BUILDDIR)/ai-version.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
+	install -m 644 $(OUTDIR)/ai-version.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
 	install -m 644 $(filter $(SRCDIR)/core/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core/
 	install -m 644 $(filter $(SRCDIR)/model/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
 	install -m 644 $(filter $(SRCDIR)/providers/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
@@ -242,6 +288,8 @@ uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(LIB_NAME).a
 	rm -rf $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	rm -f $(DESTDIR)$(PKGCONFIGDIR)/$(PROJECT_NAME)-1.0.pc
+	rm -f $(DESTDIR)$(LIBDIR)/girepository-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).typelib
+	rm -f $(DESTDIR)$(PREFIX)/share/gir-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).gir
 	@echo "Uninstallation complete!"
 
 # Print variables (for debugging)
@@ -249,9 +297,15 @@ uninstall:
 vars:
 	@echo "PROJECT_NAME  = $(PROJECT_NAME)"
 	@echo "VERSION       = $(VERSION)"
+	@echo "BUILD_TYPE    = $(BUILD_TYPE)"
+	@echo "OUTDIR        = $(OUTDIR)"
+	@echo "OBJDIR        = $(OBJDIR)"
+	@echo "GIR           = $(GIR)"
 	@echo "CC            = $(CC)"
 	@echo "CFLAGS        = $(CFLAGS)"
 	@echo "LDFLAGS       = $(LDFLAGS)"
 	@echo "PREFIX        = $(PREFIX)"
 	@echo "LIB_SOURCES   = $(LIB_SOURCES)"
 	@echo "LIB_OBJECTS   = $(LIB_OBJECTS)"
+
+endif # ifndef __MIXED

@@ -3,73 +3,58 @@
 # Copyright (C) 2025
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Pattern rules for object files
-#
-# NOTE: $(BUILDDIR)/config.h and $(BUILDDIR)/ai-version.h are listed as
-# order-only prerequisites here to prevent a parallel build race condition.
-# They are also listed as regular prerequisites via the $(LIB_OBJECTS) rule
-# in Makefile so that changes to those headers still trigger recompilation.
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR) $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+# Object subdirectories (derived from source list)
+OBJ_DIRS := $(sort $(dir $(LIB_OBJECTS)))
 
-$(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c | $(OBJDIR)/core $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/model/%.o: $(SRCDIR)/model/%.c | $(OBJDIR)/model $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/providers/%.o: $(SRCDIR)/providers/%.c | $(OBJDIR)/providers $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/convenience/%.o: $(SRCDIR)/convenience/%.c | $(OBJDIR)/convenience $(BUILDDIR)/config.h $(BUILDDIR)/ai-version.h
+# Generic pattern rule for object files.
+# Order-only deps on $(OUTDIR)/config.h and $(OUTDIR)/ai-version.h prevent a
+# parallel-build race; the per-objects regular prereq in Makefile triggers
+# recompilation when either header changes.
+$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJ_DIRS) $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Create build directories
-$(BUILDDIR):
-	mkdir -p $(BUILDDIR)
+$(OUTDIR):
+	mkdir -p $(OUTDIR)
 
-$(OBJDIR):
+$(OBJDIR): | $(OUTDIR)
 	mkdir -p $(OBJDIR)
 
-$(OBJDIR)/core:
-	mkdir -p $(OBJDIR)/core
-
-$(OBJDIR)/model:
-	mkdir -p $(OBJDIR)/model
-
-$(OBJDIR)/providers:
-	mkdir -p $(OBJDIR)/providers
-
-$(OBJDIR)/convenience:
-	mkdir -p $(OBJDIR)/convenience
+$(OBJ_DIRS): | $(OBJDIR)
+	mkdir -p $@
 
 # Test compilation rule
-$(BUILDDIR)/tests/%: $(TESTDIR)/%.c $(LIB_SHARED)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(BUILDDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(BUILDDIR)
+$(OUTDIR)/tests/%: $(TESTDIR)/%.c $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(OUTDIR)
+
+$(OUTDIR)/tests: | $(OUTDIR)
+	mkdir -p $@
 
 # Example compilation rule
-$(BUILDDIR)/examples/%: $(EXAMPLEDIR)/%.c $(LIB_SHARED)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(BUILDDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(BUILDDIR)
+$(OUTDIR)/examples/%: $(EXAMPLEDIR)/%.c $(LIB_SHARED) | $(OUTDIR)/examples
+	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(OUTDIR)
 
-# Clean rule
+$(OUTDIR)/examples: | $(OUTDIR)
+	mkdir -p $@
+
+# Clean current build type and the bundled yaml-glib build
 .PHONY: clean
 clean:
+	rm -rf $(OUTDIR)
+	rm -f $(PROJECT_NAME)-1.0.pc
+	$(MAKE) -C $(YAML_GLIB_DIR) clean 2>/dev/null || true
+
+# Clean everything (both build types + deps)
+.PHONY: clean-all
+clean-all:
 	rm -rf $(BUILDDIR)
 	rm -f $(PROJECT_NAME)-1.0.pc
 	$(MAKE) -C $(YAML_GLIB_DIR) clean 2>/dev/null || true
 
-# Distclean rule
+# Distclean is an alias for clean-all
 .PHONY: distclean
-distclean: clean
-	rm -f build/config.h
-	rm -f build/ai-version.h
+distclean: clean-all
 
 # Help
 .PHONY: help
@@ -83,15 +68,21 @@ help:
 	@echo "  test         - Build and run tests"
 	@echo "  test-verbose - Build and run tests with verbose output"
 	@echo "  examples     - Build example programs"
-	@echo "  gir          - Generate GObject introspection data"
+	@echo "  gir          - Generate GObject introspection data (requires GIR=1)"
 	@echo "  install      - Install library and headers"
 	@echo "  uninstall    - Uninstall library and headers"
-	@echo "  clean        - Remove build artifacts"
-	@echo "  distclean    - Remove all generated files"
+	@echo "  clean        - Remove current build type ($(BUILD_TYPE)) and dep builds"
+	@echo "  clean-all    - Remove all build artifacts and dep builds"
+	@echo "  distclean    - Same as clean-all"
 	@echo "  help         - Show this help"
 	@echo ""
 	@echo "Build options:"
 	@echo "  DEBUG=1      - Build with debug symbols and no optimization"
+	@echo "  GIR=1        - Build GObject introspection (.gir/.typelib)"
 	@echo "  ASAN=1       - Enable address sanitizer"
 	@echo "  UBSAN=1      - Enable undefined behavior sanitizer"
 	@echo "  PREFIX=/path - Set installation prefix (default: /usr/local)"
+	@echo ""
+	@echo "Output directories:"
+	@echo "  make         -> build/release/"
+	@echo "  make DEBUG=1 -> build/debug/"

@@ -22,12 +22,13 @@ Examples are built automatically with the library:
 make
 ```
 
-Run an example:
+Run an example (substitute `build/debug/examples/` for `build/release/examples/`
+when built with `make DEBUG=1`):
 
 ```bash
-./build/examples/simple-chat-claude
-./build/examples/simple-chat-openai
-./build/examples/simple-chat-ollama
+./build/release/examples/simple-chat-claude
+./build/release/examples/simple-chat-openai
+./build/release/examples/simple-chat-ollama
 ```
 
 ## Provider-Specific Examples

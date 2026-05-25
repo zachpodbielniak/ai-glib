@@ -30,11 +30,11 @@ export ANTHROPIC_API_KEY="..."  # or OPENAI_API_KEY / GEMINI_API_KEY / XAI_API_K
 ```bash
 make examples
 
-./build/examples/tool-use-executor claude   "What's the weather in Miami in Fahrenheit, and what's 13 * 7?"
-./build/examples/tool-use-executor openai
-./build/examples/tool-use-executor gemini
-./build/examples/tool-use-executor grok
-./build/examples/tool-use-executor ollama
+./build/release/examples/tool-use-executor claude   "What's the weather in Miami in Fahrenheit, and what's 13 * 7?"
+./build/release/examples/tool-use-executor openai
+./build/release/examples/tool-use-executor gemini
+./build/release/examples/tool-use-executor grok
+./build/release/examples/tool-use-executor ollama
 ```
 
 ## Highlights from the source

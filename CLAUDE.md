@@ -11,15 +11,23 @@ provides both sync and async APIs.
 ## Build Commands
 
 ```bash
-make                    # Build the library
-make all                # Build library, tests, and examples
-make DEBUG=1            # Debug build
-make test               # Run all tests
+make                    # Release build -> build/release/
+make DEBUG=1            # Debug build   -> build/debug/   (coexists)
+make GIR=1              # Also build GObject introspection (.gir/.typelib)
+make test               # Run tests for the current build type
 make test-verbose       # Run tests with verbose output
-make clean              # Clean build artifacts
+make examples           # Build example binaries
+make clean              # Remove current build type (build/release/ or build/debug/)
+make clean-all          # Remove the entire build/ tree
 make install            # Install to PREFIX
-make gir                # Generate GObject introspection data
+make install GIR=1      # Also install .gir/.typelib into standard GI paths
 ```
+
+Build artifacts land under `build/release/` by default and `build/debug/`
+when `DEBUG=1` — the two trees coexist so you can flip between them with
+no rebuild. Tests live under `build/<type>/tests/`, examples under
+`build/<type>/examples/`, the shared library at `build/<type>/libai-glib-1.0.so.*`.
+`ASAN=1` and `UBSAN=1` add the corresponding sanitizers.
 
 ## Code Style
 
@@ -235,16 +243,16 @@ Tests use GLib's GTest framework. Each component has its own test file:
 
     tests/test-<component>.c
 
-Run specific test:
+Run specific test (substitute `debug` for `release` when built with `DEBUG=1`):
 
 ```bash
-./build/tests/test-config
+./build/release/tests/test-config
 ```
 
 Run with verbose output:
 
 ```bash
-G_TEST_VERBOSE=1 ./build/tests/test-config
+G_TEST_VERBOSE=1 ./build/release/tests/test-config
 ```
 
 ## Key Files

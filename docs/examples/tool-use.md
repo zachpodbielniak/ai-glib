@@ -37,11 +37,11 @@ export GEMINI_API_KEY="..."
 ```bash
 make examples
 
-./build/examples/tool-use claude  "What's the weather in Miami and 13 * 7?"
-./build/examples/tool-use openai
-./build/examples/tool-use grok
-./build/examples/tool-use gemini
-./build/examples/tool-use ollama
+./build/release/examples/tool-use claude  "What's the weather in Miami and 13 * 7?"
+./build/release/examples/tool-use openai
+./build/release/examples/tool-use grok
+./build/release/examples/tool-use gemini
+./build/release/examples/tool-use ollama
 ```
 
 The first argument selects the provider (`claude` by default); the second
