@@ -301,6 +301,41 @@ g_main_loop_run(loop);
 g_list_free(messages);
 ```
 
+### Tool Calling (HTTP providers)
+
+Tool definition + multi-turn loop using built-in and user-supplied tools:
+
+```c
+g_autoptr(AiToolExecutor) exec = ai_tool_executor_new();
+g_autoptr(AiTool) tool = ai_tool_new("get_weather", "Look up weather");
+ai_tool_add_parameter(tool, "location", "string", "City", TRUE);
+
+ai_tool_executor_register_callback(
+    exec, tool, on_weather, /* user_data */ NULL, /* free */ NULL);
+
+g_autofree gchar *answer = ai_tool_executor_run(
+    exec, AI_PROVIDER(client), messages, NULL, 4096, NULL, &err);
+```
+
+For manual loops (no AiToolExecutor), construct tool-result messages with
+the tool name so Gemini's wire format round-trips:
+
+```c
+result_msg = ai_message_new_tool_result_with_name(
+    ai_tool_use_get_id(tu),
+    ai_tool_use_get_name(tu),
+    result_text,
+    /* is_error */ FALSE);
+```
+
+`ai_message_new_tool_result()` (no name) still works for everything except
+Gemini; if in doubt, use `_with_name`.
+
+Per-provider wire formats are handled inside each provider's
+`build_request`. The shared OpenAI-style serializer lives at
+`src/providers/ai-openai-shared.{c,h}` (private; consumed by OpenAI, Grok,
+and Ollama).
+
 ### Error Handling
 
 ```c

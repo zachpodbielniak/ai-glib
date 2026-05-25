@@ -166,9 +166,37 @@ The ai-glib library handles these differences transparently.
 
 - **Chat Completion**: Full support
 - **Streaming**: Full support via `AiStreamable` interface
-- **Tool Use**: Partial support (function declarations)
+- **Tool Use**: Full support (function declarations, function calls, function
+  responses, including streaming)
 - **Vision**: Full multimodal support
 - **System Prompts**: Supported via system instruction
+
+## Tool Calling
+
+Gemini uses a wire format distinct from OpenAI / Anthropic:
+
+* Tool definitions are wrapped in `tools:[{functionDeclarations:[...]}]`.
+* Assistant tool calls arrive as `parts:[{functionCall:{name, args}}]` inside
+  a `role:"model"` content item. `args` is a parsed JSON object, not a
+  string.
+* Tool results must be sent back as
+  `parts:[{functionResponse:{name, response:{output|error}}}]` in a
+  `role:"user"` content item. Crucially, Gemini keys the response by `name`,
+  not by a call id.
+
+Two things to know when calling tools through Gemini:
+
+1. Use `ai_message_new_tool_result_with_name(id, tool_name, content, is_error)`
+   when sending results back. The tool name is required on the wire. If you
+   pass `NULL` for the name, ai-glib falls back to scanning earlier assistant
+   messages for a matching `tool_use_id` — works for simple loops but is
+   slower and less robust than just supplying it.
+2. Gemini's API does not return tool-call IDs. ai-glib synthesizes a UUID
+   per call so the multi-turn loop can match results back to calls
+   internally. The synthetic ID is only used in-memory; on the wire only
+   the tool name matters.
+
+The `AiToolExecutor` convenience class handles both of these automatically.
 
 ## Context Windows
 

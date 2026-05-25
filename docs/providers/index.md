@@ -86,7 +86,7 @@ ai_client_set_model(AI_CLIENT(client), "claude-3-5-haiku-20241022");
 |---------|--------|--------|--------|------|--------|-------------|--------------------|----------|
 | Chat Completion | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Streaming | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes |
-| Tool Use | Yes | Yes | Partial | Yes | Partial | Yes | Yes | Model-dependent |
+| Tool Use | Yes | Yes | Yes | Yes | Yes (model-dependent) | Yes | Yes | Model-dependent |
 | Vision | Yes | Yes | Yes | Yes | Model-dependent | Yes | Yes | Model-dependent |
 | Local | No | No | No | No | Yes | No | No | No |
 | API Key Required | Yes | Yes | Yes | Yes | No | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) |

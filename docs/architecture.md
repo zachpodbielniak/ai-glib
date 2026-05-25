@@ -175,6 +175,28 @@ struct _AiClientClass
 };
 ```
 
+### Per-Provider Wire-Format Serialization
+
+The in-memory model (`AiMessage`, `AiToolUse`, `AiToolResult`,
+`AiTextContent`) is provider-agnostic — callers build messages once and the
+provider handles the wire-format translation inside `build_request`.
+
+- `AiClaudeClient` consumes `ai_message_to_json()` directly because its
+  output already matches Anthropic's content-block shape.
+- `AiOpenAIClient`, `AiGrokClient`, and `AiOllamaClient` share an internal
+  helper, `ai_openai_shared_serialize_messages_array()` (private header
+  `src/providers/ai-openai-shared.h`), that expands one `AiMessage` into
+  one or more OpenAI Chat Completions wire messages — `role:"tool"` for
+  results, `tool_calls` on assistant messages with `arguments` as a JSON
+  string.
+- `AiGeminiClient` walks content blocks inline and emits `parts:[{text |
+  functionCall | functionResponse}]` plus the
+  `tools:[{functionDeclarations:[...]}]` wrapper Gemini expects.
+
+This mirrors pi-mono's per-provider `convertMessages()` pattern. Adding a
+new provider means writing its own message walker; no central switch
+needs to know about it.
+
 ## Error Handling
 
 Errors use the GLib error domain system:

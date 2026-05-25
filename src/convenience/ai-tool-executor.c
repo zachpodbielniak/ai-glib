@@ -35,11 +35,33 @@
  * Struct definition — must precede any code accessing its fields
  * ================================================================ */
 
+typedef struct
+{
+    AiToolCallback  fn;
+    gpointer        user_data;
+    GDestroyNotify  user_data_free;
+} CallbackEntry;
+
+static void
+callback_entry_free (gpointer data)
+{
+    CallbackEntry *entry = data;
+
+    if (entry == NULL)
+        return;
+
+    if (entry->user_data_free != NULL && entry->user_data != NULL)
+        entry->user_data_free (entry->user_data);
+
+    g_slice_free (CallbackEntry, entry);
+}
+
 struct _AiToolExecutor
 {
     GObject           parent_instance;
     GList            *tools;           /* GList<AiTool>, owned */
     AiSearchProvider *search_provider; /* nullable, ref'd */
+    GHashTable       *callbacks;       /* str -> CallbackEntry, owned */
 };
 
 G_DEFINE_TYPE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT)
@@ -153,7 +175,10 @@ on_run_response (
                 is_error = TRUE;
             }
 
-            result_msg = ai_message_new_tool_result (tool_id, tool_result, is_error);
+            /* Pass tool_name so providers like Gemini (whose functionResponse
+             * is keyed by name, not id) round-trip correctly. */
+            result_msg = ai_message_new_tool_result_with_name (
+                tool_id, tool_name, tool_result, is_error);
             ctx->messages = g_list_append (ctx->messages, result_msg);
         }
 
@@ -728,6 +753,7 @@ ai_tool_executor_finalize (GObject *object)
     g_list_free_full (self->tools, g_object_unref);
     self->tools = NULL;
     g_clear_object (&self->search_provider);
+    g_clear_pointer (&self->callbacks, g_hash_table_unref);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
 }
@@ -745,6 +771,8 @@ ai_tool_executor_init (AiToolExecutor *self)
 {
     self->tools           = NULL;
     self->search_provider = NULL;
+    self->callbacks       = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                    g_free, callback_entry_free);
 }
 
 /* ================================================================
@@ -896,11 +924,18 @@ ai_tool_executor_execute (
 ){
     const gchar     *name;
     const ToolEntry *entry;
+    CallbackEntry   *user_entry;
 
     g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
     g_return_val_if_fail (tool_use != NULL, NULL);
 
     name = ai_tool_use_get_name (tool_use);
+
+    /* User-registered callbacks win over built-ins so callers can override
+     * a built-in tool by registering their own version with the same name. */
+    user_entry = (name != NULL) ? g_hash_table_lookup (self->callbacks, name) : NULL;
+    if (user_entry != NULL)
+        return user_entry->fn (tool_use, cancellable, error, user_entry->user_data);
 
     for (entry = BUILTIN_TOOLS; entry->name != NULL; entry++)
     {
@@ -911,6 +946,80 @@ ai_tool_executor_execute (
     g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
                  "ai_tool_executor_execute: unknown tool '%s'", name);
     return NULL;
+}
+
+void
+ai_tool_executor_register_callback (
+    AiToolExecutor  *self,
+    AiTool          *tool,
+    AiToolCallback   callback,
+    gpointer         user_data,
+    GDestroyNotify   user_data_free
+){
+    const gchar   *name;
+    GList         *iter;
+    CallbackEntry *entry;
+    gboolean       tool_already_listed = FALSE;
+
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+    g_return_if_fail (AI_IS_TOOL (tool));
+    g_return_if_fail (callback != NULL);
+
+    name = ai_tool_get_name (tool);
+    g_return_if_fail (name != NULL);
+
+    /* Register the callback (replaces any existing entry for this name). */
+    entry = g_slice_new0 (CallbackEntry);
+    entry->fn = callback;
+    entry->user_data = user_data;
+    entry->user_data_free = user_data_free;
+    g_hash_table_replace (self->callbacks, g_strdup (name), entry);
+
+    /* Ensure the tool definition appears in self->tools so the model sees
+     * it in the request. Replace an existing entry with the same name. */
+    for (iter = self->tools; iter != NULL; iter = iter->next)
+    {
+        AiTool *existing = iter->data;
+        const gchar *existing_name = ai_tool_get_name (existing);
+
+        if (g_strcmp0 (existing_name, name) == 0)
+        {
+            g_object_unref (existing);
+            iter->data = g_object_ref (tool);
+            tool_already_listed = TRUE;
+            break;
+        }
+    }
+
+    if (!tool_already_listed)
+    {
+        self->tools = g_list_append (self->tools, g_object_ref (tool));
+    }
+}
+
+void
+ai_tool_executor_unregister (
+    AiToolExecutor *self,
+    const gchar    *tool_name
+){
+    GList *iter;
+
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+    g_return_if_fail (tool_name != NULL);
+
+    g_hash_table_remove (self->callbacks, tool_name);
+
+    for (iter = self->tools; iter != NULL; iter = iter->next)
+    {
+        AiTool *tool = iter->data;
+
+        if (g_strcmp0 (ai_tool_get_name (tool), tool_name) == 0)
+        {
+            g_object_unref (tool);
+            self->tools = g_list_delete_link (self->tools, iter);
+            break;
+        }
+    }
 }
 
 gchar *

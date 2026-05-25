@@ -21,6 +21,7 @@ struct _AiToolResult
     AiContentBlock parent_instance;
 
     gchar   *tool_use_id;
+    gchar   *tool_name;
     gchar   *content;
     gboolean is_error;
 };
@@ -34,6 +35,7 @@ enum
 {
     PROP_0,
     PROP_TOOL_USE_ID,
+    PROP_TOOL_NAME,
     PROP_CONTENT,
     PROP_IS_ERROR,
     N_PROPS
@@ -47,6 +49,7 @@ ai_tool_result_finalize(GObject *object)
     AiToolResult *self = AI_TOOL_RESULT(object);
 
     g_clear_pointer(&self->tool_use_id, g_free);
+    g_clear_pointer(&self->tool_name, g_free);
     g_clear_pointer(&self->content, g_free);
 
     G_OBJECT_CLASS(ai_tool_result_parent_class)->finalize(object);
@@ -65,6 +68,9 @@ ai_tool_result_get_property(
     {
         case PROP_TOOL_USE_ID:
             g_value_set_string(value, self->tool_use_id);
+            break;
+        case PROP_TOOL_NAME:
+            g_value_set_string(value, self->tool_name);
             break;
         case PROP_CONTENT:
             g_value_set_string(value, self->content);
@@ -92,6 +98,10 @@ ai_tool_result_set_property(
         case PROP_TOOL_USE_ID:
             g_clear_pointer(&self->tool_use_id, g_free);
             self->tool_use_id = g_value_dup_string(value);
+            break;
+        case PROP_TOOL_NAME:
+            g_clear_pointer(&self->tool_name, g_free);
+            self->tool_name = g_value_dup_string(value);
             break;
         case PROP_CONTENT:
             g_clear_pointer(&self->content, g_free);
@@ -176,6 +186,21 @@ ai_tool_result_class_init(AiToolResultClass *klass)
                             G_PARAM_STATIC_STRINGS);
 
     /**
+     * AiToolResult:tool-name:
+     *
+     * Optional originating tool name. Not part of Anthropic's tool_result
+     * wire format; carried so providers like Gemini (whose functionResponse
+     * is keyed by name) can re-serialize a previously-executed tool call.
+     */
+    properties[PROP_TOOL_NAME] =
+        g_param_spec_string("tool-name",
+                            "Tool Name",
+                            "The originating tool name",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_CONSTRUCT |
+                            G_PARAM_STATIC_STRINGS);
+
+    /**
      * AiToolResult:content:
      *
      * The result content.
@@ -208,6 +233,7 @@ static void
 ai_tool_result_init(AiToolResult *self)
 {
     self->tool_use_id = NULL;
+    self->tool_name = NULL;
     self->content = NULL;
     self->is_error = FALSE;
 }
@@ -238,6 +264,34 @@ ai_tool_result_new(
 }
 
 /**
+ * ai_tool_result_new_with_name:
+ * @tool_use_id: the ID of the tool use this is responding to
+ * @tool_name: (nullable): the name of the tool whose result this is
+ * @content: the result content
+ * @is_error: whether this result indicates an error
+ *
+ * Creates a new #AiToolResult that also records the originating tool name.
+ *
+ * Returns: (transfer full): a new #AiToolResult
+ */
+AiToolResult *
+ai_tool_result_new_with_name(
+    const gchar *tool_use_id,
+    const gchar *tool_name,
+    const gchar *content,
+    gboolean     is_error
+){
+    g_autoptr(AiToolResult) self = g_object_new(AI_TYPE_TOOL_RESULT,
+                                                 "tool-use-id", tool_use_id,
+                                                 "tool-name", tool_name,
+                                                 "content", content,
+                                                 "is-error", is_error,
+                                                 NULL);
+
+    return (AiToolResult *)g_steal_pointer(&self);
+}
+
+/**
  * ai_tool_result_get_tool_use_id:
  * @self: an #AiToolResult
  *
@@ -251,6 +305,22 @@ ai_tool_result_get_tool_use_id(AiToolResult *self)
     g_return_val_if_fail(AI_IS_TOOL_RESULT(self), NULL);
 
     return self->tool_use_id;
+}
+
+/**
+ * ai_tool_result_get_tool_name:
+ * @self: an #AiToolResult
+ *
+ * Gets the originating tool name. May be %NULL if not set.
+ *
+ * Returns: (transfer none) (nullable): the tool name
+ */
+const gchar *
+ai_tool_result_get_tool_name(AiToolResult *self)
+{
+    g_return_val_if_fail(AI_IS_TOOL_RESULT(self), NULL);
+
+    return self->tool_name;
 }
 
 /**

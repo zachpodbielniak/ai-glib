@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "providers/ai-ollama-client.h"
+#include "providers/ai-openai-shared.h"
 #include "core/ai-error.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
@@ -48,8 +49,6 @@ ai_ollama_client_build_request(
     const gchar *model;
     GList *l;
 
-    (void)tools; /* TODO: Implement tool support */
-
     model = ai_client_get_model(client);
     if (model == NULL)
     {
@@ -62,39 +61,30 @@ ai_ollama_client_build_request(
     json_builder_set_member_name(builder, "model");
     json_builder_add_string_value(builder, model);
 
-    /* Messages */
+    /* Messages — Ollama's /api/chat is OpenAI-compatible for tools, so we
+     * share the OpenAI serializer (role:"tool" results, tool_calls on
+     * assistant messages). */
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-
-    /* Add system message if provided */
-    if (system_prompt != NULL && system_prompt[0] != '\0')
-    {
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, "system");
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, system_prompt);
-        json_builder_end_object(builder);
-    }
-
-    for (l = messages; l != NULL; l = l->next)
-    {
-        AiMessage *msg = l->data;
-        AiRole role = ai_message_get_role(msg);
-        g_autofree gchar *text = ai_message_get_text(msg);
-
-        json_builder_begin_object(builder);
-
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, ai_role_to_string(role));
-
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, text != NULL ? text : "");
-
-        json_builder_end_object(builder);
-    }
-
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT);
     json_builder_end_array(builder);
+
+    /* Tools — Ollama accepts the OpenAI tool definition shape. */
+    if (tools != NULL)
+    {
+        json_builder_set_member_name(builder, "tools");
+        json_builder_begin_array(builder);
+
+        for (l = tools; l != NULL; l = l->next)
+        {
+            AiTool *tool = l->data;
+            g_autoptr(JsonNode) tool_node = ai_tool_to_json(tool, AI_PROVIDER_OPENAI);
+
+            json_builder_add_value(builder, g_steal_pointer(&tool_node));
+        }
+
+        json_builder_end_array(builder);
+    }
 
     /* Disable streaming for sync requests */
     json_builder_set_member_name(builder, "stream");
@@ -187,6 +177,70 @@ ai_ollama_client_parse_response(
         {
             g_autoptr(AiTextContent) text_content = ai_text_content_new(content);
             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&text_content));
+        }
+
+        /* Tool calls — Ollama returns them in the same shape as OpenAI,
+         * except `arguments` arrives as a parsed JSON object rather than
+         * a string. Handle both shapes. */
+        if (json_object_has_member(message, "tool_calls"))
+        {
+            JsonArray *tool_calls = json_object_get_array_member(message, "tool_calls");
+            guint len = json_array_get_length(tool_calls);
+            guint i;
+            static guint synthetic_id_counter = 0;
+
+            for (i = 0; i < len; i++)
+            {
+                JsonObject *tc = json_array_get_object_element(tool_calls, i);
+                const gchar *tc_id = json_object_get_string_member_with_default(tc, "id", NULL);
+                JsonObject *func;
+                const gchar *name;
+                g_autoptr(AiToolUse) tool_use = NULL;
+                g_autofree gchar *synthetic_id = NULL;
+
+                if (!json_object_has_member(tc, "function"))
+                {
+                    continue;
+                }
+
+                func = json_object_get_object_member(tc, "function");
+                name = json_object_get_string_member_with_default(func, "name", "");
+
+                if (tc_id == NULL || tc_id[0] == '\0')
+                {
+                    synthetic_id = g_strdup_printf("call_ollama_%u",
+                                                    ++synthetic_id_counter);
+                    tc_id = synthetic_id;
+                }
+
+                if (json_object_has_member(func, "arguments"))
+                {
+                    JsonNode *args_node = json_object_get_member(func, "arguments");
+
+                    if (JSON_NODE_HOLDS_VALUE(args_node))
+                    {
+                        const gchar *args_str = json_node_get_string(args_node);
+                        tool_use = ai_tool_use_new_from_json_string(
+                            tc_id, name, args_str);
+                    }
+                    else
+                    {
+                        tool_use = ai_tool_use_new(tc_id, name, args_node);
+                    }
+                }
+                else
+                {
+                    tool_use = ai_tool_use_new(tc_id, name, NULL);
+                }
+
+                ai_response_add_content_block(response,
+                    (AiContentBlock *)g_steal_pointer(&tool_use));
+            }
+
+            if (len > 0)
+            {
+                ai_response_set_stop_reason(response, AI_STOP_REASON_TOOL_USE);
+            }
         }
     }
 
@@ -583,6 +637,7 @@ ollama_process_stream_chunk(
     {
         const gchar *done_reason = json_object_get_string_member_with_default(
             obj, "done_reason", "");
+        gboolean tool_use_present = FALSE;
 
         if (g_strcmp0(done_reason, "length") == 0)
         {
@@ -605,11 +660,79 @@ ollama_process_stream_chunk(
             }
         }
 
-        /* Finalize response */
+        /* Finalize response: text content first */
         if (data->current_text != NULL && data->current_text->len > 0)
         {
             g_autoptr(AiTextContent) text_content = ai_text_content_new(data->current_text->str);
             ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&text_content));
+        }
+
+        /* Then tool calls if present on the final message */
+        if (json_object_has_member(obj, "message"))
+        {
+            JsonObject *message = json_object_get_object_member(obj, "message");
+
+            if (json_object_has_member(message, "tool_calls"))
+            {
+                JsonArray *tool_calls = json_object_get_array_member(message, "tool_calls");
+                guint len = json_array_get_length(tool_calls);
+                guint i;
+                static guint synthetic_id_counter = 0;
+
+                for (i = 0; i < len; i++)
+                {
+                    JsonObject *tc = json_array_get_object_element(tool_calls, i);
+                    const gchar *tc_id = json_object_get_string_member_with_default(tc, "id", NULL);
+                    JsonObject *func;
+                    const gchar *name;
+                    g_autoptr(AiToolUse) tool_use = NULL;
+                    g_autofree gchar *synthetic_id = NULL;
+
+                    if (!json_object_has_member(tc, "function"))
+                    {
+                        continue;
+                    }
+
+                    func = json_object_get_object_member(tc, "function");
+                    name = json_object_get_string_member_with_default(func, "name", "");
+
+                    if (tc_id == NULL || tc_id[0] == '\0')
+                    {
+                        synthetic_id = g_strdup_printf("call_ollama_%u",
+                                                        ++synthetic_id_counter);
+                        tc_id = synthetic_id;
+                    }
+
+                    if (json_object_has_member(func, "arguments"))
+                    {
+                        JsonNode *args_node = json_object_get_member(func, "arguments");
+
+                        if (JSON_NODE_HOLDS_VALUE(args_node))
+                        {
+                            const gchar *args_str = json_node_get_string(args_node);
+                            tool_use = ai_tool_use_new_from_json_string(
+                                tc_id, name, args_str);
+                        }
+                        else
+                        {
+                            tool_use = ai_tool_use_new(tc_id, name, args_node);
+                        }
+                    }
+                    else
+                    {
+                        tool_use = ai_tool_use_new(tc_id, name, NULL);
+                    }
+
+                    ai_response_add_content_block(data->response,
+                        (AiContentBlock *)g_steal_pointer(&tool_use));
+                    tool_use_present = TRUE;
+                }
+
+                if (tool_use_present)
+                {
+                    ai_response_set_stop_reason(data->response, AI_STOP_REASON_TOOL_USE);
+                }
+            }
         }
 
         g_signal_emit_by_name(data->client, "stream-end", data->response);
@@ -741,8 +864,6 @@ ai_ollama_client_build_stream_request(
     const gchar *model;
     GList *l;
 
-    (void)tools; /* TODO: Implement tool support */
-
     model = ai_client_get_model(client);
     if (model == NULL)
     {
@@ -756,32 +877,24 @@ ai_ollama_client_build_stream_request(
 
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-
-    if (system_prompt != NULL && system_prompt[0] != '\0')
-    {
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, "system");
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, system_prompt);
-        json_builder_end_object(builder);
-    }
-
-    for (l = messages; l != NULL; l = l->next)
-    {
-        AiMessage *msg = l->data;
-        AiRole role = ai_message_get_role(msg);
-        g_autofree gchar *text = ai_message_get_text(msg);
-
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, ai_role_to_string(role));
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, text != NULL ? text : "");
-        json_builder_end_object(builder);
-    }
-
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT);
     json_builder_end_array(builder);
+
+    if (tools != NULL)
+    {
+        json_builder_set_member_name(builder, "tools");
+        json_builder_begin_array(builder);
+
+        for (l = tools; l != NULL; l = l->next)
+        {
+            AiTool *tool = l->data;
+            g_autoptr(JsonNode) tool_node = ai_tool_to_json(tool, AI_PROVIDER_OPENAI);
+
+            json_builder_add_value(builder, g_steal_pointer(&tool_node));
+        }
+
+        json_builder_end_array(builder);
+    }
 
     /* Enable streaming */
     json_builder_set_member_name(builder, "stream");

@@ -164,6 +164,15 @@ Grok uses an OpenAI-compatible API:
 - **System Prompts**: Full support
 - **Image Generation**: Basic support via `AiImageGenerator` interface
 
+## Tool Calling
+
+Grok's API is OpenAI-compatible, so ai-glib uses the same wire-format
+serializer as the OpenAI client. See the
+[OpenAI Tool Calling section](openai.md#tool-calling) for the details — the
+behavior is identical: tool definitions wrapped in `{type:"function", ...}`,
+prior assistant tool calls round-tripped as `tool_calls`, and tool results
+emitted as separate `role:"tool"` messages.
+
 ## Image Generation
 
 Grok provides basic image generation through an OpenAI-compatible API.

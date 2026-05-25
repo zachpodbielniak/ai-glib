@@ -76,6 +76,28 @@ ai_message_new_tool_result(
 );
 
 /**
+ * ai_message_new_tool_result_with_name:
+ * @tool_use_id: the tool use ID this result corresponds to
+ * @tool_name: (nullable): the name of the tool whose result this is
+ * @content: the result content
+ * @is_error: whether this is an error result
+ *
+ * Creates a new user message containing a tool result and the originating
+ * tool name. Prefer this over ai_message_new_tool_result() when the result
+ * may be replayed to a provider whose wire format requires the tool name
+ * (e.g. Gemini's functionResponse).
+ *
+ * Returns: (transfer full): a new #AiMessage
+ */
+AiMessage *
+ai_message_new_tool_result_with_name(
+    const gchar *tool_use_id,
+    const gchar *tool_name,
+    const gchar *content,
+    gboolean     is_error
+);
+
+/**
  * ai_message_get_role:
  * @self: an #AiMessage
  *

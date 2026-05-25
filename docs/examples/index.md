@@ -10,7 +10,8 @@ Code examples and tutorials for ai-glib.
 | [Simple Chat](simple-chat.md) | Full async chat completion with any provider |
 | [Multi-Provider](multi-provider.md) | Using multiple providers in one application |
 | [Streaming](streaming.md) | Real-time streaming responses |
-| [Tool Use](tool-use.md) | Function calling / tool use |
+| [Tool Use](tool-use.md) | Function calling / tool use (manual loop, all HTTP providers) |
+| [Tool Use Executor](tool-use-executor.md) | Register custom tool callbacks; loop is automatic |
 | [Image Generation](image-generation.md) | Generate images from text prompts |
 
 ## Building Examples

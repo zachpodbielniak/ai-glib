@@ -204,6 +204,35 @@ ai_message_new_tool_result(
 }
 
 /**
+ * ai_message_new_tool_result_with_name:
+ * @tool_use_id: the tool use ID this result corresponds to
+ * @tool_name: (nullable): the originating tool name
+ * @content: the result content
+ * @is_error: whether this is an error result
+ *
+ * Creates a new user message containing a tool result that also records the
+ * originating tool name. Required for round-tripping tool results back to
+ * providers whose wire format keys by tool name (e.g. Gemini).
+ *
+ * Returns: (transfer full): a new #AiMessage
+ */
+AiMessage *
+ai_message_new_tool_result_with_name(
+    const gchar *tool_use_id,
+    const gchar *tool_name,
+    const gchar *content,
+    gboolean     is_error
+){
+    g_autoptr(AiMessage) self = ai_message_new(AI_ROLE_USER);
+    g_autoptr(AiToolResult) result = ai_tool_result_new_with_name(
+        tool_use_id, tool_name, content, is_error);
+
+    ai_message_add_content_block(self, (AiContentBlock *)g_steal_pointer(&result));
+
+    return (AiMessage *)g_steal_pointer(&self);
+}
+
+/**
  * ai_message_get_role:
  * @self: an #AiMessage
  *

@@ -44,6 +44,29 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE(AiToolExecutor, ai_tool_executor, AI, TOOL_EXECUTOR, GObject)
 
+/* Forward decl needed by AiToolCallback below. */
+typedef struct _AiTool AiTool;
+
+/**
+ * AiToolCallback:
+ * @tool_use: the #AiToolUse request from the model
+ * @cancellable: (nullable): an optional #GCancellable
+ * @error: (out) (optional): return location for a #GError
+ * @user_data: the user data registered alongside this callback
+ *
+ * Function signature for user-supplied tool implementations registered with
+ * ai_tool_executor_register_callback().
+ *
+ * Returns: (transfer full) (nullable): the result string, or %NULL on error.
+ *   Free with g_free().
+ */
+typedef gchar * (*AiToolCallback) (
+    AiToolUse    *tool_use,
+    GCancellable *cancellable,
+    GError      **error,
+    gpointer      user_data
+);
+
 /**
  * ai_tool_executor_new:
  *
@@ -110,6 +133,49 @@ ai_tool_executor_execute (
     AiToolUse       *tool_use,
     GCancellable    *cancellable,
     GError         **error
+);
+
+/**
+ * ai_tool_executor_register_callback:
+ * @self: an #AiToolExecutor
+ * @tool: (transfer none): the #AiTool describing the tool (name, description,
+ *    parameters)
+ * @callback: function to invoke when the model calls this tool
+ * @user_data: (closure): opaque pointer passed to @callback on each call
+ * @user_data_free: (nullable): destroy notify for @user_data
+ *
+ * Registers a user-supplied tool callback. The executor takes a ref on @tool
+ * and merges it into its tool list so that ai_tool_executor_get_tools()
+ * (and the multi-turn loop) will advertise it to the model.
+ *
+ * If a tool with the same name is already registered (built-in or
+ * user-supplied), the new registration replaces it.
+ *
+ * This lets you wire arbitrary application logic into the same multi-turn
+ * loop that drives the built-in tools.
+ */
+void
+ai_tool_executor_register_callback (
+    AiToolExecutor  *self,
+    AiTool          *tool,
+    AiToolCallback   callback,
+    gpointer         user_data,
+    GDestroyNotify   user_data_free
+);
+
+/**
+ * ai_tool_executor_unregister:
+ * @self: an #AiToolExecutor
+ * @tool_name: the name of the tool to remove
+ *
+ * Removes a previously-registered user tool. No-op if the name is not
+ * registered. Does not remove built-in tools (the same name would simply
+ * become callable again via the built-in implementation).
+ */
+void
+ai_tool_executor_unregister (
+    AiToolExecutor *self,
+    const gchar    *tool_name
 );
 
 /**

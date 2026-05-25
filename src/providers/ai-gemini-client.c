@@ -16,6 +16,7 @@
 #include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-tool-result.h"
 #include "model/ai-image-request.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"
@@ -41,8 +42,62 @@ G_DEFINE_TYPE_WITH_CODE(AiGeminiClient, ai_gemini_client, AI_TYPE_CLIENT,
                                               ai_gemini_client_image_generator_init))
 
 /*
+ * Resolve a tool name for a tool_result whose AiToolResult was not given a
+ * tool-name. Falls back to scanning earlier assistant messages for an
+ * AiToolUse with a matching id. Returns "" if nothing matches (Gemini
+ * requires the field, so we ship something).
+ */
+static const gchar *
+resolve_tool_name(
+    GList        *messages,
+    GList        *up_to,        /* stop before this list node */
+    const gchar  *tool_use_id
+){
+    GList *m;
+
+    if (tool_use_id == NULL)
+    {
+        return "";
+    }
+
+    for (m = messages; m != NULL && m != up_to; m = m->next)
+    {
+        AiMessage *msg = m->data;
+        GList *b;
+
+        if (ai_message_get_role(msg) != AI_ROLE_ASSISTANT)
+        {
+            continue;
+        }
+
+        for (b = ai_message_get_content_blocks(msg); b != NULL; b = b->next)
+        {
+            AiContentBlock *block = b->data;
+
+            if (AI_IS_TOOL_USE(block))
+            {
+                AiToolUse *tu = AI_TOOL_USE(block);
+                const gchar *id = ai_tool_use_get_id(tu);
+
+                if (g_strcmp0(id, tool_use_id) == 0)
+                {
+                    return ai_tool_use_get_name(tu);
+                }
+            }
+        }
+    }
+
+    return "";
+}
+
+/*
  * Build Gemini API request.
- * Gemini uses a different format: { contents: [...], generationConfig: {...} }
+ * Gemini uses { contents: [...], systemInstruction: {...}, tools: [...],
+ *              generationConfig: {...} }
+ *
+ * Per-message expansion:
+ *   role==assistant -> {"role":"model","parts":[{text|functionCall}, ...]}
+ *   role==user      -> {"role":"user","parts":[{text|functionResponse}, ...]}
  */
 static JsonNode *
 ai_gemini_client_build_request(
@@ -55,8 +110,6 @@ ai_gemini_client_build_request(
     g_autoptr(JsonBuilder) builder = json_builder_new();
     GList *l;
 
-    (void)tools; /* TODO: Implement tool support for Gemini */
-
     json_builder_begin_object(builder);
 
     /* Contents (messages) */
@@ -67,11 +120,18 @@ ai_gemini_client_build_request(
     {
         AiMessage *msg = l->data;
         AiRole role = ai_message_get_role(msg);
-        g_autofree gchar *text = ai_message_get_text(msg);
+        GList *blocks = ai_message_get_content_blocks(msg);
+        GList *b;
+
+        /* System messages are surfaced via top-level systemInstruction; skip
+         * them in contents. */
+        if (role == AI_ROLE_SYSTEM)
+        {
+            continue;
+        }
 
         json_builder_begin_object(builder);
 
-        /* Gemini uses "user" and "model" for roles */
         json_builder_set_member_name(builder, "role");
         if (role == AI_ROLE_ASSISTANT)
         {
@@ -84,16 +144,92 @@ ai_gemini_client_build_request(
 
         json_builder_set_member_name(builder, "parts");
         json_builder_begin_array(builder);
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "text");
-        json_builder_add_string_value(builder, text != NULL ? text : "");
-        json_builder_end_object(builder);
-        json_builder_end_array(builder);
 
-        json_builder_end_object(builder);
+        for (b = blocks; b != NULL; b = b->next)
+        {
+            AiContentBlock *block = b->data;
+
+            if (AI_IS_TEXT_CONTENT(block))
+            {
+                const gchar *text = ai_text_content_get_text(AI_TEXT_CONTENT(block));
+
+                json_builder_begin_object(builder);
+                json_builder_set_member_name(builder, "text");
+                json_builder_add_string_value(builder, text != NULL ? text : "");
+                json_builder_end_object(builder);
+            }
+            else if (AI_IS_TOOL_USE(block) && role == AI_ROLE_ASSISTANT)
+            {
+                AiToolUse *tu = AI_TOOL_USE(block);
+                const gchar *name = ai_tool_use_get_name(tu);
+                JsonNode *input = ai_tool_use_get_input(tu);
+
+                json_builder_begin_object(builder);
+                json_builder_set_member_name(builder, "functionCall");
+                json_builder_begin_object(builder);
+
+                json_builder_set_member_name(builder, "name");
+                json_builder_add_string_value(builder, name != NULL ? name : "");
+
+                json_builder_set_member_name(builder, "args");
+                if (input != NULL && JSON_NODE_HOLDS_OBJECT(input))
+                {
+                    json_builder_add_value(builder, json_node_copy(input));
+                }
+                else
+                {
+                    json_builder_begin_object(builder);
+                    json_builder_end_object(builder);
+                }
+
+                json_builder_end_object(builder); /* functionCall */
+                json_builder_end_object(builder); /* part */
+            }
+            else if (AI_IS_TOOL_RESULT(block) && role == AI_ROLE_USER)
+            {
+                AiToolResult *tr = AI_TOOL_RESULT(block);
+                const gchar *name = ai_tool_result_get_tool_name(tr);
+                const gchar *content = ai_tool_result_get_content(tr);
+                gboolean is_error = ai_tool_result_get_is_error(tr);
+
+                if (name == NULL || name[0] == '\0')
+                {
+                    name = resolve_tool_name(messages, l,
+                                             ai_tool_result_get_tool_use_id(tr));
+                }
+
+                json_builder_begin_object(builder);
+                json_builder_set_member_name(builder, "functionResponse");
+                json_builder_begin_object(builder);
+
+                json_builder_set_member_name(builder, "name");
+                json_builder_add_string_value(builder, name);
+
+                json_builder_set_member_name(builder, "response");
+                json_builder_begin_object(builder);
+                json_builder_set_member_name(builder, is_error ? "error" : "output");
+                json_builder_add_string_value(builder, content != NULL ? content : "");
+                json_builder_end_object(builder);
+
+                json_builder_end_object(builder); /* functionResponse */
+                json_builder_end_object(builder); /* part */
+            }
+        }
+
+        /* Gemini requires at least one part per content. */
+        if (blocks == NULL)
+        {
+            json_builder_begin_object(builder);
+            json_builder_set_member_name(builder, "text");
+            json_builder_add_string_value(builder, "");
+            json_builder_end_object(builder);
+        }
+
+        json_builder_end_array(builder); /* parts */
+        json_builder_end_object(builder); /* content */
     }
 
-    json_builder_end_array(builder);
+    json_builder_end_array(builder); /* contents */
 
     /* System instruction */
     if (system_prompt != NULL && system_prompt[0] != '\0')
@@ -108,6 +244,30 @@ ai_gemini_client_build_request(
         json_builder_end_object(builder);
         json_builder_end_array(builder);
         json_builder_end_object(builder);
+    }
+
+    /* Tools — Gemini wraps the function declaration list in a single
+     * tools[0].functionDeclarations array. */
+    if (tools != NULL)
+    {
+        json_builder_set_member_name(builder, "tools");
+        json_builder_begin_array(builder);
+        json_builder_begin_object(builder);
+
+        json_builder_set_member_name(builder, "functionDeclarations");
+        json_builder_begin_array(builder);
+
+        for (l = tools; l != NULL; l = l->next)
+        {
+            AiTool *tool = l->data;
+            g_autoptr(JsonNode) tool_node = ai_tool_to_json(tool, AI_PROVIDER_GEMINI);
+
+            json_builder_add_value(builder, g_steal_pointer(&tool_node));
+        }
+
+        json_builder_end_array(builder); /* functionDeclarations */
+        json_builder_end_object(builder); /* tools[0] */
+        json_builder_end_array(builder); /* tools */
     }
 
     /* Generation config */
@@ -196,6 +356,7 @@ ai_gemini_client_parse_response(
             if (json_object_has_member(candidate, "content"))
             {
                 JsonObject *content = json_object_get_object_member(candidate, "content");
+                gboolean tool_use_present = FALSE;
 
                 if (json_object_has_member(content, "parts"))
                 {
@@ -214,7 +375,38 @@ ai_gemini_client_parse_response(
 
                             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&text_content));
                         }
+                        else if (json_object_has_member(part, "functionCall"))
+                        {
+                            JsonObject *fc = json_object_get_object_member(part, "functionCall");
+                            const gchar *name = json_object_get_string_member_with_default(fc, "name", "");
+                            const gchar *provided_id = json_object_get_string_member_with_default(fc, "id", NULL);
+                            JsonNode *args = json_object_has_member(fc, "args")
+                                ? json_object_get_member(fc, "args") : NULL;
+                            g_autofree gchar *synthetic_id = NULL;
+                            const gchar *id;
+                            g_autoptr(AiToolUse) tool_use = NULL;
+
+                            if (provided_id != NULL && provided_id[0] != '\0')
+                            {
+                                id = provided_id;
+                            }
+                            else
+                            {
+                                synthetic_id = g_uuid_string_random();
+                                id = synthetic_id;
+                            }
+
+                            tool_use = ai_tool_use_new(id, name, args);
+                            ai_response_add_content_block(response,
+                                (AiContentBlock *)g_steal_pointer(&tool_use));
+                            tool_use_present = TRUE;
+                        }
                     }
+                }
+
+                if (tool_use_present)
+                {
+                    ai_response_set_stop_reason(response, AI_STOP_REASON_TOOL_USE);
                 }
             }
         }
@@ -638,6 +830,36 @@ gemini_process_stream_chunk(
                                 g_string_append(data->current_text, text);
                                 g_signal_emit_by_name(data->client, "delta", text);
                             }
+                        }
+                        else if (json_object_has_member(part, "functionCall"))
+                        {
+                            /* Gemini streams tool calls atomically per part —
+                             * accumulate the AiToolUse directly into the
+                             * response now. */
+                            JsonObject *fc = json_object_get_object_member(part, "functionCall");
+                            const gchar *name = json_object_get_string_member_with_default(fc, "name", "");
+                            const gchar *provided_id = json_object_get_string_member_with_default(fc, "id", NULL);
+                            JsonNode *args = json_object_has_member(fc, "args")
+                                ? json_object_get_member(fc, "args") : NULL;
+                            g_autofree gchar *synthetic_id = NULL;
+                            const gchar *id;
+                            g_autoptr(AiToolUse) tool_use = NULL;
+
+                            if (provided_id != NULL && provided_id[0] != '\0')
+                            {
+                                id = provided_id;
+                            }
+                            else
+                            {
+                                synthetic_id = g_uuid_string_random();
+                                id = synthetic_id;
+                            }
+
+                            tool_use = ai_tool_use_new(id, name, args);
+                            ai_response_add_content_block(data->response,
+                                (AiContentBlock *)g_steal_pointer(&tool_use));
+                            ai_response_set_stop_reason(data->response,
+                                AI_STOP_REASON_TOOL_USE);
                         }
                     }
                 }

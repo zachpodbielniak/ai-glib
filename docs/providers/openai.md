@@ -215,6 +215,27 @@ int main(void)
 - **System Prompts**: Full support
 - **Image Generation**: Full support via `AiImageGenerator` interface
 
+## Tool Calling
+
+Tools are serialized to OpenAI's Chat Completions wire format:
+
+* Tool definitions go in the request as
+  `tools: [{type:"function", function:{name, description, parameters}}]`.
+* Prior assistant tool calls round-trip as
+  `{role:"assistant", content:<text or null>, tool_calls:[{id, type:"function",
+   function:{name, arguments:"<JSON-string>"}}]}`.
+* Each tool result becomes a separate top-level
+  `{role:"tool", tool_call_id, content}` message.
+
+Important: the model API's `AiMessage` representation is provider-agnostic.
+Application code calls `ai_message_new_tool_result_with_name()` (or
+`ai_message_new_tool_result()`) once and ai-glib's per-provider serializer
+emits the right wire shape automatically. You do not need to format the JSON
+yourself.
+
+For the easiest path through the multi-turn loop see `AiToolExecutor`. To
+hand-roll the loop see [`examples/tool-use.md`](../examples/tool-use.md).
+
 ## Image Generation
 
 OpenAI provides comprehensive image generation through DALL-E models.

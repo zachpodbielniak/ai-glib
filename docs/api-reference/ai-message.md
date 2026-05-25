@@ -103,6 +103,34 @@ Creates a new message containing a tool result.
 
 ---
 
+### ai_message_new_tool_result_with_name
+
+```c
+AiMessage *
+ai_message_new_tool_result_with_name(
+    const gchar *tool_use_id,
+    const gchar *tool_name,
+    const gchar *content,
+    gboolean     is_error
+);
+```
+
+Creates a new message containing a tool result, also recording the originating
+tool name. Prefer this constructor when the result may be sent back to a
+provider whose wire format keys by tool name (e.g. Gemini's
+`functionResponse.name`). Pass `NULL` for `tool_name` if you don't need it —
+in which case the call is equivalent to `ai_message_new_tool_result()`.
+
+**Parameters:**
+- `tool_use_id`: the ID of the tool use this is responding to
+- `tool_name`: `(nullable)`: the name of the tool whose result this is
+- `content`: the result content
+- `is_error`: whether the result is an error
+
+**Returns:** `(transfer full)`: a new AiMessage with AI_ROLE_USER
+
+---
+
 ### ai_message_get_role
 
 ```c
@@ -176,7 +204,15 @@ JsonNode *
 ai_message_to_json(AiMessage *self);
 ```
 
-Serializes the message to JSON.
+Serializes the message to JSON in **Anthropic-canonical content-block form**
+(e.g. `{type:"text", text:...}`, `{type:"tool_use", id, name, input}`,
+`{type:"tool_result", tool_use_id, content, is_error}`). This is the shape
+consumed by the Claude provider and by `ai_message_new_from_json()` for
+round-tripping; it is also useful for debug/display.
+
+It is **not** the wire format for OpenAI/Grok/Gemini/Ollama. Those providers
+perform their own per-provider conversion when building requests — see the
+respective provider docs. Application code rarely needs to call this directly.
 
 **Parameters:**
 - `self`: an AiMessage

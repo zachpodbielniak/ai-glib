@@ -213,10 +213,35 @@ ollama pull llama3.2:q4    # Quantized
 
 - **Chat Completion**: Full support
 - **Streaming**: Full support via `AiStreamable` interface
-- **Tool Use**: Model-dependent
+- **Tool Use**: Full support, model-dependent
 - **Vision**: Supported on multimodal models (llava, etc.)
 - **System Prompts**: Full support
 - **No API Key**: Runs locally, completely private
+
+## Tool Calling
+
+Ollama's `/api/chat` endpoint accepts the OpenAI-compatible `tools` array, so
+ai-glib uses the same wire-format serializer as the OpenAI client. See the
+[OpenAI Tool Calling section](openai.md#tool-calling) for the message shape.
+
+Model gotchas:
+
+* Not every Ollama model implements tool use. Confirmed-working choices
+  include `qwen3:14b`, `qwen2.5`, `llama3.1`, and `mistral-nemo`. Smaller or
+  older models (`llama2`, base `mistral`) typically ignore the `tools`
+  argument and just describe the call in prose.
+* Outbound `tool_calls[].function.arguments` is sent as a JSON **object**,
+  not a JSON-encoded string. Ollama's `/api/chat` rejects the OpenAI
+  Chat-Completions string form (`HTTP 400`). ai-glib's
+  `ai_openai_shared_serialize_messages_array()` handles this via the
+  `AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT` flag, set automatically by the
+  Ollama client.
+* Inbound `function.arguments` may arrive either as a parsed object or as
+  a JSON-encoded string depending on the model; ai-glib handles both
+  shapes transparently.
+* Tool-call IDs are sometimes omitted by the server; ai-glib synthesizes
+  `call_ollama_<N>` ids in that case so the multi-turn loop can match
+  results to calls.
 
 ## Links
 

@@ -337,6 +337,96 @@ test_executor_unknown_tool (void)
 }
 
 /* ================================================================
+ * register_callback
+ * ================================================================ */
+
+typedef struct
+{
+    gint   call_count;
+    gchar *last_query;
+} CallbackState;
+
+static gchar *
+my_lookup_tool (
+    AiToolUse    *tool_use,
+    GCancellable *cancellable,
+    GError      **error,
+    gpointer      user_data
+){
+    CallbackState *state = user_data;
+    const gchar   *query;
+
+    (void)cancellable;
+    (void)error;
+
+    state->call_count++;
+
+    query = ai_tool_use_get_input_string (tool_use, "query");
+    g_clear_pointer (&state->last_query, g_free);
+    state->last_query = g_strdup (query);
+
+    return g_strdup_printf ("looked up: %s", query != NULL ? query : "(none)");
+}
+
+static void
+test_executor_register_callback (void)
+{
+    g_autoptr(AiToolExecutor) exec      = NULL;
+    g_autoptr(AiTool)         tool      = NULL;
+    g_autoptr(AiToolUse)      tool_use  = NULL;
+    g_autofree gchar         *result    = NULL;
+    g_autoptr(GError)         err       = NULL;
+    CallbackState             state     = { 0, NULL };
+    GList                    *tools;
+    GList                    *iter;
+    gboolean                  found_my_tool = FALSE;
+
+    exec = ai_tool_executor_new ();
+    tool = ai_tool_new ("my_lookup", "Look something up");
+    ai_tool_add_parameter (tool, "query", "string", "what to look up", TRUE);
+
+    ai_tool_executor_register_callback (exec, tool, my_lookup_tool, &state, NULL);
+
+    /* Tool should be visible to the model via get_tools() */
+    tools = ai_tool_executor_get_tools (exec);
+    for (iter = tools; iter != NULL; iter = iter->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (iter->data), "my_lookup") == 0)
+        {
+            found_my_tool = TRUE;
+            break;
+        }
+    }
+    g_assert_true (found_my_tool);
+
+    /* Execute dispatches to the callback */
+    tool_use = make_tool_use ("my_lookup", "{\"query\": \"weather\"}");
+    result   = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    g_assert_no_error (err);
+    g_assert_cmpstr (result, ==, "looked up: weather");
+    g_assert_cmpint (state.call_count, ==, 1);
+    g_assert_cmpstr (state.last_query, ==, "weather");
+
+    /* Unregister removes it from both the dispatch and the tool list */
+    ai_tool_executor_unregister (exec, "my_lookup");
+
+    tools = ai_tool_executor_get_tools (exec);
+    found_my_tool = FALSE;
+    for (iter = tools; iter != NULL; iter = iter->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (iter->data), "my_lookup") == 0)
+        {
+            found_my_tool = TRUE;
+            break;
+        }
+    }
+    g_assert_false (found_my_tool);
+
+    g_clear_pointer (&state.last_query, g_free);
+}
+
+/* ================================================================
  * main
  * ================================================================ */
 
@@ -367,6 +457,8 @@ main (
                      test_executor_web_search_no_provider);
     g_test_add_func ("/ai-glib/tool-executor/unknown-tool",
                      test_executor_unknown_tool);
+    g_test_add_func ("/ai-glib/tool-executor/register-callback",
+                     test_executor_register_callback);
 
     return g_test_run ();
 }

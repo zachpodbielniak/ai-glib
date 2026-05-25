@@ -6,9 +6,11 @@
  */
 
 #include <glib.h>
+#include <json-glib/json-glib.h>
 
 #include "model/ai-message.h"
 #include "model/ai-text-content.h"
+#include "model/ai-tool-result.h"
 #include "core/ai-enums.h"
 
 static void
@@ -106,6 +108,85 @@ test_message_gtype(void)
 	g_assert_cmpstr(g_type_name(type), ==, "AiMessage");
 }
 
+static void
+test_tool_result_with_name(void)
+{
+	g_autoptr(AiToolResult) result = NULL;
+
+	result = ai_tool_result_new_with_name("call_42", "get_weather",
+	                                       "{\"temp\":72}", FALSE);
+	g_assert_nonnull(result);
+	g_assert_cmpstr(ai_tool_result_get_tool_use_id(result), ==, "call_42");
+	g_assert_cmpstr(ai_tool_result_get_tool_name(result), ==, "get_weather");
+	g_assert_cmpstr(ai_tool_result_get_content(result), ==, "{\"temp\":72}");
+	g_assert_false(ai_tool_result_get_is_error(result));
+}
+
+static void
+test_tool_result_name_optional(void)
+{
+	g_autoptr(AiToolResult) result = NULL;
+
+	/* Legacy ctor leaves tool-name NULL */
+	result = ai_tool_result_new("call_1", "ok", FALSE);
+	g_assert_nonnull(result);
+	g_assert_null(ai_tool_result_get_tool_name(result));
+}
+
+static void
+test_message_new_tool_result_with_name(void)
+{
+	g_autoptr(AiMessage) msg = NULL;
+	GList *blocks;
+	AiToolResult *result;
+
+	msg = ai_message_new_tool_result_with_name("call_42", "get_weather",
+	                                            "sunny", FALSE);
+	g_assert_nonnull(msg);
+	g_assert_cmpint(ai_message_get_role(msg), ==, AI_ROLE_USER);
+
+	blocks = ai_message_get_content_blocks(msg);
+	g_assert_cmpuint(g_list_length(blocks), ==, 1);
+	g_assert_true(AI_IS_TOOL_RESULT(blocks->data));
+
+	result = AI_TOOL_RESULT(blocks->data);
+	g_assert_cmpstr(ai_tool_result_get_tool_name(result), ==, "get_weather");
+}
+
+static void
+test_tool_result_claude_canonical_unchanged(void)
+{
+	/* Anthropic's tool_result block must not include a "name" field
+	 * even when AiToolResult carries one — guards against regression
+	 * in the per-provider serialization split. */
+	g_autoptr(AiMessage) msg = NULL;
+	g_autoptr(JsonNode) json = NULL;
+	JsonObject *obj;
+	JsonArray *content;
+	JsonObject *block;
+
+	msg = ai_message_new_tool_result_with_name("call_1", "get_weather",
+	                                            "sunny", FALSE);
+	json = ai_message_to_json(msg);
+	g_assert_true(JSON_NODE_HOLDS_OBJECT(json));
+
+	obj = json_node_get_object(json);
+	g_assert_cmpstr(json_object_get_string_member(obj, "role"), ==, "user");
+
+	content = json_object_get_array_member(obj, "content");
+	g_assert_cmpuint(json_array_get_length(content), ==, 1);
+
+	block = json_array_get_object_element(content, 0);
+	g_assert_cmpstr(json_object_get_string_member(block, "type"), ==,
+	                "tool_result");
+	g_assert_cmpstr(json_object_get_string_member(block, "tool_use_id"), ==,
+	                "call_1");
+	g_assert_cmpstr(json_object_get_string_member(block, "content"), ==,
+	                "sunny");
+	g_assert_false(json_object_has_member(block, "name"));
+	g_assert_false(json_object_has_member(block, "tool_name"));
+}
+
 int
 main(
 	int   argc,
@@ -120,6 +201,14 @@ main(
 	g_test_add_func("/ai-glib/message/get-text", test_message_get_text);
 	g_test_add_func("/ai-glib/message/to-json", test_message_to_json);
 	g_test_add_func("/ai-glib/message/gtype", test_message_gtype);
+	g_test_add_func("/ai-glib/message/tool-result-with-name",
+	                test_tool_result_with_name);
+	g_test_add_func("/ai-glib/message/tool-result-name-optional",
+	                test_tool_result_name_optional);
+	g_test_add_func("/ai-glib/message/new-tool-result-with-name",
+	                test_message_new_tool_result_with_name);
+	g_test_add_func("/ai-glib/message/tool-result-claude-canonical",
+	                test_tool_result_claude_canonical_unchanged);
 
 	return g_test_run();
 }

@@ -124,6 +124,60 @@ g_autoptr(MyDuckDuckGoSearch) ddg = my_duckduckgo_search_new();
 ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(ddg));
 ```
 
+## Custom Tools
+
+User-supplied callbacks register alongside the built-ins. The same
+multi-turn loop dispatches both — the model sees the union of built-in tools
+and your callbacks via `ai_tool_executor_get_tools()`.
+
+```c
+static gchar *
+my_lookup (AiToolUse    *tool_use,
+           GCancellable *cancellable,
+           GError      **error,
+           gpointer      user_data)
+{
+    const gchar *q = ai_tool_use_get_input_string (tool_use, "query");
+    /* ... */
+    return g_strdup_printf ("looked up: %s", q ? q : "");
+}
+
+g_autoptr(AiToolExecutor) exec = ai_tool_executor_new ();
+g_autoptr(AiTool) tool = ai_tool_new ("my_lookup", "Look something up");
+ai_tool_add_parameter (tool, "query", "string", "what to look up", TRUE);
+
+ai_tool_executor_register_callback (exec, tool, my_lookup,
+                                    /* user_data */ NULL,
+                                    /* user_data_free */ NULL);
+
+/* The model now sees both my_lookup and the built-ins. */
+g_autofree gchar *answer = ai_tool_executor_run (
+    exec, AI_PROVIDER (provider), messages, NULL, 4096, NULL, &error);
+```
+
+### Callback signature
+
+```c
+typedef gchar * (*AiToolCallback) (
+    AiToolUse    *tool_use,
+    GCancellable *cancellable,
+    GError      **error,
+    gpointer      user_data);
+```
+
+Return a newly-allocated string (freed by the executor). Returning `NULL`
+with `*error` set causes the loop to emit an error result back to the model
+so it can recover.
+
+### Overriding a built-in
+
+Registering a callback whose name matches a built-in (e.g. `"bash"`)
+replaces the built-in for this executor. To revert, call
+`ai_tool_executor_unregister(exec, "bash")`.
+
+A full worked example lives in
+[`examples/tool-use-executor.c`](examples/tool-use-executor.md).
+
 ## Low-level API
 
 For cases where you manage the provider loop yourself:

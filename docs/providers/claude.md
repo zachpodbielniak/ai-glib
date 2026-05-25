@@ -161,6 +161,14 @@ int main(void)
 - **Vision**: Supported on all Claude 3+ models
 - **System Prompts**: Full support
 
+## Tool Calling
+
+Anthropic's `tool_use` / `tool_result` content blocks are the canonical
+in-memory representation used throughout ai-glib (see
+[`ai_message_to_json`](../api-reference/ai-message.md#ai_message_to_json)).
+The Claude provider serializes them directly with no conversion; the other
+HTTP providers re-emit them in their own wire formats.
+
 ## Rate Limits
 
 Claude API has rate limits based on your plan tier. The library will return `AI_ERROR_RATE_LIMITED` when limits are exceeded.

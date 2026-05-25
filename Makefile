@@ -72,6 +72,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-image-request.c \
 	$(SRCDIR)/model/ai-generated-image.c \
 	$(SRCDIR)/model/ai-image-response.c \
+	$(SRCDIR)/providers/ai-openai-shared.c \
 	$(SRCDIR)/providers/ai-claude-client.c \
 	$(SRCDIR)/providers/ai-openai-client.c \
 	$(SRCDIR)/providers/ai-grok-client.c \
@@ -227,10 +228,10 @@ install: all
 	install -m 644 $(SRCDIR)/ai-glib.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
 	install -m 644 $(SRCDIR)/ai-types.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
 	install -m 644 $(BUILDDIR)/ai-version.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
-	install -m 644 $(SRCDIR)/core/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core/
-	install -m 644 $(SRCDIR)/model/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
-	install -m 644 $(SRCDIR)/providers/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
-	install -m 644 $(SRCDIR)/convenience/*.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience/
+	install -m 644 $(filter $(SRCDIR)/core/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core/
+	install -m 644 $(filter $(SRCDIR)/model/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
+	install -m 644 $(filter $(SRCDIR)/providers/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
+	install -m 644 $(filter $(SRCDIR)/convenience/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience/
 	install -m 644 $(PROJECT_NAME)-1.0.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	@echo "Installation complete!"
 

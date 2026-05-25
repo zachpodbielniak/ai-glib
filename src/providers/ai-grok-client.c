@@ -13,6 +13,7 @@
 #include "config.h"
 
 #include "providers/ai-grok-client.h"
+#include "providers/ai-openai-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
@@ -79,27 +80,11 @@ ai_grok_client_build_request(
         json_builder_add_int_value(builder, max_tokens);
     }
 
+    /* OpenAI-compatible message serialization (handles tool_calls /
+     * role:"tool" correctly). */
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-
-    if (system_prompt != NULL && system_prompt[0] != '\0')
-    {
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, "system");
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, system_prompt);
-        json_builder_end_object(builder);
-    }
-
-    for (l = messages; l != NULL; l = l->next)
-    {
-        AiMessage *msg = l->data;
-        g_autoptr(JsonNode) msg_node = ai_message_to_json(msg);
-
-        json_builder_add_value(builder, g_steal_pointer(&msg_node));
-    }
-
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_DEFAULT);
     json_builder_end_array(builder);
 
     if (tools != NULL)
@@ -914,24 +899,7 @@ ai_grok_client_build_stream_request(
 
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-
-    if (system_prompt != NULL && system_prompt[0] != '\0')
-    {
-        json_builder_begin_object(builder);
-        json_builder_set_member_name(builder, "role");
-        json_builder_add_string_value(builder, "system");
-        json_builder_set_member_name(builder, "content");
-        json_builder_add_string_value(builder, system_prompt);
-        json_builder_end_object(builder);
-    }
-
-    for (l = messages; l != NULL; l = l->next)
-    {
-        AiMessage *msg = l->data;
-        g_autoptr(JsonNode) msg_node = ai_message_to_json(msg);
-        json_builder_add_value(builder, g_steal_pointer(&msg_node));
-    }
-
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_DEFAULT);
     json_builder_end_array(builder);
 
     if (tools != NULL)

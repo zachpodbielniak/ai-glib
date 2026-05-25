@@ -203,7 +203,7 @@ g_list_free(messages);
 3. Check response for tool use with `ai_response_has_tool_use()`
 4. Extract tool uses with `ai_response_get_tool_uses()`
 5. Execute the tools and gather results
-6. Send results back with `ai_message_new_tool_result()`
+6. Send results back with `ai_message_new_tool_result_with_name()`
 7. Continue the conversation
 
 ```c
@@ -223,9 +223,11 @@ if (ai_response_has_tool_use(response))
         /* Execute the tool... */
         gchar *result = execute_tool(name, input);
 
-        /* Create result message */
-        g_autoptr(AiMessage) result_msg = ai_message_new_tool_result(
-            id, result, FALSE);
+        /* Create result message — pass `name` so providers like Gemini that
+         * key tool results by name (functionResponse.name) can round-trip
+         * correctly. */
+        g_autoptr(AiMessage) result_msg = ai_message_new_tool_result_with_name(
+            id, name, result, FALSE);
 
         /* Add to conversation and continue */
         messages = g_list_append(messages, g_steal_pointer(&result_msg));
@@ -234,6 +236,40 @@ if (ai_response_has_tool_use(response))
     g_list_free(tool_uses);
 }
 ```
+
+## AiToolResult Constructors
+
+The `AiToolResult` content block has two constructors:
+
+```c
+AiToolResult *
+ai_tool_result_new(
+    const gchar *tool_use_id,
+    const gchar *content,
+    gboolean     is_error);
+
+AiToolResult *
+ai_tool_result_new_with_name(
+    const gchar *tool_use_id,
+    const gchar *tool_name,    /* (nullable) */
+    const gchar *content,
+    gboolean     is_error);
+```
+
+Use `ai_tool_result_new_with_name()` when the result may be replayed to a
+provider whose wire format requires the tool name. Gemini is the canonical
+case — its `functionResponse` part is keyed by `name`, not by a call id. The
+Anthropic `tool_result` block format does not include a name, so the field is
+silently ignored by the Claude / Anthropic-canonical serialization.
+
+Retrieve the name via:
+
+```c
+const gchar *
+ai_tool_result_get_tool_name(AiToolResult *self);
+```
+
+Returns `NULL` if the result was constructed without a name.
 
 ## See Also
 
