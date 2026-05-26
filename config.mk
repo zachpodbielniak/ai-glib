@@ -32,8 +32,11 @@ PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS))
 
 # yaml-glib (bundled under deps/yaml-glib, built as static lib).
 # Always built with its own conventions; not affected by parent DEBUG.
+# yaml-glib's build splits output by type (build/release/, build/debug/)
+# and ships the archive with an API-version suffix. We pin to release
+# since this static lib is only used at compile-time.
 YAML_GLIB_DIR = deps/yaml-glib
-YAML_GLIB_STATIC = $(YAML_GLIB_DIR)/build/libyaml-glib.a
+YAML_GLIB_STATIC = $(YAML_GLIB_DIR)/build/release/libyaml-glib-1.0.a
 YAML_GLIB_CFLAGS = -I$(YAML_GLIB_DIR)/src
 YAML_GLIB_LIBS = $(YAML_GLIB_STATIC) $(shell pkg-config --libs yaml-0.1)
 

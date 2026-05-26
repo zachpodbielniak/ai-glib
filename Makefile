@@ -123,11 +123,14 @@ EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(OUTDIR)/examples/%,$(EXAMPLE_S
 # Include common rules
 include rules.mk
 
-# Build bundled yaml-glib static library
+# Build bundled yaml-glib static library.
+# Recent yaml-glib refactored its build to split output by type
+# (build/release/, build/debug/) and consolidated lib-static + lib-shared
+# into a single `lib` target. We only consume the static archive but pay
+# for the shared lib too — acceptable since yaml-glib is small.
 $(YAML_GLIB_STATIC):
 	@echo "Building yaml-glib..."
-	@mkdir -p $(YAML_GLIB_DIR)/build
-	$(MAKE) -C $(YAML_GLIB_DIR) lib-static
+	$(MAKE) -C $(YAML_GLIB_DIR) lib
 
 # Default target
 .PHONY: all
