@@ -28,56 +28,87 @@ g_autoptr(AiGrokClient) client = ai_grok_client_new_with_config(config);
 
 ## Available Models
 
-### Grok 4.1 Models (Latest)
+xAI changed its naming convention from dash-separated (`grok-4-1`) to
+dot-separated (`grok-4.3`) starting with the 4.20 generation.
+
+### Grok 4.3 Models (Latest)
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_MODEL_4_1_FAST_REASONING` | grok-4-1-fast-reasoning | Fast with reasoning (default) |
-| `AI_GROK_MODEL_4_1_FAST_NON_REASONING` | grok-4-1-fast-non-reasoning | Fast without reasoning |
+| `AI_GROK_MODEL_4_3` | grok-4.3 | Latest flagship (default) |
+
+### Grok 4.20 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GROK_MODEL_4_20_REASONING` | grok-4.20-0309-reasoning | Reasoning tier |
+| `AI_GROK_MODEL_4_20_NON_REASONING` | grok-4.20-0309-non-reasoning | Non-reasoning (fast alias) |
+| `AI_GROK_MODEL_4_20_MULTI_AGENT` | grok-4.20-multi-agent-0309 | Multi-agent |
+
+### Grok Build Models (Coding Agent CLI)
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GROK_MODEL_BUILD_0_1` | grok-build-0.1 | Coding agent (code alias) |
+
+### Grok 4.1 Models
+
+Retired upstream 2026-05-15 — server redirects to `grok-4.3`.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GROK_MODEL_4_1_FAST_REASONING` | grok-4-1-fast-reasoning | Retired — redirects to grok-4.3 |
+| `AI_GROK_MODEL_4_1_FAST_NON_REASONING` | grok-4-1-fast-non-reasoning | Retired — redirects to grok-4.3 |
 
 ### Grok 4 Models
 
+Retired upstream 2026-05-15 — server redirects to `grok-4.3`.
+
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_MODEL_4_0709` | grok-4-0709 | Grok 4 versioned |
-| `AI_GROK_MODEL_4_FAST_REASONING` | grok-4-fast-reasoning | Fast with reasoning |
-| `AI_GROK_MODEL_4_FAST_NON_REASONING` | grok-4-fast-non-reasoning | Fast without reasoning |
+| `AI_GROK_MODEL_4_0709` | grok-4-0709 | Retired — redirects to grok-4.3 |
+| `AI_GROK_MODEL_4_FAST_REASONING` | grok-4-fast-reasoning | Retired — redirects to grok-4.3 |
+| `AI_GROK_MODEL_4_FAST_NON_REASONING` | grok-4-fast-non-reasoning | Retired — redirects to grok-4.3 |
 
 ### Grok 3 Models
 
+Retired upstream 2026-05-15 — server redirects to `grok-4.3`.
+
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_MODEL_3` | grok-3 | Grok 3 base |
-| `AI_GROK_MODEL_3_MINI` | grok-3-mini | Compact Grok 3 |
+| `AI_GROK_MODEL_3` | grok-3 | Retired — redirects to grok-4.3 |
+| `AI_GROK_MODEL_3_MINI` | grok-3-mini | Retired — redirects to grok-4.3 |
 
 ### Grok 2 Models (Vision)
 
+Retired upstream.
+
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_MODEL_2_VISION_1212` | grok-2-vision-1212 | Vision capabilities |
-| `AI_GROK_MODEL_2_IMAGE_1212` | grok-2-image-1212 | Image understanding |
+| `AI_GROK_MODEL_2_VISION_1212` | grok-2-vision-1212 | Retired upstream |
+| `AI_GROK_MODEL_2_IMAGE_1212` | grok-2-image-1212 | Retired upstream |
 
 ### Grok Code Models
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_MODEL_CODE_FAST_1` | grok-code-fast-1 | Fast code generation |
+| `AI_GROK_MODEL_CODE_FAST_1` | grok-code-fast-1 | Retired — use `AI_GROK_MODEL_BUILD_0_1` |
 
 ### Convenience Aliases
 
 | Define | Points To | Description |
 |--------|-----------|-------------|
-| `AI_GROK_MODEL_LATEST` | `AI_GROK_MODEL_4_1_FAST_REASONING` | Latest model |
-| `AI_GROK_MODEL_FAST` | `AI_GROK_MODEL_4_1_FAST_NON_REASONING` | Fastest model |
-| `AI_GROK_MODEL_CODE` | `AI_GROK_MODEL_CODE_FAST_1` | Code model |
+| `AI_GROK_MODEL_LATEST` | `AI_GROK_MODEL_4_3` | Latest model |
+| `AI_GROK_MODEL_FAST` | `AI_GROK_MODEL_4_20_NON_REASONING` | Fastest model |
+| `AI_GROK_MODEL_CODE` | `AI_GROK_MODEL_BUILD_0_1` | Code model |
 
 ### Setting the Model
 
 ```c
 g_autoptr(AiGrokClient) client = ai_grok_client_new();
 
-/* Use Grok 4.1 for best performance */
-ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_4_1_FAST_REASONING);
+/* Use Grok 4.3 for best performance */
+ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_4_3);
 
 /* Or use the fast non-reasoning model */
 ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_FAST);
@@ -177,16 +208,19 @@ emitted as separate `role:"tool"` messages.
 
 Grok provides basic image generation through an OpenAI-compatible API.
 
-### Image Models
+### Image / Video Models
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GROK_IMAGE_MODEL_GROK_2_IMAGE` | grok-2-image | Grok 2 image generation |
+| `AI_GROK_IMAGE_MODEL_GROK_IMAGINE` | grok-imagine-image | Grok Imagine image (default) |
+| `AI_GROK_IMAGE_MODEL_GROK_IMAGINE_QUALITY` | grok-imagine-image-quality | High-quality image |
+| `AI_GROK_VIDEO_MODEL_GROK_IMAGINE` | grok-imagine-video | Grok Imagine video |
+| `AI_GROK_IMAGE_MODEL_GROK_2_IMAGE` | grok-2-image | Retired upstream |
 
 ### Default Model
 
 ```c
-#define AI_GROK_IMAGE_DEFAULT_MODEL  AI_GROK_IMAGE_MODEL_GROK_2_IMAGE
+#define AI_GROK_IMAGE_DEFAULT_MODEL  AI_GROK_IMAGE_MODEL_GROK_IMAGINE
 ```
 
 ### Supported Parameters
@@ -240,8 +274,8 @@ int main(void)
     );
     g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
 
-    /* Model is optional - defaults to grok-2-image */
-    ai_image_request_set_model(request, AI_GROK_IMAGE_MODEL_GROK_2_IMAGE);
+    /* Model is optional - defaults to grok-imagine-image */
+    ai_image_request_set_model(request, AI_GROK_IMAGE_MODEL_GROK_IMAGINE);
 
     ai_image_generator_generate_image_async(
         AI_IMAGE_GENERATOR(client),

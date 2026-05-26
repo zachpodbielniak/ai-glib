@@ -28,6 +28,22 @@ g_autoptr(AiClaudeClient) client = ai_claude_client_new_with_config(config);
 
 ## Available Models
 
+### Claude 4.7 Models (Latest)
+
+Starting with Claude 4.6, Anthropic model IDs are dateless but still
+pinned snapshots — no date suffix is required.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_CLAUDE_MODEL_OPUS_4_7` | claude-opus-4-7 | Flagship; agentic coding |
+
+### Claude 4.6 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_CLAUDE_MODEL_SONNET_4_6` | claude-sonnet-4-6 | Balanced (default) |
+| `AI_CLAUDE_MODEL_OPUS_4_6` | claude-opus-4-6 | Previous flagship Opus |
+
 ### Claude 4.5 Models
 
 | Define | Model ID | Description |
@@ -46,8 +62,8 @@ g_autoptr(AiClaudeClient) client = ai_claude_client_new_with_config(config);
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_CLAUDE_MODEL_OPUS_4` | claude-opus-4-20250514 | High intelligence |
-| `AI_CLAUDE_MODEL_SONNET_4` | claude-sonnet-4-20250514 | Balanced (default) |
+| `AI_CLAUDE_MODEL_OPUS_4` | claude-opus-4-20250514 | Deprecated, retires 2026-06-15 |
+| `AI_CLAUDE_MODEL_SONNET_4` | claude-sonnet-4-20250514 | Deprecated, retires 2026-06-15 |
 
 ### Claude 3.7 Models
 
@@ -71,8 +87,8 @@ g_autoptr(AiClaudeClient) client = ai_claude_client_new_with_config(config);
 
 | Define | Points To | Description |
 |--------|-----------|-------------|
-| `AI_CLAUDE_MODEL_OPUS` | `AI_CLAUDE_MODEL_OPUS_4_5` | Latest Opus |
-| `AI_CLAUDE_MODEL_SONNET` | `AI_CLAUDE_MODEL_SONNET_4` | Default Sonnet |
+| `AI_CLAUDE_MODEL_OPUS` | `AI_CLAUDE_MODEL_OPUS_4_7` | Latest Opus |
+| `AI_CLAUDE_MODEL_SONNET` | `AI_CLAUDE_MODEL_SONNET_4_6` | Latest Sonnet (default) |
 | `AI_CLAUDE_MODEL_HAIKU` | `AI_CLAUDE_MODEL_HAIKU_4_5` | Latest Haiku |
 
 ### Setting the Model
@@ -81,10 +97,10 @@ g_autoptr(AiClaudeClient) client = ai_claude_client_new_with_config(config);
 g_autoptr(AiClaudeClient) client = ai_claude_client_new();
 
 /* Use the most capable model */
-ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4_7);
 
 /* Or use a string */
-ai_client_set_model(AI_CLIENT(client), "claude-3-5-haiku-20241022");
+ai_client_set_model(AI_CLIENT(client), "claude-haiku-4-5-20251001");
 ```
 
 ## API Version
@@ -141,7 +157,7 @@ int main(void)
     GList *messages = g_list_append(NULL, msg);
 
     /* Use Opus for best results */
-    ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4);
+    ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4_7);
 
     ai_provider_chat_async(AI_PROVIDER(client), messages,
                            "You are a helpful assistant.",

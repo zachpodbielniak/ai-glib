@@ -29,10 +29,25 @@ G_DECLARE_FINAL_TYPE(AiGeminiClient, ai_gemini_client, AI, GEMINI_CLIENT, AiClie
  *
  * The default model for Gemini clients.
  */
-#define AI_GEMINI_DEFAULT_MODEL "gemini-2.5-flash"
+#define AI_GEMINI_DEFAULT_MODEL "gemini-3.5-flash"
+
+/*
+ * Gemini 3.5 Models (Latest Stable Flash)
+ */
+#define AI_GEMINI_MODEL_3_5_FLASH               "gemini-3.5-flash"
+
+/*
+ * Gemini 3.1 Models (Preview Pro, Stable Flash-Lite)
+ */
+#define AI_GEMINI_MODEL_3_1_PRO_PREVIEW         "gemini-3.1-pro-preview"
+#define AI_GEMINI_MODEL_3_1_FLASH_LITE          "gemini-3.1-flash-lite"
+#define AI_GEMINI_MODEL_3_1_FLASH_LITE_PREVIEW  "gemini-3.1-flash-lite-preview"
 
 /*
  * Gemini 3 Models (Preview)
+ *
+ * Note: gemini-3-pro-preview was retired 2026-03-09 server-side;
+ * migrate to AI_GEMINI_MODEL_3_1_PRO_PREVIEW.
  */
 #define AI_GEMINI_MODEL_3_FLASH_PREVIEW     "gemini-3-flash-preview"
 #define AI_GEMINI_MODEL_3_PRO_PREVIEW       "gemini-3-pro-preview"
@@ -84,17 +99,19 @@ G_DECLARE_FINAL_TYPE(AiGeminiClient, ai_gemini_client, AI, GEMINI_CLIENT, AiClie
 /*
  * Convenience aliases
  */
-#define AI_GEMINI_MODEL_FLASH               AI_GEMINI_MODEL_2_5_FLASH
-#define AI_GEMINI_MODEL_PRO                 AI_GEMINI_MODEL_2_5_PRO
+#define AI_GEMINI_MODEL_FLASH               AI_GEMINI_MODEL_3_5_FLASH
+#define AI_GEMINI_MODEL_PRO                 AI_GEMINI_MODEL_3_1_PRO_PREVIEW
 
 /*
  * Image Generation Models (Nano Banana / Native Gemini Image)
  *
  * Nano Banana is the codename for Gemini's native image generation.
- * - Nano Banana (gemini-2.5-flash-image): Fast, efficient, up to 1K resolution
+ * - Nano Banana (gemini-2.5-flash-image): Stable, up to 1K resolution
+ * - Nano Banana 2 (gemini-3.1-flash-image-preview): Preview, newer fast tier
  * - Nano Banana Pro (gemini-3-pro-image-preview): Professional, up to 4K resolution
  */
 #define AI_GEMINI_IMAGE_MODEL_NANO_BANANA       "gemini-2.5-flash-image"
+#define AI_GEMINI_IMAGE_MODEL_NANO_BANANA_2     "gemini-3.1-flash-image-preview"
 #define AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO   "gemini-3-pro-image-preview"
 
 /*
@@ -104,9 +121,38 @@ G_DECLARE_FINAL_TYPE(AiGeminiClient, ai_gemini_client, AI, GEMINI_CLIENT, AiClie
 #define AI_GEMINI_IMAGE_MODEL_IMAGEN_3      "imagen-3.0-generate-001"
 
 /*
- * Default image model (Nano Banana for native generation)
+ * Default image model (stable Nano Banana for native generation)
  */
 #define AI_GEMINI_IMAGE_DEFAULT_MODEL       AI_GEMINI_IMAGE_MODEL_NANO_BANANA
+
+/*
+ * Live / Audio / TTS Models
+ *
+ * Identifiers only. AiGeminiClient does not yet expose Live,
+ * native-audio, or TTS endpoints; these constants exist so callers can
+ * reference upstream IDs by symbolic name once support lands.
+ */
+#define AI_GEMINI_LIVE_MODEL_3_1_FLASH              "gemini-3.1-flash-live-preview"
+#define AI_GEMINI_LIVE_MODEL_2_5_FLASH_NATIVE_AUDIO "gemini-2.5-flash-native-audio-preview-12-2025"
+#define AI_GEMINI_TTS_MODEL_3_1_FLASH               "gemini-3.1-flash-tts-preview"
+#define AI_GEMINI_TTS_MODEL_2_5_FLASH               "gemini-2.5-flash-preview-tts"
+#define AI_GEMINI_TTS_MODEL_2_5_PRO                 "gemini-2.5-pro-preview-tts"
+
+/*
+ * Video Generation Models (Veo)
+ *
+ * Identifiers only. AiGeminiClient does not yet expose Veo endpoints.
+ */
+#define AI_GEMINI_VIDEO_MODEL_VEO_3_1       "veo-3.1-generate-preview"
+#define AI_GEMINI_VIDEO_MODEL_VEO_3_1_LITE  "veo-3.1-lite-generate-preview"
+
+/*
+ * Embedding Models
+ *
+ * Identifiers only. AiGeminiClient does not yet expose embeddings.
+ */
+#define AI_GEMINI_EMBEDDING_MODEL_2         "gemini-embedding-2"
+#define AI_GEMINI_EMBEDDING_MODEL_001       "gemini-embedding-001"
 
 /**
  * ai_gemini_client_new:

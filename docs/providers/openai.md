@@ -28,11 +28,34 @@ g_autoptr(AiOpenAIClient) client = ai_openai_client_new_with_config(config);
 
 ## Available Models
 
-### GPT-5.2 Models (Latest)
+### GPT-5.5 Models (Latest)
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_OPENAI_MODEL_GPT_5_2` | gpt-5.2 | Latest flagship |
+| `AI_OPENAI_MODEL_GPT_5_5` | gpt-5.5 | Latest flagship (default) |
+| `AI_OPENAI_MODEL_GPT_5_5_PRO` | gpt-5.5-pro | Professional tier |
+
+### GPT-5.4 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_MODEL_GPT_5_4` | gpt-5.4 | GPT-5.4 base |
+| `AI_OPENAI_MODEL_GPT_5_4_PRO` | gpt-5.4-pro | Professional tier |
+| `AI_OPENAI_MODEL_GPT_5_4_MINI` | gpt-5.4-mini | Smaller GPT-5.4 |
+| `AI_OPENAI_MODEL_GPT_5_4_NANO` | gpt-5.4-nano | Smallest GPT-5.4 (fast alias) |
+
+### GPT-5.3 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_MODEL_GPT_5_3_CODEX` | gpt-5.3-codex | Code generation |
+| `AI_OPENAI_MODEL_GPT_5_3_CHAT_LATEST` | gpt-5.3-chat-latest | ChatGPT 5.3 |
+
+### GPT-5.2 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_MODEL_GPT_5_2` | gpt-5.2 | GPT-5.2 base |
 | `AI_OPENAI_MODEL_GPT_5_2_PRO` | gpt-5.2-pro | Professional tier |
 | `AI_OPENAI_MODEL_GPT_5_2_CODEX` | gpt-5.2-codex | Code generation |
 
@@ -67,7 +90,7 @@ g_autoptr(AiOpenAIClient) client = ai_openai_client_new_with_config(config);
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_OPENAI_MODEL_GPT_4O` | gpt-4o | Multimodal flagship (default) |
+| `AI_OPENAI_MODEL_GPT_4O` | gpt-4o | Multimodal flagship |
 | `AI_OPENAI_MODEL_GPT_4O_MINI` | gpt-4o-mini | Fast and affordable |
 | `AI_OPENAI_MODEL_CHATGPT_4O_LATEST` | chatgpt-4o-latest | Latest ChatGPT |
 
@@ -75,8 +98,8 @@ g_autoptr(AiOpenAIClient) client = ai_openai_client_new_with_config(config);
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_OPENAI_MODEL_GPT_4_TURBO` | gpt-4-turbo | GPT-4 Turbo |
-| `AI_OPENAI_MODEL_GPT_4_TURBO_PREVIEW` | gpt-4-turbo-preview | Turbo preview |
+| `AI_OPENAI_MODEL_GPT_4_TURBO` | gpt-4-turbo | Deprecated upstream |
+| `AI_OPENAI_MODEL_GPT_4_TURBO_PREVIEW` | gpt-4-turbo-preview | Deprecated upstream |
 
 ### GPT-4 Models
 
@@ -118,20 +141,43 @@ g_autoptr(AiOpenAIClient) client = ai_openai_client_new_with_config(config);
 
 | Define | Points To | Description |
 |--------|-----------|-------------|
-| `AI_OPENAI_MODEL_LATEST` | `AI_OPENAI_MODEL_GPT_5_2` | Latest model |
-| `AI_OPENAI_MODEL_FAST` | `AI_OPENAI_MODEL_GPT_4O_MINI` | Fast model |
+| `AI_OPENAI_MODEL_LATEST` | `AI_OPENAI_MODEL_GPT_5_5` | Latest model |
+| `AI_OPENAI_MODEL_FAST` | `AI_OPENAI_MODEL_GPT_5_4_NANO` | Fast model |
 | `AI_OPENAI_MODEL_REASONING` | `AI_OPENAI_MODEL_O3` | Reasoning model |
+
+### Realtime / Audio / TTS Models
+
+Identifiers only. `AiOpenAIClient` does not yet expose realtime, audio,
+or transcription endpoints; these constants exist so callers can
+reference upstream IDs by symbolic name once support lands.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_REALTIME_MODEL_GPT_REALTIME_2` | gpt-realtime-2 | Realtime API v2 |
+| `AI_OPENAI_REALTIME_MODEL_GPT_REALTIME_1_5` | gpt-realtime-1.5 | Realtime API v1.5 |
+| `AI_OPENAI_AUDIO_MODEL_GPT_AUDIO_1_5` | gpt-audio-1.5 | Audio understanding |
+| `AI_OPENAI_AUDIO_MODEL_WHISPER_1` | whisper-1 | Speech-to-text |
+| `AI_OPENAI_AUDIO_MODEL_TTS_1` | tts-1 | Text-to-speech |
+
+### Embedding Models
+
+Identifiers only. `AiOpenAIClient` does not yet expose embeddings.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_OPENAI_EMBEDDING_MODEL_3_LARGE` | text-embedding-3-large | Large embeddings |
+| `AI_OPENAI_EMBEDDING_MODEL_3_SMALL` | text-embedding-3-small | Small embeddings |
 
 ### Setting the Model
 
 ```c
 g_autoptr(AiOpenAIClient) client = ai_openai_client_new();
 
-/* Use GPT-4o mini for cost efficiency */
-ai_client_set_model(AI_CLIENT(client), AI_OPENAI_MODEL_GPT_4O_MINI);
+/* Use GPT-5.4 nano for cost efficiency */
+ai_client_set_model(AI_CLIENT(client), AI_OPENAI_MODEL_GPT_5_4_NANO);
 
-/* Or use GPT-5.2 for best performance */
-ai_client_set_model(AI_CLIENT(client), AI_OPENAI_MODEL_GPT_5_2);
+/* Or use GPT-5.5 for best performance */
+ai_client_set_model(AI_CLIENT(client), AI_OPENAI_MODEL_GPT_5_5);
 
 /* Or use a reasoning model */
 ai_client_set_model(AI_CLIENT(client), AI_OPENAI_MODEL_O3);
@@ -244,14 +290,16 @@ OpenAI provides comprehensive image generation through DALL-E models.
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_OPENAI_IMAGE_MODEL_DALL_E_3` | dall-e-3 | Best quality (default) |
-| `AI_OPENAI_IMAGE_MODEL_DALL_E_2` | dall-e-2 | Faster, lower cost |
-| `AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1` | gpt-image-1 | GPT-based image model |
+| `AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_2` | gpt-image-2 | Latest GPT-based image (default) |
+| `AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1_5` | gpt-image-1.5 | GPT-based image |
+| `AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1` | gpt-image-1 | GPT-based image |
+| `AI_OPENAI_IMAGE_MODEL_DALL_E_3` | dall-e-3 | Deprecated upstream |
+| `AI_OPENAI_IMAGE_MODEL_DALL_E_2` | dall-e-2 | Deprecated upstream |
 
 ### Default Model
 
 ```c
-#define AI_OPENAI_IMAGE_DEFAULT_MODEL  AI_OPENAI_IMAGE_MODEL_DALL_E_3
+#define AI_OPENAI_IMAGE_DEFAULT_MODEL  AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_2
 ```
 
 ### Supported Parameters

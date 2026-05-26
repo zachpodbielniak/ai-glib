@@ -29,7 +29,21 @@ G_DECLARE_FINAL_TYPE(AiClaudeClient, ai_claude_client, AI, CLAUDE_CLIENT, AiClie
  *
  * The default model for Claude clients.
  */
-#define AI_CLAUDE_DEFAULT_MODEL "claude-sonnet-4-20250514"
+#define AI_CLAUDE_DEFAULT_MODEL "claude-sonnet-4-6"
+
+/*
+ * Claude 4.7 Models (Latest)
+ *
+ * Starting with Claude 4.6, IDs are dateless but still pinned snapshots
+ * (per Anthropic's model-versioning docs); no date suffix is required.
+ */
+#define AI_CLAUDE_MODEL_OPUS_4_7        "claude-opus-4-7"
+
+/*
+ * Claude 4.6 Models
+ */
+#define AI_CLAUDE_MODEL_SONNET_4_6      "claude-sonnet-4-6"
+#define AI_CLAUDE_MODEL_OPUS_4_6        "claude-opus-4-6"
 
 /*
  * Claude 4.5 Models
@@ -67,8 +81,8 @@ G_DECLARE_FINAL_TYPE(AiClaudeClient, ai_claude_client, AI, CLAUDE_CLIENT, AiClie
 /*
  * Convenience aliases
  */
-#define AI_CLAUDE_MODEL_OPUS            AI_CLAUDE_MODEL_OPUS_4_5
-#define AI_CLAUDE_MODEL_SONNET          AI_CLAUDE_MODEL_SONNET_4
+#define AI_CLAUDE_MODEL_OPUS            AI_CLAUDE_MODEL_OPUS_4_7
+#define AI_CLAUDE_MODEL_SONNET          AI_CLAUDE_MODEL_SONNET_4_6
 #define AI_CLAUDE_MODEL_HAIKU           AI_CLAUDE_MODEL_HAIKU_4_5
 
 /**

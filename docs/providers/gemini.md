@@ -27,18 +27,35 @@ g_autoptr(AiGeminiClient) client = ai_gemini_client_new_with_config(config);
 
 ## Available Models
 
+### Gemini 3.5 Models (Latest Stable Flash)
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_MODEL_3_5_FLASH` | gemini-3.5-flash | Latest stable Flash (default) |
+
+### Gemini 3.1 Models
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_MODEL_3_1_PRO_PREVIEW` | gemini-3.1-pro-preview | Latest Pro (preview) |
+| `AI_GEMINI_MODEL_3_1_FLASH_LITE` | gemini-3.1-flash-lite | Stable Flash-Lite |
+| `AI_GEMINI_MODEL_3_1_FLASH_LITE_PREVIEW` | gemini-3.1-flash-lite-preview | Flash-Lite preview |
+
 ### Gemini 3 Models (Preview)
+
+`gemini-3-pro-preview` was retired upstream on 2026-03-09; migrate to
+`AI_GEMINI_MODEL_3_1_PRO_PREVIEW`.
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
 | `AI_GEMINI_MODEL_3_FLASH_PREVIEW` | gemini-3-flash-preview | Fast text generation |
-| `AI_GEMINI_MODEL_3_PRO_PREVIEW` | gemini-3-pro-preview | Professional text generation |
+| `AI_GEMINI_MODEL_3_PRO_PREVIEW` | gemini-3-pro-preview | Retired upstream — use 3.1 Pro |
 
 ### Gemini 2.5 Models
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GEMINI_MODEL_2_5_FLASH` | gemini-2.5-flash | Fast (default) |
+| `AI_GEMINI_MODEL_2_5_FLASH` | gemini-2.5-flash | Fast |
 | `AI_GEMINI_MODEL_2_5_FLASH_LITE` | gemini-2.5-flash-lite | Lightweight |
 | `AI_GEMINI_MODEL_2_5_FLASH_LITE_PREVIEW` | gemini-2.5-flash-lite-preview-09-2025 | Lite preview |
 | `AI_GEMINI_MODEL_2_5_FLASH_PREVIEW` | gemini-2.5-flash-preview-09-2025 | Flash preview |
@@ -83,8 +100,40 @@ g_autoptr(AiGeminiClient) client = ai_gemini_client_new_with_config(config);
 
 | Define | Points To | Description |
 |--------|-----------|-------------|
-| `AI_GEMINI_MODEL_FLASH` | `AI_GEMINI_MODEL_2_5_FLASH` | Default flash |
-| `AI_GEMINI_MODEL_PRO` | `AI_GEMINI_MODEL_2_5_PRO` | Default pro |
+| `AI_GEMINI_MODEL_FLASH` | `AI_GEMINI_MODEL_3_5_FLASH` | Latest stable flash |
+| `AI_GEMINI_MODEL_PRO` | `AI_GEMINI_MODEL_3_1_PRO_PREVIEW` | Latest pro (preview) |
+
+### Live / Audio / TTS Models
+
+Identifiers only. `AiGeminiClient` does not yet expose Live,
+native-audio, or TTS endpoints; these constants exist so callers can
+reference upstream IDs by symbolic name once support lands.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_LIVE_MODEL_3_1_FLASH` | gemini-3.1-flash-live-preview | Live (3.1 Flash) |
+| `AI_GEMINI_LIVE_MODEL_2_5_FLASH_NATIVE_AUDIO` | gemini-2.5-flash-native-audio-preview-12-2025 | Live (2.5 native audio) |
+| `AI_GEMINI_TTS_MODEL_3_1_FLASH` | gemini-3.1-flash-tts-preview | TTS (3.1 Flash) |
+| `AI_GEMINI_TTS_MODEL_2_5_FLASH` | gemini-2.5-flash-preview-tts | TTS (2.5 Flash) |
+| `AI_GEMINI_TTS_MODEL_2_5_PRO` | gemini-2.5-pro-preview-tts | TTS (2.5 Pro) |
+
+### Video Generation Models (Veo)
+
+Identifiers only. `AiGeminiClient` does not yet expose Veo endpoints.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_VIDEO_MODEL_VEO_3_1` | veo-3.1-generate-preview | Veo 3.1 |
+| `AI_GEMINI_VIDEO_MODEL_VEO_3_1_LITE` | veo-3.1-lite-generate-preview | Veo 3.1 Lite |
+
+### Embedding Models
+
+Identifiers only. `AiGeminiClient` does not yet expose embeddings.
+
+| Define | Model ID | Description |
+|--------|----------|-------------|
+| `AI_GEMINI_EMBEDDING_MODEL_2` | gemini-embedding-2 | Gemini Embedding 2 |
+| `AI_GEMINI_EMBEDDING_MODEL_001` | gemini-embedding-001 | Gemini Embedding (001) |
 
 ### Setting the Model
 
@@ -92,13 +141,13 @@ g_autoptr(AiGeminiClient) client = ai_gemini_client_new_with_config(config);
 g_autoptr(AiGeminiClient) client = ai_gemini_client_new();
 
 /* Use the most capable model */
-ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_2_5_PRO);
+ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_3_1_PRO_PREVIEW);
 
-/* Or use flash for speed */
-ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_2_5_FLASH);
+/* Or use the latest stable flash for speed */
+ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_3_5_FLASH);
 
-/* Or try the latest preview */
-ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_3_PRO_PREVIEW);
+/* Or try the 3.1 Flash-Lite preview */
+ai_client_set_model(AI_CLIENT(client), AI_GEMINI_MODEL_3_1_FLASH_LITE);
 ```
 
 ## Example
@@ -218,7 +267,8 @@ Nano Banana is Google's native image generation built into Gemini models. It's f
 
 | Define | Model ID | Description |
 |--------|----------|-------------|
-| `AI_GEMINI_IMAGE_MODEL_NANO_BANANA` | gemini-2.5-flash-image | Fast, up to 1K resolution |
+| `AI_GEMINI_IMAGE_MODEL_NANO_BANANA` | gemini-2.5-flash-image | Stable, up to 1K resolution (default) |
+| `AI_GEMINI_IMAGE_MODEL_NANO_BANANA_2` | gemini-3.1-flash-image-preview | Preview, newer fast tier |
 | `AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO` | gemini-3-pro-image-preview | Pro, up to 4K resolution |
 
 ### Imagen (Legacy)

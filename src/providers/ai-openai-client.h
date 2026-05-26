@@ -29,10 +29,30 @@ G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClie
  *
  * The default model for OpenAI clients.
  */
-#define AI_OPENAI_DEFAULT_MODEL "gpt-4o"
+#define AI_OPENAI_DEFAULT_MODEL "gpt-5.5"
 
 /*
- * GPT-5.2 Models (Latest)
+ * GPT-5.5 Models (Latest)
+ */
+#define AI_OPENAI_MODEL_GPT_5_5             "gpt-5.5"
+#define AI_OPENAI_MODEL_GPT_5_5_PRO         "gpt-5.5-pro"
+
+/*
+ * GPT-5.4 Models
+ */
+#define AI_OPENAI_MODEL_GPT_5_4             "gpt-5.4"
+#define AI_OPENAI_MODEL_GPT_5_4_PRO         "gpt-5.4-pro"
+#define AI_OPENAI_MODEL_GPT_5_4_MINI        "gpt-5.4-mini"
+#define AI_OPENAI_MODEL_GPT_5_4_NANO        "gpt-5.4-nano"
+
+/*
+ * GPT-5.3 Models
+ */
+#define AI_OPENAI_MODEL_GPT_5_3_CODEX       "gpt-5.3-codex"
+#define AI_OPENAI_MODEL_GPT_5_3_CHAT_LATEST "gpt-5.3-chat-latest"
+
+/*
+ * GPT-5.2 Models
  */
 #define AI_OPENAI_MODEL_GPT_5_2             "gpt-5.2"
 #define AI_OPENAI_MODEL_GPT_5_2_PRO         "gpt-5.2-pro"
@@ -109,17 +129,40 @@ G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClie
 /*
  * Convenience aliases
  */
-#define AI_OPENAI_MODEL_LATEST              AI_OPENAI_MODEL_GPT_5_2
-#define AI_OPENAI_MODEL_FAST                AI_OPENAI_MODEL_GPT_4O_MINI
+#define AI_OPENAI_MODEL_LATEST              AI_OPENAI_MODEL_GPT_5_5
+#define AI_OPENAI_MODEL_FAST                AI_OPENAI_MODEL_GPT_5_4_NANO
 #define AI_OPENAI_MODEL_REASONING           AI_OPENAI_MODEL_O3
 
 /*
  * Image Generation Models
  */
+#define AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_2   "gpt-image-2"
+#define AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1_5 "gpt-image-1.5"
 #define AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1   "gpt-image-1"
 #define AI_OPENAI_IMAGE_MODEL_DALL_E_3      "dall-e-3"
 #define AI_OPENAI_IMAGE_MODEL_DALL_E_2      "dall-e-2"
-#define AI_OPENAI_IMAGE_DEFAULT_MODEL       AI_OPENAI_IMAGE_MODEL_DALL_E_3
+#define AI_OPENAI_IMAGE_DEFAULT_MODEL       AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_2
+
+/*
+ * Realtime / Audio / TTS Models
+ *
+ * Identifiers only. AiOpenAIClient does not yet expose realtime,
+ * audio, or transcription endpoints; these constants exist so callers
+ * can reference upstream IDs by symbolic name once support lands.
+ */
+#define AI_OPENAI_REALTIME_MODEL_GPT_REALTIME_2     "gpt-realtime-2"
+#define AI_OPENAI_REALTIME_MODEL_GPT_REALTIME_1_5   "gpt-realtime-1.5"
+#define AI_OPENAI_AUDIO_MODEL_GPT_AUDIO_1_5         "gpt-audio-1.5"
+#define AI_OPENAI_AUDIO_MODEL_WHISPER_1             "whisper-1"
+#define AI_OPENAI_AUDIO_MODEL_TTS_1                 "tts-1"
+
+/*
+ * Embedding Models
+ *
+ * Identifiers only. AiOpenAIClient does not yet expose embeddings.
+ */
+#define AI_OPENAI_EMBEDDING_MODEL_3_LARGE   "text-embedding-3-large"
+#define AI_OPENAI_EMBEDDING_MODEL_3_SMALL   "text-embedding-3-small"
 
 AiOpenAIClient *
 ai_openai_client_new(void);
