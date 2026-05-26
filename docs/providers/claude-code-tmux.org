@@ -1,0 +1,215 @@
+* Claude Code (tmux) Provider
+The Claude Code (tmux) provider (=AiClaudeTmuxClient=) drives the =claude= CLI in its *native interactive TUI* by spawning it inside an ephemeral [[https://github.com/tmux/tmux][tmux]] session. Unlike [[file:claude-code.org][=AiClaudeCodeClient=]] --- which uses =claude --print= (the Agent SDK / non-interactive path) --- this client speaks to a fully interactive =claude= process and so consumes the user's *normal subscription budget* rather than the Agent SDK credit pool.
+
+This was introduced because Anthropic's Agent SDK billing path is changing 2026-06-15, and subscription-budget users wanted a way to continue routing automated workloads through their existing plan.
+
+** Overview
+| Property      | Value                             |
+|---------------+-----------------------------------|
+| Type          | =AI_PROVIDER_CLAUDE_TMUX=         |
+| Name          | "Claude Code (tmux)"              |
+| Default Model | =sonnet=                          |
+| Interface     | CLI (subprocess wrapped in tmux)  |
+| Billing path  | Subscription (TUI), not Agent SDK |
+
+** Requirements
+- The =claude= CLI must be installed, logged in, and on =$PATH= (or pointed at via =CLAUDE_CODE_PATH=).
+- The =tmux= binary must be installed and on =$PATH= (or pointed at via =ai_claude_tmux_client_set_tmux_path()=).
+- A writable =~/.claude/projects/= directory (or override via =set_claude_project_dir()=).
+
+** Environment Variables
+| Variable           | Description                                  |
+|--------------------+----------------------------------------------|
+| =CLAUDE_CODE_PATH= | Override the path to the =claude= executable |
+
+** Available Models
+The Claude Code CLI uses simplified aliases --- same as the non-tmux client:
+
+| Define                         | Model Alias |
+|--------------------------------+-------------|
+| =AI_CLAUDE_TMUX_MODEL_OPUS=    | ="opus"=    |
+| =AI_CLAUDE_TMUX_MODEL_SONNET=  | ="sonnet"=  |
+| =AI_CLAUDE_TMUX_MODEL_HAIKU=   | ="haiku"=   |
+| =AI_CLAUDE_TMUX_DEFAULT_MODEL= | ="sonnet"=  |
+
+** How It Works
+Each call to =ai_provider_chat_sync()= (or its async equivalent) goes through this sequence:
+
+1. *Generate a session UUID* (or reuse the configured one). If a transcript already exists for that UUID the session is /resumed/ (=claude --resume=) rather than created fresh (=claude --session-id=).
+2. *Write the prompt* to a temp file atomically.
+3. *Spawn* =tmux new-session -d -s <name> -- claude [--session-id|--resume] <uuid> --settings '<json>' [args]=. The settings install a =Stop= hook that touches a per-session sentinel file when claude finishes a turn, and a =SessionStart= hook that touches a /ready/ sentinel once claude's TUI is initialized.
+4. *Wait* for the =SessionStart= ready sentinel --- proof the TUI is live and able to receive input.
+5. *Dismiss the resume-mode picker* (resumed sessions only) --- see /Resume-mode picker/ below.
+6. *Capture the byte offset* of the JSONL file as =jsonl_size_before= --- the high-water mark for "everything written before this turn."
+7. *Deliver the prompt*: load it into a tmux paste-buffer and paste it into the TUI as a bracketed-paste event (multi-line safe), then send a *verified* Enter --- see /Verified submit/ below.
+8. *Wait* for the =Stop=-hook sentinel, then poll the JSONL for a *terminal assistant entry* past =jsonl_size_before= --- see /Stop-hook / JSONL flush race/ below.
+9. *Parse* the JSONL: extract the last assistant entry's text blocks and usage, return as =AiResponse=.
+10. *Tear down*: kill the tmux session, unlink the prompt + sentinel files. (Optionally preserved --- see =debug-preserve-tmux= below.)
+
+*** Stop-hook / JSONL flush race
+A subtle gotcha worth documenting: the Stop hook fires when =claude= has generated its assistant response *in memory*, but the on-disk JSONL flush of that response lags the flush of the user-message + attachment lines by up to ~2 seconds. A naive "wait for the file to grow past =jsonl_size_before=" check fires too early and reads the *previous* turn's last assistant entry, returning a stale response.
+
+The poll loop therefore parses the slice of JSONL past =jsonl_size_before= and waits for an entry where:
+
+- =type == "assistant"=, *and*
+- =message.stop_reason= is set and is *not* ="tool_use"=.
+
+=tool_use= stop reasons are intermediate; the Stop hook only fires on terminal reasons (=end_turn=, =stop_sequence=, =max_tokens=), so we're guaranteed to converge.
+
+*** Verified submit
+=tmux send-keys= is not perfectly reliable at landing the submit Enter against the claude TUI --- a keypress can be swallowed while the input box is mid-render. A swallowed Enter means claude never receives the prompt, so the client would otherwise burn the whole turn timeout waiting on a =Stop= hook that never fires.
+
+So the Enter is treated as unconfirmed until proven otherwise. After pressing it, the client polls the JSONL slice past =jsonl_size_before= for proof that claude *accepted* the submission, which has two shapes:
+
+- a real =type:"user"= entry (not a compaction summary) --- claude was idle and started the turn immediately; or
+- a =type:"queue-operation"= entry with =operation:"enqueue"= --- claude was *busy* (running a turn, or auto-compacting a large resumed session) and /queued/ the prompt. It is not lost: it runs as soon as claude is free, and the (deliberately generous) turn timeout covers the wait.
+
+If neither shape appears within =prompt-resend-interval-ms=, the Enter is re-sent, up to =max-prompt-send-attempts= times before the turn fails with =AI_ERROR_CLI_EXECUTION=. Recognising the /queued/ shape matters: an earlier cut looked only for =type:"user"=, mistook a queued prompt for a swallowed keystroke, and tore the tmux session down mid-compaction with the message still in claude's queue. =type:"user"= entries flagged =isCompactSummary= (a finished compaction's own summary) are excluded --- they would be a false positive.
+
+The classification is a pure function, =ai_claude_tmux_client_jsonl_has_accepted_prompt()=, exported so it can be unit-tested without spawning =claude=.
+
+*** Resume-mode picker
+When a session is resumed, claude's TUI can stop on an interactive picker asking whether to resume "with a summary", "as-is", or "clear". Because this client always kills the tmux session at the end of a turn (claude never exits cleanly on its own), every resumed session looks "interrupted" to claude --- which is what triggers the picker. There is no CLI flag or settings-file key to suppress it.
+
+Left alone, the picker swallows the pasted prompt as raw keystrokes. With =dismiss-resume-prompt= enabled (the default), the client types =2= --- the "resume as-is" option --- then waits =prompt-resend-interval-ms= for the TUI to settle before pasting. Plain Enter would take the picker's /default/, "resume with a summary", which kicks off a re-summarisation (a compaction) that on a large session can run for minutes; "resume as-is" skips that.
+
+If no picker is actually shown, the =2= lands as a literal character prepended to the pasted prompt --- an accepted cosmetic trade-off. The dismissal only runs on resumed sessions; fresh sessions never show the picker.
+
+** Usage
+*** Basic Usage
+#+begin_src C
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("Hello, Claude!");
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+    GList *messages = g_list_append(NULL, msg);
+
+    response = ai_provider_chat_sync(
+        AI_PROVIDER(client),
+        messages,
+        "You are a helpful assistant.",
+        4096,
+        NULL,
+        NULL,
+        &error
+    );
+
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        return 1;
+    }
+
+    g_print("%s\n", ai_response_get_text(response));
+    g_list_free(messages);
+    return 0;
+}
+#+end_src
+
+*** Setting the Model
+#+begin_src C
+g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_TMUX_MODEL_OPUS);
+#+end_src
+
+*** Tuning Timeouts
+The two relevant timeouts:
+
+- *Startup timeout* --- how long to wait for claude's TUI to become ready (the =SessionStart= hook) after launch. Default: 15s.
+- *Turn timeout* --- how long to wait for the Stop-hook sentinel before declaring the turn timed out. Default: 600s (10 minutes) --- generous on purpose, so it can ride out an auto-compaction on a large resumed session.
+
+#+begin_src C
+ai_claude_tmux_client_set_startup_timeout_ms(client, 30000);  /* 30s */
+ai_claude_tmux_client_set_turn_timeout_ms(client, 180000);    /* 3m  */
+#+end_src
+
+*** Reliability tuning
+Three properties control the prompt-delivery machinery (see /Verified submit/ and /Resume-mode picker/ above):
+
+| Property                    | Default | Effect                                                                                                                    |
+|-----------------------------+---------+---------------------------------------------------------------------------------------------------------------------------|
+| =dismiss-resume-prompt=     | =TRUE=  | On a resumed session, type =2= ("resume as-is") to clear claude's resume-mode picker before pasting the prompt.           |
+| =prompt-resend-interval-ms= | =2000=  | Per-attempt wait for the prompt to be accepted after an Enter --- also the settle wait after the resume-picker keystroke. |
+| =max-prompt-send-attempts=  | =5=     | How many Enter keystrokes to try before failing the turn with =AI_ERROR_CLI_EXECUTION=.                                   |
+
+#+begin_src C
+ai_claude_tmux_client_set_dismiss_resume_prompt(client, TRUE);
+ai_claude_tmux_client_set_prompt_resend_interval_ms(client, 2000);
+ai_claude_tmux_client_set_max_prompt_send_attempts(client, 5);
+#+end_src
+
+The defaults suit normal use; you'd typically only raise =prompt-resend-interval-ms= / =max-prompt-send-attempts= on a very slow host.
+
+*** Skip Permissions
+For automated/headless workloads where you don't want claude to prompt for tool-permission approvals:
+
+#+begin_src C
+ai_claude_tmux_client_set_skip_permissions(client, TRUE);
+#+end_src
+
+This passes =--dangerously-skip-permissions= to =claude=. *Only use this in trusted environments* --- it bypasses claude's normal "ask before destructive actions" gating.
+
+*** Debug Mode: preserve tmux + artifacts
+When debugging a stuck or misbehaving turn, you can prevent the client from cleaning up after itself:
+
+#+begin_src C
+ai_claude_tmux_client_set_debug_preserve_tmux(client, TRUE);
+#+end_src
+
+This:
+
+- Skips =tmux kill-session= after the turn --- you can =tmux attach -t claudetmux-<uuid>= to see the interactive session.
+- Skips unlinking the prompt file and sentinel files.
+- Implies =keep-artifacts= behaviour.
+
+Default is =FALSE=. Production callers should leave it off --- the per-turn artifacts pile up otherwise.
+
+A lighter alternative if you only want to keep the temp files (without preserving the tmux session):
+
+#+begin_src C
+ai_claude_tmux_client_set_keep_artifacts(client, TRUE);
+#+end_src
+
+*** Overriding tmux / claude paths (testing)
+For tests with a stand-in script:
+
+#+begin_src C
+ai_claude_tmux_client_set_tmux_path(client, "/tmp/fake-tmux.sh");
+ai_claude_tmux_client_set_claude_project_dir(client, "/tmp/test-projects");
+#+end_src
+
+Production callers should leave both =NULL= (search =$PATH= / use =$HOME/.claude/projects=).
+
+*** Getting Cost Information
+The TUI doesn't always emit a cost field; missing values surface as =0.0=.
+
+#+begin_src C
+gdouble cost = ai_claude_tmux_client_get_total_cost(client);
+g_print("Last turn cost: $%.4f\n", cost);
+#+end_src
+
+** Comparison vs =AiClaudeCodeClient=
+| Aspect        | =AiClaudeCodeClient=    | =AiClaudeTmuxClient=                        |
+|---------------+-------------------------+---------------------------------------------|
+| Spawn mode    | =claude --print=        | Interactive TUI inside tmux                 |
+| Billing       | Agent SDK credits       | Normal subscription                         |
+| Latency       | Lower (no TUI startup)  | Higher (~3-5s startup overhead)             |
+| Failure modes | stdout/stderr parsing   | JSONL flush race, tmux session lifecycle    |
+| Best for      | One-shot CLI batch work | Long-lived assistants, subscription budgets |
+
+** Provider Type String
+Configuration files and =ai_provider_type_from_string()= accept any of:
+
+- ="claude-tmux"= / ="claude_tmux"= (canonical)
+- ="claude-code-tmux"= / ="claude_code_tmux"= (alias, parallels ="claude-code"=)
+
+All four map to =AI_PROVIDER_CLAUDE_TMUX=.
+
+** See Also
+- [[file:claude-code.org][Claude Code provider]] --- the Agent-SDK / =--print= sibling.
+- [[file:index.org][Providers overview]]

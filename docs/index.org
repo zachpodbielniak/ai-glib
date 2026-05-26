@@ -1,0 +1,121 @@
+* ai-glib Documentation
+A GLib/GObject-based C library for interacting with AI providers.
+
+** Overview
+ai-glib provides a unified interface to multiple AI providers through a GObject-based design. It supports both synchronous and asynchronous operations, streaming responses, and tool/function calling.
+
+** Supported Providers
+*** HTTP API
+| Provider                             | Description               | Default Model            |
+|--------------------------------------+---------------------------+--------------------------|
+| [[file:providers/claude.org][Claude]] | Anthropic's Claude models | claude-sonnet-4-20250514 |
+| [[file:providers/openai.org][OpenAI]] | OpenAI GPT models         | gpt-4o                   |
+| [[file:providers/gemini.org][Gemini]] | Google's Gemini models    | gemini-2.0-flash         |
+| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4-1-fast-reasoning  |
+| [[file:providers/ollama.org][Ollama]] | Local models via Ollama   | gpt-oss:20b              |
+
+*** CLI Wrappers
+| Provider                                       | Description                                    | Default Model                      |
+|------------------------------------------------+------------------------------------------------+------------------------------------|
+| [[file:providers/claude-code.org][Claude Code]] | Anthropic's Claude Code CLI                    | sonnet                             |
+| [[file:providers/opencode.org][OpenCode]]       | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-4-20250514 |
+
+** Documentation
+*** Getting Started
+- [[file:getting-started.org][Getting Started]] - Quick start guide and installation
+- [[file:configuration.org][Configuration]] - Environment variables and configuration options
+- [[file:architecture.org][Architecture]] - Design overview and class hierarchy
+
+*** Providers
+- [[file:providers/index.org][Providers Overview]] - Common provider interface
+- [[file:providers/claude.org][Claude]] - Anthropic Claude HTTP API
+- [[file:providers/openai.org][OpenAI]] - OpenAI GPT HTTP API
+- [[file:providers/gemini.org][Gemini]] - Google Gemini HTTP API
+- [[file:providers/grok.org][Grok]] - xAI Grok HTTP API
+- [[file:providers/ollama.org][Ollama]] - Local Ollama HTTP API
+- [[file:providers/claude-code.org][Claude Code]] - Claude Code CLI wrapper
+- [[file:providers/opencode.org][OpenCode]] - OpenCode CLI wrapper (multi-provider)
+
+*** API Reference
+- [[file:api-reference/index.org][API Reference Index]] - Complete API documentation
+- [[file:api-reference/ai-simple.org][AiSimple]] - Simple convenience API (start here)
+- [[file:api-reference/ai-client.org][AiClient]] - Base client class
+- [[file:api-reference/ai-provider.org][AiProvider]] - Provider interface
+- [[file:api-reference/ai-image-generator.org][AiImageGenerator]] - Image generation interface
+- [[file:api-reference/ai-message.org][AiMessage]] - Message class
+- [[file:api-reference/ai-response.org][AiResponse]] - Response class
+- [[file:api-reference/ai-tool.org][AiTool]] - Tool definition
+- [[file:api-reference/ai-config.org][AiConfig]] - Configuration
+- [[file:api-reference/ai-error.org][AiError]] - Error codes
+
+*** Examples
+- [[file:examples/index.org][Examples Index]] - All examples
+- [[file:examples/simple-chat.org][Simple Chat]] - Basic chat completion
+- [[file:examples/multi-provider.org][Multi-Provider]] - Using multiple providers
+- [[file:examples/streaming.org][Streaming]] - Streaming responses
+- [[file:examples/tool-use.org][Tool Use]] - Function calling
+- [[file:examples/image-generation.org][Image Generation]] - Generate images from text
+
+*** Contributing
+- [[file:contributing.org][Contributing]] - How to contribute to ai-glib
+
+** Quick Example (Simple API)
+The simplest way to call an LLM --- just 3 lines:
+
+#+begin_src C
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiSimple) ai = ai_simple_new();
+    g_autofree gchar *answer = ai_simple_prompt(ai, "Hello!", NULL, NULL);
+    g_print("Response: %s\n", answer);
+    return 0;
+}
+#+end_src
+
+** Full API Example
+For async operations, streaming, and tool use, use the full provider API:
+
+#+begin_src C
+#include <ai-glib.h>
+
+static void
+on_response(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    GMainLoop *loop = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(AiResponse) response = NULL;
+    g_autofree gchar *text = NULL;
+
+    response = ai_provider_chat_finish(AI_PROVIDER(source), result, &error);
+    if (error != NULL)
+    {
+        g_printerr("Error: %s\n", error->message);
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    text = ai_response_get_text(response);
+    g_print("Response: %s\n", text);
+    g_main_loop_quit(loop);
+}
+
+int main(void)
+{
+    g_autoptr(AiClaudeClient) client = ai_claude_client_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("Hello!");
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+    GList *messages = g_list_append(NULL, msg);
+
+    ai_provider_chat_async(AI_PROVIDER(client), messages, NULL, 4096,
+                           NULL, NULL, on_response, loop);
+
+    g_main_loop_run(loop);
+    g_list_free(messages);
+    return 0;
+}
+#+end_src
+
+** License
+ai-glib is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
