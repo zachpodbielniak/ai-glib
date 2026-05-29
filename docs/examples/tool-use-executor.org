@@ -59,6 +59,8 @@ g_autofree gchar *answer = ai_tool_executor_run (
 
 The model sees the union of your registered tools and any built-ins (=bash=, =read=, =write=, =edit=, =glob=, =grep=, =ls=, =web_fetch= and optionally =web_search=). Built-ins remain available; register a tool with the same name to override one of them for this executor.
 
+=web_fetch= converts HTML to readable text, upgrades =http://= to =https://=, caches responses for 15 minutes, and accepts an optional =prompt= parameter --- when set, a model reads the fetched page and returns only the requested information. See [[../tool-executor.org][the tool-executor reference]] for details.
+
 ** See also
 - [[../tool-executor.org][tool-executor.md]] --- =AiToolExecutor= reference
 - [[file:tool-use.org][Tool Use]] --- manual loop without =AiToolExecutor=

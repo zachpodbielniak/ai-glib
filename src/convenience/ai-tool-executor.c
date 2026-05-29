@@ -15,6 +15,8 @@
 #include <sys/wait.h>
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
+#include <libxml/HTMLparser.h>
+#include <libxml/tree.h>
 
 #include "convenience/ai-tool-executor.h"
 #include "convenience/ai-search-provider.h"
@@ -30,6 +32,11 @@
 #define MAX_TURNS          20
 #define WEB_FETCH_MAX_BYTES (100 * 1024)  /* 100 KB */
 #define DEFAULT_MAX_TOKENS  4096
+#define WEB_FETCH_TIMEOUT_SECS 30
+/* Self-cleaning cache TTL: 15 minutes, in microseconds (monotonic clock). */
+#define WEB_FETCH_CACHE_TTL_US (15 * 60 * (gint64)G_USEC_PER_SEC)
+#define WEB_FETCH_USER_AGENT \
+    "cmacs-ai/1.0 (ai-glib web_fetch; +https://github.com/zachp/cmacs)"
 
 /* ================================================================
  * Struct definition — must precede any code accessing its fields
@@ -62,6 +69,7 @@ struct _AiToolExecutor
     GList            *tools;           /* GList<AiTool>, owned */
     AiSearchProvider *search_provider; /* nullable, ref'd */
     GHashTable       *callbacks;       /* str -> CallbackEntry, owned */
+    AiProvider       *active_provider; /* borrowed; set only during a run() */
 };
 
 G_DEFINE_TYPE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT)
@@ -631,6 +639,504 @@ tool_ls (
     return g_string_free (output, FALSE);
 }
 
+/* ---- web_fetch: response cache (URL -> converted text, 15 min TTL) ---- */
+
+typedef struct
+{
+    gint64  stamp;   /* g_get_monotonic_time() at insertion (microseconds) */
+    gchar  *text;    /* converted/cleaned body, owned */
+} WebFetchCacheEntry;
+
+static GHashTable *web_fetch_cache = NULL;     /* url -> WebFetchCacheEntry */
+static GMutex      web_fetch_cache_lock;       /* static GMutex: zero-init OK */
+
+static void
+web_fetch_cache_entry_free (gpointer data)
+{
+    WebFetchCacheEntry *entry = data;
+
+    if (entry == NULL)
+        return;
+
+    g_free (entry->text);
+    g_slice_free (WebFetchCacheEntry, entry);
+}
+
+/* Drop every expired entry. Caller must hold web_fetch_cache_lock. */
+static void
+web_fetch_cache_sweep_locked (gint64 now)
+{
+    GHashTableIter iter;
+    gpointer       key;
+    gpointer       value;
+
+    if (web_fetch_cache == NULL)
+        return;
+
+    g_hash_table_iter_init (&iter, web_fetch_cache);
+    while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+        WebFetchCacheEntry *entry = value;
+
+        if (now - entry->stamp > WEB_FETCH_CACHE_TTL_US)
+            g_hash_table_iter_remove (&iter);
+    }
+}
+
+/* Returns a fresh copy of the cached text for URL, or NULL on miss/expiry. */
+static gchar *
+web_fetch_cache_lookup (const gchar *url)
+{
+    gchar  *result = NULL;
+    gint64  now;
+
+    g_mutex_lock (&web_fetch_cache_lock);
+    now = g_get_monotonic_time ();
+
+    if (web_fetch_cache != NULL)
+    {
+        WebFetchCacheEntry *entry = g_hash_table_lookup (web_fetch_cache, url);
+
+        if (entry != NULL)
+        {
+            if (now - entry->stamp <= WEB_FETCH_CACHE_TTL_US)
+                result = g_strdup (entry->text);
+            else
+                g_hash_table_remove (web_fetch_cache, url);
+        }
+
+        web_fetch_cache_sweep_locked (now);
+    }
+
+    g_mutex_unlock (&web_fetch_cache_lock);
+    return result;
+}
+
+static void
+web_fetch_cache_store (const gchar *url, const gchar *text)
+{
+    WebFetchCacheEntry *entry;
+
+    g_mutex_lock (&web_fetch_cache_lock);
+
+    if (web_fetch_cache == NULL)
+        web_fetch_cache = g_hash_table_new_full (
+            g_str_hash, g_str_equal, g_free, web_fetch_cache_entry_free);
+
+    entry = g_slice_new0 (WebFetchCacheEntry);
+    entry->stamp = g_get_monotonic_time ();
+    entry->text  = g_strdup (text);
+
+    g_hash_table_replace (web_fetch_cache, g_strdup (url), entry);
+
+    g_mutex_unlock (&web_fetch_cache_lock);
+}
+
+/* ---- web_fetch: HTML -> readable markdown-ish text ---- */
+
+static gboolean
+node_name_is (xmlNode *node, const gchar *name)
+{
+    return node->name != NULL
+        && g_ascii_strcasecmp ((const gchar *)node->name, name) == 0;
+}
+
+static void
+html_walk (xmlNode *node, GString *out)
+{
+    xmlNode *cur;
+
+    for (cur = node; cur != NULL; cur = cur->next)
+    {
+        if (cur->type == XML_TEXT_NODE)
+        {
+            if (cur->content != NULL)
+                g_string_append (out, (const gchar *)cur->content);
+            continue;
+        }
+
+        if (cur->type != XML_ELEMENT_NODE)
+            continue;
+
+        /* Skip non-content subtrees entirely. */
+        if (node_name_is (cur, "script")   || node_name_is (cur, "style")
+            || node_name_is (cur, "head")  || node_name_is (cur, "noscript")
+            || node_name_is (cur, "svg")   || node_name_is (cur, "template"))
+            continue;
+
+        if (node_name_is (cur, "br"))
+        {
+            g_string_append_c (out, '\n');
+            continue;
+        }
+
+        /* Headings h1..h6 -> markdown '#' prefixes. */
+        if (cur->name != NULL
+            && (cur->name[0] == 'h' || cur->name[0] == 'H')
+            && cur->name[1] >= '1' && cur->name[1] <= '6'
+            && cur->name[2] == '\0')
+        {
+            gint level = cur->name[1] - '0';
+            gint i;
+
+            g_string_append_c (out, '\n');
+            for (i = 0; i < level; i++)
+                g_string_append_c (out, '#');
+            g_string_append_c (out, ' ');
+            html_walk (cur->children, out);
+            g_string_append_c (out, '\n');
+            continue;
+        }
+
+        /* Links -> [text](href). */
+        if (node_name_is (cur, "a"))
+        {
+            xmlChar *href = xmlGetProp (cur, (const xmlChar *)"href");
+
+            if (href != NULL && href[0] != '\0')
+            {
+                g_string_append_c (out, '[');
+                html_walk (cur->children, out);
+                g_string_append_printf (out, "](%s)", (const gchar *)href);
+            }
+            else
+            {
+                html_walk (cur->children, out);
+            }
+
+            if (href != NULL)
+                xmlFree (href);
+            continue;
+        }
+
+        /* List items get a bullet; block elements get surrounding newlines. */
+        if (node_name_is (cur, "li"))
+        {
+            g_string_append (out, "\n- ");
+            html_walk (cur->children, out);
+            g_string_append_c (out, '\n');
+            continue;
+        }
+
+        {
+            gboolean block =
+                node_name_is (cur, "p")       || node_name_is (cur, "div")
+                || node_name_is (cur, "tr")   || node_name_is (cur, "ul")
+                || node_name_is (cur, "ol")   || node_name_is (cur, "table")
+                || node_name_is (cur, "section") || node_name_is (cur, "article")
+                || node_name_is (cur, "header")  || node_name_is (cur, "footer")
+                || node_name_is (cur, "blockquote");
+
+            if (block)
+                g_string_append_c (out, '\n');
+
+            html_walk (cur->children, out);
+
+            if (block)
+                g_string_append_c (out, '\n');
+        }
+    }
+}
+
+/* Parse HTML and return cleaned text (transfer full), or NULL on parse fail.
+ * ENCODING is the charset hint (e.g. from the HTTP Content-Type); when NULL we
+ * default to UTF-8 rather than libxml's legacy ISO-8859-1, since that is the
+ * dominant encoding for modern pages that omit a charset declaration. */
+static gchar *
+html_to_text (const gchar *html, gsize len, const gchar *encoding)
+{
+    htmlDocPtr   doc;
+    xmlNode     *root;
+    GString     *out;
+    gchar       *raw;
+    GString     *clean;
+    const gchar *p;
+    const gchar *enc;
+    gint         nl_run;
+    gboolean     space_pending;
+    gboolean     at_line_start;
+
+    enc = (encoding != NULL && encoding[0] != '\0') ? encoding : "UTF-8";
+    doc = htmlReadMemory (html, (int)len, NULL, enc,
+                          HTML_PARSE_RECOVER | HTML_PARSE_NOERROR
+                          | HTML_PARSE_NOWARNING | HTML_PARSE_NONET);
+    if (doc == NULL)
+        return NULL;
+
+    out  = g_string_new (NULL);
+    root = xmlDocGetRootElement (doc);
+    if (root != NULL)
+        html_walk (root, out);
+    xmlFreeDoc (doc);
+
+    /* Whitespace cleanup: collapse spaces/tabs to one, drop leading spaces,
+     * and limit consecutive blank lines to a single one. */
+    raw           = g_string_free (out, FALSE);
+    clean         = g_string_new (NULL);
+    nl_run        = 0;
+    space_pending = FALSE;
+    at_line_start = TRUE;
+
+    for (p = raw; *p != '\0'; p++)
+    {
+        gchar c = *p;
+
+        if (c == '\r')
+            continue;
+
+        if (c == '\n')
+        {
+            nl_run++;
+            space_pending = FALSE;
+            continue;
+        }
+
+        if (c == ' ' || c == '\t')
+        {
+            space_pending = TRUE;
+            continue;
+        }
+
+        if (nl_run > 0)
+        {
+            gint emit = (nl_run >= 2) ? 2 : 1;
+            gint i;
+
+            for (i = 0; i < emit; i++)
+                g_string_append_c (clean, '\n');
+
+            nl_run        = 0;
+            at_line_start = TRUE;
+            space_pending = FALSE;
+        }
+
+        if (space_pending && !at_line_start)
+            g_string_append_c (clean, ' ');
+        space_pending = FALSE;
+
+        g_string_append_c (clean, c);
+        at_line_start = FALSE;
+    }
+
+    g_free (raw);
+
+    while (clean->len > 0
+           && (clean->str[clean->len - 1] == '\n'
+               || clean->str[clean->len - 1] == ' '))
+        g_string_truncate (clean, clean->len - 1);
+
+    return g_string_free (clean, FALSE);
+}
+
+/* Truncate BODY in place to at most MAX bytes on a valid UTF-8 boundary,
+ * appending a marker when truncation occurred. No-op if already within MAX. */
+static void
+web_fetch_truncate (GString *body, gsize max)
+{
+    const gchar *valid_end;
+    gsize        cut = max;
+
+    if (body->len <= max)
+        return;
+
+    /* Never split a multi-byte UTF-8 sequence: if the prefix up to the cap
+     * is not valid UTF-8, back the cut up to the last good boundary. */
+    if (!g_utf8_validate (body->str, (gssize)cut, &valid_end))
+        cut = (gsize)(valid_end - body->str);
+
+    g_string_truncate (body, cut);
+    g_string_append (body, "\n\n[truncated at 100 KB]");
+}
+
+/* Build the model-facing body (transfer full) from a fetched response.
+ * Prepends a redirect notice when the final host differs from the requested
+ * one, converts HTML to text (other text-ish types pass through, binary gets a
+ * placeholder), and truncates to the size cap. Pure: no network or Soup types,
+ * so it is unit-testable with synthetic inputs.
+ *   CONTENT_TYPE / CHARSET : from the response (both nullable).
+ *   REQ_HOST / FINAL_HOST  : requested vs final host (nullable; notice emitted
+ *                            only when both are set and differ).
+ *   FINAL_URL              : full final URL for the notice text (nullable). */
+static gchar *
+web_fetch_build_body (
+    const gchar *data,
+    gsize        size,
+    const gchar *content_type,
+    const gchar *charset,
+    const gchar *req_host,
+    const gchar *final_host,
+    const gchar *final_url
+){
+    GString *body = g_string_new (NULL);
+
+    if (req_host != NULL && final_host != NULL
+        && g_ascii_strcasecmp (req_host, final_host) != 0)
+    {
+        g_string_append_printf (body, "[redirected to %s]\n\n",
+                                final_url ? final_url : final_host);
+    }
+
+    if (content_type != NULL
+        && (g_ascii_strcasecmp (content_type, "text/html") == 0
+            || g_ascii_strcasecmp (content_type, "application/xhtml+xml") == 0))
+    {
+        g_autofree gchar *text = html_to_text (data, size, charset);
+
+        if (text != NULL)
+            g_string_append (body, text);
+        else
+            g_string_append_len (body, data, (gssize)size);
+    }
+    else if (content_type == NULL
+             || g_str_has_prefix (content_type, "text/")
+             || g_ascii_strcasecmp (content_type, "application/json") == 0
+             || g_ascii_strcasecmp (content_type, "application/xml") == 0
+             || g_ascii_strcasecmp (content_type, "application/javascript") == 0)
+    {
+        g_string_append_len (body, data, (gssize)size);
+    }
+    else
+    {
+        g_string_append_printf (body,
+            "[binary content: %" G_GSIZE_FORMAT " bytes, type %s "
+            "\xe2\x80\x94 not returned as text]", size, content_type);
+    }
+
+    web_fetch_truncate (body, WEB_FETCH_MAX_BYTES);
+
+    return g_string_free (body, FALSE);
+}
+
+/* ---- web_fetch: optional prompt-based extraction via a sub-model ---- */
+
+typedef struct
+{
+    GMainLoop *loop;
+    gchar     *result;
+    GError    *error;
+} WebFetchExtractCtx;
+
+static void
+on_web_fetch_extract (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+    WebFetchExtractCtx   *ec       = user_data;
+    g_autoptr(AiResponse) response = NULL;
+
+    response = ai_provider_chat_finish (AI_PROVIDER (source), res, &ec->error);
+    if (response != NULL)
+        ec->result = ai_response_get_text (response);
+
+    g_main_loop_quit (ec->loop);
+}
+
+/* Run PROMPT over CONTENT with PROVIDER and return the model's text, or NULL
+ * (with a warning) so the caller can fall back to the raw content. */
+static gchar *
+web_fetch_extract (
+    AiProvider   *provider,
+    const gchar  *url,
+    const gchar  *content,
+    const gchar  *prompt,
+    GCancellable *cancellable
+){
+    WebFetchExtractCtx  ec        = { NULL, NULL, NULL };
+    GList              *messages  = NULL;
+    g_autofree gchar   *user_text = NULL;
+    AiMessage          *msg;
+
+    user_text = g_strdup_printf (
+        "Content fetched from %s:\n\n%s\n\nTask: %s", url, content, prompt);
+    msg      = ai_message_new_user (user_text);
+    messages = g_list_append (NULL, msg);
+
+    ec.loop = g_main_loop_new (NULL, FALSE);
+    ai_provider_chat_async (
+        provider, messages,
+        "You extract and summarise fetched web content. Return only what the "
+        "task asks for, concisely, with no preamble.",
+        DEFAULT_MAX_TOKENS,
+        NULL,            /* no tools for the sub-call */
+        cancellable,
+        on_web_fetch_extract, &ec);
+    g_main_loop_run (ec.loop);
+    g_main_loop_unref (ec.loop);
+
+    g_list_free_full (messages, g_object_unref);
+
+    if (ec.error != NULL)
+    {
+        g_warning ("web_fetch: prompt extraction failed: %s", ec.error->message);
+        g_clear_error (&ec.error);
+        return NULL;
+    }
+
+    return ec.result;   /* may be NULL if the model returned no text */
+}
+
+/* TRUE if an http:// URL should be speculatively upgraded to https://.
+ * False for localhost and IP-literal hosts (dev/internal endpoints). */
+static gboolean
+web_fetch_should_upgrade (const gchar *url)
+{
+    g_autoptr(GUri)  uri  = NULL;
+    const gchar     *host;
+
+    uri = g_uri_parse (url, G_URI_FLAGS_NONE, NULL);
+    if (uri == NULL)
+        return FALSE;
+
+    host = g_uri_get_host (uri);
+    if (host == NULL || host[0] == '\0')
+        return FALSE;
+
+    if (g_ascii_strcasecmp (host, "localhost") == 0)
+        return FALSE;
+
+    if (g_hostname_is_ip_address (host))
+        return FALSE;
+
+    return TRUE;
+}
+
+/* GET URL with our headers; returns body bytes and (transfer full) *out_msg. */
+static GBytes *
+web_fetch_get (
+    SoupSession   *session,
+    const gchar   *url,
+    SoupMessage  **out_msg,
+    GCancellable  *cancellable,
+    GError       **error
+){
+    SoupMessage        *msg;
+    SoupMessageHeaders *req_headers;
+    GBytes             *bytes;
+
+    msg = soup_message_new ("GET", url);
+    if (msg == NULL)
+    {
+        g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                     "web_fetch: invalid URL '%s'", url);
+        return NULL;
+    }
+
+    req_headers = soup_message_get_request_headers (msg);
+    soup_message_headers_replace (req_headers, "User-Agent",
+                                  WEB_FETCH_USER_AGENT);
+    soup_message_headers_replace (req_headers, "Accept",
+        "text/html,application/xhtml+xml,text/plain,"
+        "application/json;q=0.9,*/*;q=0.8");
+
+    bytes = soup_session_send_and_read (session, msg, cancellable, error);
+    if (bytes == NULL)
+    {
+        g_object_unref (msg);
+        return NULL;
+    }
+
+    *out_msg = msg;
+    return bytes;
+}
+
 static gchar *
 tool_web_fetch (
     AiToolExecutor  *self,
@@ -638,15 +1144,9 @@ tool_web_fetch (
     GCancellable    *cancellable,
     GError         **error
 ){
-    const gchar           *url;
-    g_autoptr(SoupSession)  session = NULL;
-    g_autoptr(SoupMessage)  msg     = NULL;
-    g_autoptr(GBytes)       bytes   = NULL;
-    guint        status_code;
-    const gchar *data;
-    gsize        size;
-
-    (void)self;
+    const gchar            *url;
+    const gchar            *prompt;
+    g_autofree gchar       *converted = NULL;
 
     url = ai_tool_use_get_input_string (tool_use, "url");
     if (url == NULL)
@@ -656,34 +1156,104 @@ tool_web_fetch (
         return NULL;
     }
 
-    session = soup_session_new ();
-    msg     = soup_message_new ("GET", url);
+    prompt = ai_tool_use_get_input_string (tool_use, "prompt");
 
-    if (msg == NULL)
+    /* 1. Cache lookup (keyed on the original URL; stores converted text). */
+    converted = web_fetch_cache_lookup (url);
+
+    /* 2. On miss, fetch and convert. */
+    if (converted == NULL)
     {
-        g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
-                     "web_fetch: invalid URL '%s'", url);
-        return NULL;
+        g_autoptr(SoupSession)  session    = NULL;
+        g_autoptr(SoupMessage)  msg        = NULL;
+        g_autoptr(GBytes)       bytes      = NULL;
+        g_autoptr(GError)       local_err  = NULL;
+        g_autofree gchar       *fetch_url  = NULL;
+        g_autoptr(GUri)         req_uri    = NULL;
+        gboolean                upgraded   = FALSE;
+        guint                   status_code;
+        const gchar            *data;
+        gsize                   size;
+        const gchar            *content_type;
+        GHashTable             *ct_params = NULL;
+        const gchar            *charset;
+        SoupMessageHeaders     *resp_headers;
+        GUri                   *final_uri;
+        const gchar            *req_host;
+        const gchar            *final_host;
+        gchar                  *final_str;
+
+        session = soup_session_new ();
+        g_object_set (session, "timeout", (guint)WEB_FETCH_TIMEOUT_SECS, NULL);
+
+        /* http:// -> https:// upgrade, with fall-back to the original.
+         * Skipped for localhost / IP-literal hosts: those are dev or internal
+         * endpoints that are rarely TLS, and a speculative https probe there
+         * just stalls until the timeout before falling back. */
+        if (g_str_has_prefix (url, "http://") && web_fetch_should_upgrade (url))
+        {
+            fetch_url = g_strconcat ("https://",
+                                     url + strlen ("http://"), NULL);
+            upgraded = TRUE;
+        }
+        else
+        {
+            fetch_url = g_strdup (url);
+        }
+
+        bytes = web_fetch_get (session, fetch_url, &msg, cancellable, &local_err);
+        if (bytes == NULL && upgraded)
+        {
+            g_clear_error (&local_err);
+            bytes = web_fetch_get (session, url, &msg, cancellable, &local_err);
+        }
+        if (bytes == NULL)
+        {
+            g_propagate_error (error, g_steal_pointer (&local_err));
+            return NULL;
+        }
+
+        status_code = soup_message_get_status (msg);
+        if (status_code < 200 || status_code >= 300)
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_SERVER_ERROR,
+                         "web_fetch: HTTP %u for '%s'", status_code, url);
+            return NULL;
+        }
+
+        data         = g_bytes_get_data (bytes, &size);
+        resp_headers = soup_message_get_response_headers (msg);
+        content_type = soup_message_headers_get_content_type (resp_headers,
+                                                              &ct_params);
+        charset      = (ct_params != NULL)
+                       ? g_hash_table_lookup (ct_params, "charset") : NULL;
+
+        req_uri    = g_uri_parse (url, G_URI_FLAGS_NONE, NULL);
+        req_host   = (req_uri != NULL) ? g_uri_get_host (req_uri) : NULL;
+        final_uri  = soup_message_get_uri (msg);
+        final_host = (final_uri != NULL) ? g_uri_get_host (final_uri) : NULL;
+        final_str  = (final_uri != NULL) ? g_uri_to_string (final_uri) : NULL;
+
+        converted = web_fetch_build_body (data, size, content_type, charset,
+                                          req_host, final_host, final_str);
+        g_free (final_str);
+        g_clear_pointer (&ct_params, g_hash_table_unref);
+
+        web_fetch_cache_store (url, converted);
     }
 
-    bytes = soup_session_send_and_read (session, msg, cancellable, error);
-    if (bytes == NULL)
-        return NULL;
-
-    status_code = soup_message_get_status (msg);
-    if (status_code < 200 || status_code >= 300)
+    /* 3. Optional prompt-based extraction via the active run's provider. */
+    if (prompt != NULL && prompt[0] != '\0'
+        && self != NULL && self->active_provider != NULL)
     {
-        g_set_error (error, AI_ERROR, AI_ERROR_SERVER_ERROR,
-                     "web_fetch: HTTP %u for '%s'", status_code, url);
-        return NULL;
+        gchar *extracted = web_fetch_extract (self->active_provider, url,
+                                              converted, prompt, cancellable);
+        if (extracted != NULL)
+            return extracted;
+        /* On failure, fall through and return the converted content. */
     }
 
-    data = g_bytes_get_data (bytes, &size);
-
-    if (size > WEB_FETCH_MAX_BYTES)
-        size = WEB_FETCH_MAX_BYTES;
-
-    return g_strndup (data, size);
+    return g_steal_pointer (&converted);
 }
 
 static gchar *
@@ -861,11 +1431,21 @@ ai_tool_executor_new (void)
 
     /* web_fetch */
     tool = ai_tool_new ("web_fetch",
-                        "Fetch the raw contents of a URL over HTTP or HTTPS. "
-                        "Returns up to 100 KB of the response body.");
+                        "Fetch a URL over HTTP or HTTPS. HTML is converted to "
+                        "readable markdown-style text (scripts/styles stripped, "
+                        "headings and links preserved); JSON and plain text are "
+                        "returned as-is. http:// is upgraded to https://. "
+                        "Responses are cached for 15 minutes. Returns up to "
+                        "100 KB. If 'prompt' is given, a model reads the page "
+                        "and returns only the requested information.");
     ai_tool_add_parameter (tool, "url", "string",
                            "The URL to fetch (must start with http:// or https://).",
                            TRUE);
+    ai_tool_add_parameter (tool, "prompt", "string",
+                           "Optional: what to extract from the page. When set, "
+                           "a model summarises the fetched content and only the "
+                           "result is returned instead of the full page.",
+                           FALSE);
     self->tools = g_list_append (self->tools, tool);
 
     /* web_search is registered on demand by set_search_provider() */
@@ -1051,6 +1631,10 @@ ai_tool_executor_run (
     ctx.result        = NULL;
     ctx.error         = NULL;
 
+    /* Expose the active provider to built-in tools (e.g. web_fetch's optional
+     * prompt-based extraction) for the duration of this run only. */
+    self->active_provider = provider;
+
     /* Shallow-copy the caller's messages so we can extend the list */
     for (iter = messages; iter != NULL; iter = iter->next)
         ctx.messages = g_list_append (ctx.messages, g_object_ref (iter->data));
@@ -1058,6 +1642,8 @@ ai_tool_executor_run (
     run_context_send (&ctx);
     g_main_loop_run (ctx.loop);
     g_main_loop_unref (ctx.loop);
+
+    self->active_provider = NULL;
 
     /* Free our message list (caller keeps ownership of their originals) */
     g_list_free_full (ctx.messages, g_object_unref);

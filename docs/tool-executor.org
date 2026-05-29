@@ -11,7 +11,7 @@
 | =glob=       | Find files matching a glob pattern (recursive)                 |
 | =grep=       | Search file contents with a regex; returns =file:line: match=  |
 | =ls=         | List a directory with type and size                            |
-| =web_fetch=  | Fetch a URL via HTTP/HTTPS (max 100 KB)                        |
+| =web_fetch=  | Fetch a URL; HTML converted to text, optional model extraction |
 | =web_search= | Search the web (requires a search provider --- see below)      |
 
 ** Quick Start
@@ -176,7 +176,33 @@ for (GList *i = uses; i; i = i->next) {
 g_list_free(uses);
 #+end_src
 
+** The =web_fetch= tool
+=web_fetch= retrieves a URL and returns content tuned for a model rather
+than the raw bytes:
+
+- *HTML to text*: =text/html= responses are parsed (libxml2) and rendered
+  to readable markdown-ish text --- =script=/=style=/=head= are dropped,
+  headings become =#= prefixes, and =<a href>= becomes =[text](href)=.
+  =application/json= and other =text/*= responses pass through unchanged;
+  binary types return a short placeholder instead of garbage.
+- *Hardening*: =http://= URLs are upgraded to =https://= (with fall-back),
+  a real =User-Agent= is sent, the request times out after 30 s, and a
+  redirect to a different host is announced with a =[redirected to ...]=
+  notice line.
+- *Caching*: converted bodies are cached in-process for *15 minutes*,
+  keyed by URL; repeated fetches within a session avoid the network. The
+  cache is self-cleaning (expired entries are dropped on access).
+- *Optional extraction*: pass a =prompt= parameter and a model reads the
+  fetched content and returns only the requested information instead of
+  the whole page. Extraction uses the provider driving the current
+  =ai_tool_executor_run()= call; if no run is active (e.g. a bare
+  =ai_tool_executor_execute()=) the =prompt= is ignored and the converted
+  content is returned. Extraction failures fall back to the content.
+
+Parameters: =url= (required), =prompt= (optional).
+
 ** Limits
 - =ai_tool_executor_run()= caps at *20 turns* to prevent infinite loops.
-- =web_fetch= returns at most *100 KB* of response body.
+- =web_fetch= returns at most *100 KB* of converted text (truncated on a
+  valid UTF-8 boundary, with a =[truncated at 100 KB]= marker).
 - Tools run on the calling thread; =bash= commands block until completion.

@@ -77,6 +77,39 @@ test_executor_new (void)
     g_assert_false (has_web_search);
 }
 
+/* web_fetch must advertise both 'url' (required) and 'prompt' (optional). */
+static void
+test_executor_web_fetch_params (void)
+{
+    g_autoptr(AiToolExecutor) exec = NULL;
+    GList            *tools;
+    GList            *iter;
+    AiTool           *web_fetch = NULL;
+    JsonNode         *params;
+    g_autofree gchar *json = NULL;
+
+    exec  = ai_tool_executor_new ();
+    tools = ai_tool_executor_get_tools (exec);
+
+    for (iter = tools; iter != NULL; iter = iter->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (iter->data), "web_fetch") == 0)
+        {
+            web_fetch = iter->data;
+            break;
+        }
+    }
+    g_assert_nonnull (web_fetch);
+
+    params = ai_tool_get_parameters_json (web_fetch);
+    g_assert_nonnull (params);
+    json = json_to_string (params, FALSE);
+
+    g_assert_nonnull (json);
+    g_assert_true (g_strstr_len (json, -1, "\"url\"") != NULL);
+    g_assert_true (g_strstr_len (json, -1, "\"prompt\"") != NULL);
+}
+
 /* ================================================================
  * bash
  * ================================================================ */
@@ -439,6 +472,8 @@ main (
 
     g_test_add_func ("/ai-glib/tool-executor/new",
                      test_executor_new);
+    g_test_add_func ("/ai-glib/tool-executor/web-fetch-params",
+                     test_executor_web_fetch_params);
     g_test_add_func ("/ai-glib/tool-executor/bash/echo",
                      test_executor_bash_echo);
     g_test_add_func ("/ai-glib/tool-executor/bash/exit-code",

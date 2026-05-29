@@ -7,16 +7,17 @@ This guide will help you get started using ai-glib for interacting with AI provi
 - GIO >= 2.56
 - libsoup >= 3.0
 - json-glib >= 1.6
+- libxml2 (=libxml-2.0=, used by =web_fetch= for HTML to text)
 - GCC with gnu89 support
 
 *** Fedora
 #+begin_src sh
-dnf install glib2-devel libsoup3-devel json-glib-devel
+dnf install glib2-devel libsoup3-devel json-glib-devel libxml2-devel
 #+end_src
 
 *** Ubuntu/Debian
 #+begin_src sh
-apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev
+apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libxml2-dev
 #+end_src
 
 ** Building
@@ -133,7 +134,7 @@ gcc -o myprogram myprogram.c \
     -I/usr/local/include/ai-glib-1.0 \
     -L/usr/local/lib \
     -lai-glib-1.0 \
-    $(pkg-config --cflags --libs glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0)
+    $(pkg-config --cflags --libs glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0)
 #+end_src
 
 ** Environment Variables

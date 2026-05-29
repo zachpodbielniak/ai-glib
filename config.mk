@@ -24,7 +24,7 @@ WARNINGS = -Wall -Wextra -Wno-unused-parameter -Wformat=2 -Wshadow
 CFLAGS_BASE = $(CSTD) $(WARNINGS) -fPIC
 
 # pkg-config dependencies
-PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0
+PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0
 
 # Get flags from pkg-config
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKG_DEPS))
