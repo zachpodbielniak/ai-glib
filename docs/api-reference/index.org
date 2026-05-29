@@ -19,6 +19,7 @@ Complete API documentation for ai-glib.
 | [[file:ai-provider.org][AiProvider]]              | Core provider interface      |
 | AiStreamable                                     | Streaming response interface |
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface   |
+| [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface         |
 
 ** Model Classes
 | Class                               | Description                            |
@@ -53,6 +54,17 @@ Complete API documentation for ai-glib.
 |--------------------+-----------------|
 | AiClaudeCodeClient | Claude Code CLI |
 | AiOpenCodeClient   | OpenCode CLI    |
+
+** Web Search
+See [[file:ai-search-provider.org][AiSearchProvider]] for the full reference.
+
+| Class                | Description                                  |
+|----------------------+----------------------------------------------|
+| AiSearchResult       | A single web search result                   |
+| AiSearchOptions      | Tunable search options (count, freshness, …) |
+| AiBraveSearch        | Brave Search backend (=BRAVE_API_KEY=)       |
+| AiBingSearch         | Bing Search backend (=BING_API_KEY=)         |
+| AiDuckDuckGoSearch   | Keyless DuckDuckGo backend (best-effort)     |
 
 ** Enumerations
 *** AiProviderType
@@ -149,6 +161,30 @@ typedef enum {
     AI_IMAGE_RESPONSE_URL,    /* Return URL */
     AI_IMAGE_RESPONSE_BASE64  /* Return base64 data */
 } AiImageResponseFormat;
+#+end_src
+
+*** AiSearchFreshness
+Web search recency filter:
+
+#+begin_src C
+typedef enum {
+    AI_SEARCH_FRESHNESS_ANY,    /* No restriction (default) */
+    AI_SEARCH_FRESHNESS_DAY,
+    AI_SEARCH_FRESHNESS_WEEK,
+    AI_SEARCH_FRESHNESS_MONTH,
+    AI_SEARCH_FRESHNESS_YEAR
+} AiSearchFreshness;
+#+end_src
+
+*** AiSearchSafeSearch
+Web search safe-search level:
+
+#+begin_src C
+typedef enum {
+    AI_SEARCH_SAFE_OFF,
+    AI_SEARCH_SAFE_MODERATE,    /* default */
+    AI_SEARCH_SAFE_STRICT
+} AiSearchSafeSearch;
 #+end_src
 
 ** Type Macros

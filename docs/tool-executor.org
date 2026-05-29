@@ -12,7 +12,7 @@
 | =grep=       | Search file contents with a regex; returns =file:line: match=  |
 | =ls=         | List a directory with type and size                            |
 | =web_fetch=  | Fetch a URL; HTML converted to text, optional model extraction |
-| =web_search= | Search the web (requires a search provider --- see below)      |
+| =web_search= | Search the web; ranked results + optional page fetch (below)   |
 
 ** Quick Start
 #+begin_src C
@@ -50,67 +50,78 @@ if (err != NULL) {
 #+end_src
 
 ** web_search
-The =web_search= tool is disabled by default. Enable it by setting a search provider:
+=web_search= returns ranked results (title, URL, source domain, snippet) and
+can optionally fetch the top results' pages. It is registered the moment you
+set a search provider:
 
 #+begin_src C
-/* Using Bing Web Search API */
-g_autoptr(AiBingSearch) bing = ai_bing_search_new("YOUR_BING_API_KEY");
-ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(bing));
+/* Zero-config: Brave/Bing from the environment, else keyless DuckDuckGo. */
+g_autoptr(AiSearchProvider) sp = ai_search_provider_new_default(NULL);
+ai_tool_executor_set_search_provider(exec, sp);
 
-/* Using Brave Search API */
+/* ...or choose a backend explicitly: */
 g_autoptr(AiBraveSearch) brave = ai_brave_search_new("YOUR_BRAVE_API_KEY");
 ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(brave));
 #+end_src
 
-*** Bing
-Requires an Azure Cognitive Services key (=Ocp-Apim-Subscription-Key=). Create one at [[https://portal.azure.com/]] → Bing Search v7.
+The tool advertises these parameters to the model:
 
-*** Brave
-Requires a Brave Search API key (=X-Subscription-Token=). Create one at [[https://brave.com/search/api/]].
+| Parameter       | Type    | Notes                                          |
+|-----------------+---------+------------------------------------------------|
+| =query=         | string  | required                                       |
+| =count=         | number  | maximum results (default 10)                   |
+| =freshness=     | enum    | any / day / week / month / year                |
+| =safesearch=    | enum    | off / moderate / strict                        |
+| =country=       | string  | two-letter region code, e.g. "US"              |
+| =language=      | string  | two-letter language code, e.g. "en"            |
+| =site=          | string  | restrict to one domain, e.g. "example.com"     |
+| =fetch_content= | boolean | fetch + attach the top results' page text      |
 
-*** Adding a New Search Provider
-Implement the =AiSearchProvider= interface:
+Results are cached for 5 minutes (keyed by provider + query + options). When
+=fetch_content= is set, each fetched page also rides the 15-minute =web_fetch=
+cache, so a later =web_fetch= of the same URL is free.
+
+*** Providers
+| Provider             | Key env var     | Notes                             |
+|----------------------+-----------------+-----------------------------------|
+| =AiBraveSearch=      | =BRAVE_API_KEY= | [[https://brave.com/search/api/]] |
+| =AiBingSearch=       | =BING_API_KEY=  | Azure Bing Search v7              |
+| =AiDuckDuckGoSearch= | (none)          | keyless, best-effort (no SLA)     |
+
+See [[file:web-search.org][Web Search]] for the full guide and
+[[file:api-reference/ai-search-provider.org][AiSearchProvider]] for the API
+reference.
+
+*** Adding a new search provider
+Implement the =AiSearchProvider= interface --- a single vfunc that returns a
+=GList= of =AiSearchResult= (transfer full):
 
 #+begin_src C
-/* my-duckduckgo-search.h */
-#include <ai-glib.h>
+static GList *
+my_do_search(AiSearchProvider *provider, const gchar *query,
+             AiSearchOptions *options, GCancellable *cancellable,
+             GError **error)
+{
+    GList *results = NULL;
+    /* ... query your backend; for each hit: ... */
+    AiSearchResult *r = ai_search_result_new(title, url, snippet);
+    ai_search_result_set_rank(r, rank);
+    results = g_list_append(results, r);
+    return results;   /* caller frees: g_list_free_full(.., g_object_unref) */
+}
 
-G_DECLARE_FINAL_TYPE(MyDuckDuckGoSearch, my_duckduckgo_search,
-                     MY, DUCKDUCKGO_SEARCH, GObject)
-
-MyDuckDuckGoSearch *my_duckduckgo_search_new(void);
-#+end_src
-
-#+begin_src C
-/* my-duckduckgo-search.c */
 static void
-my_duckduckgo_iface_init(AiSearchProviderInterface *iface)
+my_iface_init(AiSearchProviderInterface *iface)
 {
-    iface->search = my_duckduckgo_do_search;
+    iface->search = my_do_search;
 }
 
-G_DEFINE_TYPE_WITH_CODE(
-    MyDuckDuckGoSearch, my_duckduckgo_search, G_TYPE_OBJECT,
-    G_IMPLEMENT_INTERFACE(AI_TYPE_SEARCH_PROVIDER, my_duckduckgo_iface_init)
-)
-
-static gchar *
-my_duckduckgo_do_search(AiSearchProvider *provider,
-                         const gchar *query,
-                         GCancellable *cancellable,
-                         GError **error)
-{
-    /* Fetch from DDG API, format as "Title\nURL\nSnippet\n---\n" per result */
-    ...
-}
+G_DEFINE_TYPE_WITH_CODE(MySearch, my_search, G_TYPE_OBJECT,
+    G_IMPLEMENT_INTERFACE(AI_TYPE_SEARCH_PROVIDER, my_iface_init))
 #+end_src
 
-Then register it:
-
-#+begin_src C
-g_autoptr(MyDuckDuckGoSearch) ddg = my_duckduckgo_search_new();
-ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(ddg));
-#+end_src
+Return =NULL= with =*error= set on failure; return an empty list (=NULL=,
+no error) when there are simply no results.
 
 ** Custom Tools
 User-supplied callbacks register alongside the built-ins. The same multi-turn loop dispatches both --- the model sees the union of built-in tools and your callbacks via =ai_tool_executor_get_tools()=.

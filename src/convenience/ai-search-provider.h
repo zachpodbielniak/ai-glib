@@ -7,9 +7,14 @@
  * This file is part of ai-glib.
  *
  * AiSearchProvider is a GInterface that abstracts web search backends.
- * Implement this interface to add new search providers (Bing, Brave, etc.).
- * Concrete implementations are registered with AiToolExecutor via
- * ai_tool_executor_set_search_provider() to enable the web_search tool.
+ * Implement this interface to add new search providers (Bing, Brave,
+ * DuckDuckGo, ...). Concrete implementations are registered with
+ * AiToolExecutor via ai_tool_executor_set_search_provider() to enable the
+ * web_search tool.
+ *
+ * A search returns a GList of #AiSearchResult (transfer full); free with
+ * g_list_free_full(list, g_object_unref). Use ai_search_results_format() to
+ * render the list into a model-facing string.
  */
 
 #pragma once
@@ -21,6 +26,9 @@
 #include <glib-object.h>
 #include <gio/gio.h>
 
+#include "convenience/ai-search-result.h"
+#include "convenience/ai-search-options.h"
+
 G_BEGIN_DECLS
 
 #define AI_TYPE_SEARCH_PROVIDER (ai_search_provider_get_type())
@@ -30,7 +38,7 @@ G_DECLARE_INTERFACE(AiSearchProvider, ai_search_provider, AI, SEARCH_PROVIDER, G
 /**
  * AiSearchProviderInterface:
  * @parent_iface: the parent interface
- * @search: perform a web search and return formatted results
+ * @search: perform a web search and return a list of #AiSearchResult
  * @_reserved: reserved for future expansion
  *
  * Interface for web search providers used by #AiToolExecutor.
@@ -41,8 +49,9 @@ struct _AiSearchProviderInterface
     GTypeInterface parent_iface;
 
     /* Virtual methods */
-    gchar * (*search) (AiSearchProvider  *self,
+    GList * (*search) (AiSearchProvider  *self,
                        const gchar       *query,
+                       AiSearchOptions   *options,
                        GCancellable      *cancellable,
                        GError           **error);
 
@@ -50,26 +59,23 @@ struct _AiSearchProviderInterface
     gpointer _reserved[8];
 };
 
-/**
- * ai_search_provider_search:
- * @self: an #AiSearchProvider
- * @query: the search query string
- * @cancellable: (nullable): a #GCancellable
- * @error: (out) (optional): return location for a #GError
- *
- * Performs a web search and returns the results as a formatted string.
- * Each result is formatted as:
- *   Title\nURL\nSnippet\n---\n
- *
- * Returns: (transfer full) (nullable): the search results string, or %NULL
- *   on error. Free with g_free().
- */
-gchar *
+GList *
 ai_search_provider_search (
     AiSearchProvider  *self,
     const gchar       *query,
+    AiSearchOptions   *options,
     GCancellable      *cancellable,
     GError           **error
 );
+
+gchar *
+ai_search_results_format (
+    GList        *results,
+    const gchar  *query,
+    gboolean      include_content
+);
+
+AiSearchProvider *
+ai_search_provider_new_default (GError **error);
 
 G_END_DECLS

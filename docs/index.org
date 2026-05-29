@@ -36,6 +36,10 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [[file:providers/claude-code.org][Claude Code]] - Claude Code CLI wrapper
 - [[file:providers/opencode.org][OpenCode]] - OpenCode CLI wrapper (multi-provider)
 
+*** Tools & Search
+- [[file:tool-executor.org][Tool Executor]] - Built-in tools and the multi-turn tool-use loop
+- [[file:web-search.org][Web Search]] - The web_search tool and its providers
+
 *** API Reference
 - [[file:api-reference/index.org][API Reference Index]] - Complete API documentation
 - [[file:api-reference/ai-simple.org][AiSimple]] - Simple convenience API (start here)
@@ -45,6 +49,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [[file:api-reference/ai-message.org][AiMessage]] - Message class
 - [[file:api-reference/ai-response.org][AiResponse]] - Response class
 - [[file:api-reference/ai-tool.org][AiTool]] - Tool definition
+- [[file:api-reference/ai-search-provider.org][AiSearchProvider]] - Web search interface, results, options
 - [[file:api-reference/ai-config.org][AiConfig]] - Configuration
 - [[file:api-reference/ai-error.org][AiError]] - Error codes
 
@@ -54,6 +59,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [[file:examples/multi-provider.org][Multi-Provider]] - Using multiple providers
 - [[file:examples/streaming.org][Streaming]] - Streaming responses
 - [[file:examples/tool-use.org][Tool Use]] - Function calling
+- [[file:examples/web-search.org][Web Search]] - Search the web with a provider
 - [[file:examples/image-generation.org][Image Generation]] - Generate images from text
 
 *** Contributing

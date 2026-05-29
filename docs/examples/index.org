@@ -10,6 +10,7 @@ Code examples and tutorials for ai-glib.
 | [[file:streaming.org][Streaming]]                 | Real-time streaming responses                                 |
 | [[file:tool-use.org][Tool Use]]                   | Function calling / tool use (manual loop, all HTTP providers) |
 | [[file:tool-use-executor.org][Tool Use Executor]] | Register custom tool callbacks; loop is automatic             |
+| [[file:web-search.org][Web Search]]               | Search the web with a provider (Brave/Bing/DuckDuckGo)        |
 | [[file:image-generation.org][Image Generation]]   | Generate images from text prompts                             |
 | [[file:python-bindings.org][Python Bindings]]     | Drive ai-glib from PyGObject (works in any GI-aware language) |
 

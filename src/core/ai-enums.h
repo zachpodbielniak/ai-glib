@@ -272,4 +272,58 @@ ai_image_response_format_to_string(AiImageResponseFormat format);
 AiImageResponseFormat
 ai_image_response_format_from_string(const gchar *str);
 
+/**
+ * AiSearchFreshness:
+ * @AI_SEARCH_FRESHNESS_ANY: No recency restriction (default)
+ * @AI_SEARCH_FRESHNESS_DAY: Results from the past day
+ * @AI_SEARCH_FRESHNESS_WEEK: Results from the past week
+ * @AI_SEARCH_FRESHNESS_MONTH: Results from the past month
+ * @AI_SEARCH_FRESHNESS_YEAR: Results from the past year
+ *
+ * Recency filter for web search results. Each #AiSearchProvider maps these
+ * to its backend's own freshness parameter; backends that cannot express a
+ * given window omit the filter rather than approximating it.
+ */
+typedef enum
+{
+    AI_SEARCH_FRESHNESS_ANY = 0,
+    AI_SEARCH_FRESHNESS_DAY,
+    AI_SEARCH_FRESHNESS_WEEK,
+    AI_SEARCH_FRESHNESS_MONTH,
+    AI_SEARCH_FRESHNESS_YEAR
+} AiSearchFreshness;
+
+GType ai_search_freshness_get_type(void);
+#define AI_TYPE_SEARCH_FRESHNESS (ai_search_freshness_get_type())
+
+const gchar *
+ai_search_freshness_to_string(AiSearchFreshness freshness);
+
+AiSearchFreshness
+ai_search_freshness_from_string(const gchar *str);
+
+/**
+ * AiSearchSafeSearch:
+ * @AI_SEARCH_SAFE_OFF: No content filtering
+ * @AI_SEARCH_SAFE_MODERATE: Moderate filtering (default)
+ * @AI_SEARCH_SAFE_STRICT: Strict filtering
+ *
+ * Safe-search level for web search results.
+ */
+typedef enum
+{
+    AI_SEARCH_SAFE_OFF = 0,
+    AI_SEARCH_SAFE_MODERATE,
+    AI_SEARCH_SAFE_STRICT
+} AiSearchSafeSearch;
+
+GType ai_search_safe_search_get_type(void);
+#define AI_TYPE_SEARCH_SAFE_SEARCH (ai_search_safe_search_get_type())
+
+const gchar *
+ai_search_safe_search_to_string(AiSearchSafeSearch safe_search);
+
+AiSearchSafeSearch
+ai_search_safe_search_from_string(const gchar *str);
+
 G_END_DECLS

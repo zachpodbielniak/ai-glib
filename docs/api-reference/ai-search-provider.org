@@ -1,0 +1,117 @@
+* AiSearchProvider
+=AiSearchProvider= is the GInterface that abstracts web search backends for
+the =web_search= tool. ai-glib ships three implementations --- =AiBraveSearch=,
+=AiBingSearch= and the keyless =AiDuckDuckGoSearch= --- and you can add your
+own by implementing the interface.
+
+A search returns a =GList= of [[#aisearchresult][AiSearchResult]] in rank order
+(transfer full). Free it with =g_list_free_full(list, g_object_unref)=.
+
+** Interface
+#+begin_src C
+struct _AiSearchProviderInterface
+{
+    GTypeInterface parent_iface;
+
+    GList * (*search) (AiSearchProvider  *self,
+                       const gchar       *query,
+                       AiSearchOptions   *options,   /* nullable */
+                       GCancellable      *cancellable,
+                       GError           **error);
+
+    gpointer _reserved[8];
+};
+#+end_src
+
+** Functions
+#+begin_src C
+/* Run a search. options may be NULL (defaults). Returns a GList of
+ * AiSearchResult (transfer full); NULL+error on failure, NULL+no-error when
+ * there are no results. */
+GList *ai_search_provider_search (AiSearchProvider *self,
+                                  const gchar      *query,
+                                  AiSearchOptions  *options,
+                                  GCancellable     *cancellable,
+                                  GError          **error);
+
+/* Render results into a numbered, model-facing string. An empty/NULL list
+ * yields "No results found for: <query>". (transfer full) */
+gchar *ai_search_results_format (GList *results, const gchar *query,
+                                 gboolean include_content);
+
+/* Pick a provider from the environment: BRAVE_API_KEY -> Brave,
+ * else BING_API_KEY -> Bing, else keyless DuckDuckGo. (transfer full) */
+AiSearchProvider *ai_search_provider_new_default (GError **error);
+#+end_src
+
+** AiSearchResult
+:PROPERTIES:
+:CUSTOM_ID: aisearchresult
+:END:
+A single result. Constructed with =ai_search_result_new(title, url, snippet)=;
+the =source= host is derived from the URL. =age=, =content= and =rank= are
+filled by the provider (or by =fetch_content= enrichment).
+
+| Getter                            | Returns                                  |
+|-----------------------------------+------------------------------------------|
+| =ai_search_result_get_title=      | title (never %NULL)                      |
+| =ai_search_result_get_url=        | URL (never %NULL)                        |
+| =ai_search_result_get_snippet=    | snippet (never %NULL)                    |
+| =ai_search_result_get_source=     | source domain derived from the URL       |
+| =ai_search_result_get_age=        | date/age string, or %NULL                |
+| =ai_search_result_get_rank=       | 1-based rank, or 0 if unset              |
+| =ai_search_result_get_content=    | fetched page text, or %NULL              |
+
+Matching setters (=ai_search_result_set_*=) exist for all fields.
+
+** AiSearchOptions
+A GObject of query knobs (all are installed properties, so language bindings
+get native property syntax). Construct with =ai_search_options_new()=;
+=ai_search_options_copy()= makes an independent copy.
+
+| Property        | Type                 | Default                  |
+|-----------------+----------------------+--------------------------|
+| =count=         | uint                 | 10                       |
+| =freshness=     | =AiSearchFreshness=  | =AI_SEARCH_FRESHNESS_ANY= |
+| =safesearch=    | =AiSearchSafeSearch= | =AI_SEARCH_SAFE_MODERATE= |
+| =country=       | string (nullable)    | %NULL                    |
+| =language=      | string (nullable)    | %NULL                    |
+| =site=          | string (nullable)    | %NULL                    |
+| =offset=        | uint                 | 0                        |
+| =fetch-content= | boolean              | %FALSE                   |
+| =fetch-count=   | uint                 | 3 (capped at =AI_SEARCH_MAX_FETCH_COUNT=) |
+
+** Enumerations
+*** AiSearchFreshness
+=AI_SEARCH_FRESHNESS_ANY= (default), =_DAY=, =_WEEK=, =_MONTH=, =_YEAR=.
+Each provider maps these to its own freshness window; a backend that can't
+express a window omits the filter (e.g. Bing has no "past year").
+Helpers: =ai_search_freshness_to_string= / =ai_search_freshness_from_string=.
+
+*** AiSearchSafeSearch
+=AI_SEARCH_SAFE_OFF=, =_MODERATE= (default), =_STRICT=.
+Helpers: =ai_search_safe_search_to_string= / =ai_search_safe_search_from_string=.
+
+** Providers
+*** AiBraveSearch / AiBingSearch
+Constructed with =ai_brave_search_new(api_key)= / =ai_bing_search_new(api_key)=.
+Both expose =api-key= and =endpoint= construct properties (override =endpoint=
+for a proxy/regional host or for testing). Bing reads the key from the
+=Ocp-Apim-Subscription-Key= header; Brave from =X-Subscription-Token=.
+
+*** AiDuckDuckGoSearch
+=ai_duckduckgo_search_new()= --- keyless, the zero-config default. It scrapes
+DuckDuckGo's "lite" HTML endpoint and is therefore *best-effort*: on rate
+limiting or markup changes it returns an empty result list rather than an
+error, so a flaky SERP can't derail an agent loop.
+
+** Robustness
+HTTP requests for the API providers go through a shared helper that retries
+transient failures (HTTP 429 honoring =Retry-After=, 5xx, and fast network
+errors) with exponential backoff, and maps status codes to =AI_ERROR= codes
+(401 → =INVALID_API_KEY=, 403 → =PERMISSION_DENIED=, 429 → =RATE_LIMITED=,
+5xx → =SERVER_ERROR=, timeout → =TIMEOUT=). Timeouts are terminal (not
+retried) to keep worst-case latency bounded.
+
+See also: [[file:../web-search.org][Web Search guide]],
+[[file:../tool-executor.org][Tool Executor]].

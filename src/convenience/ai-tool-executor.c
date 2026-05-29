@@ -38,6 +38,14 @@
 #define WEB_FETCH_USER_AGENT \
     "cmacs-ai/1.0 (ai-glib web_fetch; +https://github.com/zachp/cmacs)"
 
+/* web_search: formatted-result cache TTL (shorter than web_fetch's, since
+ * search freshness matters more than a fetched page's). */
+#define WEB_SEARCH_CACHE_TTL_US (5 * 60 * (gint64)G_USEC_PER_SEC)
+/* Per-result page-content excerpt cap (bytes) for fetch_content enrichment. */
+#define WEB_SEARCH_EXCERPT_MAX 1500
+/* Timeout for each enrichment page fetch. */
+#define WEB_SEARCH_FETCH_TIMEOUT 15
+
 /* ================================================================
  * Struct definition — must precede any code accessing its fields
  * ================================================================ */
@@ -732,6 +740,81 @@ web_fetch_cache_store (const gchar *url, const gchar *text)
     g_mutex_unlock (&web_fetch_cache_lock);
 }
 
+/* ---- web_search: formatted-result cache (key -> formatted text, 5 min) ----
+ * Reuses WebFetchCacheEntry. Keyed by provider + query + options so repeated
+ * identical web_search calls within one agent run skip the network. */
+
+static GHashTable *web_search_cache = NULL;     /* key -> WebFetchCacheEntry */
+static GMutex      web_search_cache_lock;       /* static GMutex: zero-init OK */
+
+static void
+web_search_cache_sweep_locked (gint64 now)
+{
+    GHashTableIter iter;
+    gpointer       key;
+    gpointer       value;
+
+    if (web_search_cache == NULL)
+        return;
+
+    g_hash_table_iter_init (&iter, web_search_cache);
+    while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+        WebFetchCacheEntry *entry = value;
+
+        if (now - entry->stamp > WEB_SEARCH_CACHE_TTL_US)
+            g_hash_table_iter_remove (&iter);
+    }
+}
+
+static gchar *
+web_search_cache_lookup (const gchar *key)
+{
+    gchar  *result = NULL;
+    gint64  now;
+
+    g_mutex_lock (&web_search_cache_lock);
+    now = g_get_monotonic_time ();
+
+    if (web_search_cache != NULL)
+    {
+        WebFetchCacheEntry *entry = g_hash_table_lookup (web_search_cache, key);
+
+        if (entry != NULL)
+        {
+            if (now - entry->stamp <= WEB_SEARCH_CACHE_TTL_US)
+                result = g_strdup (entry->text);
+            else
+                g_hash_table_remove (web_search_cache, key);
+        }
+
+        web_search_cache_sweep_locked (now);
+    }
+
+    g_mutex_unlock (&web_search_cache_lock);
+    return result;
+}
+
+static void
+web_search_cache_store (const gchar *key, const gchar *text)
+{
+    WebFetchCacheEntry *entry;
+
+    g_mutex_lock (&web_search_cache_lock);
+
+    if (web_search_cache == NULL)
+        web_search_cache = g_hash_table_new_full (
+            g_str_hash, g_str_equal, g_free, web_fetch_cache_entry_free);
+
+    entry = g_slice_new0 (WebFetchCacheEntry);
+    entry->stamp = g_get_monotonic_time ();
+    entry->text  = g_strdup (text);
+
+    g_hash_table_replace (web_search_cache, g_strdup (key), entry);
+
+    g_mutex_unlock (&web_search_cache_lock);
+}
+
 /* ---- web_fetch: HTML -> readable markdown-ish text ---- */
 
 static gboolean
@@ -1256,6 +1339,150 @@ tool_web_fetch (
     return g_steal_pointer (&converted);
 }
 
+/* UTF-8-safe truncation of TEXT to at most MAX bytes, with an ellipsis when
+ * cut. Used to keep fetch_content excerpts small in the model's context. */
+static gchar *
+web_search_excerpt (const gchar *text, gsize max)
+{
+    gsize len;
+    gsize cut;
+
+    if (text == NULL)
+        return NULL;
+
+    len = strlen (text);
+    if (len <= max)
+        return g_strdup (text);
+
+    cut = max;
+    /* Back off any UTF-8 continuation bytes so we cut on a char boundary. */
+    while (cut > 0 && (((guchar) text[cut]) & 0xC0) == 0x80)
+        cut--;
+
+    return g_strdup_printf ("%.*s\xe2\x80\xa6", (int) cut, text);
+}
+
+/* Fetch URL and return a short readable excerpt of its page text, reusing the
+ * web_fetch pipeline + cache. Returns NULL on any failure (best-effort). */
+static gchar *
+web_search_fetch_excerpt (const gchar *url, GCancellable *cancellable)
+{
+    g_autofree gchar *converted = NULL;
+
+    converted = web_fetch_cache_lookup (url);
+
+    if (converted == NULL)
+    {
+        g_autoptr(SoupSession)  session   = NULL;
+        g_autoptr(SoupMessage)  msg       = NULL;
+        g_autoptr(GBytes)       bytes     = NULL;
+        g_autoptr(GError)       local_err = NULL;
+        SoupMessageHeaders     *resp_headers;
+        const gchar            *data;
+        gsize                   size;
+        const gchar            *content_type;
+        GHashTable             *ct_params = NULL;
+        const gchar            *charset;
+        guint                   status;
+
+        session = soup_session_new ();
+        g_object_set (session, "timeout", (guint) WEB_SEARCH_FETCH_TIMEOUT, NULL);
+
+        bytes = web_fetch_get (session, url, &msg, cancellable, &local_err);
+        if (bytes == NULL)
+            return NULL;
+
+        status = soup_message_get_status (msg);
+        if (status < 200 || status >= 300)
+            return NULL;
+
+        data         = g_bytes_get_data (bytes, &size);
+        resp_headers = soup_message_get_response_headers (msg);
+        content_type = soup_message_headers_get_content_type (resp_headers,
+                                                              &ct_params);
+        charset      = (ct_params != NULL)
+                       ? g_hash_table_lookup (ct_params, "charset") : NULL;
+
+        converted = web_fetch_build_body (data, size, content_type, charset,
+                                          NULL, NULL, NULL);
+        g_clear_pointer (&ct_params, g_hash_table_unref);
+
+        if (converted != NULL)
+            web_fetch_cache_store (url, converted);
+    }
+
+    if (converted == NULL)
+        return NULL;
+
+    return web_search_excerpt (converted, WEB_SEARCH_EXCERPT_MAX);
+}
+
+/* Build an AiSearchOptions from the web_search tool inputs. */
+static AiSearchOptions *
+web_search_build_options (AiToolUse *tool_use)
+{
+    AiSearchOptions *options = ai_search_options_new ();
+    const gchar     *s;
+    gint64           count;
+
+    count = ai_tool_use_get_input_int (tool_use, "count", -1);
+    if (count > 0)
+        ai_search_options_set_count (options, (guint) count);
+
+    s = ai_tool_use_get_input_string (tool_use, "freshness");
+    if (s != NULL)
+        ai_search_options_set_freshness (options,
+                                         ai_search_freshness_from_string (s));
+
+    s = ai_tool_use_get_input_string (tool_use, "safesearch");
+    if (s != NULL)
+        ai_search_options_set_safesearch (options,
+                                          ai_search_safe_search_from_string (s));
+
+    s = ai_tool_use_get_input_string (tool_use, "country");
+    if (s != NULL)
+        ai_search_options_set_country (options, s);
+
+    s = ai_tool_use_get_input_string (tool_use, "language");
+    if (s != NULL)
+        ai_search_options_set_language (options, s);
+
+    s = ai_tool_use_get_input_string (tool_use, "site");
+    if (s != NULL)
+        ai_search_options_set_site (options, s);
+
+    ai_search_options_set_fetch_content (
+        options, ai_tool_use_get_input_boolean (tool_use, "fetch_content",
+                                                FALSE));
+
+    return options;
+}
+
+/* Cache key: provider type + query + every option that affects the output. */
+static gchar *
+web_search_cache_key (
+    AiSearchProvider *provider,
+    const gchar      *query,
+    AiSearchOptions  *options
+){
+    const gchar *country  = ai_search_options_get_country (options);
+    const gchar *language = ai_search_options_get_language (options);
+    const gchar *site     = ai_search_options_get_site (options);
+
+    return g_strdup_printf (
+        "%s|%s|c=%u|f=%d|s=%d|cc=%s|lang=%s|site=%s|off=%u|fc=%d|fn=%u",
+        G_OBJECT_TYPE_NAME (provider), query,
+        ai_search_options_get_count (options),
+        (int) ai_search_options_get_freshness (options),
+        (int) ai_search_options_get_safesearch (options),
+        country  != NULL ? country  : "",
+        language != NULL ? language : "",
+        site     != NULL ? site     : "",
+        ai_search_options_get_offset (options),
+        ai_search_options_get_fetch_content (options) ? 1 : 0,
+        ai_search_options_get_fetch_count (options));
+}
+
 static gchar *
 tool_web_search (
     AiToolExecutor  *self,
@@ -1263,7 +1490,14 @@ tool_web_search (
     GCancellable    *cancellable,
     GError         **error
 ){
-    const gchar *query;
+    const gchar              *query;
+    g_autoptr(AiSearchOptions) options   = NULL;
+    g_autofree gchar         *cache_key  = NULL;
+    g_autofree gchar         *cached     = NULL;
+    g_autofree gchar         *formatted  = NULL;
+    g_autoptr(GError)         local_err  = NULL;
+    GList                    *results;
+    gboolean                  fetch_content;
 
     if (self->search_provider == NULL)
     {
@@ -1281,8 +1515,56 @@ tool_web_search (
         return NULL;
     }
 
-    return ai_search_provider_search (self->search_provider, query,
-                                      cancellable, error);
+    options       = web_search_build_options (tool_use);
+    fetch_content = ai_search_options_get_fetch_content (options);
+
+    /* Cache hit: identical query+options within the TTL skips the network. */
+    cache_key = web_search_cache_key (self->search_provider, query, options);
+    cached    = web_search_cache_lookup (cache_key);
+    if (cached != NULL)
+        return g_steal_pointer (&cached);
+
+    results = ai_search_provider_search (self->search_provider, query, options,
+                                         cancellable, &local_err);
+    if (local_err != NULL)
+    {
+        g_propagate_error (error, g_steal_pointer (&local_err));
+        return NULL;
+    }
+
+    /* Optional enrichment: fetch the top results' pages and attach excerpts. */
+    if (fetch_content && results != NULL)
+    {
+        guint  budget = ai_search_options_get_fetch_count (options);
+        guint  done   = 0;
+        GList *l;
+
+        for (l = results; l != NULL && done < budget; l = l->next)
+        {
+            AiSearchResult *r   = l->data;
+            const gchar    *url = ai_search_result_get_url (r);
+            gchar          *excerpt;
+
+            if (url == NULL || *url == '\0')
+                continue;
+
+            excerpt = web_search_fetch_excerpt (url, cancellable);
+            if (excerpt != NULL)
+            {
+                ai_search_result_set_content (r, excerpt);
+                g_free (excerpt);
+                done++;
+            }
+        }
+    }
+
+    formatted = ai_search_results_format (results, query, fetch_content);
+    g_list_free_full (results, g_object_unref);
+
+    if (formatted != NULL)
+        web_search_cache_store (cache_key, formatted);
+
+    return g_steal_pointer (&formatted);
 }
 
 /* ================================================================
@@ -1478,11 +1760,37 @@ ai_tool_executor_set_search_provider (
 
     if (!already_registered)
     {
+        static const gchar *freshness_values[] =
+            { "any", "day", "week", "month", "year", NULL };
+        static const gchar *safesearch_values[] =
+            { "off", "moderate", "strict", NULL };
         AiTool *tool = ai_tool_new ("web_search",
-                                    "Search the web and return the top results "
-                                    "with title, URL, and description.");
+                                    "Search the web and return ranked results "
+                                    "(title, URL, source, snippet). Optionally "
+                                    "fetch the top results' page text.");
+
         ai_tool_add_parameter (tool, "query", "string",
                                "The search query string.", TRUE);
+        ai_tool_add_parameter (tool, "count", "number",
+                               "Maximum number of results to return "
+                               "(default 10).", FALSE);
+        ai_tool_add_enum_parameter (tool, "freshness",
+                                    "Restrict results by recency.",
+                                    (const gchar **) freshness_values, FALSE);
+        ai_tool_add_enum_parameter (tool, "safesearch",
+                                    "Safe-search filtering level.",
+                                    (const gchar **) safesearch_values, FALSE);
+        ai_tool_add_parameter (tool, "country", "string",
+                               "Two-letter region/country code, e.g. \"US\".",
+                               FALSE);
+        ai_tool_add_parameter (tool, "language", "string",
+                               "Two-letter language code, e.g. \"en\".", FALSE);
+        ai_tool_add_parameter (tool, "site", "string",
+                               "Restrict results to a single domain, e.g. "
+                               "\"example.com\".", FALSE);
+        ai_tool_add_parameter (tool, "fetch_content", "boolean",
+                               "When true, fetch the top results' pages and "
+                               "include their extracted text.", FALSE);
         self->tools = g_list_append (self->tools, tool);
     }
 }

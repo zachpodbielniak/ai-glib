@@ -299,6 +299,39 @@ G_TEST_VERBOSE=1 ./build/release/tests/test-config
 2. Update documentation in `docs/providers/<provider>.md`
 3. Consider adding convenience aliases if appropriate
 
+## Web Search Subsystem
+
+The `web_search` tool is backed by the `AiSearchProvider` interface
+(`src/convenience/ai-search-provider.{h,c}`). A search returns a
+`GList<AiSearchResult>` (transfer full) and is shaped by an `AiSearchOptions`
+GObject (count, freshness, safesearch, country, language, site, fetch_content).
+Backends:
+
+- `ai-bing-search.c` / `ai-brave-search.c` — API providers; `api-key` +
+  `endpoint` construct properties; share the robust JSON GET helper
+  `ai-search-http.c` (retries/backoff/429/Retry-After/status→`AI_ERROR`).
+- `ai-duckduckgo-search.c` — keyless, scrapes the DDG "lite" HTML endpoint via
+  libxml2; best-effort (degrades to an empty list, never an error).
+
+`ai_search_provider_new_default()` picks Brave/Bing from the environment, else
+DuckDuckGo. The executor (`tool_web_search` in `ai-tool-executor.c`) builds the
+options, caches the formatted result (5 min), and — when `fetch_content` is set
+— enriches the top results via the existing `web_fetch_get` + `html_to_text`.
+
+`ai-search-http.{c,h}` is **private** (the `AI_GLIB_COMPILATION` guard, like
+`ai-openai-shared`): in `LIB_SOURCES` but NOT `PUBLIC_HEADERS`/`ai-glib.h`.
+
+### Adding a search provider
+
+1. Create `src/convenience/ai-<name>-search.{h,c}`
+2. Implement `AiSearchProvider` (the single `search` vfunc returning a
+   `GList<AiSearchResult>`)
+3. Add the `.c` to `LIB_SOURCES` and the public `.h` to `PUBLIC_HEADERS`
+4. Add it to `src/ai-glib.h`
+5. Cover it in `tests/test-search-providers.c` (use the `TServer` harness +
+   the `endpoint` property to test against loopback)
+6. Document it in `docs/web-search.org` + `docs/api-reference/ai-search-provider.org`
+
 ## Common Patterns
 
 ### Basic Chat Request

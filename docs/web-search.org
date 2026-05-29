@@ -1,0 +1,123 @@
+* Web Search
+ai-glib gives an agent a =web_search= tool backed by a pluggable
+=AiSearchProvider=. Three backends ship in the box:
+
+| Provider             | Key env var     | Notes                              |
+|----------------------+-----------------+------------------------------------|
+| =AiBraveSearch=      | =BRAVE_API_KEY= | [[https://brave.com/search/api/]]  |
+| =AiBingSearch=       | =BING_API_KEY=  | Azure Bing Search v7               |
+| =AiDuckDuckGoSearch= | (none)          | keyless, best-effort (no SLA)      |
+
+** Quick start (zero config)
+=ai_search_provider_new_default()= picks a backend from the environment ---
+Brave if =BRAVE_API_KEY= is set, else Bing if =BING_API_KEY= is set, else the
+keyless DuckDuckGo provider. So =web_search= works out of the box:
+
+#+begin_src C
+#include <ai-glib.h>
+
+g_autoptr(AiToolExecutor) exec = ai_tool_executor_new();
+g_autoptr(AiSearchProvider) sp = ai_search_provider_new_default(NULL);
+ai_tool_executor_set_search_provider(exec, sp);
+
+/* The model can now call web_search inside ai_tool_executor_run(). */
+#+end_src
+
+** Choosing a backend explicitly
+#+begin_src C
+g_autoptr(AiBraveSearch) brave = ai_brave_search_new("YOUR_BRAVE_API_KEY");
+ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(brave));
+#+end_src
+
+Brave and Bing expose =api-key= and =endpoint= construct properties; override
+=endpoint= to point at a proxy/regional host:
+
+#+begin_src C
+g_autoptr(AiBingSearch) bing =
+    g_object_new(AI_TYPE_BING_SEARCH,
+                 "api-key", key,
+                 "endpoint", "https://my-proxy.example/bing/v7.0/search",
+                 NULL);
+#+end_src
+
+** Calling a provider directly
+#+begin_src C
+g_autoptr(AiSearchOptions) opts = ai_search_options_new();
+ai_search_options_set_count(opts, 5);
+ai_search_options_set_freshness(opts, AI_SEARCH_FRESHNESS_WEEK);
+ai_search_options_set_site(opts, "kernel.org");
+
+g_autoptr(GError) err = NULL;
+GList *results = ai_search_provider_search(
+    AI_SEARCH_PROVIDER(brave), "io_uring", opts, NULL, &err);
+
+for (GList *l = results; l != NULL; l = l->next) {
+    AiSearchResult *r = l->data;
+    g_print("%u. %s — %s\n",
+            ai_search_result_get_rank(r),
+            ai_search_result_get_title(r),
+            ai_search_result_get_url(r));
+}
+
+g_autofree gchar *rendered = ai_search_results_format(results, "io_uring", FALSE);
+g_list_free_full(results, g_object_unref);
+#+end_src
+
+** Query options
+All knobs live on [[file:api-reference/ai-search-provider.org][AiSearchOptions]];
+the =web_search= tool exposes them to the model too:
+
+| Option         | Effect                                                   |
+|----------------+----------------------------------------------------------|
+| =count=        | maximum number of results (default 10)                   |
+| =freshness=    | recency: any/day/week/month/year                         |
+| =safesearch=   | off/moderate/strict (default moderate)                   |
+| =country=      | two-letter region code, e.g. "US"                        |
+| =language=     | two-letter language code, e.g. "en"                      |
+| =site=         | restrict to one domain (folded into the query)           |
+| =fetch-content=| fetch the top results' pages and attach their text       |
+
+** Fetch & extract
+Set =fetch_content= and the executor fetches the top results' pages through the
+same pipeline as =web_fetch= (HTML → readable text), attaching a short excerpt
+to each result's =content=. This gives the model real page content, not just
+snippets. The number of pages fetched is =fetch-count= (default 3, hard-capped
+at =AI_SEARCH_MAX_FETCH_COUNT=); fetches are sequential, so the cap keeps
+latency bounded. Each fetched page is cached in the 15-minute =web_fetch=
+cache, so a later =web_fetch= of the same URL is free.
+
+** Caching
+=web_search= caches the *formatted* result string for 5 minutes, keyed by
+provider + query + every option. Repeated identical searches within one agent
+run skip the network entirely.
+
+** Robustness
+API requests retry transient failures (HTTP 429 honoring =Retry-After=, 5xx,
+and fast network errors) with exponential backoff, and map status codes to
+=AI_ERROR= codes. Timeouts are terminal (not retried) so a hung endpoint can't
+multiply the wait.
+
+** DuckDuckGo caveat
+=AiDuckDuckGoSearch= needs no key, which makes it the friendly default --- but
+it scrapes an HTML SERP and is *best-effort with no SLA*. DuckDuckGo may
+rate-limit datacenter clients or change its markup; when that happens the
+provider returns an empty result list (never an error), so the agent gets a
+clean "no results" instead of a failure. For dependable search, set a Brave or
+Bing key.
+
+** Python (GObject Introspection)
+#+begin_src python
+import gi
+gi.require_version("AiGlib", "1.0")
+from gi.repository import AiGlib
+
+sp = AiGlib.search_provider_new_default()
+opts = AiGlib.SearchOptions(count=5, freshness=AiGlib.SearchFreshness.WEEK)
+results = sp.search("io_uring", opts, None)
+for r in results:
+    print(r.get_rank(), r.get_title(), r.get_url())
+#+end_src
+
+See also: [[file:api-reference/ai-search-provider.org][AiSearchProvider API]],
+[[file:tool-executor.org][Tool Executor]],
+[[file:examples/web-search.org][Web search example]].

@@ -68,8 +68,11 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-opencode-client.h \
 	$(SRCDIR)/convenience/ai-simple.h \
 	$(SRCDIR)/convenience/ai-search-provider.h \
+	$(SRCDIR)/convenience/ai-search-result.h \
+	$(SRCDIR)/convenience/ai-search-options.h \
 	$(SRCDIR)/convenience/ai-bing-search.h \
 	$(SRCDIR)/convenience/ai-brave-search.h \
+	$(SRCDIR)/convenience/ai-duckduckgo-search.h \
 	$(SRCDIR)/convenience/ai-tool-executor.h
 
 # Library source files
@@ -105,8 +108,12 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-opencode-client.c \
 	$(SRCDIR)/convenience/ai-simple.c \
 	$(SRCDIR)/convenience/ai-search-provider.c \
+	$(SRCDIR)/convenience/ai-search-result.c \
+	$(SRCDIR)/convenience/ai-search-options.c \
+	$(SRCDIR)/convenience/ai-search-http.c \
 	$(SRCDIR)/convenience/ai-bing-search.c \
 	$(SRCDIR)/convenience/ai-brave-search.c \
+	$(SRCDIR)/convenience/ai-duckduckgo-search.c \
 	$(SRCDIR)/convenience/ai-tool-executor.c
 
 # Object files

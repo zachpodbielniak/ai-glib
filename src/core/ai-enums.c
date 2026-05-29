@@ -836,3 +836,184 @@ ai_image_response_format_from_string(const gchar *str)
 
     return AI_IMAGE_RESPONSE_URL;
 }
+
+/*
+ * GType registration for AiSearchFreshness.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_search_freshness_get_type(void)
+{
+    static GType freshness_type = 0;
+
+    if (g_once_init_enter(&freshness_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_SEARCH_FRESHNESS_ANY, "AI_SEARCH_FRESHNESS_ANY", "any" },
+            { AI_SEARCH_FRESHNESS_DAY, "AI_SEARCH_FRESHNESS_DAY", "day" },
+            { AI_SEARCH_FRESHNESS_WEEK, "AI_SEARCH_FRESHNESS_WEEK", "week" },
+            { AI_SEARCH_FRESHNESS_MONTH, "AI_SEARCH_FRESHNESS_MONTH", "month" },
+            { AI_SEARCH_FRESHNESS_YEAR, "AI_SEARCH_FRESHNESS_YEAR", "year" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiSearchFreshness", values);
+        g_once_init_leave(&freshness_type, type);
+    }
+
+    return freshness_type;
+}
+
+/**
+ * ai_search_freshness_to_string:
+ * @freshness: an #AiSearchFreshness
+ *
+ * Converts an #AiSearchFreshness to its canonical string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_search_freshness_to_string(AiSearchFreshness freshness)
+{
+    switch (freshness)
+    {
+        case AI_SEARCH_FRESHNESS_ANY:
+            return "any";
+        case AI_SEARCH_FRESHNESS_DAY:
+            return "day";
+        case AI_SEARCH_FRESHNESS_WEEK:
+            return "week";
+        case AI_SEARCH_FRESHNESS_MONTH:
+            return "month";
+        case AI_SEARCH_FRESHNESS_YEAR:
+            return "year";
+        default:
+            return "any";
+    }
+}
+
+/**
+ * ai_search_freshness_from_string:
+ * @str: (nullable): a freshness string
+ *
+ * Converts a string to an #AiSearchFreshness. Accepts the canonical names
+ * plus common aliases (d/w/m/y, "all"/"none").
+ *
+ * Returns: the #AiSearchFreshness, or %AI_SEARCH_FRESHNESS_ANY if unrecognized
+ */
+AiSearchFreshness
+ai_search_freshness_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_SEARCH_FRESHNESS_ANY;
+    }
+
+    if (g_ascii_strcasecmp(str, "day") == 0 ||
+        g_ascii_strcasecmp(str, "d") == 0)
+    {
+        return AI_SEARCH_FRESHNESS_DAY;
+    }
+    else if (g_ascii_strcasecmp(str, "week") == 0 ||
+             g_ascii_strcasecmp(str, "w") == 0)
+    {
+        return AI_SEARCH_FRESHNESS_WEEK;
+    }
+    else if (g_ascii_strcasecmp(str, "month") == 0 ||
+             g_ascii_strcasecmp(str, "m") == 0)
+    {
+        return AI_SEARCH_FRESHNESS_MONTH;
+    }
+    else if (g_ascii_strcasecmp(str, "year") == 0 ||
+             g_ascii_strcasecmp(str, "y") == 0)
+    {
+        return AI_SEARCH_FRESHNESS_YEAR;
+    }
+
+    return AI_SEARCH_FRESHNESS_ANY;
+}
+
+/*
+ * GType registration for AiSearchSafeSearch.
+ * Registers the enumeration values with the GLib type system for introspection.
+ */
+GType
+ai_search_safe_search_get_type(void)
+{
+    static GType safe_search_type = 0;
+
+    if (g_once_init_enter(&safe_search_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_SEARCH_SAFE_OFF, "AI_SEARCH_SAFE_OFF", "off" },
+            { AI_SEARCH_SAFE_MODERATE, "AI_SEARCH_SAFE_MODERATE", "moderate" },
+            { AI_SEARCH_SAFE_STRICT, "AI_SEARCH_SAFE_STRICT", "strict" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiSearchSafeSearch", values);
+        g_once_init_leave(&safe_search_type, type);
+    }
+
+    return safe_search_type;
+}
+
+/**
+ * ai_search_safe_search_to_string:
+ * @safe_search: an #AiSearchSafeSearch
+ *
+ * Converts an #AiSearchSafeSearch to its canonical string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_search_safe_search_to_string(AiSearchSafeSearch safe_search)
+{
+    switch (safe_search)
+    {
+        case AI_SEARCH_SAFE_OFF:
+            return "off";
+        case AI_SEARCH_SAFE_MODERATE:
+            return "moderate";
+        case AI_SEARCH_SAFE_STRICT:
+            return "strict";
+        default:
+            return "moderate";
+    }
+}
+
+/**
+ * ai_search_safe_search_from_string:
+ * @str: (nullable): a safe-search string
+ *
+ * Converts a string to an #AiSearchSafeSearch. Accepts the canonical names
+ * plus common aliases ("none"/"high").
+ *
+ * Returns: the #AiSearchSafeSearch, or %AI_SEARCH_SAFE_MODERATE if unrecognized
+ */
+AiSearchSafeSearch
+ai_search_safe_search_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_SEARCH_SAFE_MODERATE;
+    }
+
+    if (g_ascii_strcasecmp(str, "off") == 0 ||
+        g_ascii_strcasecmp(str, "none") == 0)
+    {
+        return AI_SEARCH_SAFE_OFF;
+    }
+    else if (g_ascii_strcasecmp(str, "moderate") == 0 ||
+             g_ascii_strcasecmp(str, "medium") == 0)
+    {
+        return AI_SEARCH_SAFE_MODERATE;
+    }
+    else if (g_ascii_strcasecmp(str, "strict") == 0 ||
+             g_ascii_strcasecmp(str, "high") == 0)
+    {
+        return AI_SEARCH_SAFE_STRICT;
+    }
+
+    return AI_SEARCH_SAFE_MODERATE;
+}

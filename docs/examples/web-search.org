@@ -1,0 +1,39 @@
+* Web Search Example
+=examples/web-search.c= shows the web search subsystem end to end: the
+zero-config env factory, a direct provider search with options, and rendering
+results for a model.
+
+** Run it
+#+begin_src sh
+make examples
+
+# Keyless (DuckDuckGo, best-effort):
+./build/release/examples/web-search "gnu emacs"
+
+# Or with a real backend:
+export BRAVE_API_KEY=...        # or BING_API_KEY=...
+./build/release/examples/web-search "io_uring performance"
+#+end_src
+
+** What it does
+1. =ai_search_provider_new_default()= picks Brave/Bing from the environment,
+   else the keyless DuckDuckGo provider, and prints which one it chose.
+2. Builds an =AiSearchOptions= (count 5, freshness = past month) and calls
+   =ai_search_provider_search()=.
+3. Iterates the =GList= of =AiSearchResult=, printing rank/title/URL/source.
+4. Calls =ai_search_results_format()= to show the exact string the
+   =web_search= tool hands back to a model.
+
+** Wiring it into the tool loop
+To let a model search during =ai_tool_executor_run()=:
+
+#+begin_src C
+g_autoptr(AiToolExecutor) exec = ai_tool_executor_new();
+g_autoptr(AiSearchProvider) sp = ai_search_provider_new_default(NULL);
+ai_tool_executor_set_search_provider(exec, sp);
+/* web_search is now advertised to the model, incl. the fetch_content option. */
+#+end_src
+
+See also: [[file:../web-search.org][Web Search guide]],
+[[file:../api-reference/ai-search-provider.org][AiSearchProvider API]],
+[[file:tool-use-executor.org][Tool Use Executor]].

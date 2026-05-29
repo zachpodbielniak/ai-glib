@@ -58,9 +58,12 @@
 
 /* Convenience API */
 #include "convenience/ai-simple.h"
+#include "convenience/ai-search-result.h"
+#include "convenience/ai-search-options.h"
 #include "convenience/ai-search-provider.h"
 #include "convenience/ai-bing-search.h"
 #include "convenience/ai-brave-search.h"
+#include "convenience/ai-duckduckgo-search.h"
 #include "convenience/ai-tool-executor.h"
 
 #undef AI_GLIB_INSIDE
