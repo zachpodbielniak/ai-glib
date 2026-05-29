@@ -193,9 +193,12 @@ than the raw bytes:
 
 - *HTML to text*: =text/html= responses are parsed (libxml2) and rendered
   to readable markdown-ish text --- =script=/=style=/=head= are dropped,
-  headings become =#= prefixes, and =<a href>= becomes =[text](href)=.
-  =application/json= and other =text/*= responses pass through unchanged;
-  binary types return a short placeholder instead of garbage.
+  headings become =#= prefixes, =<a href>= becomes =[text](href)=, and
+  =<img src>= becomes =![alt](src)= with the src resolved to an absolute
+  URL (honoring a =<base href>=) so the model gets directly-fetchable
+  image links.  =application/json= and other =text/*= responses pass
+  through unchanged; binary types return a short placeholder instead of
+  garbage.
 - *Hardening*: =http://= URLs are upgraded to =https://= (with fall-back),
   a real =User-Agent= is sent, the request times out after 30 s, and a
   redirect to a different host is announced with a =[redirected to ...]=

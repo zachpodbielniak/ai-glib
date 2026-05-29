@@ -17,6 +17,7 @@
 #include <json-glib/json-glib.h>
 #include <libxml/HTMLparser.h>
 #include <libxml/tree.h>
+#include <libxml/uri.h>
 
 #include "convenience/ai-tool-executor.h"
 #include "convenience/ai-search-provider.h"
@@ -824,8 +825,42 @@ node_name_is (xmlNode *node, const gchar *name)
         && g_ascii_strcasecmp ((const gchar *)node->name, name) == 0;
 }
 
+/* Find the first <base href> in the tree (HTML's per-document base override),
+ * returning its href (caller frees with xmlFree) or NULL. */
+static xmlChar *
+html_find_base_href (xmlNode *node)
+{
+    xmlNode *cur;
+
+    for (cur = node; cur != NULL; cur = cur->next)
+    {
+        if (cur->type != XML_ELEMENT_NODE)
+            continue;
+
+        if (node_name_is (cur, "base"))
+        {
+            xmlChar *href = xmlGetProp (cur, (const xmlChar *)"href");
+
+            if (href != NULL && href[0] != '\0')
+                return href;
+            if (href != NULL)
+                xmlFree (href);
+        }
+
+        {
+            xmlChar *found = html_find_base_href (cur->children);
+
+            if (found != NULL)
+                return found;
+        }
+    }
+    return NULL;
+}
+
+/* Walk the HTML tree appending markdown-ish text. BASE (nullable) is the
+ * effective base URL used to resolve <img> srcs to absolute URLs. */
 static void
-html_walk (xmlNode *node, GString *out)
+html_walk (xmlNode *node, GString *out, const gchar *base)
 {
     xmlNode *cur;
 
@@ -866,7 +901,7 @@ html_walk (xmlNode *node, GString *out)
             for (i = 0; i < level; i++)
                 g_string_append_c (out, '#');
             g_string_append_c (out, ' ');
-            html_walk (cur->children, out);
+            html_walk (cur->children, out, base);
             g_string_append_c (out, '\n');
             continue;
         }
@@ -879,12 +914,12 @@ html_walk (xmlNode *node, GString *out)
             if (href != NULL && href[0] != '\0')
             {
                 g_string_append_c (out, '[');
-                html_walk (cur->children, out);
+                html_walk (cur->children, out, base);
                 g_string_append_printf (out, "](%s)", (const gchar *)href);
             }
             else
             {
-                html_walk (cur->children, out);
+                html_walk (cur->children, out, base);
             }
 
             if (href != NULL)
@@ -892,11 +927,37 @@ html_walk (xmlNode *node, GString *out)
             continue;
         }
 
+        /* Images -> ![alt](src).  The src is resolved to an absolute URL
+         * against the document base (set from the page URL at parse time, or
+         * a <base href>), so the model gets a directly-fetchable link rather
+         * than a site-relative or protocol-relative path. */
+        if (node_name_is (cur, "img"))
+        {
+            xmlChar *src = xmlGetProp (cur, (const xmlChar *)"src");
+
+            if (src != NULL && src[0] != '\0')
+            {
+                xmlChar *alt = xmlGetProp (cur, (const xmlChar *)"alt");
+                xmlChar *abs = xmlBuildURI (src, (const xmlChar *)base);
+                const xmlChar *url = (abs != NULL) ? abs : src;
+
+                g_string_append_printf (out, "![%s](%s)",
+                                        (alt != NULL && alt[0] != '\0')
+                                          ? (const gchar *)alt : "",
+                                        (const gchar *)url);
+                if (abs != NULL) xmlFree (abs);
+                if (alt != NULL) xmlFree (alt);
+            }
+            if (src != NULL)
+                xmlFree (src);
+            continue;   /* void element: no children */
+        }
+
         /* List items get a bullet; block elements get surrounding newlines. */
         if (node_name_is (cur, "li"))
         {
             g_string_append (out, "\n- ");
-            html_walk (cur->children, out);
+            html_walk (cur->children, out, base);
             g_string_append_c (out, '\n');
             continue;
         }
@@ -913,7 +974,7 @@ html_walk (xmlNode *node, GString *out)
             if (block)
                 g_string_append_c (out, '\n');
 
-            html_walk (cur->children, out);
+            html_walk (cur->children, out, base);
 
             if (block)
                 g_string_append_c (out, '\n');
@@ -924,9 +985,12 @@ html_walk (xmlNode *node, GString *out)
 /* Parse HTML and return cleaned text (transfer full), or NULL on parse fail.
  * ENCODING is the charset hint (e.g. from the HTTP Content-Type); when NULL we
  * default to UTF-8 rather than libxml's legacy ISO-8859-1, since that is the
- * dominant encoding for modern pages that omit a charset declaration. */
+ * dominant encoding for modern pages that omit a charset declaration.
+ * BASE_URL (nullable) is the page's URL; it becomes the document base so that
+ * <img> srcs (and <base href>) resolve to absolute, fetchable URLs. */
 static gchar *
-html_to_text (const gchar *html, gsize len, const gchar *encoding)
+html_to_text (const gchar *html, gsize len, const gchar *encoding,
+              const gchar *base_url)
 {
     htmlDocPtr   doc;
     xmlNode     *root;
@@ -940,7 +1004,7 @@ html_to_text (const gchar *html, gsize len, const gchar *encoding)
     gboolean     at_line_start;
 
     enc = (encoding != NULL && encoding[0] != '\0') ? encoding : "UTF-8";
-    doc = htmlReadMemory (html, (int)len, NULL, enc,
+    doc = htmlReadMemory (html, (int)len, base_url, enc,
                           HTML_PARSE_RECOVER | HTML_PARSE_NOERROR
                           | HTML_PARSE_NOWARNING | HTML_PARSE_NONET);
     if (doc == NULL)
@@ -949,7 +1013,28 @@ html_to_text (const gchar *html, gsize len, const gchar *encoding)
     out  = g_string_new (NULL);
     root = xmlDocGetRootElement (doc);
     if (root != NULL)
-        html_walk (root, out);
+    {
+        g_autofree gchar *eff_base = NULL;
+        xmlChar          *bhref    = html_find_base_href (root);
+
+        if (bhref != NULL)
+        {
+            /* A <base href> can itself be relative to the page URL. */
+            xmlChar *abs = (base_url != NULL)
+                           ? xmlBuildURI (bhref, (const xmlChar *)base_url)
+                           : NULL;
+            eff_base = g_strdup ((const gchar *)(abs != NULL ? abs : bhref));
+            if (abs != NULL)
+                xmlFree (abs);
+            xmlFree (bhref);
+        }
+        else if (base_url != NULL)
+        {
+            eff_base = g_strdup (base_url);
+        }
+
+        html_walk (root, out, eff_base);
+    }
     xmlFreeDoc (doc);
 
     /* Whitespace cleanup: collapse spaces/tabs to one, drop leading spaces,
@@ -1063,7 +1148,7 @@ web_fetch_build_body (
         && (g_ascii_strcasecmp (content_type, "text/html") == 0
             || g_ascii_strcasecmp (content_type, "application/xhtml+xml") == 0))
     {
-        g_autofree gchar *text = html_to_text (data, size, charset);
+        g_autofree gchar *text = html_to_text (data, size, charset, final_url);
 
         if (text != NULL)
             g_string_append (body, text);
@@ -1715,8 +1800,10 @@ ai_tool_executor_new (void)
     tool = ai_tool_new ("web_fetch",
                         "Fetch a URL over HTTP or HTTPS. HTML is converted to "
                         "readable markdown-style text (scripts/styles stripped, "
-                        "headings and links preserved); JSON and plain text are "
-                        "returned as-is. http:// is upgraded to https://. "
+                        "headings and links preserved; images become "
+                        "![alt](absolute-url) so you can reuse the URLs); JSON "
+                        "and plain text are returned as-is. http:// is upgraded "
+                        "to https://. "
                         "Responses are cached for 15 minutes. Returns up to "
                         "100 KB. If 'prompt' is given, a model reads the page "
                         "and returns only the requested information.");

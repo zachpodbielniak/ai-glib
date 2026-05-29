@@ -38,7 +38,7 @@ test_html_basic (void)
         "<a href=\"https://example.com\">link</a></body></html>";
     g_autofree gchar *text = NULL;
 
-    text = html_to_text (html, strlen (html), NULL);
+    text = html_to_text (html, strlen (html), NULL, NULL);
     g_assert_nonnull (text);
 
     g_assert_null (g_strstr_len (text, -1, "color:red"));   /* style dropped */
@@ -53,7 +53,7 @@ test_html_basic (void)
 static void
 test_html_empty (void)
 {
-    g_autofree gchar *text = html_to_text ("", 0, NULL);
+    g_autofree gchar *text = html_to_text ("", 0, NULL, NULL);
 
     /* Empty input: libxml yields no root -> NULL, or an empty document. */
     g_assert_true (text == NULL || text[0] == '\0');
@@ -64,7 +64,7 @@ test_html_malformed (void)
 {
     /* Unclosed tags: HTML_PARSE_RECOVER must still extract the text. */
     const gchar      *html = "<p>hello<b>world<i>nested";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_nonnull (g_strstr_len (text, -1, "hello"));
@@ -77,7 +77,7 @@ test_html_entities (void)
 {
     /* Character entities in text nodes must be decoded by libxml. */
     const gchar      *html = "<p>a &amp; b &lt;c&gt; &#233;</p>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_nonnull (g_strstr_len (text, -1, "a & b"));
@@ -91,7 +91,7 @@ test_html_all_heading_levels (void)
     const gchar      *html =
         "<h1>A</h1><h2>B</h2><h3>C</h3>"
         "<h4>D</h4><h5>E</h5><h6>F</h6>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_nonnull (g_strstr_len (text, -1, "# A"));
@@ -107,7 +107,7 @@ test_html_not_a_heading (void)
 {
     /* <h7> is not a real heading: text kept, no '#' prefix emitted. */
     const gchar      *html = "<h7>NotHead</h7>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_nonnull (g_strstr_len (text, -1, "NotHead"));
@@ -118,7 +118,7 @@ static void
 test_html_link_without_href (void)
 {
     const gchar      *html = "<a>bare</a> and <a href=\"\">empty</a>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     /* No href / empty href: render the text only, no markdown brackets. */
@@ -132,7 +132,7 @@ static void
 test_html_nested_inline (void)
 {
     const gchar      *html = "<p>a <b><i>bold</i></b> c</p>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_nonnull (g_strstr_len (text, -1, "a "));
@@ -144,7 +144,7 @@ static void
 test_html_utf8_preserved (void)
 {
     const gchar      *html = "<p>caf\xc3\xa9 r\xc3\xa9sum\xc3\xa9</p>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_true (g_utf8_validate (text, -1, NULL));
@@ -157,7 +157,7 @@ test_html_drops_noscript_and_head (void)
     const gchar      *html =
         "<head><title>TITLE</title></head>"
         "<body><noscript>NOSCRIPT</noscript><p>ok</p></body>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_null (g_strstr_len (text, -1, "TITLE"));
@@ -170,13 +170,92 @@ test_html_collapses_whitespace (void)
 {
     const gchar      *html =
         "<body><p>one</p>\n\n\n\n<p>two</p>     <p>three</p></body>";
-    g_autofree gchar *text = html_to_text (html, strlen (html), NULL);
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
 
     g_assert_nonnull (text);
     g_assert_null (g_strstr_len (text, -1, "\n\n\n"));   /* <= 2 newlines */
     g_assert_nonnull (g_strstr_len (text, -1, "one"));
     g_assert_nonnull (g_strstr_len (text, -1, "two"));
     g_assert_nonnull (g_strstr_len (text, -1, "three"));
+}
+
+/* ============================================================
+ * <img> -> ![alt](src), resolved against the page base URL
+ * ============================================================ */
+
+static void
+test_html_img_relative_resolves_against_base (void)
+{
+    const gchar      *html = "<p><img src=\"/img/pic.png\" alt=\"A pic\"></p>";
+    g_autofree gchar *text =
+        html_to_text (html, strlen (html), NULL, "https://example.com/page");
+
+    g_assert_nonnull (text);
+    g_assert_nonnull (g_strstr_len (text, -1,
+                                    "![A pic](https://example.com/img/pic.png)"));
+}
+
+static void
+test_html_img_protocol_relative_resolves (void)
+{
+    const gchar      *html = "<img src=\"//cdn.example.net/a.jpg\" alt=\"x\">";
+    g_autofree gchar *text =
+        html_to_text (html, strlen (html), NULL, "https://example.com/p");
+
+    g_assert_nonnull (text);
+    g_assert_nonnull (g_strstr_len (text, -1,
+                                    "![x](https://cdn.example.net/a.jpg)"));
+}
+
+static void
+test_html_img_absolute_passthrough (void)
+{
+    const gchar      *html =
+        "<img src=\"https://img.example/abs.webp\" alt=\"shot\">";
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
+
+    g_assert_nonnull (text);
+    g_assert_nonnull (g_strstr_len (text, -1,
+                                    "![shot](https://img.example/abs.webp)"));
+}
+
+static void
+test_html_img_no_alt (void)
+{
+    const gchar      *html = "<img src=\"https://img.example/x.png\">";
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
+
+    g_assert_nonnull (text);
+    g_assert_nonnull (g_strstr_len (text, -1,
+                                    "![](https://img.example/x.png)"));
+}
+
+static void
+test_html_img_no_src_ignored (void)
+{
+    /* An <img> without a usable src emits nothing and must not crash. */
+    const gchar      *html = "<p>before<img alt=\"empty\">after</p>";
+    g_autofree gchar *text = html_to_text (html, strlen (html), NULL, NULL);
+
+    g_assert_nonnull (text);
+    g_assert_null (g_strstr_len (text, -1, "!["));
+    g_assert_nonnull (g_strstr_len (text, -1, "before"));
+    g_assert_nonnull (g_strstr_len (text, -1, "after"));
+}
+
+static void
+test_html_img_honors_base_href (void)
+{
+    /* A <base href> overrides the page URL for resolution. */
+    const gchar      *html =
+        "<head><base href=\"https://cdn.example/assets/\"></head>"
+        "<body><img src=\"logo.png\" alt=\"L\"></body>";
+    g_autofree gchar *text =
+        html_to_text (html, strlen (html), NULL, "https://example.com/p");
+
+    g_assert_nonnull (text);
+    g_assert_nonnull (g_strstr_len (text, -1,
+                                    "![L](https://cdn.example/assets/logo.png)"));
 }
 
 /* ============================================================
@@ -351,6 +430,21 @@ test_body_html_converted (void)
     g_assert_nonnull (g_strstr_len (out, -1, "Body text"));
     g_assert_null (g_strstr_len (out, -1, "secret"));   /* script dropped */
     g_assert_null (g_strstr_len (out, -1, "<h1>"));     /* not raw HTML */
+}
+
+static void
+test_body_html_img_resolved_against_final_url (void)
+{
+    /* build_body passes the final URL as the base, so a relative <img>
+     * src becomes an absolute, fetchable URL in the model-facing output. */
+    const gchar      *html = "<p><img src=\"pics/x.png\" alt=\"X\"></p>";
+    g_autofree gchar *out  =
+        web_fetch_build_body (html, strlen (html), "text/html", NULL,
+                              NULL, NULL, "https://site.example/a/b");
+
+    g_assert_nonnull (out);
+    g_assert_nonnull (g_strstr_len (out, -1,
+                                    "![X](https://site.example/a/pics/x.png)"));
 }
 
 static void
@@ -1362,6 +1456,20 @@ main (int argc, char *argv[])
     g_test_add_func ("/ai-glib/web-fetch/html/whitespace",
                      test_html_collapses_whitespace);
 
+    /* <img> extraction */
+    g_test_add_func ("/ai-glib/web-fetch/html/img-relative",
+                     test_html_img_relative_resolves_against_base);
+    g_test_add_func ("/ai-glib/web-fetch/html/img-protocol-relative",
+                     test_html_img_protocol_relative_resolves);
+    g_test_add_func ("/ai-glib/web-fetch/html/img-absolute",
+                     test_html_img_absolute_passthrough);
+    g_test_add_func ("/ai-glib/web-fetch/html/img-no-alt",
+                     test_html_img_no_alt);
+    g_test_add_func ("/ai-glib/web-fetch/html/img-no-src",
+                     test_html_img_no_src_ignored);
+    g_test_add_func ("/ai-glib/web-fetch/html/img-base-href",
+                     test_html_img_honors_base_href);
+
     /* web_fetch_truncate */
     g_test_add_func ("/ai-glib/web-fetch/truncate/under", test_truncate_under_limit);
     g_test_add_func ("/ai-glib/web-fetch/truncate/over", test_truncate_over_limit);
@@ -1380,6 +1488,8 @@ main (int argc, char *argv[])
 
     /* build-body: content-type dispatch, redirect notice, truncation */
     g_test_add_func ("/ai-glib/web-fetch/body/html", test_body_html_converted);
+    g_test_add_func ("/ai-glib/web-fetch/body/html-img-resolved",
+                     test_body_html_img_resolved_against_final_url);
     g_test_add_func ("/ai-glib/web-fetch/body/xhtml", test_body_xhtml_converted);
     g_test_add_func ("/ai-glib/web-fetch/body/json", test_body_json_passthrough);
     g_test_add_func ("/ai-glib/web-fetch/body/plain",
