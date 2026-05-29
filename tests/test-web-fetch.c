@@ -472,6 +472,872 @@ test_body_truncates_large (void)
     g_string_free (big, TRUE);
 }
 
+/* ============================================================
+ * Live HTTP transport (the thin glue the white-box tests skip)
+ *
+ * Covered here over a real loopback socket:
+ *   - request headers on the wire (User-Agent / Accept) via web_fetch_get
+ *   - non-2xx -> AI_ERROR_SERVER_ERROR mapping (tool_web_fetch)
+ *   - end-to-end 200 text/html -> converted body
+ *   - the http -> https speculative upgrade with fall-back to http
+ *   - the SoupSession I/O timeout
+ *
+ * libsoup's synchronous send_and_read() drives its own private GMainContext,
+ * so an in-process SoupServer on the SAME thread deadlocks (the server's
+ * callbacks never run while the client call blocks). Worse, a *plain* HTTP
+ * SoupServer that receives a TLS ClientHello buffers it forever, stalling the
+ * https probe until the 30 s timeout — useless for the fall-back test.
+ *
+ * The harness is therefore a tiny raw-socket HTTP/1.1 server on its own
+ * GThread (blocking accept loop, no GMainContext). It classifies each
+ * connection by its first byte: 0x16 is a TLS ClientHello (the https probe),
+ * which it fast-closes so the client's handshake fails in milliseconds and
+ * web_fetch falls back to http; anything else is parsed as HTTP and answered
+ * by path. This makes every path deterministic and sub-second.
+ * ============================================================ */
+
+typedef struct
+{
+    GThread *thread;
+    GSocket *listen_sock;
+    guint    port;
+    gint     stop;            /* atomic stop flag */
+    GMutex   lock;            /* guards the capture fields below */
+    gchar   *last_request;    /* full request text of the most recent http hit */
+    guint    http_hits;       /* plain-HTTP requests served */
+    guint    tls_hits;        /* TLS ClientHellos fast-closed */
+} RawServer;
+
+static void
+raw_send_all (GSocket *sock, const gchar *data, gsize len)
+{
+    gsize off = 0;
+
+    while (off < len)
+    {
+        gssize n = g_socket_send (sock, data + off, len - off, NULL, NULL);
+
+        if (n <= 0)
+            break;
+        off += (gsize) n;
+    }
+}
+
+/* Drain one HTTP request off CONN (FIRST/FIRSTLEN are bytes already read),
+ * route by path, write a fixed response, and record the request. */
+static void
+raw_serve_http (
+    RawServer    *rs,
+    GSocket      *conn,
+    const gchar  *first,
+    gsize         firstlen
+){
+    GString          *req   = g_string_new_len (first, (gssize) firstlen);
+    g_autofree gchar *path  = NULL;
+    g_autofree gchar *resp  = NULL;
+    const gchar      *line_end;
+    const gchar      *sp1;
+    const gchar      *sp2;
+    const gchar      *body;
+    const gchar      *ctype;
+    const gchar      *reason;
+    guint             status;
+    gchar             chunk[1024];
+
+    /* Read up to the end of the request headers. */
+    while (g_strstr_len (req->str, (gssize) req->len, "\r\n\r\n") == NULL)
+    {
+        gssize n = g_socket_receive (conn, chunk, sizeof chunk, NULL, NULL);
+
+        if (n <= 0)
+            break;
+        g_string_append_len (req, chunk, n);
+        if (req->len > 64 * 1024)   /* runaway guard */
+            break;
+    }
+
+    /* Parse the path out of "GET <path> HTTP/1.1". */
+    line_end = g_strstr_len (req->str, (gssize) req->len, "\r\n");
+    sp1      = (line_end != NULL) ? memchr (req->str, ' ', line_end - req->str)
+                                  : NULL;
+    sp2      = (sp1 != NULL) ? memchr (sp1 + 1, ' ', line_end - (sp1 + 1))
+                             : NULL;
+    if (sp1 != NULL && sp2 != NULL)
+        path = g_strndup (sp1 + 1, (gsize) (sp2 - (sp1 + 1)));
+
+    if (g_strcmp0 (path, "/notfound") == 0)
+    {
+        status = 404; reason = "Not Found";
+        ctype  = "text/plain"; body = "nope";
+    }
+    else if (g_strcmp0 (path, "/error") == 0)
+    {
+        status = 500; reason = "Internal Server Error";
+        ctype  = "text/plain"; body = "boom";
+    }
+    else if (g_strcmp0 (path, "/html") == 0)
+    {
+        status = 200; reason = "OK";
+        ctype  = "text/html; charset=utf-8";
+        body   = "<html><head><title>T</title>"
+                 "<script>secret()</script></head>"
+                 "<body><h1>Live Heading</h1><p>Live body.</p></body></html>";
+    }
+    else
+    {
+        status = 200; reason = "OK";
+        ctype  = "text/plain"; body = "hello from server";
+    }
+
+    resp = g_strdup_printf (
+        "HTTP/1.1 %u %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %lu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        status, reason, ctype, (gulong) strlen (body), body);
+
+    raw_send_all (conn, resp, strlen (resp));
+
+    g_mutex_lock (&rs->lock);
+    g_clear_pointer (&rs->last_request, g_free);
+    rs->last_request = g_string_free (req, FALSE);   /* transfer to capture */
+    rs->http_hits++;
+    g_mutex_unlock (&rs->lock);
+}
+
+static gpointer
+raw_server_thread (gpointer data)
+{
+    RawServer *rs = data;
+
+    while (!g_atomic_int_get (&rs->stop))
+    {
+        GSocket *conn;
+        gchar    first[1];
+        gssize   n;
+
+        conn = g_socket_accept (rs->listen_sock, NULL, NULL);
+        if (conn == NULL)
+            continue;                          /* accept timeout: re-check stop */
+        if (g_atomic_int_get (&rs->stop))      /* woken by the shutdown poke */
+        {
+            g_object_unref (conn);
+            break;
+        }
+
+        g_socket_set_timeout (conn, 2);
+
+        n = g_socket_receive (conn, first, 1, NULL, NULL);
+        if (n == 1)
+        {
+            if (first[0] == 0x16)
+            {
+                /* TLS ClientHello: the https probe. Fast-close it. */
+                g_mutex_lock (&rs->lock);
+                rs->tls_hits++;
+                g_mutex_unlock (&rs->lock);
+            }
+            else
+            {
+                raw_serve_http (rs, conn, first, 1);
+            }
+        }
+
+        g_socket_close (conn, NULL);
+        g_object_unref (conn);
+    }
+
+    return NULL;
+}
+
+static RawServer *
+raw_server_start (void)
+{
+    RawServer      *rs  = g_new0 (RawServer, 1);
+    GError         *err = NULL;
+    GInetAddress   *ia;
+    GSocketAddress *bind_addr;
+    GSocketAddress *local_addr;
+
+    g_mutex_init (&rs->lock);
+
+    rs->listen_sock = g_socket_new (G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM,
+                                    G_SOCKET_PROTOCOL_TCP, &err);
+    g_assert_no_error (err);
+    g_socket_set_timeout (rs->listen_sock, 1);   /* wake to re-check stop */
+
+    ia        = g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
+    bind_addr = g_inet_socket_address_new (ia, 0);
+    g_object_unref (ia);
+    g_socket_bind (rs->listen_sock, bind_addr, TRUE, &err);
+    g_object_unref (bind_addr);
+    g_assert_no_error (err);
+
+    g_socket_listen (rs->listen_sock, &err);
+    g_assert_no_error (err);
+
+    local_addr = g_socket_get_local_address (rs->listen_sock, &err);
+    g_assert_no_error (err);
+    rs->port = g_inet_socket_address_get_port (
+        G_INET_SOCKET_ADDRESS (local_addr));
+    g_object_unref (local_addr);
+
+    rs->thread = g_thread_new ("ai-glib-test-http", raw_server_thread, rs);
+    return rs;
+}
+
+static void
+raw_server_stop (RawServer *rs)
+{
+    GSocket        *poke;
+    GInetAddress   *ia;
+    GSocketAddress *addr;
+
+    g_atomic_int_set (&rs->stop, 1);
+
+    /* Poke our own listener so a blocked accept() returns at once. */
+    poke = g_socket_new (G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM,
+                         G_SOCKET_PROTOCOL_TCP, NULL);
+    if (poke != NULL)
+    {
+        ia   = g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
+        addr = g_inet_socket_address_new (ia, rs->port);
+        g_object_unref (ia);
+        g_socket_set_timeout (poke, 1);
+        g_socket_connect (poke, addr, NULL, NULL);   /* result irrelevant */
+        g_object_unref (addr);
+        g_socket_close (poke, NULL);
+        g_object_unref (poke);
+    }
+
+    g_thread_join (rs->thread);
+
+    g_socket_close (rs->listen_sock, NULL);
+    g_object_unref (rs->listen_sock);
+    g_mutex_clear (&rs->lock);
+    g_free (rs->last_request);
+    g_free (rs);
+}
+
+static gchar *
+raw_server_take_request (RawServer *rs)
+{
+    gchar *out;
+
+    g_mutex_lock (&rs->lock);
+    out = g_strdup (rs->last_request);
+    g_mutex_unlock (&rs->lock);
+    return out;
+}
+
+/* ---- a "black hole": accepts at the kernel level, never replies ---- */
+
+typedef struct
+{
+    GSocket *socket;
+    guint    port;
+} BlackHole;
+
+static BlackHole *
+black_hole_start (void)
+{
+    BlackHole      *bh  = g_new0 (BlackHole, 1);
+    GError         *err = NULL;
+    GInetAddress   *ia;
+    GSocketAddress *bind_addr;
+    GSocketAddress *local_addr;
+
+    bh->socket = g_socket_new (G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM,
+                               G_SOCKET_PROTOCOL_TCP, &err);
+    g_assert_no_error (err);
+
+    ia        = g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
+    bind_addr = g_inet_socket_address_new (ia, 0);
+    g_object_unref (ia);
+    g_socket_bind (bh->socket, bind_addr, TRUE, &err);
+    g_object_unref (bind_addr);
+    g_assert_no_error (err);
+
+    g_socket_listen (bh->socket, &err);   /* never accept() -> silent peer */
+    g_assert_no_error (err);
+
+    local_addr = g_socket_get_local_address (bh->socket, &err);
+    g_assert_no_error (err);
+    bh->port = g_inet_socket_address_get_port (
+        G_INET_SOCKET_ADDRESS (local_addr));
+    g_object_unref (local_addr);
+
+    return bh;
+}
+
+static void
+black_hole_stop (BlackHole *bh)
+{
+    g_socket_close (bh->socket, NULL);
+    g_object_unref (bh->socket);
+    g_free (bh);
+}
+
+/* ---- a GResolver that maps every name to IPv4 loopback ----
+ *
+ * Installed as the default resolver only for the fall-back test, so a
+ * real-looking hostname (which web_fetch_should_upgrade() agrees to upgrade)
+ * still lands on our loopback server. 127.0.0.1 / localhost would skip the
+ * upgrade entirely and never exercise the probe. */
+
+#define TEST_TYPE_RESOLVER (test_resolver_get_type ())
+G_DECLARE_FINAL_TYPE (TestResolver, test_resolver, TEST, RESOLVER, GResolver)
+
+struct _TestResolver
+{
+    GResolver parent_instance;
+};
+
+G_DEFINE_TYPE (TestResolver, test_resolver, G_TYPE_RESOLVER)
+
+static GList *
+test_resolver_loopback (void)
+{
+    return g_list_append (NULL,
+        g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4));
+}
+
+static GList *
+test_resolver_lookup_by_name (
+    GResolver     *resolver,
+    const gchar   *hostname,
+    GCancellable  *cancellable,
+    GError       **error
+){
+    (void) resolver; (void) hostname; (void) cancellable; (void) error;
+    return test_resolver_loopback ();
+}
+
+static GList *
+test_resolver_lookup_by_name_with_flags (
+    GResolver                 *resolver,
+    const gchar               *hostname,
+    GResolverNameLookupFlags   flags,
+    GCancellable              *cancellable,
+    GError                   **error
+){
+    (void) flags;
+    return test_resolver_lookup_by_name (resolver, hostname, cancellable, error);
+}
+
+static void
+test_resolver_lookup_by_name_async (
+    GResolver           *resolver,
+    const gchar         *hostname,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    GTask *task = g_task_new (resolver, cancellable, callback, user_data);
+
+    (void) hostname;
+    g_task_return_pointer (task, test_resolver_loopback (),
+                           (GDestroyNotify) g_resolver_free_addresses);
+    g_object_unref (task);
+}
+
+static void
+test_resolver_lookup_by_name_with_flags_async (
+    GResolver                 *resolver,
+    const gchar               *hostname,
+    GResolverNameLookupFlags   flags,
+    GCancellable              *cancellable,
+    GAsyncReadyCallback        callback,
+    gpointer                   user_data
+){
+    (void) flags;
+    test_resolver_lookup_by_name_async (resolver, hostname, cancellable,
+                                        callback, user_data);
+}
+
+static GList *
+test_resolver_lookup_finish (
+    GResolver     *resolver,
+    GAsyncResult  *result,
+    GError       **error
+){
+    (void) resolver;
+    return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+static void
+test_resolver_class_init (TestResolverClass *klass)
+{
+    GResolverClass *rc = G_RESOLVER_CLASS (klass);
+
+    rc->lookup_by_name                   = test_resolver_lookup_by_name;
+    rc->lookup_by_name_async             = test_resolver_lookup_by_name_async;
+    rc->lookup_by_name_finish            = test_resolver_lookup_finish;
+    rc->lookup_by_name_with_flags        = test_resolver_lookup_by_name_with_flags;
+    rc->lookup_by_name_with_flags_async  = test_resolver_lookup_by_name_with_flags_async;
+    rc->lookup_by_name_with_flags_finish = test_resolver_lookup_finish;
+}
+
+static void
+test_resolver_init (TestResolver *self)
+{
+    (void) self;
+}
+
+/* ---- a mock AiProvider for the prompt-extraction sub-model path ---- */
+
+#define MOCK_TYPE_PROVIDER (mock_provider_get_type ())
+G_DECLARE_FINAL_TYPE (MockProvider, mock_provider, MOCK, PROVIDER, GObject)
+
+struct _MockProvider
+{
+    GObject  parent_instance;
+    gchar   *reply;            /* canned reply text (NULL -> empty) */
+    gboolean fail;             /* TRUE -> chat returns an error */
+    /* captures */
+    gchar   *seen_system;
+    gchar   *seen_user_text;
+    gint     seen_max_tokens;
+    gint     calls;
+};
+
+static void mock_provider_iface_init (AiProviderInterface *iface);
+
+G_DEFINE_TYPE_WITH_CODE (MockProvider, mock_provider, G_TYPE_OBJECT,
+    G_IMPLEMENT_INTERFACE (AI_TYPE_PROVIDER, mock_provider_iface_init))
+
+static void
+mock_provider_finalize (GObject *object)
+{
+    MockProvider *mp = MOCK_PROVIDER (object);
+
+    g_free (mp->reply);
+    g_free (mp->seen_system);
+    g_free (mp->seen_user_text);
+
+    G_OBJECT_CLASS (mock_provider_parent_class)->finalize (object);
+}
+
+static void
+mock_provider_class_init (MockProviderClass *klass)
+{
+    G_OBJECT_CLASS (klass)->finalize = mock_provider_finalize;
+}
+
+static void
+mock_provider_init (MockProvider *self)
+{
+    (void) self;
+}
+
+static void
+mock_provider_chat_async (
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    GList               *tools,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    MockProvider *mp  = MOCK_PROVIDER (provider);
+    GTask        *task;
+    GString      *acc;
+    GList        *l;
+
+    (void) tools;
+
+    mp->calls++;
+    mp->seen_max_tokens = max_tokens;
+    g_clear_pointer (&mp->seen_system, g_free);
+    mp->seen_system = g_strdup (system_prompt);
+
+    acc = g_string_new (NULL);
+    for (l = messages; l != NULL; l = l->next)
+    {
+        gchar *t = ai_message_get_text (AI_MESSAGE (l->data));
+
+        if (t != NULL)
+        {
+            g_string_append (acc, t);
+            g_free (t);
+        }
+    }
+    g_clear_pointer (&mp->seen_user_text, g_free);
+    mp->seen_user_text = g_string_free (acc, FALSE);
+
+    task = g_task_new (provider, cancellable, callback, user_data);
+
+    if (mp->fail)
+    {
+        g_task_return_new_error (task, AI_ERROR, AI_ERROR_SERVER_ERROR,
+                                 "mock provider failure");
+        g_object_unref (task);
+        return;
+    }
+
+    {
+        AiResponse    *resp = ai_response_new ("mock-id", "mock-model");
+        AiTextContent *txt  =
+            ai_text_content_new (mp->reply != NULL ? mp->reply : "");
+
+        ai_response_add_content_block (resp, (AiContentBlock *) txt);
+        g_task_return_pointer (task, resp, g_object_unref);
+    }
+    g_object_unref (task);
+}
+
+static AiResponse *
+mock_provider_chat_finish (
+    AiProvider    *provider,
+    GAsyncResult  *result,
+    GError       **error
+){
+    (void) provider;
+    return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+static AiProviderType
+mock_provider_get_provider_type (AiProvider *provider)
+{
+    (void) provider;
+    return AI_PROVIDER_CLAUDE;
+}
+
+static const gchar *
+mock_provider_get_name (AiProvider *provider)
+{
+    (void) provider;
+    return "mock";
+}
+
+static const gchar *
+mock_provider_get_default_model (AiProvider *provider)
+{
+    (void) provider;
+    return "mock-model";
+}
+
+static void
+mock_provider_iface_init (AiProviderInterface *iface)
+{
+    iface->get_provider_type = mock_provider_get_provider_type;
+    iface->get_name          = mock_provider_get_name;
+    iface->get_default_model = mock_provider_get_default_model;
+    iface->chat_async        = mock_provider_chat_async;
+    iface->chat_finish       = mock_provider_chat_finish;
+}
+
+static MockProvider *
+mock_provider_new (const gchar *reply, gboolean fail)
+{
+    MockProvider *mp = g_object_new (MOCK_TYPE_PROVIDER, NULL);
+
+    mp->reply = g_strdup (reply);
+    mp->fail  = fail;
+    return mp;
+}
+
+static AiToolUse *
+wf_tool_use (const gchar *json)
+{
+    return ai_tool_use_new_from_json_string ("wf-test", "web_fetch", json);
+}
+
+/* ============================================================
+ * transport tests
+ * ============================================================ */
+
+static void
+test_wire_request_headers (void)
+{
+    RawServer              *rs;
+    g_autoptr(SoupSession)  session = NULL;
+    g_autoptr(SoupMessage)  msg     = NULL;
+    g_autoptr(GBytes)       bytes   = NULL;
+    g_autoptr(GError)       err     = NULL;
+    g_autofree gchar       *url     = NULL;
+    g_autofree gchar       *request = NULL;
+
+    rs      = raw_server_start ();
+    session = soup_session_new ();
+    url     = g_strdup_printf ("http://127.0.0.1:%u/ok", rs->port);
+
+    /* web_fetch_get is the production helper that injects the headers. */
+    bytes = web_fetch_get (session, url, &msg, NULL, &err);
+    g_assert_no_error (err);
+    g_assert_nonnull (bytes);
+    g_assert_cmpuint (soup_message_get_status (msg), ==, 200);
+
+    request = raw_server_take_request (rs);
+    g_assert_nonnull (request);
+    /* Request line carried our GET + path. */
+    g_assert_nonnull (g_strstr_len (request, -1, "GET /ok HTTP/1.1"));
+    /* User-Agent set verbatim on the wire. */
+    g_assert_nonnull (g_strstr_len (request, -1, WEB_FETCH_USER_AGENT));
+    /* Accept advertises HTML so servers content-negotiate toward text. */
+    g_assert_nonnull (g_strstr_len (request, -1, "text/html"));
+
+    raw_server_stop (rs);
+}
+
+static void
+test_wire_http_404 (void)
+{
+    RawServer                *rs;
+    g_autoptr(AiToolExecutor) exec     = NULL;
+    g_autoptr(AiToolUse)      tool_use = NULL;
+    g_autofree gchar         *result   = NULL;
+    g_autoptr(GError)         err      = NULL;
+    g_autofree gchar         *json     = NULL;
+
+    rs   = raw_server_start ();
+    exec = ai_tool_executor_new ();
+
+    json     = g_strdup_printf (
+        "{\"url\": \"http://127.0.0.1:%u/notfound\"}", rs->port);
+    tool_use = wf_tool_use (json);
+    result   = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    g_assert_null (result);
+    g_assert_error (err, AI_ERROR, AI_ERROR_SERVER_ERROR);
+    g_assert_nonnull (g_strstr_len (err->message, -1, "HTTP 404"));
+
+    raw_server_stop (rs);
+}
+
+static void
+test_wire_http_500 (void)
+{
+    RawServer                *rs;
+    g_autoptr(AiToolExecutor) exec     = NULL;
+    g_autoptr(AiToolUse)      tool_use = NULL;
+    g_autofree gchar         *result   = NULL;
+    g_autoptr(GError)         err      = NULL;
+    g_autofree gchar         *json     = NULL;
+
+    rs   = raw_server_start ();
+    exec = ai_tool_executor_new ();
+
+    json     = g_strdup_printf (
+        "{\"url\": \"http://127.0.0.1:%u/error\"}", rs->port);
+    tool_use = wf_tool_use (json);
+    result   = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    g_assert_null (result);
+    g_assert_error (err, AI_ERROR, AI_ERROR_SERVER_ERROR);
+    g_assert_nonnull (g_strstr_len (err->message, -1, "HTTP 500"));
+
+    raw_server_stop (rs);
+}
+
+static void
+test_wire_html_converted (void)
+{
+    RawServer                *rs;
+    g_autoptr(AiToolExecutor) exec     = NULL;
+    g_autoptr(AiToolUse)      tool_use = NULL;
+    g_autofree gchar         *result   = NULL;
+    g_autoptr(GError)         err      = NULL;
+    g_autofree gchar         *json     = NULL;
+
+    rs   = raw_server_start ();
+    exec = ai_tool_executor_new ();
+
+    json     = g_strdup_printf (
+        "{\"url\": \"http://127.0.0.1:%u/html\"}", rs->port);
+    tool_use = wf_tool_use (json);
+    result   = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    /* Full pipeline over a real socket: fetch -> content-type dispatch ->
+     * html_to_text -> build_body. */
+    g_assert_no_error (err);
+    g_assert_nonnull (result);
+    g_assert_nonnull (g_strstr_len (result, -1, "# Live Heading"));
+    g_assert_nonnull (g_strstr_len (result, -1, "Live body."));
+    g_assert_null (g_strstr_len (result, -1, "secret"));   /* script dropped */
+    g_assert_null (g_strstr_len (result, -1, "<h1>"));     /* not raw HTML */
+
+    raw_server_stop (rs);
+}
+
+static void
+test_wire_https_fallback (void)
+{
+    RawServer                *rs;
+    GResolver                *saved;
+    TestResolver             *mock_res;
+    g_autoptr(AiToolExecutor) exec     = NULL;
+    g_autoptr(AiToolUse)      tool_use = NULL;
+    g_autofree gchar         *result   = NULL;
+    g_autoptr(GError)         err      = NULL;
+    g_autofree gchar         *json     = NULL;
+    g_autofree gchar         *request  = NULL;
+    guint                     http_hits;
+    guint                     tls_hits;
+
+    rs = raw_server_start ();
+
+    saved    = g_resolver_get_default ();          /* +1 ref */
+    mock_res = g_object_new (TEST_TYPE_RESOLVER, NULL);
+    g_resolver_set_default (G_RESOLVER (mock_res));
+
+    exec     = ai_tool_executor_new ();
+    json     = g_strdup_printf (
+        "{\"url\": \"http://webfetch.test:%u/fallback\"}", rs->port);
+    tool_use = wf_tool_use (json);
+    result   = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    /* Restore before asserting so a failure can't leave the global default
+     * dangling at our about-to-be-freed mock. */
+    g_resolver_set_default (saved);
+    g_object_unref (saved);
+    g_object_unref (mock_res);
+
+    g_assert_no_error (err);
+    g_assert_nonnull (result);
+    g_assert_nonnull (g_strstr_len (result, -1, "hello from server"));
+
+    g_mutex_lock (&rs->lock);
+    http_hits = rs->http_hits;
+    tls_hits  = rs->tls_hits;
+    g_mutex_unlock (&rs->lock);
+
+    /* The https probe was attempted (and fast-failed) AND the http fall-back
+     * actually reached the server. */
+    g_assert_cmpuint (tls_hits,  >=, 1);
+    g_assert_cmpuint (http_hits, >=, 1);
+
+    request = raw_server_take_request (rs);
+    g_assert_nonnull (request);
+    g_assert_nonnull (g_strstr_len (request, -1, "GET /fallback HTTP/1.1"));
+
+    raw_server_stop (rs);
+}
+
+static void
+test_wire_timeout (void)
+{
+    BlackHole              *bh;
+    g_autoptr(SoupSession)  session = NULL;
+    g_autoptr(SoupMessage)  msg     = NULL;
+    g_autoptr(GBytes)       bytes   = NULL;
+    g_autoptr(GError)       err     = NULL;
+    g_autofree gchar       *url     = NULL;
+
+    /* Lock the production timeout constant alongside the live-timeout check. */
+    g_assert_cmpint (WEB_FETCH_TIMEOUT_SECS, ==, 30);
+
+    bh      = black_hole_start ();
+    session = soup_session_new ();
+    g_object_set (session, "timeout", (guint) 1, NULL);   /* 1 s, not 30 */
+    url     = g_strdup_printf ("http://127.0.0.1:%u/", bh->port);
+
+    /* Peer accepts but never replies: send_and_read must hit the I/O timeout
+     * (the same mechanism tool_web_fetch arms with the 30 s value). */
+    bytes = web_fetch_get (session, url, &msg, NULL, &err);
+    g_assert_null (bytes);
+    g_assert_nonnull (err);
+
+    black_hole_stop (bh);
+}
+
+/* ============================================================
+ * prompt-extraction sub-model path (web_fetch_extract)
+ * ============================================================ */
+
+static void
+test_extract_success (void)
+{
+    g_autoptr(MockProvider)  mock = NULL;
+    g_autofree gchar        *out  = NULL;
+
+    mock = mock_provider_new ("EXTRACTED SUMMARY", FALSE);
+
+    out = web_fetch_extract (AI_PROVIDER (mock),
+                             "https://docs.example/page",
+                             "the full converted page content",
+                             "Summarise in one line",
+                             NULL);
+
+    g_assert_cmpstr (out, ==, "EXTRACTED SUMMARY");
+    g_assert_cmpint (mock->calls, ==, 1);
+
+    /* The sub-call wove url + content + task into the user message, set a
+     * system prompt, and passed the default token budget. */
+    g_assert_nonnull (mock->seen_user_text);
+    g_assert_nonnull (g_strstr_len (mock->seen_user_text, -1,
+                                    "https://docs.example/page"));
+    g_assert_nonnull (g_strstr_len (mock->seen_user_text, -1,
+                                    "the full converted page content"));
+    g_assert_nonnull (g_strstr_len (mock->seen_user_text, -1,
+                                    "Summarise in one line"));
+    g_assert_nonnull (mock->seen_system);
+    g_assert_nonnull (g_strstr_len (mock->seen_system, -1, "extract"));
+    g_assert_cmpint (mock->seen_max_tokens, ==, DEFAULT_MAX_TOKENS);
+}
+
+static void
+test_extract_error_returns_null (void)
+{
+    g_autoptr(MockProvider) mock = NULL;
+    gchar                  *out;
+
+    mock = mock_provider_new (NULL, TRUE);   /* provider errors */
+
+    /* The failure is logged as a warning and swallowed (caller falls back to
+     * the raw content), so expect the warning rather than abort on it. */
+    g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_WARNING,
+                           "*prompt extraction failed*");
+    out = web_fetch_extract (AI_PROVIDER (mock),
+                             "https://docs.example/page",
+                             "content", "task", NULL);
+    g_test_assert_expected_messages ();
+
+    g_assert_null (out);
+    g_assert_cmpint (mock->calls, ==, 1);
+}
+
+/* Full tool_web_fetch prompt branch: cache-seeded body (no network) routed
+ * through the active provider for extraction. */
+static void
+test_extract_via_tool_web_fetch (void)
+{
+    g_autoptr(AiToolExecutor) exec     = NULL;
+    g_autoptr(MockProvider)   mock     = NULL;
+    g_autoptr(AiToolUse)      tool_use = NULL;
+    g_autofree gchar         *result   = NULL;
+    g_autoptr(GError)         err      = NULL;
+    const gchar              *url      = "https://extract.example/seeded-doc";
+
+    exec = ai_tool_executor_new ();
+    mock = mock_provider_new ("CONDENSED", FALSE);
+
+    /* Seed the cache so tool_web_fetch takes the hit path (no socket) and
+     * goes straight to the prompt-extraction branch. */
+    web_fetch_cache_store (url, "SEEDED BODY CONTENT");
+
+    /* active_provider is normally set for the duration of a run(); set it
+     * directly for the test. */
+    exec->active_provider = AI_PROVIDER (mock);
+
+    tool_use = wf_tool_use (
+        "{\"url\": \"https://extract.example/seeded-doc\", "
+        "\"prompt\": \"condense\"}");
+    result = ai_tool_executor_execute (exec, tool_use, NULL, &err);
+
+    exec->active_provider = NULL;   /* borrowed; drop before mock is freed */
+
+    g_assert_no_error (err);
+    g_assert_cmpstr (result, ==, "CONDENSED");
+    g_assert_cmpint (mock->calls, ==, 1);
+    g_assert_nonnull (g_strstr_len (mock->seen_user_text, -1,
+                                    "SEEDED BODY CONTENT"));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -530,6 +1396,28 @@ main (int argc, char *argv[])
                      test_body_no_redirect_notice_null_hosts);
     g_test_add_func ("/ai-glib/web-fetch/body/truncates-large",
                      test_body_truncates_large);
+
+    /* live HTTP transport over a loopback socket */
+    g_test_add_func ("/ai-glib/web-fetch/wire/request-headers",
+                     test_wire_request_headers);
+    g_test_add_func ("/ai-glib/web-fetch/wire/http-404",
+                     test_wire_http_404);
+    g_test_add_func ("/ai-glib/web-fetch/wire/http-500",
+                     test_wire_http_500);
+    g_test_add_func ("/ai-glib/web-fetch/wire/html-converted",
+                     test_wire_html_converted);
+    g_test_add_func ("/ai-glib/web-fetch/wire/https-fallback",
+                     test_wire_https_fallback);
+    g_test_add_func ("/ai-glib/web-fetch/wire/timeout",
+                     test_wire_timeout);
+
+    /* prompt-extraction sub-model path */
+    g_test_add_func ("/ai-glib/web-fetch/extract/success",
+                     test_extract_success);
+    g_test_add_func ("/ai-glib/web-fetch/extract/error-returns-null",
+                     test_extract_error_returns_null);
+    g_test_add_func ("/ai-glib/web-fetch/extract/via-tool-web-fetch",
+                     test_extract_via_tool_web_fetch);
 
     return g_test_run ();
 }
