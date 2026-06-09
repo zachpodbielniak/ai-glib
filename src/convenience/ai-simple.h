@@ -190,8 +190,8 @@ ai_simple_set_working_directory(
 /**
  * ai_simple_set_effort_level:
  * @self: an #AiSimple
- * @effort_level: (nullable): effort level string (low/medium/high/max),
- *   or %NULL to reset to default (medium)
+ * @effort_level: (nullable): effort level string
+ *   (low/medium/high/xhigh/max), or %NULL to reset to default (medium)
  *
  * Sets the reasoning effort level for CLI-based providers.
  * Maps to --effort for Claude Code and --variant for OpenCode.

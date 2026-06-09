@@ -2146,6 +2146,7 @@ ai_claude_tmux_client_list_models_async(
     (void)cancellable;
 
     task = g_task_new(provider, NULL, callback, user_data);
+    models = g_list_append(models, g_strdup("fable"));
     models = g_list_append(models, g_strdup("opus"));
     models = g_list_append(models, g_strdup("sonnet"));
     models = g_list_append(models, g_strdup("haiku"));

@@ -137,6 +137,71 @@ test_content_type_from_string(void)
 	g_assert_cmpint(ai_content_type_from_string(NULL), ==, AI_CONTENT_TYPE_TEXT);
 }
 
+static void
+test_effort_level_gtype(void)
+{
+	GType        type;
+	GEnumClass  *klass;
+
+	type = ai_effort_level_get_type();
+	g_assert_true(G_TYPE_IS_ENUM(type));
+	g_assert_cmpstr(g_type_name(type), ==, "AiEffortLevel");
+
+	/* xhigh must be registered in the GEnum value table */
+	klass = g_type_class_ref(type);
+	g_assert_nonnull(g_enum_get_value_by_nick(klass, "xhigh"));
+	g_assert_nonnull(g_enum_get_value(klass, AI_EFFORT_XHIGH));
+	g_type_class_unref(klass);
+}
+
+static void
+test_effort_level_to_string(void)
+{
+	g_assert_cmpstr(ai_effort_level_to_string(AI_EFFORT_LOW), ==, "low");
+	g_assert_cmpstr(ai_effort_level_to_string(AI_EFFORT_MEDIUM), ==, "medium");
+	g_assert_cmpstr(ai_effort_level_to_string(AI_EFFORT_HIGH), ==, "high");
+	g_assert_cmpstr(ai_effort_level_to_string(AI_EFFORT_XHIGH), ==, "xhigh");
+	g_assert_cmpstr(ai_effort_level_to_string(AI_EFFORT_MAX), ==, "max");
+}
+
+static void
+test_effort_level_from_string(void)
+{
+	g_assert_cmpint(ai_effort_level_from_string("low"), ==, AI_EFFORT_LOW);
+	g_assert_cmpint(ai_effort_level_from_string("min"), ==, AI_EFFORT_LOW);
+	g_assert_cmpint(ai_effort_level_from_string("medium"), ==, AI_EFFORT_MEDIUM);
+	g_assert_cmpint(ai_effort_level_from_string("high"), ==, AI_EFFORT_HIGH);
+	g_assert_cmpint(ai_effort_level_from_string("max"), ==, AI_EFFORT_MAX);
+
+	/* xhigh and its accepted aliases */
+	g_assert_cmpint(ai_effort_level_from_string("xhigh"), ==, AI_EFFORT_XHIGH);
+	g_assert_cmpint(ai_effort_level_from_string("XHIGH"), ==, AI_EFFORT_XHIGH);
+	g_assert_cmpint(ai_effort_level_from_string("x-high"), ==, AI_EFFORT_XHIGH);
+	g_assert_cmpint(ai_effort_level_from_string("extra-high"), ==, AI_EFFORT_XHIGH);
+
+	/* Unknown / NULL fall back to medium */
+	g_assert_cmpint(ai_effort_level_from_string("bogus"), ==, AI_EFFORT_MEDIUM);
+	g_assert_cmpint(ai_effort_level_from_string(NULL), ==, AI_EFFORT_MEDIUM);
+}
+
+static void
+test_effort_level_roundtrip(void)
+{
+	/* Every level must survive to_string -> from_string unchanged.
+	 * This is the property that guards against the xhigh-silently-
+	 * downgraded-to-medium regression. */
+	AiEffortLevel levels[] = {
+		AI_EFFORT_LOW, AI_EFFORT_MEDIUM, AI_EFFORT_HIGH,
+		AI_EFFORT_XHIGH, AI_EFFORT_MAX
+	};
+	gsize i;
+
+	for (i = 0; i < G_N_ELEMENTS(levels); i++) {
+		const gchar *s = ai_effort_level_to_string(levels[i]);
+		g_assert_cmpint(ai_effort_level_from_string(s), ==, levels[i]);
+	}
+}
+
 int
 main(
 	int   argc,
@@ -159,6 +224,11 @@ main(
 	g_test_add_func("/ai-glib/enums/content-type/gtype", test_content_type_gtype);
 	g_test_add_func("/ai-glib/enums/content-type/to-string", test_content_type_to_string);
 	g_test_add_func("/ai-glib/enums/content-type/from-string", test_content_type_from_string);
+
+	g_test_add_func("/ai-glib/enums/effort-level/gtype", test_effort_level_gtype);
+	g_test_add_func("/ai-glib/enums/effort-level/to-string", test_effort_level_to_string);
+	g_test_add_func("/ai-glib/enums/effort-level/from-string", test_effort_level_from_string);
+	g_test_add_func("/ai-glib/enums/effort-level/roundtrip", test_effort_level_roundtrip);
 
 	return g_test_run();
 }

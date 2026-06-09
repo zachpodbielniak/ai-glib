@@ -1029,6 +1029,7 @@ ai_claude_code_client_list_models_async(
     /* Return static list of model aliases */
     task = g_task_new(provider, NULL, callback, user_data);
 
+    models = g_list_append(models, g_strdup("fable"));
     models = g_list_append(models, g_strdup("opus"));
     models = g_list_append(models, g_strdup("sonnet"));
     models = g_list_append(models, g_strdup("haiku"));

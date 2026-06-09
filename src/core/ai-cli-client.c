@@ -319,7 +319,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
     properties[PROP_EFFORT_LEVEL] =
         g_param_spec_string("effort-level",
                             "Effort Level",
-                            "Reasoning effort level (low/medium/high/max)",
+                            "Reasoning effort level (low/medium/high/xhigh/max)",
                             "medium",
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
@@ -778,8 +778,8 @@ ai_cli_client_get_effort_level(AiCliClient *self)
 /**
  * ai_cli_client_set_effort_level:
  * @self: an #AiCliClient
- * @effort_level: (nullable): the effort level (low/medium/high/max),
- *   or %NULL to reset to default (medium)
+ * @effort_level: (nullable): the effort level
+ *   (low/medium/high/xhigh/max), or %NULL to reset to default (medium)
  *
  * Sets the reasoning effort level. Maps to --effort for Claude Code
  * and --variant for OpenCode.

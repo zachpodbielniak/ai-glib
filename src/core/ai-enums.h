@@ -148,16 +148,23 @@ ai_content_type_from_string(const gchar *str);
  * @AI_EFFORT_LOW: Low effort / minimal reasoning
  * @AI_EFFORT_MEDIUM: Medium effort (default)
  * @AI_EFFORT_HIGH: High effort / extended reasoning
+ * @AI_EFFORT_XHIGH: Extra-high effort / very deep reasoning (between
+ *   high and max).  Supported by newer Claude Code models such as
+ *   fable (claude-fable-5).
  * @AI_EFFORT_MAX: Maximum effort / deepest reasoning
  *
  * Enumeration of reasoning effort levels for AI providers.
  * Maps to --effort for Claude Code and --variant for OpenCode.
+ *
+ * Ordered low → max; XHIGH sits between HIGH and MAX so the numeric
+ * ordering matches the semantic ordering.
  */
 typedef enum
 {
     AI_EFFORT_LOW = 0,
     AI_EFFORT_MEDIUM,
     AI_EFFORT_HIGH,
+    AI_EFFORT_XHIGH,
     AI_EFFORT_MAX
 } AiEffortLevel;
 

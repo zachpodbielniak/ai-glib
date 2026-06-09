@@ -432,6 +432,7 @@ ai_effort_level_get_type(void)
             { AI_EFFORT_LOW, "AI_EFFORT_LOW", "low" },
             { AI_EFFORT_MEDIUM, "AI_EFFORT_MEDIUM", "medium" },
             { AI_EFFORT_HIGH, "AI_EFFORT_HIGH", "high" },
+            { AI_EFFORT_XHIGH, "AI_EFFORT_XHIGH", "xhigh" },
             { AI_EFFORT_MAX, "AI_EFFORT_MAX", "max" },
             { 0, NULL, NULL }
         };
@@ -462,6 +463,8 @@ ai_effort_level_to_string(AiEffortLevel level)
             return "medium";
         case AI_EFFORT_HIGH:
             return "high";
+        case AI_EFFORT_XHIGH:
+            return "xhigh";
         case AI_EFFORT_MAX:
             return "max";
         default:
@@ -499,6 +502,12 @@ ai_effort_level_from_string(const gchar *str)
     else if (g_ascii_strcasecmp(str, "high") == 0)
     {
         return AI_EFFORT_HIGH;
+    }
+    else if (g_ascii_strcasecmp(str, "xhigh") == 0 ||
+             g_ascii_strcasecmp(str, "x-high") == 0 ||
+             g_ascii_strcasecmp(str, "extra-high") == 0)
+    {
+        return AI_EFFORT_XHIGH;
     }
     else if (g_ascii_strcasecmp(str, "max") == 0)
     {
