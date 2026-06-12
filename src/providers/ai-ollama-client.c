@@ -16,6 +16,7 @@
 #include "model/ai-tool-use.h"
 
 #define OLLAMA_CHAT_ENDPOINT "/api/chat"
+#define OLLAMA_TAGS_ENDPOINT "/api/tags"
 
 /*
  * Private structure for AiOllamaClient.
@@ -491,6 +492,100 @@ ai_ollama_client_chat_finish(
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
+typedef struct
+{
+    AiOllamaClient *client;
+    GTask          *task;
+    SoupMessage    *msg;
+} OllamaListModelsData;
+
+static void
+ollama_list_models_data_free(OllamaListModelsData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->task);
+    g_clear_object(&data->msg);
+    g_slice_free(OllamaListModelsData, data);
+}
+
+static void
+on_ollama_list_models_response(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OllamaListModelsData *data = user_data;
+    g_autoptr(GBytes) response_bytes = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonParser) parser = NULL;
+    const gchar *response_data;
+    gsize response_len;
+    JsonObject *root;
+    JsonArray *arr;
+    GList *models = NULL;
+    guint i, n;
+
+    (void)source;
+
+    response_bytes = soup_session_send_and_read_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)), result, &error);
+
+    if (response_bytes == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        ollama_list_models_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(data->msg)))
+    {
+        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                "Model listing failed (HTTP %u)",
+                                soup_message_get_status(data->msg));
+        ollama_list_models_data_free(data);
+        return;
+    }
+
+    response_data = g_bytes_get_data(response_bytes, &response_len);
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, response_data, response_len, &error))
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        ollama_list_models_data_free(data);
+        return;
+    }
+
+    /* /api/tags: {"models": [{"name": "llama3.2:latest", ...}, ...]} */
+    root = json_node_get_object(json_parser_get_root(parser));
+    arr = (root != NULL && json_object_has_member(root, "models"))
+        ? json_object_get_array_member(root, "models")
+        : NULL;
+
+    if (arr == NULL)
+    {
+        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Malformed model list response");
+        ollama_list_models_data_free(data);
+        return;
+    }
+
+    n = json_array_get_length(arr);
+    for (i = 0; i < n; i++)
+    {
+        JsonObject *entry = json_array_get_object_element(arr, i);
+
+        if (entry != NULL && json_object_has_member(entry, "name"))
+        {
+            models = g_list_append(models,
+                g_strdup(json_object_get_string_member(entry, "name")));
+        }
+    }
+
+    g_task_return_pointer(data->task, models, NULL);
+    ollama_list_models_data_free(data);
+}
+
 static void
 ai_ollama_client_list_models_async(
     AiProvider          *provider,
@@ -498,21 +593,34 @@ ai_ollama_client_list_models_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(provider);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    AiConfig *config = ai_client_get_config(AI_CLIENT(self));
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    OllamaListModelsData *data;
     GTask *task;
-    GList *models = NULL;
 
-    (void)cancellable;
+    task = g_task_new(provider, cancellable, callback, user_data);
 
-    task = g_task_new(provider, NULL, callback, user_data);
+    /* Query the local Ollama daemon for what is actually pulled. */
+    url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_OLLAMA),
+                      OLLAMA_TAGS_ENDPOINT, NULL);
+    msg = soup_message_new("GET", url);
+    klass->add_auth_headers(AI_CLIENT(self), msg);
 
-    /* Common Ollama models */
-    models = g_list_append(models, g_strdup("llama3.2"));
-    models = g_list_append(models, g_strdup("llama3.1"));
-    models = g_list_append(models, g_strdup("mistral"));
-    models = g_list_append(models, g_strdup("codellama"));
+    data = g_slice_new0(OllamaListModelsData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
 
-    g_task_return_pointer(task, models, NULL);
-    g_object_unref(task);
+    soup_session_send_and_read_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_ollama_list_models_response,
+        data);
 }
 
 static GList *

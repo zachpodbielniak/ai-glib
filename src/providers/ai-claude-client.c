@@ -15,6 +15,7 @@
 #include "model/ai-tool-use.h"
 
 #define CLAUDE_MESSAGES_ENDPOINT "/v1/messages"
+#define CLAUDE_MODELS_ENDPOINT "/v1/models?limit=100"
 
 /*
  * Private structure for AiClaudeClient.
@@ -567,6 +568,110 @@ ai_claude_client_chat_finish(
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
+typedef struct
+{
+    AiClaudeClient *client;
+    GTask          *task;
+    SoupMessage    *msg;
+} ClaudeListModelsData;
+
+static void
+claude_list_models_data_free(ClaudeListModelsData *data)
+{
+    g_clear_object(&data->client);
+    g_clear_object(&data->task);
+    g_clear_object(&data->msg);
+    g_slice_free(ClaudeListModelsData, data);
+}
+
+static void
+on_claude_list_models_response(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    ClaudeListModelsData *data = user_data;
+    g_autoptr(GBytes) response_bytes = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonParser) parser = NULL;
+    const gchar *response_data;
+    gsize response_len;
+    JsonObject *root;
+    JsonArray *arr;
+    GList *models = NULL;
+    guint i, n;
+
+    (void)source;
+
+    response_bytes = soup_session_send_and_read_finish(
+        ai_client_get_soup_session(AI_CLIENT(data->client)), result, &error);
+
+    if (response_bytes == NULL)
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        claude_list_models_data_free(data);
+        return;
+    }
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(data->msg)))
+    {
+        guint status = soup_message_get_status(data->msg);
+
+        if (status == 401 || status == 403)
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
+                                    "Authentication failed (HTTP %u)", status);
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                    "Model listing failed (HTTP %u)", status);
+        }
+
+        claude_list_models_data_free(data);
+        return;
+    }
+
+    response_data = g_bytes_get_data(response_bytes, &response_len);
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, response_data, response_len, &error))
+    {
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        claude_list_models_data_free(data);
+        return;
+    }
+
+    /* {"data": [{"type": "model", "id": "claude-...", ...}, ...]} */
+    root = json_node_get_object(json_parser_get_root(parser));
+    arr = (root != NULL && json_object_has_member(root, "data"))
+        ? json_object_get_array_member(root, "data")
+        : NULL;
+
+    if (arr == NULL)
+    {
+        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Malformed model list response");
+        claude_list_models_data_free(data);
+        return;
+    }
+
+    n = json_array_get_length(arr);
+    for (i = 0; i < n; i++)
+    {
+        JsonObject *entry = json_array_get_object_element(arr, i);
+
+        if (entry != NULL && json_object_has_member(entry, "id"))
+        {
+            models = g_list_append(models,
+                g_strdup(json_object_get_string_member(entry, "id")));
+        }
+    }
+
+    g_task_return_pointer(data->task, models, NULL);
+    claude_list_models_data_free(data);
+}
+
 static void
 ai_claude_client_list_models_async(
     AiProvider          *provider,
@@ -574,20 +679,33 @@ ai_claude_client_list_models_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
+    AiClaudeClient *self = AI_CLAUDE_CLIENT(provider);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    AiConfig *config = ai_client_get_config(AI_CLIENT(self));
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autofree gchar *url = NULL;
+    ClaudeListModelsData *data;
     GTask *task;
-    GList *models = NULL;
 
-    (void)cancellable;
+    task = g_task_new(provider, cancellable, callback, user_data);
 
-    /* Claude doesn't have a models endpoint, return static list */
-    task = g_task_new(provider, NULL, callback, user_data);
+    url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_CLAUDE),
+                      CLAUDE_MODELS_ENDPOINT, NULL);
+    msg = soup_message_new("GET", url);
+    klass->add_auth_headers(AI_CLIENT(self), msg);
 
-    models = g_list_append(models, g_strdup("claude-opus-4-20250514"));
-    models = g_list_append(models, g_strdup("claude-sonnet-4-20250514"));
-    models = g_list_append(models, g_strdup("claude-3-5-haiku-20241022"));
+    data = g_slice_new0(ClaudeListModelsData);
+    data->client = g_object_ref(self);
+    data->task = task;
+    data->msg = g_object_ref(msg);
 
-    g_task_return_pointer(task, models, NULL);
-    g_object_unref(task);
+    soup_session_send_and_read_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        G_PRIORITY_DEFAULT,
+        cancellable,
+        on_claude_list_models_response,
+        data);
 }
 
 static GList *
