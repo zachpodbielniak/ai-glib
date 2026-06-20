@@ -19,6 +19,7 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <string.h>
 
@@ -961,6 +962,103 @@ test_accepted_prompt_summary_then_real_prompt(void)
 }
 
 /* ================================================================== */
+/* cancellation                                                        */
+/* ================================================================== */
+
+typedef struct
+{
+    GMainLoop  *loop;
+    AiResponse *response;   /* NULL on cancel/error */
+    GError     *error;      /* set on cancel/error */
+    gboolean    done;
+} CancelTestCtx;
+
+static void
+on_cancelled_chat_finish(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    CancelTestCtx *ctx = user_data;
+
+    ctx->response = ai_provider_chat_finish(AI_PROVIDER(source),
+                                            result, &ctx->error);
+    ctx->done = TRUE;
+    g_main_loop_quit(ctx->loop);
+}
+
+/*
+ * A turn whose GCancellable is ALREADY cancelled before the worker
+ * thread starts must fail fast AND — crucially — must never spawn a
+ * tmux/claude session.  This is the hermetic half of the !stop/!kill
+ * fix: the early-cancel guard returns before any process is launched.
+ *
+ * We prove "no spawn" by pointing the client's tmux binary at a fake
+ * shell script that drops a marker file the instant it is invoked.  If
+ * the guard works the marker never appears.  (GTask normalises the
+ * reported error of any cancelled task to G_IO_ERROR_CANCELLED, so we
+ * assert on that rather than the provider's own AI_ERROR_CANCELLED.)
+ *
+ * The other half — killing a session already in flight — is exercised
+ * by manual integration testing, like the rest of the orchestration.
+ */
+static void
+test_chat_precancelled_returns_cancelled(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autoptr(GCancellable) cancellable = g_cancellable_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("hello");
+    g_autoptr(GError) write_err = NULL;
+    g_autofree gchar *tmpdir = NULL;
+    g_autofree gchar *marker = NULL;
+    g_autofree gchar *fake_tmux = NULL;
+    g_autofree gchar *script = NULL;
+    GList *messages = NULL;
+    CancelTestCtx ctx = { 0 };
+
+    tmpdir = g_dir_make_tmp("ai-glib-tmux-cancel-XXXXXX", &write_err);
+    g_assert_no_error(write_err);
+    marker = g_build_filename(tmpdir, "tmux-was-invoked", NULL);
+    fake_tmux = g_build_filename(tmpdir, "fake-tmux", NULL);
+
+    /* A fake tmux: touch the marker on ANY invocation, then succeed. */
+    script = g_strdup_printf("#!/bin/sh\ntouch '%s'\nexit 0\n", marker);
+    g_file_set_contents(fake_tmux, script, -1, &write_err);
+    g_assert_no_error(write_err);
+    g_assert_cmpint(g_chmod(fake_tmux, 0755), ==, 0);
+
+    g_object_set(client, "tmux-path", fake_tmux, NULL);
+
+    ctx.loop = g_main_loop_new(NULL, FALSE);
+    messages = g_list_append(messages, msg);
+
+    /* Cancel up front: this models a !kill landing before the queued
+     * GTask is picked up by the thread pool. */
+    g_cancellable_cancel(cancellable);
+
+    ai_provider_chat_async(AI_PROVIDER(client), messages,
+                           NULL, 0, NULL, cancellable,
+                           on_cancelled_chat_finish, &ctx);
+
+    g_main_loop_run(ctx.loop);
+
+    g_assert_true(ctx.done);
+    g_assert_null(ctx.response);
+    g_assert_nonnull(ctx.error);
+    g_assert_error(ctx.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+
+    /* The decisive check: the fake tmux must NEVER have run. */
+    g_assert_false(g_file_test(marker, G_FILE_TEST_EXISTS));
+
+    g_clear_error(&ctx.error);
+    g_list_free(messages);
+    g_main_loop_unref(ctx.loop);
+
+    g_unlink(fake_tmux);
+    g_rmdir(tmpdir);
+}
+
+/* ================================================================== */
 /* main                                                                */
 /* ================================================================== */
 
@@ -974,6 +1072,8 @@ main(int argc, char *argv[])
     g_test_add_func("/claude-tmux/new-with-config", test_new_with_config);
     g_test_add_func("/claude-tmux/default-model", test_default_model);
     g_test_add_func("/claude-tmux/provider-interface", test_provider_interface);
+    g_test_add_func("/claude-tmux/cancel/precancelled-no-spawn",
+                    test_chat_precancelled_returns_cancelled);
 
     /* properties */
     g_test_add_func("/claude-tmux/prop/tmux-path", test_tmux_path_property);

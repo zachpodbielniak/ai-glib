@@ -869,7 +869,18 @@ wait_for_file(
             G_CALLBACK(g_main_loop_quit), loop, NULL);
     }
 
-    g_main_loop_run(loop);
+    /*
+     * If the cancellable was ALREADY triggered before we connected, the
+     * immediate g_main_loop_quit fired against a loop that is not yet
+     * running and was simply lost — g_main_loop_run() would then set
+     * is_running = TRUE and block for the full timeout, ignoring the
+     * cancellation.  Skip the run entirely in that case so a !kill that
+     * lands between two waits still takes effect at once.
+     */
+    if (!(cancellable != NULL && g_cancellable_is_cancelled(cancellable)))
+    {
+        g_main_loop_run(loop);
+    }
 
     if (cancel_id != 0)
     {
@@ -945,6 +956,56 @@ run_command_sync(
         return FALSE;
     }
     return TRUE;
+}
+
+/*
+ * ---------- direct cancel -> tmux teardown ----------
+ *
+ * A user !stop / !kill cancels the per-turn GCancellable.  Relying on
+ * the worker thread to *notice* the cancellation and reach its cleanup
+ * path is not enough: the claude TUI can wedge the worker (a hung
+ * send-keys, a stuck resume/compaction) so it never gets there, and the
+ * tmux session then survives — pinning turn_active and forcing a
+ * libreclaw restart.  Worse, tmux_session_name is stable across
+ * restarts, so the orphan outlives the restart too.
+ *
+ * So we ALSO connect this handler directly to the cancellable.  It runs
+ * the instant the turn is cancelled — in whichever thread calls
+ * g_cancellable_cancel() — and kills the tmux session outright, without
+ * waiting on the worker thread.  The worker's own cleanup_and_fail path
+ * still runs kill-session afterwards; the second kill is a harmless
+ * no-op.
+ *
+ * Lifetime: the ctx lives on chat_sync_real's stack.  The handler is
+ * connected only after the session is spawned and is DISCONNECTED with
+ * g_cancellable_disconnect() before chat_sync_real returns —
+ * g_cancellable_disconnect() blocks until any in-flight handler has
+ * finished, so the borrowed strings can never be touched after the
+ * stack frame is gone.
+ */
+typedef struct
+{
+    const gchar *tmux_bin;            /* borrowed; valid for the turn */
+    const gchar *tmux_session_name;   /* borrowed; valid for the turn */
+} TurnCancelKillCtx;
+
+static void
+on_turn_cancelled_kill_session(
+    GCancellable *cancellable,
+    gpointer      user_data
+){
+    const TurnCancelKillCtx *ctx = user_data;
+    const gchar *kill_argv[] = {
+        ctx->tmux_bin, "kill-session", "-t", ctx->tmux_session_name, NULL
+    };
+
+    (void)cancellable;
+
+    g_warning("claude-tmux: turn cancelled (!stop/!kill) — tearing down "
+              "tmux session '%s' directly", ctx->tmux_session_name);
+
+    /* Best-effort: the session may already be gone. */
+    run_command_sync(kill_argv, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1344,6 +1405,23 @@ ai_claude_tmux_client_chat_sync_real(
     gboolean resuming_existing_session = FALSE;
     goffset jsonl_size_before = 0;
     gdouble cost = 0.0;
+    TurnCancelKillCtx kill_ctx = { NULL, NULL };
+    gulong kill_cancel_id = 0;
+
+    /*
+     * Already cancelled before we even started?  A !stop / !kill can
+     * land in the window between the GTask being queued and this worker
+     * thread picking it up.  Bail before spawning tmux/claude — there is
+     * nothing to tear down yet, and starting a session only to kill it
+     * milliseconds later is pure waste (and another orphan risk).
+     */
+    if (cancellable != NULL && g_cancellable_is_cancelled(cancellable))
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
+                    "Turn cancelled before the claude tmux session "
+                    "was started");
+        return NULL;
+    }
 
     /* ---------- preflight ---------- */
     runtime_dir = get_runtime_dir(error);
@@ -1559,6 +1637,28 @@ ai_claude_tmux_client_chat_sync_real(
             }
             return NULL;
         }
+    }
+
+    /*
+     * The tmux session now exists.  Arm the direct cancel -> teardown
+     * hook so a !stop / !kill kills it immediately, even if the worker
+     * thread later wedges interacting with a hung claude TUI.  Every
+     * exit path below — the success tail and cleanup_and_fail — calls
+     * g_cancellable_disconnect() before returning, so the borrowed
+     * pointers in kill_ctx outlive the handler.
+     *
+     * If the turn was cancelled before we got here, g_cancellable_connect
+     * invokes the handler synchronously right now (killing the session we
+     * just made) and the wait_for_file calls below return AI_ERROR_CANCELLED.
+     */
+    if (cancellable != NULL)
+    {
+        kill_ctx.tmux_bin = tmux_bin;
+        kill_ctx.tmux_session_name = tmux_session_name;
+        kill_cancel_id = g_cancellable_connect(
+            cancellable,
+            G_CALLBACK(on_turn_cancelled_kill_session),
+            &kill_ctx, NULL);
     }
 
     /*
@@ -1824,6 +1924,17 @@ ai_claude_tmux_client_chat_sync_real(
 
             while (waited < this_wait_ms)
             {
+                /* Honour !stop / !kill promptly: the direct hook has
+                 * already killed the tmux session, so bail out instead
+                 * of polling a transcript that will never advance. */
+                if (cancellable != NULL &&
+                    g_cancellable_is_cancelled(cancellable))
+                {
+                    g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
+                                "Turn cancelled while waiting for the "
+                                "prompt to be accepted by the claude TUI");
+                    goto cleanup_and_fail;
+                }
                 if (slice_has_accepted_prompt(jsonl_path, jsonl_size_before))
                 {
                     prompt_accepted = TRUE;
@@ -1898,6 +2009,16 @@ ai_claude_tmux_client_chat_sync_real(
 
         while (waited < max_wait_ms)
         {
+            /* Honour !stop / !kill promptly here too — see the prompt
+             * acceptance loop above. */
+            if (cancellable != NULL &&
+                g_cancellable_is_cancelled(cancellable))
+            {
+                g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
+                            "Turn cancelled while waiting for the terminal "
+                            "assistant entry to flush to the transcript");
+                goto cleanup_and_fail;
+            }
             if (g_stat(jsonl_path, &st) == 0)
             {
                 size_after = (goffset)st.st_size;
@@ -1985,6 +2106,14 @@ ai_claude_tmux_client_chat_sync_real(
         g_unlink(settings_path);
     }
 
+    /* Drop the cancel hook before the stack frame (and the strings it
+     * borrows) goes away.  Blocks until any in-flight handler finishes. */
+    if (cancellable != NULL && kill_cancel_id != 0)
+    {
+        g_cancellable_disconnect(cancellable, kill_cancel_id);
+        kill_cancel_id = 0;
+    }
+
     g_atomic_int_set(&self->turn_active, 0);
     return g_steal_pointer(&response);
 
@@ -2009,6 +2138,15 @@ cleanup_and_fail:
         g_unlink(sentinel_path);
         g_unlink(settings_path);
     }
+
+    /* Same teardown of the cancel hook as the success path — must run
+     * before tmux_session_name (borrowed by kill_ctx) is freed. */
+    if (cancellable != NULL && kill_cancel_id != 0)
+    {
+        g_cancellable_disconnect(cancellable, kill_cancel_id);
+        kill_cancel_id = 0;
+    }
+
     g_atomic_int_set(&self->turn_active, 0);
     return NULL;
 }
