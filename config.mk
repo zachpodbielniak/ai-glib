@@ -50,7 +50,7 @@ ifeq ($(DEBUG),1)
     CFLAGS_OPT  = -O0 -g3 -DDEBUG
 else
     BUILD_TYPE := release
-    CFLAGS_OPT  = -Og -g -DNDEBUG
+    CFLAGS_OPT  = -O2 -DNDEBUG
 endif
 
 OUTDIR := $(BUILDDIR)/$(BUILD_TYPE)
