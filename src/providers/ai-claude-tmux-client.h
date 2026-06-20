@@ -473,4 +473,33 @@ ai_claude_tmux_client_parse_jsonl(
 gboolean
 ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice);
 
+/**
+ * ai_claude_tmux_client_wait_for_sentinel_or_idle:
+ * @sentinel_path: path the Stop hook touches when the turn finishes
+ * @activity_path: the JSONL transcript whose growth signals progress
+ * @idle_timeout_ms: maximum time with NO transcript growth and no
+ *   sentinel before the wait gives up
+ * @cancellable: (nullable): aborts the wait with %AI_ERROR_CANCELLED
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Waits for @sentinel_path to appear, bounding the wait by INACTIVITY
+ * rather than a fixed wall-clock deadline: every time @activity_path
+ * grows the idle clock is reset, so an actively-working (but long)
+ * claude turn is never killed mid-flight.  Fails with %AI_ERROR_TIMEOUT
+ * only after the transcript has been completely silent for
+ * @idle_timeout_ms, or with %AI_ERROR_CANCELLED if @cancellable trips.
+ *
+ * Exposed for unit testing; production callers use it internally.
+ *
+ * Returns: %TRUE once the sentinel appears, %FALSE on timeout/cancel.
+ */
+gboolean
+ai_claude_tmux_client_wait_for_sentinel_or_idle(
+    const gchar  *sentinel_path,
+    const gchar  *activity_path,
+    gint          idle_timeout_ms,
+    GCancellable *cancellable,
+    GError      **error
+);
+
 G_END_DECLS

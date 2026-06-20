@@ -912,6 +912,84 @@ out:
 }
 
 /*
+ * Wait for the Stop-hook @sentinel_path to appear, bounding the wait by
+ * INACTIVITY rather than a hard wall-clock deadline.
+ *
+ * Why this exists: a single long-running agentic turn (claude making
+ * dozens of tool calls) can legitimately run far longer than any fixed
+ * turn budget.  The old code waited for the sentinel with a hard
+ * @idle_timeout_ms cap, so a turn that was actively working — but not
+ * yet finished — got killed mid-flight at the deadline and its response
+ * was lost.  This is the "ran for 10-20 minutes then no reply" bug.
+ *
+ * Claude Code appends to the JSONL transcript incrementally as the turn
+ * progresses (each assistant step, tool_use, and tool_result is flushed
+ * as it happens).  So transcript growth is a reliable "still working"
+ * signal: every time @activity_path grows we reset the idle clock.  The
+ * wait only fails once the transcript has been COMPLETELY silent — no
+ * growth and no sentinel — for @idle_timeout_ms, which means claude is
+ * genuinely wedged, not merely slow.  A user who wants to abort a
+ * still-active turn can !stop / !kill it (handled separately).
+ */
+gboolean
+ai_claude_tmux_client_wait_for_sentinel_or_idle(
+    const gchar  *sentinel_path,
+    const gchar  *activity_path,
+    gint          idle_timeout_ms,
+    GCancellable *cancellable,
+    GError      **error
+){
+    const gint poll_ms = 200;
+    gint       idle_ms = 0;
+    goffset    last_size = -1;
+    GStatBuf   st;
+
+    /* Seed the activity watermark with the file's current size so that
+     * "growth" is measured from now, not from an empty file. */
+    if (g_stat(activity_path, &st) == 0)
+        last_size = (goffset)st.st_size;
+
+    for (;;)
+    {
+        /* Turn finished: the Stop hook touched the sentinel. */
+        if (g_file_test(sentinel_path, G_FILE_TEST_EXISTS))
+            return TRUE;
+
+        /* Honour !stop / !kill immediately. */
+        if (cancellable != NULL && g_cancellable_is_cancelled(cancellable))
+        {
+            g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
+                        "Cancelled while waiting for the turn to finish");
+            return FALSE;
+        }
+
+        /* Any transcript growth means claude is still working — reset
+         * the idle clock. */
+        if (g_stat(activity_path, &st) == 0)
+        {
+            goffset size = (goffset)st.st_size;
+            if (size != last_size)
+            {
+                last_size = size;
+                idle_ms = 0;
+            }
+        }
+
+        if (idle_ms >= idle_timeout_ms)
+        {
+            g_set_error(error, AI_ERROR, AI_ERROR_TIMEOUT,
+                        "No transcript activity and no Stop hook for "
+                        "%d ms — the claude turn appears wedged",
+                        idle_timeout_ms);
+            return FALSE;
+        }
+
+        g_usleep((gulong)poll_ms * 1000);
+        idle_ms += poll_ms;
+    }
+}
+
+/*
  * Run a one-shot child process synchronously, capturing exit status.
  * Returns TRUE on exit-zero, FALSE otherwise.  When @capture_stderr
  * is non-NULL, stderr is captured (used for diagnostics on failure).
@@ -1964,12 +2042,20 @@ ai_claude_tmux_client_chat_sync_real(
 
     /*
      * ---------- wait for Stop hook sentinel ----------
-     * The Stop hook fires when claude finishes its turn.  By the
-     * time the sentinel appears, the JSONL transcript has been
-     * fully written for this turn.
+     * The Stop hook fires when claude finishes its turn.  By the time
+     * the sentinel appears, the JSONL transcript has been fully written
+     * for this turn.
+     *
+     * turn_timeout_ms is applied as an INACTIVITY budget, not a hard
+     * wall-clock cap: as long as the transcript keeps growing (claude is
+     * working through a long multi-tool turn) we keep waiting.  Only a
+     * fully silent transcript for the whole budget counts as a wedged
+     * turn.  See wait_for_sentinel_or_idle() for the rationale — this is
+     * the fix for long turns being killed mid-flight with no reply.
      */
-    if (!wait_for_file(sentinel_path, self->turn_timeout_ms,
-                       cancellable, error))
+    if (!ai_claude_tmux_client_wait_for_sentinel_or_idle(
+             sentinel_path, jsonl_path, self->turn_timeout_ms,
+             cancellable, error))
     {
         g_prefix_error(error,
                        "Stop hook sentinel '%s' never appeared: ",

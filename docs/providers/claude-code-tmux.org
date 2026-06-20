@@ -121,7 +121,7 @@ ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_TMUX_MODEL_OPUS);
 The two relevant timeouts:
 
 - *Startup timeout* --- how long to wait for claude's TUI to become ready (the =SessionStart= hook) after launch. Default: 15s.
-- *Turn timeout* --- how long to wait for the Stop-hook sentinel before declaring the turn timed out. Default: 600s (10 minutes) --- generous on purpose, so it can ride out an auto-compaction on a large resumed session.
+- *Turn timeout* --- applied as an *inactivity* budget, not a hard wall-clock cap. The provider waits for the Stop-hook sentinel and resets this clock every time the JSONL transcript grows (claude writing an assistant step, tool call, or tool result). A long but actively-working turn therefore never times out; only a transcript that stays completely silent for the whole budget is treated as a wedged turn. Default: 600s (10 minutes) of *silence*. This is what lets multi-minute agentic turns (many tool calls) complete instead of being killed mid-flight — a still-running turn can always be aborted with =!stop= / =!kill= instead.
 
 #+begin_src C
 ai_claude_tmux_client_set_startup_timeout_ms(client, 30000);  /* 30s */

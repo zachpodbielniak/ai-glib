@@ -1059,6 +1059,171 @@ test_chat_precancelled_returns_cancelled(void)
 }
 
 /* ================================================================== */
+/* sentinel / inactivity wait                                          */
+/* ================================================================== */
+
+/* Sentinel already present before the wait begins -> immediate success. */
+static void
+test_sentinel_or_idle_sentinel_present(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *tmpdir =
+        g_dir_make_tmp("ai-glib-idle-pre-XXXXXX", &err);
+    g_autofree gchar *sentinel = NULL;
+    g_autofree gchar *activity = NULL;
+    gboolean ok;
+
+    g_assert_no_error(err);
+    sentinel = g_build_filename(tmpdir, "done", NULL);
+    activity = g_build_filename(tmpdir, "transcript.jsonl", NULL);
+
+    /* Sentinel exists up front; the function must return at once. */
+    g_file_set_contents(sentinel, "", 0, &err);
+    g_assert_no_error(err);
+
+    ok = ai_claude_tmux_client_wait_for_sentinel_or_idle(
+             sentinel, activity, 5000, NULL, &err);
+
+    g_assert_no_error(err);
+    g_assert_true(ok);
+
+    g_unlink(sentinel);
+    g_rmdir(tmpdir);
+}
+
+/* An already-cancelled cancellable -> AI_ERROR_CANCELLED, fast. */
+static void
+test_sentinel_or_idle_cancelled(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autoptr(GCancellable) cancellable = g_cancellable_new();
+    g_autofree gchar *tmpdir =
+        g_dir_make_tmp("ai-glib-idle-cancel-XXXXXX", &err);
+    g_autofree gchar *sentinel = NULL;
+    g_autofree gchar *activity = NULL;
+    gboolean ok;
+
+    g_assert_no_error(err);
+    sentinel = g_build_filename(tmpdir, "done", NULL);
+    activity = g_build_filename(tmpdir, "transcript.jsonl", NULL);
+
+    g_cancellable_cancel(cancellable);
+
+    ok = ai_claude_tmux_client_wait_for_sentinel_or_idle(
+             sentinel, activity, 5000, cancellable, &err);
+
+    g_assert_false(ok);
+    g_assert_error(err, AI_ERROR, AI_ERROR_CANCELLED);
+
+    g_rmdir(tmpdir);
+}
+
+/* No sentinel and no transcript growth -> times out after the idle
+ * budget with AI_ERROR_TIMEOUT. */
+static void
+test_sentinel_or_idle_times_out_when_silent(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *tmpdir =
+        g_dir_make_tmp("ai-glib-idle-silent-XXXXXX", &err);
+    g_autofree gchar *sentinel = NULL;
+    g_autofree gchar *activity = NULL;
+    gboolean ok;
+
+    g_assert_no_error(err);
+    sentinel = g_build_filename(tmpdir, "done", NULL);
+    activity = g_build_filename(tmpdir, "transcript.jsonl", NULL);
+
+    /* A static (never-growing) transcript models a wedged turn. */
+    g_file_set_contents(activity, "stuck\n", -1, &err);
+    g_assert_no_error(err);
+
+    ok = ai_claude_tmux_client_wait_for_sentinel_or_idle(
+             sentinel, activity, 150, NULL, &err);
+
+    g_assert_false(ok);
+    g_assert_error(err, AI_ERROR, AI_ERROR_TIMEOUT);
+
+    g_unlink(activity);
+    g_rmdir(tmpdir);
+}
+
+typedef struct
+{
+    gchar *activity_path;
+    gchar *sentinel_path;
+    gint   steps;
+    gint   step_sleep_ms;
+} IdleActivityCtx;
+
+static gpointer
+idle_activity_thread(gpointer data)
+{
+    IdleActivityCtx *c = data;
+    GString *buf = g_string_new(NULL);
+    gint i;
+
+    /* Grow the transcript repeatedly — each write is claude making
+     * progress on a long turn — then touch the sentinel to finish. */
+    for (i = 0; i < c->steps; i++) {
+        g_usleep((gulong)c->step_sleep_ms * 1000);
+        g_string_append(buf, "more transcript data\n");
+        g_file_set_contents(c->activity_path, buf->str, buf->len, NULL);
+    }
+    g_file_set_contents(c->sentinel_path, "", 0, NULL);
+
+    g_string_free(buf, TRUE);
+    return NULL;
+}
+
+/*
+ * The decisive test for the fix: a turn that runs far longer than the
+ * idle budget but keeps the transcript growing must NOT time out.  With
+ * a 300 ms idle budget and growth every 150 ms, a hard wall-clock
+ * timeout would have fired at 300 ms — well before the sentinel appears
+ * at ~600 ms — and killed the turn.  The inactivity reset keeps it alive
+ * until completion.
+ */
+static void
+test_sentinel_or_idle_activity_keeps_alive(void)
+{
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *tmpdir =
+        g_dir_make_tmp("ai-glib-idle-active-XXXXXX", &err);
+    g_autofree gchar *sentinel = NULL;
+    g_autofree gchar *activity = NULL;
+    IdleActivityCtx c = { 0 };
+    GThread *th;
+    gboolean ok;
+
+    g_assert_no_error(err);
+    sentinel = g_build_filename(tmpdir, "done", NULL);
+    activity = g_build_filename(tmpdir, "transcript.jsonl", NULL);
+
+    g_file_set_contents(activity, "", 0, &err);
+    g_assert_no_error(err);
+
+    c.activity_path = activity;
+    c.sentinel_path = sentinel;
+    c.steps = 4;
+    c.step_sleep_ms = 150;
+
+    th = g_thread_new("idle-activity", idle_activity_thread, &c);
+
+    ok = ai_claude_tmux_client_wait_for_sentinel_or_idle(
+             sentinel, activity, 300, NULL, &err);
+
+    g_thread_join(th);
+
+    g_assert_no_error(err);
+    g_assert_true(ok);
+
+    g_unlink(activity);
+    g_unlink(sentinel);
+    g_rmdir(tmpdir);
+}
+
+/* ================================================================== */
 /* main                                                                */
 /* ================================================================== */
 
@@ -1074,6 +1239,16 @@ main(int argc, char *argv[])
     g_test_add_func("/claude-tmux/provider-interface", test_provider_interface);
     g_test_add_func("/claude-tmux/cancel/precancelled-no-spawn",
                     test_chat_precancelled_returns_cancelled);
+
+    /* sentinel / inactivity wait */
+    g_test_add_func("/claude-tmux/idle/sentinel-present",
+                    test_sentinel_or_idle_sentinel_present);
+    g_test_add_func("/claude-tmux/idle/cancelled",
+                    test_sentinel_or_idle_cancelled);
+    g_test_add_func("/claude-tmux/idle/times-out-when-silent",
+                    test_sentinel_or_idle_times_out_when_silent);
+    g_test_add_func("/claude-tmux/idle/activity-keeps-alive",
+                    test_sentinel_or_idle_activity_keeps_alive);
 
     /* properties */
     g_test_add_func("/claude-tmux/prop/tmux-path", test_tmux_path_property);
