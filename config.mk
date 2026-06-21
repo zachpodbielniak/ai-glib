@@ -76,6 +76,7 @@ endif
 SRCDIR = src
 TESTDIR = tests
 EXAMPLEDIR = examples
+BINDIR = bin
 DOCSDIR = docs
 
 # Combined flags. -I$(OUTDIR) picks up the per-build-type generated headers

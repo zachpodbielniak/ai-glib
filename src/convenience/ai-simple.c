@@ -22,6 +22,7 @@
 #include "providers/ai-grok-client.h"
 #include "providers/ai-ollama-client.h"
 #include "providers/ai-claude-code-client.h"
+#include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-opencode-client.h"
 
 #include "convenience/ai-simple.h"
@@ -92,6 +93,12 @@ ai_simple_create_provider(
 
     case AI_PROVIDER_CLAUDE_CODE:
         provider = G_OBJECT(ai_claude_code_client_new_with_config(config));
+        if (model != NULL)
+            ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
+        break;
+
+    case AI_PROVIDER_CLAUDE_TMUX:
+        provider = G_OBJECT(ai_claude_tmux_client_new_with_config(config));
         if (model != NULL)
             ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
         break;

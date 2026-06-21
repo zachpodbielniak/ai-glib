@@ -8,9 +8,140 @@
 #include <glib.h>
 
 #include "providers/ai-claude-code-client.h"
+#include "providers/ai-claude-code-client-internal.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
 #include "core/ai-config.h"
+#include "model/ai-message.h"
+
+/* ----------------------------------------------------------------
+ * build_argv helpers (Ollama transport + regression locks)
+ * ---------------------------------------------------------------- */
+
+/* Return the index of @needle in NULL-terminated @argv, or -1. */
+static gint
+argv_index_of(gchar **argv, const gchar *needle)
+{
+	gint i;
+	for (i = 0; argv[i] != NULL; i++)
+		if (g_strcmp0(argv[i], needle) == 0)
+			return i;
+	return -1;
+}
+
+/* Count occurrences of @needle in NULL-terminated @argv. */
+static gint
+argv_count(gchar **argv, const gchar *needle)
+{
+	gint i, n = 0;
+	for (i = 0; argv[i] != NULL; i++)
+		if (g_strcmp0(argv[i], needle) == 0)
+			n++;
+	return n;
+}
+
+/* Build argv for a single-user-message turn with the given model. */
+static gchar **
+build_argv_for_model(const gchar *model, const gchar *system,
+                     gboolean streaming, gboolean skip_perms)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	gchar **argv;
+
+	if (model != NULL)
+		ai_cli_client_set_model(AI_CLI_CLIENT(client), model);
+	ai_claude_code_client_set_skip_permissions(client, skip_perms);
+
+	argv = ai_claude_code_client_build_argv(
+		AI_CLI_CLIENT(client), messages, system, 4096, streaming);
+
+	g_list_free_full(messages, g_object_unref);
+	g_object_unref(client);
+	return argv;
+}
+
+/*
+ * Ollama model: the argv is wrapped in `ollama launch claude --model
+ * <suffix> --` and claude's own --model is omitted.
+ */
+static void
+test_claude_code_build_argv_ollama(void)
+{
+	g_auto(GStrv) argv = build_argv_for_model("ollama/glm-5.2:cloud",
+	                                          NULL, FALSE, FALSE);
+	gint dd;
+
+	g_assert_cmpstr(argv[0], ==, "ollama");
+	g_assert_cmpstr(argv[1], ==, "launch");
+	g_assert_cmpstr(argv[2], ==, "claude");
+	g_assert_cmpstr(argv[3], ==, "--model");
+	g_assert_cmpstr(argv[4], ==, "glm-5.2:cloud");
+	g_assert_cmpstr(argv[5], ==, "--");
+	g_assert_cmpstr(argv[6], ==, "--print");
+
+	/* Exactly one --model (the ollama one); no claude --model after --. */
+	g_assert_cmpint(argv_count(argv, "--model"), ==, 1);
+	dd = argv_index_of(argv, "--");
+	g_assert_cmpint(dd, ==, 5);
+	g_assert_cmpint(argv_index_of(argv, "--print"), >, dd);
+}
+
+/*
+ * Plain claude model: the historical behavior (regression lock) -- spawn
+ * claude directly with its own --model, no ollama wrapper.
+ */
+static void
+test_claude_code_build_argv_plain(void)
+{
+	g_auto(GStrv) argv = build_argv_for_model("sonnet", NULL, FALSE, FALSE);
+	gint mi;
+
+	g_assert_cmpstr(argv[0], ==, "claude");
+	g_assert_cmpstr(argv[1], ==, "--print");
+	/* No ollama wrapper. */
+	g_assert_cmpint(argv_index_of(argv, "launch"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--"), ==, -1);
+	/* claude --model sonnet present. */
+	mi = argv_index_of(argv, "--model");
+	g_assert_cmpint(mi, >=, 0);
+	g_assert_cmpstr(argv[mi + 1], ==, "sonnet");
+}
+
+/* Ollama streaming: stream-json + --verbose ride after the --. */
+static void
+test_claude_code_build_argv_ollama_streaming(void)
+{
+	g_auto(GStrv) argv = build_argv_for_model("ollama/x", NULL, TRUE, FALSE);
+	gint dd = argv_index_of(argv, "--");
+
+	g_assert_cmpint(dd, ==, 5);
+	g_assert_cmpint(argv_index_of(argv, "stream-json"), >, dd);
+	g_assert_cmpint(argv_index_of(argv, "--verbose"), >, dd);
+	g_assert_cmpint(argv_count(argv, "--model"), ==, 1);
+}
+
+/*
+ * Ollama + skip-permissions + system prompt: all flags ride after the --,
+ * still no claude --model.
+ */
+static void
+test_claude_code_build_argv_ollama_skip_and_system(void)
+{
+	g_auto(GStrv) argv = build_argv_for_model("ollama/foo:bar", "SYS",
+	                                          FALSE, TRUE);
+	gint dd = argv_index_of(argv, "--");
+	gint si;
+
+	g_assert_cmpint(dd, ==, 5);
+	g_assert_cmpint(argv_index_of(argv, "--dangerously-skip-permissions"),
+	                >, dd);
+	si = argv_index_of(argv, "--system-prompt");
+	g_assert_cmpint(si, >, dd);
+	g_assert_cmpstr(argv[si + 1], ==, "SYS");
+	g_assert_cmpint(argv_count(argv, "--model"), ==, 1);
+}
 
 /*
  * Test that a new client can be created.
@@ -201,6 +332,15 @@ main(
 	g_test_add_func("/ai-glib/claude-code-client/executable-path", test_claude_code_client_executable_path);
 	g_test_add_func("/ai-glib/claude-code-client/total-cost", test_claude_code_client_total_cost);
 	g_test_add_func("/ai-glib/claude-code-client/gtype", test_claude_code_client_gtype);
+
+	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama",
+	                test_claude_code_build_argv_ollama);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv-plain",
+	                test_claude_code_build_argv_plain);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama-streaming",
+	                test_claude_code_build_argv_ollama_streaming);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama-skip-system",
+	                test_claude_code_build_argv_ollama_skip_and_system);
 
 	return g_test_run();
 }

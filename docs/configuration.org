@@ -80,12 +80,20 @@ By default, =ai_config_new()= reads API keys from environment variables. Multipl
 | Ollama   | =OLLAMA_API_KEY= (optional)                    |
 
 **** CLI Wrapper Providers
-CLI providers (=AiClaudeCodeClient=, =AiOpenCodeClient=) do not use API keys directly --- they delegate authentication to their respective CLI tools. Optional environment variables:
+CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=) do not use API keys directly --- they delegate authentication to their respective CLI tools. Optional environment variables:
 
-| Provider    | Environment Variable | Description                            |
-|-------------+----------------------+----------------------------------------|
-| Claude Code | =CLAUDE_CODE_PATH=   | Override path to =claude= executable   |
-| OpenCode    | =OPENCODE_PATH=      | Override path to =opencode= executable |
+| Provider           | Environment Variable | Description                              |
+|--------------------+----------------------+------------------------------------------|
+| Claude Code        | =CLAUDE_CODE_PATH=   | Override path to =claude= executable     |
+| Claude Code (tmux) | =CLAUDE_CODE_PATH=   | Override path to =claude= executable     |
+| Claude Code (tmux) | =TMUX_PATH=          | Override path to =tmux= executable       |
+| Claude Code *      | =OLLAMA_PATH=        | Override path to =ollama= launcher, used for =ollama/<model>= models |
+| OpenCode           | =OPENCODE_PATH=      | Override path to =opencode= executable   |
+
+For the Claude Code (=claude-code=) and Claude Code tmux (=claude-tmux=)
+providers, a model name beginning with =ollama/= routes the turn through
+=ollama launch claude= instead of spawning =claude= directly --- see the
+respective provider pages.
 
 *** Programmatic Configuration
 #+begin_src C

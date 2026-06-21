@@ -12,6 +12,8 @@
 #include <string.h>
 
 #include "providers/ai-claude-code-client.h"
+#include "providers/ai-claude-code-client-internal.h"
+#include "providers/ai-claude-launch.h"
 #include "core/ai-error.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
@@ -113,24 +115,17 @@ ai_claude_code_client_set_property(
 
 /*
  * Get the executable path for the claude CLI.
- * Checks CLAUDE_CODE_PATH environment variable first, then falls back to "claude".
+ *
+ * For a normal model this is the CLAUDE_CODE_PATH env override, else
+ * "claude". For an "ollama/<model>" transport model it is the launcher
+ * binary instead (OLLAMA_PATH env, else "ollama") -- the base CLI pipeline
+ * resolves this and overwrites argv[0], so it must agree with the program
+ * token build_argv emits. Both decisions live in ai_claude_launch_*.
  */
 static gchar *
 ai_claude_code_client_get_executable_path(AiCliClient *client)
 {
-    const gchar *env_path;
-
-    (void)client;
-
-    /* Check environment variable override */
-    env_path = g_getenv("CLAUDE_CODE_PATH");
-    if (env_path != NULL && env_path[0] != '\0')
-    {
-        return g_strdup(env_path);
-    }
-
-    /* Fall back to searching PATH */
-    return g_strdup("claude");
+    return ai_claude_launch_executable_name(ai_cli_client_get_model(client));
 }
 
 /*
@@ -139,7 +134,7 @@ ai_claude_code_client_get_executable_path(AiCliClient *client)
  * Non-streaming: claude --print --output-format json --model <model> --system-prompt "..." "prompt"
  * Streaming: claude --print --output-format stream-json --verbose --model <model> "prompt"
  */
-static gchar **
+gchar **
 ai_claude_code_client_build_argv(
     AiCliClient *client,
     GList       *messages,
@@ -152,13 +147,23 @@ ai_claude_code_client_build_argv(
     const gchar *model;
     const gchar *session_id;
     gboolean persist;
+    g_autofree gchar *program = NULL;
 
     (void)max_tokens;  /* Claude Code CLI doesn't have a max tokens flag */
 
+    model = ai_cli_client_get_model(client);
+
     args = g_ptr_array_new();
 
-    /* Executable (will be replaced with resolved path) */
-    g_ptr_array_add(args, g_strdup("claude"));
+    /*
+     * Program token + (in Ollama mode) the `ollama launch claude --model
+     * <m> --` wrapper. The program token is a placeholder the base CLI
+     * pipeline overwrites with the resolved executable path; everything
+     * appended below is the claude arg tail (rides after the `--` in
+     * Ollama mode).
+     */
+    program = ai_claude_launch_executable_name(model);
+    ai_claude_launch_emit_tokens(args, model, program);
 
     /* Print mode (required for non-interactive use) */
     g_ptr_array_add(args, g_strdup("--print"));
@@ -182,14 +187,18 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup("json"));
     }
 
-    /* Model */
-    model = ai_cli_client_get_model(client);
-    if (model == NULL)
+    /*
+     * Model. Omitted in Ollama mode -- there the model is carried solely
+     * by `ollama launch --model <suffix>` (emitted above), and re-passing
+     * it to claude would be wrong.
+     */
+    if (ai_claude_launch_should_emit_claude_model(model))
     {
-        model = AI_CLAUDE_CODE_DEFAULT_MODEL;
+        const gchar *claude_model =
+            (model != NULL) ? model : AI_CLAUDE_CODE_DEFAULT_MODEL;
+        g_ptr_array_add(args, g_strdup("--model"));
+        g_ptr_array_add(args, g_strdup(claude_model));
     }
-    g_ptr_array_add(args, g_strdup("--model"));
-    g_ptr_array_add(args, g_strdup(model));
 
     /* Session management - resolve session_id before system prompt */
     persist = ai_cli_client_get_session_persistence(client);
@@ -781,15 +790,24 @@ attempt_text_retry(
         return FALSE;
 
     rargs = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_add(rargs, g_strdup(exe));
+    /*
+     * Program token (the already-resolved executable -- ollama in Ollama
+     * mode, claude otherwise) plus, in Ollama mode, the
+     * `launch claude --model <suffix> --` wrapper.
+     */
+    ai_claude_launch_emit_tokens(rargs, model, exe);
     g_ptr_array_add(rargs, g_strdup("--print"));
     if (client->skip_permissions)
         g_ptr_array_add(rargs, g_strdup("--dangerously-skip-permissions"));
     g_ptr_array_add(rargs, g_strdup("--output-format"));
     g_ptr_array_add(rargs, g_strdup("json"));
-    g_ptr_array_add(rargs, g_strdup("--model"));
-    g_ptr_array_add(rargs,
-        g_strdup(model ? model : AI_CLAUDE_CODE_DEFAULT_MODEL));
+    /* claude's own --model is omitted in Ollama mode (see build_argv). */
+    if (ai_claude_launch_should_emit_claude_model(model))
+    {
+        g_ptr_array_add(rargs, g_strdup("--model"));
+        g_ptr_array_add(rargs,
+            g_strdup(model ? model : AI_CLAUDE_CODE_DEFAULT_MODEL));
+    }
     g_ptr_array_add(rargs, g_strdup("--resume"));
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);

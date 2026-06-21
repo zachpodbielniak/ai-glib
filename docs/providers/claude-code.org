@@ -17,9 +17,10 @@ The Claude Code provider (=AiClaudeCodeClient=) is a wrapper around the =claude=
 Install the Claude CLI following the official instructions from Anthropic. The CLI is part of the Claude Code product.
 
 ** Environment Variables
-| Variable           | Description                                  |
-|--------------------+----------------------------------------------|
-| =CLAUDE_CODE_PATH= | Override the path to the =claude= executable |
+| Variable           | Description                                            |
+|--------------------+--------------------------------------------------------|
+| =CLAUDE_CODE_PATH= | Override the path to the =claude= executable           |
+| =OLLAMA_PATH=      | Override the path to the =ollama= launcher (Ollama transport, below) |
 
 ** Available Models
 The Claude Code CLI uses simplified model aliases:
@@ -30,6 +31,36 @@ The Claude Code CLI uses simplified model aliases:
 | =AI_CLAUDE_CODE_MODEL_SONNET=  | ="sonnet"=  |
 | =AI_CLAUDE_CODE_MODEL_HAIKU=   | ="haiku"=   |
 | =AI_CLAUDE_CODE_DEFAULT_MODEL= | ="sonnet"=  |
+
+** Ollama transport ("ollama/" models)
+Ollama can drive the Claude Code CLI as its transport. When the model name
+begins with the prefix =ollama/=, this provider does NOT spawn =claude=
+directly; instead it spawns:
+
+#+begin_example
+ollama launch claude --model <model-after-prefix> -- <the claude args>
+#+end_example
+
+For example, model =ollama/glm-5.2:cloud= produces:
+
+#+begin_example
+ollama launch claude --model glm-5.2:cloud -- --print --output-format json ...
+#+end_example
+
+Notes:
+- The =--model= flag is consumed by =ollama launch=; claude's own =--model=
+  flag is omitted (the Ollama model id is not a claude alias).
+- The =claude= binary must still be installed and on =$PATH= --- =ollama
+  launch claude= execs it.
+- The launcher binary is =ollama= (override with =OLLAMA_PATH=).
+- The prefix match is exact and case-sensitive: =ollama= (no slash) and
+  =ollama/= (empty suffix) are NOT the transport and select a normal model.
+- Models WITHOUT the =ollama/= prefix are unchanged --- =claude= is spawned
+  directly as before.
+
+This is handy for routing local or Ollama-cloud models through the same
+Claude Code agent surface. Verify the exact command with the =ai= CLI:
+=ai -p claude-code -m ollama/glm-5.2:cloud --dry-run "hi"=.
 
 ** Usage
 *** Basic Usage

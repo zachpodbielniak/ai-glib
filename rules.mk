@@ -38,6 +38,17 @@ $(OUTDIR)/examples/%: $(EXAMPLEDIR)/%.c $(LIB_SHARED) | $(OUTDIR)/examples
 $(OUTDIR)/examples: | $(OUTDIR)
 	mkdir -p $@
 
+# CLI binary compilation rule (the `ai` front-end).
+# ai-glib is linked STATICALLY ($(LIB_STATIC)) so the installed binary has
+# no runtime dependency on the ai-glib shared library; the system libraries
+# (glib/gobject/gio/libsoup/json-glib/libxml2) and the bundled yaml-glib
+# static archive (via $(LDFLAGS)) are pulled in as usual.
+$(OUTDIR)/bin/%: $(BINDIR)/%.c $(LIB_STATIC) | $(OUTDIR)/bin
+	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ $(LIB_STATIC) $(LDFLAGS)
+
+$(OUTDIR)/bin: | $(OUTDIR)
+	mkdir -p $@
+
 # Clean current build type and the bundled yaml-glib build
 .PHONY: clean
 clean:
@@ -70,6 +81,7 @@ help:
 	@echo "  test-gi      - Run the PyGObject binding smoke test (needs python3-gobject)"
 	@echo "  test-gir-clean - Assert g-ir-scanner emits zero warnings"
 	@echo "  examples     - Build example programs"
+	@echo "  binaries     - Build installable CLI binaries (the 'ai' front-end)"
 	@echo "  gir          - Generate GObject introspection data (requires GIR=1)"
 	@echo "  install      - Install library and headers"
 	@echo "  uninstall    - Uninstall library and headers"

@@ -98,6 +98,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-generated-image.c \
 	$(SRCDIR)/model/ai-image-response.c \
 	$(SRCDIR)/providers/ai-openai-shared.c \
+	$(SRCDIR)/providers/ai-claude-launch.c \
 	$(SRCDIR)/providers/ai-claude-client.c \
 	$(SRCDIR)/providers/ai-openai-client.c \
 	$(SRCDIR)/providers/ai-grok-client.c \
@@ -127,6 +128,10 @@ TEST_BINARIES = $(patsubst $(TESTDIR)/%.c,$(OUTDIR)/tests/%,$(TEST_SOURCES))
 EXAMPLE_SOURCES = $(wildcard $(EXAMPLEDIR)/*.c)
 EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(OUTDIR)/examples/%,$(EXAMPLE_SOURCES))
 
+# Installable CLI binaries (e.g. the `ai` front-end)
+BIN_SOURCES = $(wildcard $(BINDIR)/*.c)
+BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
+
 # Include common rules
 include rules.mk
 
@@ -141,7 +146,7 @@ $(YAML_GLIB_STATIC):
 
 # Default target
 .PHONY: all
-all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir
+all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries
 
 # Generate config.h from template
 $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
@@ -251,6 +256,10 @@ test-gir-clean:
 .PHONY: examples
 examples: $(EXAMPLE_BINARIES)
 
+# Installable CLI binaries (the `ai` front-end). Built as part of `all`.
+.PHONY: binaries
+binaries: $(BIN_BINARIES)
+
 # GObject introspection (opt-in: pass GIR=1).  Defaults off so hosts that
 # lack gobject-introspection-devel can build without setting any flags.
 ifeq ($(GIR),1)
@@ -307,6 +316,11 @@ endif
 .PHONY: install
 install: all install-gir
 	@echo "Installing to $(PREFIX)..."
+	install -d $(DESTDIR)$(PREFIX)/bin
+	@for b in $(BIN_BINARIES); do \
+		echo "  install $$b"; \
+		install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/; \
+	done
 	install -d $(DESTDIR)$(LIBDIR)
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core

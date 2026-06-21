@@ -3,11 +3,13 @@ A GLib/GObject-based C library for interacting with AI providers.
 
 ** Features
 - *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode
+- *Ollama transport*: route the Claude Code providers through =ollama launch claude= with an =ollama/<model>= model id
 - *GObject-based*: Full GObject type system integration
 - *Async Support*: Non-blocking operations via GAsyncResult/GTask
 - *Streaming*: Real-time response streaming with signals
 - *Tool Use*: Function calling / tool use support
 - *GObject Introspection*: Use from Python, JavaScript, etc.
+- *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
 - *Environment Variables*: Standard env var configuration
 - *AGPLv3 Licensed*: Free and open source
 
@@ -89,6 +91,9 @@ int main(void)
 | =GEMINI_API_KEY=    | Gemini   | Google AI API key                                   |
 | =XAI_API_KEY=       | Grok     | xAI API key                                         |
 | =OLLAMA_HOST=       | Ollama   | Ollama server URL (default: http://localhost:11434) |
+| =CLAUDE_CODE_PATH=  | Claude Code | Override path to the =claude= executable         |
+| =TMUX_PATH=         | Claude Code (tmux) | Override path to the =tmux= executable    |
+| =OLLAMA_PATH=       | Claude Code | Override path to the =ollama= launcher (=ollama/= models) |
 
 ** Documentation
 See the [[file:docs/]] directory for full documentation:

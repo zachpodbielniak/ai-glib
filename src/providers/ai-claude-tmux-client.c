@@ -15,6 +15,8 @@
 #include "config.h"
 
 #include "providers/ai-claude-tmux-client.h"
+#include "providers/ai-claude-tmux-client-internal.h"
+#include "providers/ai-claude-launch.h"
 
 #include <errno.h>
 #include <gio/gio.h>
@@ -1455,6 +1457,92 @@ resolve_session_cwd(AiClaudeTmuxClient *self)
 }
 
 /*
+ * Assemble the argv for `tmux new-session -d -s NAME -c CWD -- CMD ARGS`.
+ *
+ * Non-static so unit tests (and the `ai` CLI --dry-run) can assert the
+ * exact command line, including the Ollama transport rewrite. See
+ * ai-claude-tmux-client-internal.h.
+ */
+GPtrArray *
+ai_claude_tmux_client_build_session_argv(
+    const gchar *tmux_bin,
+    const gchar *session_name,
+    const gchar *cwd,
+    const gchar *claude_exec_path,
+    gboolean     resuming_existing_session,
+    const gchar *session_id,
+    const gchar *settings_path,
+    const gchar *model,
+    const gchar *effort,
+    gboolean     skip_permissions
+){
+    GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+    g_autofree gchar *program = NULL;
+
+    g_ptr_array_add(argv, g_strdup(tmux_bin));
+    g_ptr_array_add(argv, g_strdup("new-session"));
+    g_ptr_array_add(argv, g_strdup("-d"));
+    g_ptr_array_add(argv, g_strdup("-s"));
+    g_ptr_array_add(argv, g_strdup(session_name));
+    /*
+     * Anchor the session's start-directory to the resolved workspace cwd.
+     * Without this tmux (and therefore claude) inherit libreclaw's process
+     * cwd, and claude writes its transcript under a "wrong" project
+     * subdirectory in ~/.claude/projects — our jsonl_path lookup misses it.
+     */
+    g_ptr_array_add(argv, g_strdup("-c"));
+    g_ptr_array_add(argv, g_strdup(cwd));
+    g_ptr_array_add(argv, g_strdup("--"));
+
+    /*
+     * Program token after the tmux `--`. In Ollama mode this is the
+     * launcher binary and emit_tokens wraps it as
+     * `ollama launch claude --model <suffix> --`; otherwise it is the
+     * resolved claude path. The claude args appended below ride after the
+     * Ollama wrapper's own `--`.
+     */
+    program = ai_claude_launch_model_is_ollama(model)
+                  ? ai_claude_launch_executable_name(model)
+                  : g_strdup(claude_exec_path);
+    ai_claude_launch_emit_tokens(argv, model, program);
+
+    if (resuming_existing_session)
+    {
+        g_ptr_array_add(argv, g_strdup("--resume"));
+    }
+    else
+    {
+        g_ptr_array_add(argv, g_strdup("--session-id"));
+    }
+    g_ptr_array_add(argv, g_strdup(session_id));
+    g_ptr_array_add(argv, g_strdup("--settings"));
+    g_ptr_array_add(argv, g_strdup(settings_path));
+
+    /*
+     * Model — omitted in Ollama mode (carried by `ollama launch --model`),
+     * and omitted when empty/unset, as before.
+     */
+    if (ai_claude_launch_should_emit_claude_model(model) &&
+        model != NULL && model[0] != '\0')
+    {
+        g_ptr_array_add(argv, g_strdup("--model"));
+        g_ptr_array_add(argv, g_strdup(model));
+    }
+    if (effort != NULL && effort[0] != '\0')
+    {
+        g_ptr_array_add(argv, g_strdup("--effort"));
+        g_ptr_array_add(argv, g_strdup(effort));
+    }
+    if (skip_permissions)
+    {
+        g_ptr_array_add(argv, g_strdup("--dangerously-skip-permissions"));
+    }
+    g_ptr_array_add(argv, NULL);
+
+    return argv;
+}
+
+/*
  * Synchronous chat — the actual workhorse.
  */
 static AiResponse *
@@ -1649,58 +1737,20 @@ ai_claude_tmux_client_chat_sync_real(
 
     /* ---------- assemble argv for `tmux new-session -d -s NAME -- CMD ARGS` ---------- */
     {
-        g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
+        g_autoptr(GPtrArray) argv = NULL;
         gboolean ok;
 
-        g_ptr_array_add(argv, g_strdup(tmux_bin));
-        g_ptr_array_add(argv, g_strdup("new-session"));
-        g_ptr_array_add(argv, g_strdup("-d"));
-        g_ptr_array_add(argv, g_strdup("-s"));
-        g_ptr_array_add(argv, g_strdup(tmux_session_name));
-        /*
-         * Anchor the session's start-directory to the resolved
-         * workspace cwd.  Without this tmux (and therefore claude)
-         * inherit libreclaw's process cwd, and claude writes its
-         * transcript under a "wrong" project subdirectory in
-         * ~/.claude/projects — our jsonl_path lookup then misses it.
-         */
-        g_ptr_array_add(argv, g_strdup("-c"));
-        g_ptr_array_add(argv, g_strdup(cwd));
-        g_ptr_array_add(argv, g_strdup("--"));
-        g_ptr_array_add(argv, g_strdup(claude_exec_path));
-        if (resuming_existing_session)
-        {
-            g_ptr_array_add(argv, g_strdup("--resume"));
-        }
-        else
-        {
-            g_ptr_array_add(argv, g_strdup("--session-id"));
-        }
-        g_ptr_array_add(argv, g_strdup(session_id));
-        g_ptr_array_add(argv, g_strdup("--settings"));
-        g_ptr_array_add(argv, g_strdup(settings_path));
-
-        {
-            const gchar *model = ai_cli_client_get_model(AI_CLI_CLIENT(self));
-            if (model != NULL && model[0] != '\0')
-            {
-                g_ptr_array_add(argv, g_strdup("--model"));
-                g_ptr_array_add(argv, g_strdup(model));
-            }
-        }
-        {
-            const gchar *effort = ai_cli_client_get_effort_level(AI_CLI_CLIENT(self));
-            if (effort != NULL && effort[0] != '\0')
-            {
-                g_ptr_array_add(argv, g_strdup("--effort"));
-                g_ptr_array_add(argv, g_strdup(effort));
-            }
-        }
-        if (self->skip_permissions)
-        {
-            g_ptr_array_add(argv, g_strdup("--dangerously-skip-permissions"));
-        }
-        g_ptr_array_add(argv, NULL);
+        argv = ai_claude_tmux_client_build_session_argv(
+            tmux_bin,
+            tmux_session_name,
+            cwd,
+            claude_exec_path,
+            resuming_existing_session,
+            session_id,
+            settings_path,
+            ai_cli_client_get_model(AI_CLI_CLIENT(self)),
+            ai_cli_client_get_effort_level(AI_CLI_CLIENT(self)),
+            self->skip_permissions);
 
         ok = run_command_sync(
             (const gchar * const *)argv->pdata, NULL, error);

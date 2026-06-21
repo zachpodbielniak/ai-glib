@@ -15,16 +15,22 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/ollama.org][Ollama]] | Local models via Ollama   | gpt-oss:20b              |
 
 *** CLI Wrappers
-| Provider                                       | Description                                    | Default Model                      |
-|------------------------------------------------+------------------------------------------------+------------------------------------|
-| [[file:providers/claude-code.org][Claude Code]] | Anthropic's Claude Code CLI                    | sonnet                             |
-| [[file:providers/opencode.org][OpenCode]]       | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-4-20250514 |
+| Provider                                            | Description                                    | Default Model                      |
+|-----------------------------------------------------+------------------------------------------------+------------------------------------|
+| [[file:providers/claude-code.org][Claude Code]]      | Anthropic's Claude Code CLI (=--print=)        | sonnet                             |
+| [[file:providers/claude-code-tmux.org][Claude Code (tmux)]] | Claude Code CLI via an interactive tmux session | sonnet                          |
+| [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-4-20250514 |
+
+The two Claude Code providers also accept =ollama/<model>= model ids, which
+route the turn through =ollama launch claude= (the Ollama-as-transport mode);
+see their provider pages.
 
 ** Documentation
 *** Getting Started
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
+- [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 
 *** Providers
 - [[file:providers/index.org][Providers Overview]] - Common provider interface
@@ -33,7 +39,8 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 - [[file:providers/gemini.org][Gemini]] - Google Gemini HTTP API
 - [[file:providers/grok.org][Grok]] - xAI Grok HTTP API
 - [[file:providers/ollama.org][Ollama]] - Local Ollama HTTP API
-- [[file:providers/claude-code.org][Claude Code]] - Claude Code CLI wrapper
+- [[file:providers/claude-code.org][Claude Code]] - Claude Code CLI wrapper (=--print=)
+- [[file:providers/claude-code-tmux.org][Claude Code (tmux)]] - Claude Code CLI via tmux
 - [[file:providers/opencode.org][OpenCode]] - OpenCode CLI wrapper (multi-provider)
 
 *** Tools & Search

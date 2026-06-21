@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "providers/ai-claude-tmux-client.h"
+#include "providers/ai-claude-tmux-client-internal.h"
 #include "core/ai-provider.h"
 #include "core/ai-config.h"
 #include "core/ai-error.h"
@@ -31,6 +32,138 @@
 #include "model/ai-response.h"
 #include "model/ai-text-content.h"
 #include "model/ai-usage.h"
+
+/* ================================================================== */
+/* build_session_argv: Ollama transport + regression locks            */
+/* ================================================================== */
+
+#define AT(argv, i) ((const gchar *) g_ptr_array_index((argv), (i)))
+
+/*
+ * Non-ollama fresh session: byte-for-byte the historical argv -- claude
+ * runs directly with its own --model.
+ */
+static void
+test_tmux_session_argv_plain_fresh(void)
+{
+    g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
+        "tmux", "sess", "/work", "/usr/bin/claude",
+        /* resuming */ FALSE, "SID", "/tmp/settings.json",
+        "sonnet", NULL, FALSE);
+
+    g_assert_cmpstr(AT(argv, 0), ==, "tmux");
+    g_assert_cmpstr(AT(argv, 1), ==, "new-session");
+    g_assert_cmpstr(AT(argv, 2), ==, "-d");
+    g_assert_cmpstr(AT(argv, 3), ==, "-s");
+    g_assert_cmpstr(AT(argv, 4), ==, "sess");
+    g_assert_cmpstr(AT(argv, 5), ==, "-c");
+    g_assert_cmpstr(AT(argv, 6), ==, "/work");
+    g_assert_cmpstr(AT(argv, 7), ==, "--");
+    g_assert_cmpstr(AT(argv, 8), ==, "/usr/bin/claude");
+    g_assert_cmpstr(AT(argv, 9), ==, "--session-id");
+    g_assert_cmpstr(AT(argv, 10), ==, "SID");
+    g_assert_cmpstr(AT(argv, 11), ==, "--settings");
+    g_assert_cmpstr(AT(argv, 12), ==, "/tmp/settings.json");
+    g_assert_cmpstr(AT(argv, 13), ==, "--model");
+    g_assert_cmpstr(AT(argv, 14), ==, "sonnet");
+    g_assert_null(g_ptr_array_index(argv, 15));
+}
+
+/*
+ * Ollama fresh session: claude is wrapped by `ollama launch claude
+ * --model <suffix> --` after the tmux `--`, and claude's own --model is
+ * omitted. (OLLAMA_PATH unset for determinism.)
+ */
+static void
+test_tmux_session_argv_ollama_fresh(void)
+{
+    g_autofree gchar *old_ollama = g_strdup(g_getenv("OLLAMA_PATH"));
+    g_autoptr(GPtrArray) argv = NULL;
+
+    g_unsetenv("OLLAMA_PATH");
+    argv = ai_claude_tmux_client_build_session_argv(
+        "tmux", "sess", "/work", "/usr/bin/claude",
+        /* resuming */ FALSE, "SID", "/tmp/settings.json",
+        "ollama/glm-5.2:cloud", NULL, FALSE);
+
+    g_assert_cmpstr(AT(argv, 7), ==, "--");
+    g_assert_cmpstr(AT(argv, 8), ==, "ollama");
+    g_assert_cmpstr(AT(argv, 9), ==, "launch");
+    g_assert_cmpstr(AT(argv, 10), ==, "claude");
+    g_assert_cmpstr(AT(argv, 11), ==, "--model");
+    g_assert_cmpstr(AT(argv, 12), ==, "glm-5.2:cloud");
+    g_assert_cmpstr(AT(argv, 13), ==, "--");
+    g_assert_cmpstr(AT(argv, 14), ==, "--session-id");
+    g_assert_cmpstr(AT(argv, 15), ==, "SID");
+    g_assert_cmpstr(AT(argv, 16), ==, "--settings");
+    g_assert_cmpstr(AT(argv, 17), ==, "/tmp/settings.json");
+    /* No claude --model after the wrapper. */
+    g_assert_null(g_ptr_array_index(argv, 18));
+
+    if (old_ollama != NULL)
+        g_setenv("OLLAMA_PATH", old_ollama, TRUE);
+}
+
+/* Ollama resume: --resume replaces --session-id; wrapper unchanged. */
+static void
+test_tmux_session_argv_ollama_resume(void)
+{
+    g_autofree gchar *old_ollama = g_strdup(g_getenv("OLLAMA_PATH"));
+    g_autoptr(GPtrArray) argv = NULL;
+
+    g_unsetenv("OLLAMA_PATH");
+    argv = ai_claude_tmux_client_build_session_argv(
+        "tmux", "sess", "/work", "/usr/bin/claude",
+        /* resuming */ TRUE, "SID", "/tmp/settings.json",
+        "ollama/x", NULL, FALSE);
+
+    g_assert_cmpstr(AT(argv, 8), ==, "ollama");
+    g_assert_cmpstr(AT(argv, 13), ==, "--");
+    g_assert_cmpstr(AT(argv, 14), ==, "--resume");
+    g_assert_cmpstr(AT(argv, 15), ==, "SID");
+
+    if (old_ollama != NULL)
+        g_setenv("OLLAMA_PATH", old_ollama, TRUE);
+}
+
+/*
+ * Ollama + effort + skip-permissions: both land at the tail (after the
+ * claude args), still no claude --model.
+ */
+static void
+test_tmux_session_argv_ollama_effort_skip(void)
+{
+    g_autofree gchar *old_ollama = g_strdup(g_getenv("OLLAMA_PATH"));
+    g_autoptr(GPtrArray) argv = NULL;
+    guint i;
+    gint model_count = 0, effort_idx = -1, skip_idx = -1;
+
+    g_unsetenv("OLLAMA_PATH");
+    argv = ai_claude_tmux_client_build_session_argv(
+        "tmux", "sess", "/work", "/usr/bin/claude",
+        /* resuming */ FALSE, "SID", "/tmp/settings.json",
+        "ollama/x", "high", TRUE);
+
+    for (i = 0; i < argv->len && g_ptr_array_index(argv, i) != NULL; i++)
+    {
+        const gchar *tok = AT(argv, i);
+        if (g_strcmp0(tok, "--model") == 0)
+            model_count++;
+        else if (g_strcmp0(tok, "--effort") == 0)
+            effort_idx = (gint) i;
+        else if (g_strcmp0(tok, "--dangerously-skip-permissions") == 0)
+            skip_idx = (gint) i;
+    }
+
+    /* Exactly one --model (the ollama wrapper's). */
+    g_assert_cmpint(model_count, ==, 1);
+    g_assert_cmpint(effort_idx, >, 0);
+    g_assert_cmpstr(AT(argv, effort_idx + 1), ==, "high");
+    g_assert_cmpint(skip_idx, >, effort_idx);
+
+    if (old_ollama != NULL)
+        g_setenv("OLLAMA_PATH", old_ollama, TRUE);
+}
 
 /* ================================================================== */
 /* Class / type basics                                                 */
@@ -1358,6 +1491,15 @@ main(int argc, char *argv[])
                     test_accepted_prompt_empty);
     g_test_add_func("/claude-tmux/accepted-prompt/summary-then-real-prompt",
                     test_accepted_prompt_summary_then_real_prompt);
+
+    g_test_add_func("/claude-tmux/session-argv/plain-fresh",
+                    test_tmux_session_argv_plain_fresh);
+    g_test_add_func("/claude-tmux/session-argv/ollama-fresh",
+                    test_tmux_session_argv_ollama_fresh);
+    g_test_add_func("/claude-tmux/session-argv/ollama-resume",
+                    test_tmux_session_argv_ollama_resume);
+    g_test_add_func("/claude-tmux/session-argv/ollama-effort-skip",
+                    test_tmux_session_argv_ollama_effort_skip);
 
     return g_test_run();
 }

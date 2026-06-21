@@ -18,9 +18,11 @@ This was introduced because Anthropic's Agent SDK billing path is changing 2026-
 - A writable =~/.claude/projects/= directory (or override via =set_claude_project_dir()=).
 
 ** Environment Variables
-| Variable           | Description                                  |
-|--------------------+----------------------------------------------|
-| =CLAUDE_CODE_PATH= | Override the path to the =claude= executable |
+| Variable           | Description                                            |
+|--------------------+--------------------------------------------------------|
+| =CLAUDE_CODE_PATH= | Override the path to the =claude= executable           |
+| =TMUX_PATH=        | Override the path to the =tmux= executable             |
+| =OLLAMA_PATH=      | Override the path to the =ollama= launcher (Ollama transport, below) |
 
 ** Available Models
 The Claude Code CLI uses simplified aliases --- same as the non-tmux client:
@@ -31,6 +33,24 @@ The Claude Code CLI uses simplified aliases --- same as the non-tmux client:
 | =AI_CLAUDE_TMUX_MODEL_SONNET=  | ="sonnet"=  |
 | =AI_CLAUDE_TMUX_MODEL_HAIKU=   | ="haiku"=   |
 | =AI_CLAUDE_TMUX_DEFAULT_MODEL= | ="sonnet"=  |
+
+** Ollama transport ("ollama/" models)
+Like the [[file:claude-code.org][non-tmux client]], a model name beginning with =ollama/= routes
+the turn through Ollama as the transport. The =ollama launch claude= wrapper
+is inlined inside the tmux command, *after* the tmux =--=:
+
+#+begin_example
+tmux new-session -d -s <name> -c <cwd> -- \
+     ollama launch claude --model <suffix> -- \
+     --session-id <uuid> --settings <json> [args]
+#+end_example
+
+So for =ollama/glm-5.2:cloud= the program tmux launches is =ollama= (override
+with =OLLAMA_PATH=), which in turn launches the =claude= TUI. claude's own
+=--model= flag is omitted (the model is carried by =ollama launch --model=);
+=claude= must still be installed and on =$PATH=. Models without the =ollama/=
+prefix are unchanged. Verify the exact command with:
+=ai -p claude-tmux -m ollama/glm-5.2:cloud --dry-run "hi"=.
 
 ** How It Works
 Each call to =ai_provider_chat_sync()= (or its async equivalent) goes through this sequence:

@@ -197,6 +197,8 @@ ai-glib/
 │       ├── ai-grok-client.h/.c
 │       └── ai-ollama-client.h/.c
 ├── tests/                     # GTest unit tests
+├── bin/                       # Installable CLI binaries
+│   └── ai.c                   # `ai` command-line front-end
 ├── examples/                  # Example programs
 │   ├── simple-chat-claude.c
 │   ├── simple-chat-openai.c
@@ -221,6 +223,30 @@ ai-glib/
 | Gemini   | `GEMINI_API_KEY` |
 | Grok     | `XAI_API_KEY`, `GROK_API_KEY` |
 | Ollama   | `OLLAMA_HOST` (default: `http://localhost:11434`), `OLLAMA_API_KEY` (optional) |
+| Claude Code | `CLAUDE_CODE_PATH` (override `claude` path), `OLLAMA_PATH` (override `ollama` launcher for `ollama/` models) |
+| Claude Code (tmux) | `CLAUDE_CODE_PATH`, `TMUX_PATH`, `OLLAMA_PATH` |
+
+## Ollama-as-transport (`ollama/` models)
+
+The `claude-code` and `claude-tmux` CLI providers detect a model name that
+begins with `ollama/`. Such models are routed through Ollama as the transport:
+instead of spawning `claude` directly they spawn
+
+```
+ollama launch claude --model <model-after-prefix> -- <the claude args>
+```
+
+(claude's own `--model` is omitted; `claude` must still be installed). Models
+without the prefix are unchanged. The prefix logic lives in one place,
+`src/providers/ai-claude-launch.{h,c}` (private), and is shared by both
+providers and the retry path. Inspect the exact command with
+`ai -p claude-code -m ollama/<id> --dry-run "hi"`.
+
+## CLI binary (`ai`)
+
+`bin/ai.c` builds a small `ai` front-end (provider/model/system/stream/
+interactive/`--dry-run`/`--list-providers`). It is built by `make` and
+installed by `make install`. See `docs/cli.org`.
 
 ## Model Defines
 

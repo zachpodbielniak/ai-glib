@@ -1,0 +1,88 @@
+* The =ai= CLI
+=ai= is a small command-line front-end for ai-glib. It lets you drive every
+provider by hand --- pick a provider and model, send a prompt (from an
+argument or stdin), and print the reply to stdout. It is the easiest way to
+exercise the providers, and in particular to verify the Ollama-as-transport
+rewrite for the Claude Code providers, outside the larger integrations.
+
+The binary is built as part of =make= (landing at =build/<type>/bin/ai=) and
+installed into =$(PREFIX)/bin= by =make install=.
+
+** Synopsis
+#+begin_example
+ai [OPTIONS] [PROMPT]
+echo "PROMPT" | ai [OPTIONS]
+#+end_example
+
+The prompt comes from the positional argument(s) if present, otherwise from
+stdin (when stdin is not a terminal). The response is written to *stdout*;
+diagnostics, notes and usage go to *stderr*, so stdout stays clean for
+piping.
+
+** Options
+| Option                  | Description                                                        |
+|-------------------------+--------------------------------------------------------------------|
+| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode (default: =$AI_PROVIDER= or =claude=) |
+| =-m=, =--model ID=      | Model id (default: provider default). =ollama/<id>= on the Claude Code providers selects the Ollama transport |
+| =-s=, =--system TEXT=   | System prompt                                                      |
+| =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
+| =--max-tokens N=        | Max output tokens (default: 4096)                                  |
+| =--temperature F=       | Sampling temperature (HTTP providers)                             |
+| =--stream=              | Stream the response as it arrives (providers that support it)      |
+| =--skip-permissions=    | Pass =--dangerously-skip-permissions= (claude-code / claude-tmux)  |
+| =--dry-run=             | Print the command that would be spawned; do not run it             |
+| =--list-providers=      | List known provider names and exit                                 |
+| =-i=, =--interactive=   | Interactive multi-turn REPL (keeps history)                        |
+| =-v=, =--version=       | Print version and exit                                             |
+
+** Examples
+List the providers:
+#+begin_example
+$ ai --list-providers
+Providers:
+  claude         HTTP
+  ...
+  claude-code    CLI   (model "ollama/<name>" => ollama launch claude)
+  claude-tmux    CLI   (model "ollama/<name>" => ollama launch claude)
+  opencode       CLI
+#+end_example
+
+A one-shot chat (HTTP provider):
+#+begin_example
+$ ai -p claude -m claude-sonnet-4-6 "Say hi in one word"
+#+end_example
+
+Stream from stdin:
+#+begin_example
+$ echo "Write a haiku about C" | ai -p openai --stream
+#+end_example
+
+Verify the Ollama transport without running anything (=--dry-run=):
+#+begin_example
+$ ai -p claude-code -m ollama/glm-5.2:cloud --dry-run "hi"
+/usr/bin/ollama launch claude --model glm-5.2:cloud -- --print --output-format json ...
+
+$ ai -p claude-tmux -m ollama/glm-5.2:cloud --dry-run "hi"
+tmux new-session -d -s ai-glib-dry-run -c <cwd> -- ollama launch claude --model glm-5.2:cloud -- --session-id <session-id> --settings <settings.json>
+
+$ ai -p claude-code -m sonnet --dry-run "hi"
+/path/to/claude --print --output-format json --model sonnet ...
+#+end_example
+
+An interactive session:
+#+begin_example
+$ ai -p claude-code -i
+ai interactive (provider=claude-code). Ctrl-D to exit.
+> hello
+...
+#+end_example
+
+** Notes
+- =--dry-run= prints the real argv for the =claude-code= and =claude-tmux=
+  providers (executable resolved, Ollama transport applied). For other
+  providers it prints a short summary, since they do not spawn a CLI.
+- For the Ollama transport the =claude= binary must be installed and on
+  =$PATH= (=ollama launch claude= execs it); the launcher path may be
+  overridden with =OLLAMA_PATH=.
+- HTTP providers read their API keys from the usual environment variables
+  (see [[file:configuration.org][Configuration]]).
