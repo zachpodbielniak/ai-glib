@@ -2015,7 +2015,13 @@ ai_tool_executor_run (
     g_return_val_if_fail (AI_IS_PROVIDER (provider), NULL);
     g_return_val_if_fail (messages != NULL, NULL);
 
-    ctx.loop          = g_main_loop_new (NULL, FALSE);
+    /* Bind the loop to the caller's thread-default context (NULL when
+     * none is pushed, i.e. the process-global default -- unchanged from
+     * the historical behaviour).  A synchronous caller can push a
+     * private GMainContext to isolate this loop (and the provider's
+     * thread-default-bound async I/O) from the caller's own default
+     * context. */
+    ctx.loop          = g_main_loop_new (g_main_context_get_thread_default (), FALSE);
     ctx.executor      = self;
     ctx.provider      = provider;
     ctx.messages      = NULL;
