@@ -27,6 +27,7 @@
 
 #include "core/ai-error.h"
 #include "core/ai-provider.h"
+#include "core/ai-subprocess-util.h"
 #include "model/ai-message.h"
 #include "model/ai-text-content.h"
 #include "model/ai-response.h"
@@ -59,6 +60,12 @@ struct _AiClaudeTmuxClient
                                                 * of waiting a fixed
                                                 * prompt_resend_interval_ms
                                                 * every time (default TRUE) */
+    gint      command_timeout_ms;   /* deadline for each tmux plumbing
+                                     * command (new-session, send-keys,
+                                     * kill-session, ...); a wedged tmux
+                                     * server otherwise blocks the turn
+                                     * worker forever (default 30 sec,
+                                     * 0 disables) */
     gint      turn_active;          /* atomic flag: 1 while this client
                                      * owns a live tmux session (a turn
                                      * is in flight), 0 otherwise — gates
@@ -80,6 +87,7 @@ enum
     PROP_MAX_PROMPT_SEND_ATTEMPTS,
     PROP_DISMISS_RESUME_PROMPT,
     PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF,
+    PROP_COMMAND_TIMEOUT_MS,
     PROP_TOTAL_COST,
     N_PROPS
 };
@@ -995,11 +1003,19 @@ ai_claude_tmux_client_wait_for_sentinel_or_idle(
  * Run a one-shot child process synchronously, capturing exit status.
  * Returns TRUE on exit-zero, FALSE otherwise.  When @capture_stderr
  * is non-NULL, stderr is captured (used for diagnostics on failure).
+ *
+ * Every call is bounded: @timeout_ms caps the wall-clock wait (0
+ * disables) and @cancellable aborts it early — in both cases the
+ * child is killed.  tmux plumbing commands complete in milliseconds
+ * when healthy; an unbounded wait here once pinned a libreclaw
+ * session worker forever behind a wedged tmux server.
  */
 static gboolean
 run_command_sync(
     const gchar * const  *argv,
     gchar               **capture_stderr,
+    gint                  timeout_ms,
+    GCancellable         *cancellable,
     GError              **error
 ){
     g_autoptr(GSubprocess) sub = NULL;
@@ -1020,9 +1036,11 @@ run_command_sync(
     {
         return FALSE;
     }
-    if (!g_subprocess_communicate_utf8(sub, NULL, NULL, NULL,
-                                       stderr_dest, error))
+    if (!ai_subprocess_communicate_utf8_bounded(sub, NULL, timeout_ms,
+                                                cancellable, NULL,
+                                                stderr_dest, error))
     {
+        g_prefix_error(error, "Command '%s': ", argv[0]);
         return FALSE;
     }
     if (!g_subprocess_get_successful(sub))
@@ -1067,6 +1085,7 @@ typedef struct
 {
     const gchar *tmux_bin;            /* borrowed; valid for the turn */
     const gchar *tmux_session_name;   /* borrowed; valid for the turn */
+    gint         command_timeout_ms;  /* bound for the kill-session cmd */
 } TurnCancelKillCtx;
 
 static void
@@ -1085,7 +1104,7 @@ on_turn_cancelled_kill_session(
               "tmux session '%s' directly", ctx->tmux_session_name);
 
     /* Best-effort: the session may already be gone. */
-    run_command_sync(kill_argv, NULL, NULL);
+    run_command_sync(kill_argv, NULL, ctx->command_timeout_ms, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1135,6 +1154,9 @@ ai_claude_tmux_client_get_property(
             break;
         case PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF:
             g_value_set_boolean(value, self->prompt_send_exponential_backoff);
+            break;
+        case PROP_COMMAND_TIMEOUT_MS:
+            g_value_set_int(value, self->command_timeout_ms);
             break;
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
@@ -1189,6 +1211,9 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF:
             self->prompt_send_exponential_backoff = g_value_get_boolean(value);
+            break;
+        case PROP_COMMAND_TIMEOUT_MS:
+            self->command_timeout_ms = g_value_get_int(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -1335,6 +1360,16 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "static prompt-resend-interval-ms — the pre-0.20.4 behaviour",
         TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    properties[PROP_COMMAND_TIMEOUT_MS] = g_param_spec_int(
+        "command-timeout-ms", "Command Timeout (ms)",
+        "Deadline for each tmux plumbing command (new-session, "
+        "send-keys, kill-session, ...).  A wedged tmux server would "
+        "otherwise block the turn worker thread forever.  On expiry "
+        "the tmux command is killed and the turn fails with "
+        "AI_ERROR_TIMEOUT.  0 disables the deadline",
+        0, G_MAXINT, 30000,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_TOTAL_COST] = g_param_spec_double(
         "total-cost", "Total Cost",
         "Cost in USD reported by the last response (0.0 if absent)",
@@ -1358,6 +1393,7 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->max_prompt_send_attempts = 5;
     self->dismiss_resume_prompt = TRUE;
     self->prompt_send_exponential_backoff = TRUE;
+    self->command_timeout_ms = 30000;   /* 30 sec */
     self->turn_active = 0;
     self->total_cost = 0.0;
 
@@ -1571,7 +1607,7 @@ ai_claude_tmux_client_chat_sync_real(
     gboolean resuming_existing_session = FALSE;
     goffset jsonl_size_before = 0;
     gdouble cost = 0.0;
-    TurnCancelKillCtx kill_ctx = { NULL, NULL };
+    TurnCancelKillCtx kill_ctx = { NULL, NULL, 0 };
     gulong kill_cancel_id = 0;
 
     /*
@@ -1713,7 +1749,8 @@ ai_claude_tmux_client_chat_sync_real(
         };
         /* has-session exits 0 iff the session exists; any non-zero
          * (no such session, no server running) means nothing to reap. */
-        if (run_command_sync(has_argv, NULL, NULL))
+        if (run_command_sync(has_argv, NULL, self->command_timeout_ms,
+                             cancellable, NULL))
         {
             const gchar *kill_argv[] = {
                 tmux_bin, "kill-session", "-t", tmux_session_name, NULL
@@ -1724,7 +1761,8 @@ ai_claude_tmux_client_chat_sync_real(
                       "spawning a fresh one", tmux_session_name);
             /* Best-effort: if it vanished between the check and now,
              * kill-session just fails harmlessly. */
-            run_command_sync(kill_argv, NULL, NULL);
+            run_command_sync(kill_argv, NULL, self->command_timeout_ms,
+                             NULL, NULL);
         }
     }
 
@@ -1753,7 +1791,8 @@ ai_claude_tmux_client_chat_sync_real(
             self->skip_permissions);
 
         ok = run_command_sync(
-            (const gchar * const *)argv->pdata, NULL, error);
+            (const gchar * const *)argv->pdata, NULL,
+            self->command_timeout_ms, cancellable, error);
         if (!ok)
         {
             /* Never got a session — release the ownership claim. */
@@ -1783,6 +1822,7 @@ ai_claude_tmux_client_chat_sync_real(
     {
         kill_ctx.tmux_bin = tmux_bin;
         kill_ctx.tmux_session_name = tmux_session_name;
+        kill_ctx.command_timeout_ms = self->command_timeout_ms;
         kill_cancel_id = g_cancellable_connect(
             cancellable,
             G_CALLBACK(on_turn_cancelled_kill_session),
@@ -1861,7 +1901,9 @@ ai_claude_tmux_client_chat_sync_real(
             tmux_bin, "send-keys", "-t", tmux_session_name,
             "BSpace", NULL
         };
-        if (!run_command_sync(dismiss_argv, NULL, error))
+        if (!run_command_sync(dismiss_argv, NULL,
+                              self->command_timeout_ms, cancellable,
+                              error))
         {
             g_prefix_error(error,
                            "tmux send-keys (resume-picker dismiss) "
@@ -1869,7 +1911,9 @@ ai_claude_tmux_client_chat_sync_real(
             goto cleanup_and_fail;
         }
         g_usleep((gulong)self->prompt_resend_interval_ms * 1000);
-        if (!run_command_sync(clean_argv, NULL, error))
+        if (!run_command_sync(clean_argv, NULL,
+                              self->command_timeout_ms, cancellable,
+                              error))
         {
             g_prefix_error(error,
                            "tmux send-keys (post-dismiss backspace) "
@@ -1920,7 +1964,9 @@ ai_claude_tmux_client_chat_sync_real(
         const gchar *load_argv[] = {
             tmux_bin, "load-buffer", "-b", buffer_name, prompt_path, NULL
         };
-        if (!run_command_sync(load_argv, NULL, error))
+        if (!run_command_sync(load_argv, NULL,
+                              self->command_timeout_ms, cancellable,
+                              error))
         {
             g_prefix_error(error, "tmux load-buffer failed: ");
             goto cleanup_and_fail;
@@ -1930,7 +1976,9 @@ ai_claude_tmux_client_chat_sync_real(
                 tmux_bin, "paste-buffer", "-b", buffer_name,
                 "-t", tmux_session_name, "-d", NULL  /* -d = delete buffer after */
             };
-            if (!run_command_sync(paste_argv, NULL, error))
+            if (!run_command_sync(paste_argv, NULL,
+                                  self->command_timeout_ms,
+                                  cancellable, error))
             {
                 g_prefix_error(error, "tmux paste-buffer failed: ");
                 goto cleanup_and_fail;
@@ -2043,7 +2091,9 @@ ai_claude_tmux_client_chat_sync_real(
                               : "");
             }
 
-            if (!run_command_sync(enter_argv, NULL, error))
+            if (!run_command_sync(enter_argv, NULL,
+                                  self->command_timeout_ms,
+                                  cancellable, error))
             {
                 g_prefix_error(error,
                                "tmux send-keys (Enter) failed: ");
@@ -2225,7 +2275,8 @@ ai_claude_tmux_client_chat_sync_real(
         };
         /* Best-effort: ignore errors — the session may have already
          * exited on its own. */
-        run_command_sync(argv, NULL, NULL);
+        run_command_sync(argv, NULL, self->command_timeout_ms,
+                         NULL, NULL);
     }
     else
     {
@@ -2259,7 +2310,8 @@ cleanup_and_fail:
         const gchar *argv[] = {
             tmux_bin, "kill-session", "-t", tmux_session_name, NULL
         };
-        run_command_sync(argv, NULL, NULL);
+        run_command_sync(argv, NULL, self->command_timeout_ms,
+                         NULL, NULL);
     }
     else
     {
@@ -2686,4 +2738,23 @@ ai_claude_tmux_client_set_prompt_send_exponential_backoff(
     self->prompt_send_exponential_backoff = backoff;
     g_object_notify_by_pspec(G_OBJECT(self),
         properties[PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF]);
+}
+
+gint
+ai_claude_tmux_client_get_command_timeout_ms(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), 0);
+    return self->command_timeout_ms;
+}
+
+void
+ai_claude_tmux_client_set_command_timeout_ms(
+    AiClaudeTmuxClient *self,
+    gint                timeout_ms
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    g_return_if_fail(timeout_ms >= 0);
+    self->command_timeout_ms = timeout_ms;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_COMMAND_TIMEOUT_MS]);
 }

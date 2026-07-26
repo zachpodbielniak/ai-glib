@@ -381,6 +381,39 @@ ai_claude_tmux_client_set_prompt_send_exponential_backoff(
     gboolean            backoff
 );
 
+/**
+ * ai_claude_tmux_client_get_command_timeout_ms:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: the per-command deadline (in ms) applied to every tmux
+ *   plumbing invocation, or 0 when the deadline is disabled.
+ *   Default 30000.
+ *
+ * Since: 0.23.3
+ */
+gint
+ai_claude_tmux_client_get_command_timeout_ms(AiClaudeTmuxClient *self);
+
+/**
+ * ai_claude_tmux_client_set_command_timeout_ms:
+ * @self: an #AiClaudeTmuxClient
+ * @timeout_ms: deadline in milliseconds; 0 disables
+ *
+ * Bounds every tmux plumbing command the client runs (new-session,
+ * send-keys, load-buffer, paste-buffer, kill-session, ...).  These
+ * normally complete in milliseconds; the deadline only matters when
+ * the tmux server wedges, which would otherwise block the calling
+ * worker thread forever.  On expiry the tmux command is killed and
+ * the turn fails with %AI_ERROR_TIMEOUT.
+ *
+ * Since: 0.23.3
+ */
+void
+ai_claude_tmux_client_set_command_timeout_ms(
+    AiClaudeTmuxClient *self,
+    gint                timeout_ms
+);
+
 /* ================================================================== */
 /* Pure-function helpers — exposed primarily for unit testing.        */
 /* ================================================================== */

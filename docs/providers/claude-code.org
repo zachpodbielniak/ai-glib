@@ -118,6 +118,16 @@ const gchar *session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
 ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "previous-session-id");
 #+end_src
 
+*** Process Timeout
+/Since 0.23.3./ Synchronous chat calls (=ai_cli_client_chat_sync()=) are bounded by a wall-clock deadline, =process-timeout-ms= (default 30 minutes, =0= disables). On expiry the =claude= child process is killed and the call fails with =AI_ERROR_TIMEOUT= --- previously a CLI wedged on a dead network connection could block the calling thread forever. Cancelling the call's =GCancellable= now also kills the child instead of leaking it.
+
+#+begin_src C
+g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+
+/* Fail any single claude run that takes longer than 10 minutes */
+ai_cli_client_set_process_timeout_ms(AI_CLI_CLIENT(client), 600000);
+#+end_src
+
 *** Getting Cost Information
 Claude Code provides cost information in its responses:
 

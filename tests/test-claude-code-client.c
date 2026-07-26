@@ -304,6 +304,33 @@ test_claude_code_client_total_cost(void)
 }
 
 /*
+ * Test the inherited process-timeout-ms knob.  The default MUST be
+ * non-zero: 0 means an unbounded g_subprocess_communicate wait, which
+ * is the hang class that once froze a libreclaw session forever.
+ */
+static void
+test_claude_code_client_process_timeout(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = NULL;
+	gint v;
+
+	client = ai_claude_code_client_new();
+
+	g_assert_cmpint(
+		ai_cli_client_get_process_timeout_ms(AI_CLI_CLIENT(client)),
+		==, 1800000);
+
+	g_object_set(client, "process-timeout-ms", 60000, NULL);
+	g_object_get(client, "process-timeout-ms", &v, NULL);
+	g_assert_cmpint(v, ==, 60000);
+
+	ai_cli_client_set_process_timeout_ms(AI_CLI_CLIENT(client), 0);
+	g_assert_cmpint(
+		ai_cli_client_get_process_timeout_ms(AI_CLI_CLIENT(client)),
+		==, 0);
+}
+
+/*
  * Test GType registration.
  */
 static void
@@ -331,6 +358,7 @@ main(
 	g_test_add_func("/ai-glib/claude-code-client/session-management", test_claude_code_client_session_management);
 	g_test_add_func("/ai-glib/claude-code-client/executable-path", test_claude_code_client_executable_path);
 	g_test_add_func("/ai-glib/claude-code-client/total-cost", test_claude_code_client_total_cost);
+	g_test_add_func("/ai-glib/claude-code-client/process-timeout", test_claude_code_client_process_timeout);
 	g_test_add_func("/ai-glib/claude-code-client/gtype", test_claude_code_client_gtype);
 
 	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama",

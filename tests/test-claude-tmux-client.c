@@ -380,6 +380,35 @@ test_prompt_send_exponential_backoff_property(void)
 }
 
 static void
+test_command_timeout_ms_default(void)
+{
+    /*
+     * The default MUST be non-zero: 0 means "no deadline on tmux
+     * plumbing commands", which is the exact unbounded wait that
+     * once froze a libreclaw session behind a wedged tmux server.
+     */
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+
+    g_assert_cmpint(
+        ai_claude_tmux_client_get_command_timeout_ms(c), ==, 30000);
+}
+
+static void
+test_command_timeout_ms_property(void)
+{
+    g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
+    gint v;
+
+    g_object_set(c, "command-timeout-ms", 5000, NULL);
+    g_object_get(c, "command-timeout-ms", &v, NULL);
+    g_assert_cmpint(v, ==, 5000);
+
+    ai_claude_tmux_client_set_command_timeout_ms(c, 0);
+    g_assert_cmpint(
+        ai_claude_tmux_client_get_command_timeout_ms(c), ==, 0);
+}
+
+static void
 test_total_cost_initial(void)
 {
     g_autoptr(AiClaudeTmuxClient) c = ai_claude_tmux_client_new();
@@ -1401,6 +1430,10 @@ main(int argc, char *argv[])
                     test_prompt_send_exponential_backoff);
     g_test_add_func("/claude-tmux/prop/prompt-send-exp-backoff-gobject",
                     test_prompt_send_exponential_backoff_property);
+    g_test_add_func("/claude-tmux/prop/command-timeout-ms-default",
+                    test_command_timeout_ms_default);
+    g_test_add_func("/claude-tmux/prop/command-timeout-ms",
+                    test_command_timeout_ms_property);
     g_test_add_func("/claude-tmux/prop/total-cost-initial",
                     test_total_cost_initial);
 

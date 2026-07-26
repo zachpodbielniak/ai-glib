@@ -138,15 +138,19 @@ ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_TMUX_MODEL_OPUS);
 #+end_src
 
 *** Tuning Timeouts
-The two relevant timeouts:
+The three relevant timeouts:
 
 - *Startup timeout* --- how long to wait for claude's TUI to become ready (the =SessionStart= hook) after launch. Default: 15s.
 - *Turn timeout* --- applied as an *inactivity* budget, not a hard wall-clock cap. The provider waits for the Stop-hook sentinel and resets this clock every time the JSONL transcript grows (claude writing an assistant step, tool call, or tool result). A long but actively-working turn therefore never times out; only a transcript that stays completely silent for the whole budget is treated as a wedged turn. Default: 600s (10 minutes) of *silence*. This is what lets multi-minute agentic turns (many tool calls) complete instead of being killed mid-flight — a still-running turn can always be aborted with =!stop= / =!kill= instead.
+- *Command timeout* (=command-timeout-ms=, since 0.23.3) --- a deadline on every tmux /plumbing/ command the provider runs (=new-session=, =send-keys=, =load-buffer=, =paste-buffer=, =kill-session=, ...). These complete in milliseconds when tmux is healthy; the deadline only matters when the tmux server wedges, which would otherwise block the calling worker thread *forever* (this exact hang once froze a libreclaw session for hours). On expiry the tmux command is killed and the turn fails with =AI_ERROR_TIMEOUT=. Default: 30s. =0= disables (not recommended).
 
 #+begin_src C
 ai_claude_tmux_client_set_startup_timeout_ms(client, 30000);  /* 30s */
 ai_claude_tmux_client_set_turn_timeout_ms(client, 180000);    /* 3m  */
+ai_claude_tmux_client_set_command_timeout_ms(client, 10000);  /* 10s */
 #+end_src
+
+Cancelling the turn's =GCancellable= (libreclaw's =!stop= / =!kill=, or a caller-side watchdog) now also aborts any in-flight tmux plumbing command and kills its child process --- previously a wedged command was uncancellable.
 
 *** Reliability tuning
 Three properties control the prompt-delivery machinery (see /Verified submit/ and /Resume-mode picker/ above):

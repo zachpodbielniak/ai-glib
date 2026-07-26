@@ -11,6 +11,7 @@
 
 #include "core/ai-cli-client.h"
 #include "core/ai-error.h"
+#include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
 
 /*
@@ -26,6 +27,7 @@ typedef struct
     gchar    *working_directory;
     gchar    *effort_level;
     gint      max_tokens;
+    gint      process_timeout_ms;
     gboolean  session_persistence;
 } AiCliClientPrivate;
 
@@ -46,6 +48,7 @@ enum
     PROP_SESSION_PERSISTENCE,
     PROP_WORKING_DIRECTORY,
     PROP_EFFORT_LEVEL,
+    PROP_PROCESS_TIMEOUT_MS,
     N_PROPS
 };
 
@@ -121,6 +124,9 @@ ai_cli_client_get_property(
         case PROP_EFFORT_LEVEL:
             g_value_set_string(value, priv->effort_level);
             break;
+        case PROP_PROCESS_TIMEOUT_MS:
+            g_value_set_int(value, priv->process_timeout_ms);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -172,6 +178,9 @@ ai_cli_client_set_property(
         case PROP_EFFORT_LEVEL:
             g_clear_pointer(&priv->effort_level, g_free);
             priv->effort_level = g_value_dup_string(value);
+            break;
+        case PROP_PROCESS_TIMEOUT_MS:
+            priv->process_timeout_ms = g_value_get_int(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -323,6 +332,25 @@ ai_cli_client_class_init(AiCliClientClass *klass)
                             "medium",
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiCliClient:process-timeout-ms:
+     *
+     * Wall-clock deadline for one synchronous CLI subprocess run.
+     * On expiry the child is killed and the call fails with
+     * %AI_ERROR_TIMEOUT, so a wedged CLI (for example a half-open
+     * network connection the child is blocked on) can never pin the
+     * calling thread forever.  0 disables the deadline.
+     *
+     * Since: 0.23.3
+     */
+    properties[PROP_PROCESS_TIMEOUT_MS] =
+        g_param_spec_int("process-timeout-ms",
+                         "Process Timeout (ms)",
+                         "Wall-clock deadline for one CLI subprocess "
+                         "run (0 disables)",
+                         0, G_MAXINT, 1800000,
+                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -400,6 +428,7 @@ ai_cli_client_init(AiCliClient *self)
     priv->executable_path = NULL;
     priv->session_id = NULL;
     priv->max_tokens = 4096;
+    priv->process_timeout_ms = 1800000;   /* 30 min */
     priv->session_persistence = TRUE;
     priv->working_directory = NULL;
     priv->effort_level = g_strdup("medium");
@@ -802,6 +831,56 @@ ai_cli_client_set_effort_level(
 }
 
 /**
+ * ai_cli_client_get_process_timeout_ms:
+ * @self: an #AiCliClient
+ *
+ * Returns: the wall-clock deadline (in ms) applied to one synchronous
+ *   CLI subprocess run, or 0 when disabled.  Default 1800000 (30 min).
+ *
+ * Since: 0.23.3
+ */
+gint
+ai_cli_client_get_process_timeout_ms(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), 0);
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->process_timeout_ms;
+}
+
+/**
+ * ai_cli_client_set_process_timeout_ms:
+ * @self: an #AiCliClient
+ * @timeout_ms: deadline in milliseconds; 0 disables
+ *
+ * Bounds one synchronous CLI subprocess run.  On expiry the child is
+ * killed and the call fails with %AI_ERROR_TIMEOUT.  Providers that
+ * override chat_sync with their own orchestration (the tmux client)
+ * bound their turns with their own knobs instead.
+ *
+ * Since: 0.23.3
+ */
+void
+ai_cli_client_set_process_timeout_ms(
+    AiCliClient *self,
+    gint         timeout_ms
+)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+    g_return_if_fail(timeout_ms >= 0);
+
+    priv = ai_cli_client_get_instance_private(self);
+    priv->process_timeout_ms = timeout_ms;
+
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_PROCESS_TIMEOUT_MS]);
+}
+
+/**
  * ai_cli_client_resolve_executable:
  * @self: an #AiCliClient
  * @error: (out) (optional): return location for a #GError
@@ -987,13 +1066,20 @@ ai_cli_client_chat_sync(
         return NULL;
     }
 
-    /* Wait for completion and capture output */
-    if (!g_subprocess_communicate_utf8(subprocess,
-                                       stdin_data,  /* pipe prompt via stdin */
-                                       cancellable,
-                                       &stdout_data,
-                                       &stderr_data,
-                                       error))
+    /*
+     * Wait for completion and capture output — bounded.  The deadline
+     * (and the caller's cancellable) kill the child on expiry, so a
+     * CLI wedged on a dead network connection can never pin this
+     * thread forever; before this bound, one such hang froze a
+     * libreclaw session permanently.
+     */
+    if (!ai_subprocess_communicate_utf8_bounded(subprocess,
+                                                stdin_data,
+                                                priv->process_timeout_ms,
+                                                cancellable,
+                                                &stdout_data,
+                                                &stderr_data,
+                                                error))
     {
         return NULL;
     }

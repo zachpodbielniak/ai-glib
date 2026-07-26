@@ -148,6 +148,15 @@ ai_cli_client_set_working_directory(
     const gchar *directory
 );
 
+gint
+ai_cli_client_get_process_timeout_ms(AiCliClient *self);
+
+void
+ai_cli_client_set_process_timeout_ms(
+    AiCliClient *self,
+    gint         timeout_ms
+);
+
 const gchar *
 ai_cli_client_get_effort_level(AiCliClient *self);
 

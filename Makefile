@@ -84,6 +84,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-streamable.c \
 	$(SRCDIR)/core/ai-image-generator.c \
 	$(SRCDIR)/core/ai-client.c \
+	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
 	$(SRCDIR)/model/ai-usage.c \
