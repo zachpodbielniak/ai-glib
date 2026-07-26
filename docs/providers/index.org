@@ -16,7 +16,7 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 |--------------------------------------------------+----------------------+-------------------------------+------------------------------------|
 | [[file:claude-code.org][Claude Code]]             | =AiClaudeCodeClient= | =CLAUDE_CODE_PATH= (optional) | sonnet                             |
 | [[file:claude-code-tmux.org][Claude Code (tmux)]] | =AiClaudeTmuxClient= | =CLAUDE_CODE_PATH= (optional) | sonnet                             |
-| [[file:opencode.org][OpenCode]]                   | =AiOpenCodeClient=   | =OPENCODE_PATH= (optional)    | anthropic/claude-sonnet-4-20250514 |
+| [[file:opencode.org][OpenCode]]                   | =AiOpenCodeClient=   | =OPENCODE_PATH= (optional)    | anthropic/claude-sonnet-5          |
 
 The two Claude Code variants drive the same =claude= CLI but differ in billing path: =AiClaudeCodeClient= uses =claude --print= (Agent SDK credits), while =AiClaudeTmuxClient= runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [[file:claude-code-tmux.org]] for details.
 
@@ -67,10 +67,10 @@ After creating a client, you can change the model:
 g_autoptr(AiClaudeClient) client = ai_claude_client_new();
 
 /* Set a different model */
-ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_5);
 
 /* Or use the string directly */
-ai_client_set_model(AI_CLIENT(client), "claude-3-5-haiku-20241022");
+ai_client_set_model(AI_CLIENT(client), "claude-haiku-4-5-20251001");
 #+end_src
 
 ** Provider Comparison

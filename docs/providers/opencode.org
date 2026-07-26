@@ -6,7 +6,7 @@ The OpenCode provider (=AiOpenCodeClient=) is a wrapper around the =opencode= CL
 |---------------+--------------------------------------|
 | Type          | =AI_PROVIDER_OPENCODE=               |
 | Name          | "OpenCode"                           |
-| Default Model | =anthropic/claude-sonnet-4-20250514= |
+| Default Model | =anthropic/claude-sonnet-5=          |
 | Interface     | CLI (subprocess)                     |
 
 ** Requirements
@@ -26,12 +26,36 @@ Install the OpenCode CLI following its official documentation.
 OpenCode supports models from multiple providers:
 
 *** Anthropic Models
-| Define                              | Model ID                                |
-|-------------------------------------+-----------------------------------------|
-| =AI_OPENCODE_MODEL_CLAUDE_SONNET_4= | ="anthropic/claude-sonnet-4-20250514"=  |
-| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4=   | ="anthropic/claude-opus-4-20250514"=    |
-| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5= | ="anthropic/claude-opus-4-5-20251101"=  |
-| =AI_OPENCODE_MODEL_CLAUDE_HAIKU=    | ="anthropic/claude-3-5-haiku-20241022"= |
+Current generation. Model IDs are passed through to Anthropic verbatim, so
+these match the =claude= provider's IDs with an =anthropic/= prefix.
+
+| Define                               | Model ID                       | Description                     |
+|--------------------------------------+--------------------------------+---------------------------------|
+| =AI_OPENCODE_MODEL_CLAUDE_FABLE_5=   | ="anthropic/claude-fable-5"=   | Most capable                    |
+| =AI_OPENCODE_MODEL_CLAUDE_OPUS_5=    | ="anthropic/claude-opus-5"=    | Flagship                        |
+| =AI_OPENCODE_MODEL_CLAUDE_SONNET_5=  | ="anthropic/claude-sonnet-5"=  | Balanced (default)              |
+| =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5= | ="anthropic/claude-haiku-4-5"= | Fastest (there is no Haiku 5)   |
+
+Older generations. The defines are kept for source compatibility, but the
+three marked retired name IDs Anthropic has already withdrawn upstream — a
+request naming one of them will fail.
+
+| Define                              | Model ID                                | Description                    |
+|-------------------------------------+-----------------------------------------+--------------------------------|
+| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5= | ="anthropic/claude-opus-4-5-20251101"=  | Still available                |
+| =AI_OPENCODE_MODEL_CLAUDE_SONNET_4= | ="anthropic/claude-sonnet-4-20250514"=  | Retired 2026-06-15             |
+| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4=   | ="anthropic/claude-opus-4-20250514"=    | Retired 2026-06-15             |
+| =AI_OPENCODE_MODEL_CLAUDE_HAIKU_3_5=| ="anthropic/claude-3-5-haiku-20241022"= | Retired 2026-02-19             |
+
+*** Anthropic Convenience Alias
+| Define                           | Points To                            | Description                |
+|----------------------------------+--------------------------------------+----------------------------|
+| =AI_OPENCODE_MODEL_CLAUDE_HAIKU= | =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5= | Latest Haiku               |
+
+This alias previously expanded to the Haiku 3.5 ID, which is retired; it now
+tracks Haiku 4.5. As with the =claude= provider's aliases, =g-ir-scanner=
+does not export a define whose value is another define, so bindings should
+use =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5=.
 
 *** OpenAI Models
 | Define                          | Model ID               |

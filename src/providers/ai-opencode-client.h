@@ -29,18 +29,38 @@ G_DECLARE_FINAL_TYPE(AiOpenCodeClient, ai_opencode_client, AI, OPENCODE_CLIENT, 
  *
  * The default model for OpenCode clients.
  */
-#define AI_OPENCODE_DEFAULT_MODEL "anthropic/claude-sonnet-4-20250514"
+#define AI_OPENCODE_DEFAULT_MODEL "anthropic/claude-sonnet-5"
 
 /*
  * OpenCode CLI model identifiers.
- * These map to the --model argument of the opencode CLI.
+ * These map to the --model argument of the opencode CLI, in
+ * provider/model-id form.
  */
 
-/* Anthropic models */
+/* Anthropic models — Claude 5 (current) */
+#define AI_OPENCODE_MODEL_CLAUDE_FABLE_5    "anthropic/claude-fable-5"
+#define AI_OPENCODE_MODEL_CLAUDE_OPUS_5     "anthropic/claude-opus-5"
+#define AI_OPENCODE_MODEL_CLAUDE_SONNET_5   "anthropic/claude-sonnet-5"
+#define AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5  "anthropic/claude-haiku-4-5"
+
+/*
+ * Anthropic models — older generations.
+ *
+ * SONNET_4, OPUS_4 and HAIKU_3_5 name IDs that Anthropic has already
+ * retired upstream (2026-06-15 for the two Claude 4 IDs, 2026-02-19 for
+ * Haiku 3.5); a request naming one of them will fail. The defines are
+ * kept so existing source keeps compiling — do not use them in new code.
+ */
+#define AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5   "anthropic/claude-opus-4-5-20251101"
 #define AI_OPENCODE_MODEL_CLAUDE_SONNET_4   "anthropic/claude-sonnet-4-20250514"
 #define AI_OPENCODE_MODEL_CLAUDE_OPUS_4     "anthropic/claude-opus-4-20250514"
-#define AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5   "anthropic/claude-opus-4-5-20251101"
-#define AI_OPENCODE_MODEL_CLAUDE_HAIKU      "anthropic/claude-3-5-haiku-20241022"
+#define AI_OPENCODE_MODEL_CLAUDE_HAIKU_3_5  "anthropic/claude-3-5-haiku-20241022"
+
+/*
+ * Unversioned Anthropic alias, retargeted to the newest tier on each
+ * model refresh. Previously pointed at the now-retired Haiku 3.5.
+ */
+#define AI_OPENCODE_MODEL_CLAUDE_HAIKU      AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5
 
 /* OpenAI models */
 #define AI_OPENCODE_MODEL_GPT_4O            "openai/gpt-4o"

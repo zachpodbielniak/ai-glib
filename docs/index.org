@@ -19,7 +19,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 |-----------------------------------------------------+------------------------------------------------+------------------------------------|
 | [[file:providers/claude-code.org][Claude Code]]      | Anthropic's Claude Code CLI (=--print=)        | sonnet                             |
 | [[file:providers/claude-code-tmux.org][Claude Code (tmux)]] | Claude Code CLI via an interactive tmux session | sonnet                          |
-| [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-4-20250514 |
+| [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-5          |
 
 The two Claude Code providers also accept =ollama/<model>= model ids, which
 route the turn through =ollama launch claude= (the Ollama-as-transport mode);

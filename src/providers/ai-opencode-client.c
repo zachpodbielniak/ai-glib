@@ -1056,11 +1056,17 @@ ai_opencode_client_list_models_async(
     /* Return static list of popular models */
     task = g_task_new(provider, NULL, callback, user_data);
 
-    /* Anthropic models */
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_SONNET_4));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_OPUS_4));
+    /*
+     * Anthropic models.  Only IDs that are still served upstream are
+     * advertised — the retired SONNET_4 / OPUS_4 / HAIKU_3_5 defines
+     * remain in the header for source compat but are deliberately not
+     * offered here.
+     */
+    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_FABLE_5));
+    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_OPUS_5));
+    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_SONNET_5));
+    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5));
     models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_HAIKU));
 
     /* OpenAI models */
     models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_GPT_4O));
