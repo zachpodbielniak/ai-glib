@@ -33,11 +33,24 @@ G_DECLARE_FINAL_TYPE(AiClaudeCodeClient, ai_claude_code_client, AI, CLAUDE_CODE_
 
 /*
  * Claude Code CLI model aliases.
- * These map to the --model argument of the claude CLI.
+ * These map to the --model argument of the claude CLI. The short aliases
+ * float: the CLI resolves each to the newest model of that tier.
  */
+#define AI_CLAUDE_CODE_MODEL_FABLE      "fable"
 #define AI_CLAUDE_CODE_MODEL_OPUS       "opus"
 #define AI_CLAUDE_CODE_MODEL_SONNET     "sonnet"
 #define AI_CLAUDE_CODE_MODEL_HAIKU      "haiku"
+
+/*
+ * Claude 5 model IDs, also valid --model arguments.
+ *
+ * Use these to pin a generation instead of floating with the aliases above.
+ * 1M context is the default and the maximum for this generation, so no
+ * "[1m]"/"-1m" suffix exists or is accepted.
+ */
+#define AI_CLAUDE_CODE_MODEL_FABLE_5    "claude-fable-5"
+#define AI_CLAUDE_CODE_MODEL_OPUS_5     "claude-opus-5"
+#define AI_CLAUDE_CODE_MODEL_SONNET_5   "claude-sonnet-5"
 
 
 AiClaudeCodeClient *

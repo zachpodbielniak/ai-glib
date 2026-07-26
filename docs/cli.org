@@ -49,7 +49,7 @@ Providers:
 
 A one-shot chat (HTTP provider):
 #+begin_example
-$ ai -p claude -m claude-sonnet-4-6 "Say hi in one word"
+$ ai -p claude -m claude-sonnet-5 "Say hi in one word"
 #+end_example
 
 Stream from stdin:

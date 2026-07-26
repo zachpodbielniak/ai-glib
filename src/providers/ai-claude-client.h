@@ -29,10 +29,23 @@ G_DECLARE_FINAL_TYPE(AiClaudeClient, ai_claude_client, AI, CLAUDE_CLIENT, AiClie
  *
  * The default model for Claude clients.
  */
-#define AI_CLAUDE_DEFAULT_MODEL "claude-sonnet-4-6"
+#define AI_CLAUDE_DEFAULT_MODEL "claude-sonnet-5"
 
 /*
- * Claude 4.7 Models (Latest)
+ * Claude 5 Models (Latest)
+ *
+ * The whole Claude 5 generation has a 1M-token context window as both the
+ * default and the maximum, so there is no long-context opt-in: do NOT send
+ * an anthropic-beta context-1m header and do NOT append a "[1m]" or "-1m"
+ * suffix to these IDs. Max output is 128K tokens (streaming required at
+ * that size). Fable is the most capable tier, above Opus.
+ */
+#define AI_CLAUDE_MODEL_FABLE_5         "claude-fable-5"
+#define AI_CLAUDE_MODEL_OPUS_5          "claude-opus-5"
+#define AI_CLAUDE_MODEL_SONNET_5        "claude-sonnet-5"
+
+/*
+ * Claude 4.7 Models
  *
  * Starting with Claude 4.6, IDs are dateless but still pinned snapshots
  * (per Anthropic's model-versioning docs); no date suffix is required.
@@ -80,9 +93,12 @@ G_DECLARE_FINAL_TYPE(AiClaudeClient, ai_claude_client, AI, CLAUDE_CLIENT, AiClie
 
 /*
  * Convenience aliases
+ *
+ * HAIKU stays on 4.5: there is no Haiku 5.
  */
-#define AI_CLAUDE_MODEL_OPUS            AI_CLAUDE_MODEL_OPUS_4_7
-#define AI_CLAUDE_MODEL_SONNET          AI_CLAUDE_MODEL_SONNET_4_6
+#define AI_CLAUDE_MODEL_FABLE           AI_CLAUDE_MODEL_FABLE_5
+#define AI_CLAUDE_MODEL_OPUS            AI_CLAUDE_MODEL_OPUS_5
+#define AI_CLAUDE_MODEL_SONNET          AI_CLAUDE_MODEL_SONNET_5
 #define AI_CLAUDE_MODEL_HAIKU           AI_CLAUDE_MODEL_HAIKU_4_5
 
 /**

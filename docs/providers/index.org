@@ -5,10 +5,10 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 *** HTTP API Providers
 | Provider                   | Client Class     | Environment Variable                    | Default Model            |
 |----------------------------+------------------+-----------------------------------------+--------------------------|
-| [[file:claude.org][Claude]] | =AiClaudeClient= | =ANTHROPIC_API_KEY= or =CLAUDE_API_KEY= | claude-sonnet-4-20250514 |
-| [[file:openai.org][OpenAI]] | =AiOpenAIClient= | =OPENAI_API_KEY=                        | gpt-4o                   |
-| [[file:gemini.org][Gemini]] | =AiGeminiClient= | =GEMINI_API_KEY=                        | gemini-2.0-flash         |
-| [[file:grok.org][Grok]]     | =AiGrokClient=   | =XAI_API_KEY= or =GROK_API_KEY=         | grok-4-1-fast-reasoning  |
+| [[file:claude.org][Claude]] | =AiClaudeClient= | =ANTHROPIC_API_KEY= or =CLAUDE_API_KEY= | claude-sonnet-5          |
+| [[file:openai.org][OpenAI]] | =AiOpenAIClient= | =OPENAI_API_KEY=                        | gpt-5.5                  |
+| [[file:gemini.org][Gemini]] | =AiGeminiClient= | =GEMINI_API_KEY=                        | gemini-3.5-flash         |
+| [[file:grok.org][Grok]]     | =AiGrokClient=   | =XAI_API_KEY= or =GROK_API_KEY=         | grok-4.3                 |
 | [[file:ollama.org][Ollama]] | =AiOllamaClient= | =OLLAMA_HOST= (optional)                | gpt-oss:20b              |
 
 *** CLI Wrapper Providers

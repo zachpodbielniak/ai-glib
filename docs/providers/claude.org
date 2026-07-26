@@ -23,18 +23,35 @@ g_autoptr(AiClaudeClient) client = ai_claude_client_new_with_config(config);
 #+end_src
 
 ** Available Models
-*** Claude 4.7 Models (Latest)
+*** Claude 5 Models (Latest)
+The whole Claude 5 generation has a 1M-token context window as both the
+default *and* the maximum, so there is no long-context opt-in: do not send an
+=anthropic-beta= =context-1m= header, and do not append a =[1m]= or =-1m=
+suffix to these IDs (no such variant exists). Max output is 128K tokens, which
+requires streaming at that size.
+
+Fable is the most capable tier, above Opus.
+
+| Define                      | Model ID         | Description                          |
+|-----------------------------+------------------+--------------------------------------|
+| =AI_CLAUDE_MODEL_FABLE_5=   | claude-fable-5   | Most capable; hardest reasoning      |
+| =AI_CLAUDE_MODEL_OPUS_5=    | claude-opus-5    | Flagship; agentic coding             |
+| =AI_CLAUDE_MODEL_SONNET_5=  | claude-sonnet-5  | Balanced (default)                   |
+
+There is no Haiku 5; =AI_CLAUDE_MODEL_HAIKU= still points at Haiku 4.5.
+
+*** Claude 4.7 Models
 Starting with Claude 4.6, Anthropic model IDs are dateless but still pinned snapshots --- no date suffix is required.
 
 | Define                     | Model ID        | Description              |
 |----------------------------+-----------------+--------------------------|
-| =AI_CLAUDE_MODEL_OPUS_4_7= | claude-opus-4-7 | Flagship; agentic coding |
+| =AI_CLAUDE_MODEL_OPUS_4_7= | claude-opus-4-7 | Previous flagship Opus   |
 
 *** Claude 4.6 Models
 | Define                       | Model ID          | Description            |
 |------------------------------+-------------------+------------------------|
-| =AI_CLAUDE_MODEL_SONNET_4_6= | claude-sonnet-4-6 | Balanced (default)     |
-| =AI_CLAUDE_MODEL_OPUS_4_6=   | claude-opus-4-6   | Previous flagship Opus |
+| =AI_CLAUDE_MODEL_SONNET_4_6= | claude-sonnet-4-6 | Previous Sonnet        |
+| =AI_CLAUDE_MODEL_OPUS_4_6=   | claude-opus-4-6   | Older Opus             |
 
 *** Claude 4.5 Models
 | Define                       | Model ID                   | Description                   |
@@ -51,8 +68,8 @@ Starting with Claude 4.6, Anthropic model IDs are dateless but still pinned snap
 *** Claude 4 Models
 | Define                     | Model ID                 | Description                    |
 |----------------------------+--------------------------+--------------------------------|
-| =AI_CLAUDE_MODEL_OPUS_4=   | claude-opus-4-20250514   | Deprecated, retires 2026-06-15 |
-| =AI_CLAUDE_MODEL_SONNET_4= | claude-sonnet-4-20250514 | Deprecated, retires 2026-06-15 |
+| =AI_CLAUDE_MODEL_OPUS_4=   | claude-opus-4-20250514   | Retired 2026-06-15; define kept for source compat |
+| =AI_CLAUDE_MODEL_SONNET_4= | claude-sonnet-4-20250514 | Retired 2026-06-15; define kept for source compat |
 
 *** Claude 3.7 Models
 | Define                       | Model ID                   | Description        |
@@ -70,21 +87,31 @@ Starting with Claude 4.6, Anthropic model IDs are dateless but still pinned snap
 | =AI_CLAUDE_MODEL_HAIKU_3= | claude-3-haiku-20240307 | Fast responses |
 
 *** Convenience Aliases
-| Define                   | Points To                    | Description             |
-|--------------------------+------------------------------+-------------------------|
-| =AI_CLAUDE_MODEL_OPUS=   | =AI_CLAUDE_MODEL_OPUS_4_7=   | Latest Opus             |
-| =AI_CLAUDE_MODEL_SONNET= | =AI_CLAUDE_MODEL_SONNET_4_6= | Latest Sonnet (default) |
-| =AI_CLAUDE_MODEL_HAIKU=  | =AI_CLAUDE_MODEL_HAIKU_4_5=  | Latest Haiku            |
+These are re-pointed at the newest tier on each model refresh, so they float
+across generations. Pin an explicit =*_5= define instead if you need a fixed
+model.
+
+| Define                   | Points To                   | Description                  |
+|--------------------------+-----------------------------+------------------------------|
+| =AI_CLAUDE_MODEL_FABLE=  | =AI_CLAUDE_MODEL_FABLE_5=   | Latest Fable (most capable)  |
+| =AI_CLAUDE_MODEL_OPUS=   | =AI_CLAUDE_MODEL_OPUS_5=    | Latest Opus                  |
+| =AI_CLAUDE_MODEL_SONNET= | =AI_CLAUDE_MODEL_SONNET_5=  | Latest Sonnet (default)      |
+| =AI_CLAUDE_MODEL_HAIKU=  | =AI_CLAUDE_MODEL_HAIKU_4_5= | Latest Haiku (no Haiku 5)    |
+
+Note: =g-ir-scanner= skips a =#define= whose value is another =#define=, so
+these four aliases are *not* exported to GObject Introspection. Bindings
+consumers should use the versioned defines (=AI_CLAUDE_MODEL_OPUS_5= etc.),
+which are exported.
 
 *** Setting the Model
 #+begin_src C
 g_autoptr(AiClaudeClient) client = ai_claude_client_new();
 
 /* Use the most capable model */
-ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4_7);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_FABLE_5);
 
 /* Or use a string */
-ai_client_set_model(AI_CLIENT(client), "claude-haiku-4-5-20251001");
+ai_client_set_model(AI_CLIENT(client), "claude-opus-5");
 #+end_src
 
 ** API Version

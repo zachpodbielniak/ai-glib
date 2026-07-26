@@ -23,14 +23,32 @@ Install the Claude CLI following the official instructions from Anthropic. The C
 | =OLLAMA_PATH=      | Override the path to the =ollama= launcher (Ollama transport, below) |
 
 ** Available Models
-The Claude Code CLI uses simplified model aliases:
+Both forms below are valid =--model= arguments to the =claude= CLI.
+
+The short aliases *float*: the CLI resolves each to the newest model of that
+tier, so they follow new releases without a code change.
 
 | Define                         | Model Alias |
 |--------------------------------+-------------|
+| =AI_CLAUDE_CODE_MODEL_FABLE=   | ="fable"=   |
 | =AI_CLAUDE_CODE_MODEL_OPUS=    | ="opus"=    |
 | =AI_CLAUDE_CODE_MODEL_SONNET=  | ="sonnet"=  |
 | =AI_CLAUDE_CODE_MODEL_HAIKU=   | ="haiku"=   |
 | =AI_CLAUDE_CODE_DEFAULT_MODEL= | ="sonnet"=  |
+
+Use a full Claude 5 ID instead to *pin* a generation. 1M context is the
+default and the maximum for this generation, so no =[1m]= / =-1m= suffix
+exists or is accepted.
+
+| Define                          | Model ID          |
+|---------------------------------+-------------------|
+| =AI_CLAUDE_CODE_MODEL_FABLE_5=  | ="claude-fable-5"=  |
+| =AI_CLAUDE_CODE_MODEL_OPUS_5=   | ="claude-opus-5"=   |
+| =AI_CLAUDE_CODE_MODEL_SONNET_5= | ="claude-sonnet-5"= |
+
+=ai_provider_list_models()= reports all seven: the four aliases followed by
+the three pinned Claude 5 IDs. The list is advisory --- this provider passes
+any =--model= string through to the CLI verbatim without validating it.
 
 ** Ollama transport ("ollama/" models)
 Ollama can drive the Claude Code CLI as its transport. When the model name

@@ -61,7 +61,7 @@ int main(void)
 
     /* Uses ANTHROPIC_API_KEY from environment */
     client = ai_claude_client_new();
-    ai_client_set_model(AI_CLIENT(client), "claude-sonnet-4-20250514");
+    ai_client_set_model(AI_CLIENT(client), "claude-sonnet-5");
 
     msg = ai_message_new_user("What is 2 + 2?");
     messages = g_list_append(NULL, msg);

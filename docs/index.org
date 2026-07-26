@@ -8,10 +8,10 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 *** HTTP API
 | Provider                             | Description               | Default Model            |
 |--------------------------------------+---------------------------+--------------------------|
-| [[file:providers/claude.org][Claude]] | Anthropic's Claude models | claude-sonnet-4-20250514 |
-| [[file:providers/openai.org][OpenAI]] | OpenAI GPT models         | gpt-4o                   |
-| [[file:providers/gemini.org][Gemini]] | Google's Gemini models    | gemini-2.0-flash         |
-| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4-1-fast-reasoning  |
+| [[file:providers/claude.org][Claude]] | Anthropic's Claude models | claude-sonnet-5          |
+| [[file:providers/openai.org][OpenAI]] | OpenAI GPT models         | gpt-5.5                  |
+| [[file:providers/gemini.org][Gemini]] | Google's Gemini models    | gemini-3.5-flash         |
+| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4.3                 |
 | [[file:providers/ollama.org][Ollama]] | Local models via Ollama   | gpt-oss:20b              |
 
 *** CLI Wrappers

@@ -25,14 +25,29 @@ This was introduced because Anthropic's Agent SDK billing path is changing 2026-
 | =OLLAMA_PATH=      | Override the path to the =ollama= launcher (Ollama transport, below) |
 
 ** Available Models
-The Claude Code CLI uses simplified aliases --- same as the non-tmux client:
+Same set as the [[file:claude-code.org][non-tmux client]]. The short aliases *float* to the newest
+model of each tier:
 
 | Define                         | Model Alias |
 |--------------------------------+-------------|
+| =AI_CLAUDE_TMUX_MODEL_FABLE=   | ="fable"=   |
 | =AI_CLAUDE_TMUX_MODEL_OPUS=    | ="opus"=    |
 | =AI_CLAUDE_TMUX_MODEL_SONNET=  | ="sonnet"=  |
 | =AI_CLAUDE_TMUX_MODEL_HAIKU=   | ="haiku"=   |
 | =AI_CLAUDE_TMUX_DEFAULT_MODEL= | ="sonnet"=  |
+
+Use a full Claude 5 ID instead to *pin* a generation. 1M context is the
+default and the maximum for this generation, so no =[1m]= / =-1m= suffix
+exists or is accepted.
+
+| Define                          | Model ID            |
+|---------------------------------+---------------------|
+| =AI_CLAUDE_TMUX_MODEL_FABLE_5=  | ="claude-fable-5"=  |
+| =AI_CLAUDE_TMUX_MODEL_OPUS_5=   | ="claude-opus-5"=   |
+| =AI_CLAUDE_TMUX_MODEL_SONNET_5= | ="claude-sonnet-5"= |
+
+=ai_provider_list_models()= reports all seven: the four aliases followed by
+the three pinned Claude 5 IDs.
 
 ** Ollama transport ("ollama/" models)
 Like the [[file:claude-code.org][non-tmux client]], a model name beginning with =ollama/= routes

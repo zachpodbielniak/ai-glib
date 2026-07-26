@@ -225,7 +225,7 @@ g_autoptr(AiClaudeClient) claude = ai_claude_client_new();
 AiClient *client = AI_CLIENT(claude);
 
 /* Configure the client */
-ai_client_set_model(client, "claude-sonnet-4-20250514");
+ai_client_set_model(client, "claude-sonnet-5");
 ai_client_set_max_tokens(client, 4096);
 ai_client_set_temperature(client, 0.7);
 ai_client_set_system_prompt(client, "You are a helpful assistant.");

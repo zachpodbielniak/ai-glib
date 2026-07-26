@@ -233,7 +233,7 @@ create_provider(AiProviderType type)
 
 /* Usage */
 g_autoptr(AiClient) client = create_provider(AI_PROVIDER_CLAUDE);
-ai_client_set_model(client, "claude-sonnet-4-20250514");
+ai_client_set_model(client, "claude-sonnet-5");
 
 ai_provider_chat_async(AI_PROVIDER(client), messages, ...);
 #+end_src

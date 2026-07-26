@@ -63,7 +63,7 @@ const gchar *model = ai_config_get_default_model(config);
 
 /* Override */
 ai_config_set_default_provider(config, AI_PROVIDER_CLAUDE);
-ai_config_set_default_model(config, "claude-sonnet-4-20250514");
+ai_config_set_default_model(config, "claude-sonnet-5");
 #+end_src
 
 ** API Keys
@@ -107,7 +107,7 @@ The default provider and model can be set via environment variables, which overr
 | Variable                   | Description           | Example                                                                   |
 |----------------------------+-----------------------+---------------------------------------------------------------------------|
 | =AI_GLIB_DEFAULT_PROVIDER= | Default provider name | =ollama=, =claude=, =openai=, =gemini=, =grok=, =claude-code=, =opencode= |
-| =AI_GLIB_DEFAULT_MODEL=    | Default model name    | =qwen2.5:7b=, =claude-sonnet-4-20250514=                                  |
+| =AI_GLIB_DEFAULT_MODEL=    | Default model name    | =qwen2.5:7b=, =claude-sonnet-5=                                  |
 
 #+begin_src sh
 export AI_GLIB_DEFAULT_PROVIDER=ollama
@@ -207,7 +207,7 @@ Set the model on the client:
 g_autoptr(AiClaudeClient) client = ai_claude_client_new();
 
 /* Change from default model */
-ai_client_set_model(AI_CLIENT(client), "claude-opus-4-20250514");
+ai_client_set_model(AI_CLIENT(client), "claude-opus-5");
 #+end_src
 
 Available models vary by provider. Use =ai_provider_list_models_async()= to query.

@@ -2471,11 +2471,15 @@ ai_claude_tmux_client_list_models_async(
 
     (void)cancellable;
 
+    /* Static list of model aliases, then the pinned Claude 5 IDs */
     task = g_task_new(provider, NULL, callback, user_data);
-    models = g_list_append(models, g_strdup("fable"));
-    models = g_list_append(models, g_strdup("opus"));
-    models = g_list_append(models, g_strdup("sonnet"));
-    models = g_list_append(models, g_strdup("haiku"));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_FABLE));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_OPUS));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_SONNET));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_HAIKU));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_FABLE_5));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_OPUS_5));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_SONNET_5));
     g_task_return_pointer(task, models, NULL);
     g_object_unref(task);
 }

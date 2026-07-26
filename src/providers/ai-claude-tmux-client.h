@@ -56,13 +56,32 @@ G_DECLARE_FINAL_TYPE(AiClaudeTmuxClient, ai_claude_tmux_client,
 #define AI_CLAUDE_TMUX_DEFAULT_MODEL "sonnet"
 
 /**
+ * AI_CLAUDE_TMUX_MODEL_FABLE:
  * AI_CLAUDE_TMUX_MODEL_OPUS:
  * AI_CLAUDE_TMUX_MODEL_SONNET:
  * AI_CLAUDE_TMUX_MODEL_HAIKU:
+ *
+ * Floating claude CLI aliases: each resolves to the newest model of that
+ * tier.
  */
+#define AI_CLAUDE_TMUX_MODEL_FABLE   "fable"
 #define AI_CLAUDE_TMUX_MODEL_OPUS    "opus"
 #define AI_CLAUDE_TMUX_MODEL_SONNET  "sonnet"
 #define AI_CLAUDE_TMUX_MODEL_HAIKU   "haiku"
+
+/**
+ * AI_CLAUDE_TMUX_MODEL_FABLE_5:
+ * AI_CLAUDE_TMUX_MODEL_OPUS_5:
+ * AI_CLAUDE_TMUX_MODEL_SONNET_5:
+ *
+ * Claude 5 model IDs, also valid --model arguments. Use these to pin a
+ * generation instead of floating with the aliases above. 1M context is the
+ * default and the maximum for this generation, so no "[1m]"/"-1m" suffix
+ * exists or is accepted.
+ */
+#define AI_CLAUDE_TMUX_MODEL_FABLE_5  "claude-fable-5"
+#define AI_CLAUDE_TMUX_MODEL_OPUS_5   "claude-opus-5"
+#define AI_CLAUDE_TMUX_MODEL_SONNET_5 "claude-sonnet-5"
 
 /**
  * ai_claude_tmux_client_new:

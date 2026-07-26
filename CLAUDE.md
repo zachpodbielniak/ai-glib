@@ -254,8 +254,9 @@ Each provider header defines model constants. Use these instead of hardcoding st
 
 ```c
 /* Claude */
-ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_SONNET_4);
-ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_4_5);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_SONNET_5);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_OPUS_5);
+ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_FABLE_5);
 ai_client_set_model(AI_CLIENT(client), AI_CLAUDE_MODEL_HAIKU);  /* alias */
 
 /* OpenAI */
