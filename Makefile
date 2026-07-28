@@ -55,6 +55,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/model/ai-tool-result.h \
 	$(SRCDIR)/model/ai-message.h \
 	$(SRCDIR)/model/ai-response.h \
+	$(SRCDIR)/model/ai-image.h \
 	$(SRCDIR)/model/ai-image-request.h \
 	$(SRCDIR)/model/ai-generated-image.h \
 	$(SRCDIR)/model/ai-image-response.h \
@@ -95,6 +96,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-tool-result.c \
 	$(SRCDIR)/model/ai-message.c \
 	$(SRCDIR)/model/ai-response.c \
+	$(SRCDIR)/model/ai-image.c \
 	$(SRCDIR)/model/ai-image-request.c \
 	$(SRCDIR)/model/ai-generated-image.c \
 	$(SRCDIR)/model/ai-image-response.c \
@@ -156,14 +158,20 @@ $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
 	     -e 's/@VERSION_MICRO@/$(VERSION_MICRO)/g' \
 	     -e 's/@PACKAGE_NAME@/$(PROJECT_NAME)/g' \
+	     -e 's/@PACKAGE_VERSION@/$(VERSION)/g' \
+	     -e 's|@PACKAGE_BUGREPORT@|$(PACKAGE_BUGREPORT)|g' \
+	     -e 's|@PREFIX@|$(PREFIX)|g' \
+	     -e 's|@LIBDIR@|$(LIBDIR)|g' \
+	     -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' \
 	     $< > $@
 
 # Generate ai-version.h from template
 $(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
 	@echo "Generating ai-version.h..."
-	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
-	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
-	     -e 's/@VERSION_MICRO@/$(VERSION_MICRO)/g' \
+	@sed -e 's/@AI_GLIB_MAJOR_VERSION@/$(VERSION_MAJOR)/g' \
+	     -e 's/@AI_GLIB_MINOR_VERSION@/$(VERSION_MINOR)/g' \
+	     -e 's/@AI_GLIB_MICRO_VERSION@/$(VERSION_MICRO)/g' \
+	     -e 's/@AI_GLIB_VERSION@/$(VERSION)/g' \
 	     $< > $@
 
 # Shared library

@@ -55,9 +55,20 @@ typedef struct _AiMessage  AiMessage;
 typedef struct _AiResponse  AiResponse;
 /* AiResponse is final */
 
+/* Image types - all boxed */
+typedef struct _AiImage           AiImage;
+typedef struct _AiImageRequest    AiImageRequest;
+typedef struct _AiGeneratedImage  AiGeneratedImage;
+typedef struct _AiImageResponse   AiImageResponse;
+typedef struct _AiImageModelInfo  AiImageModelInfo;
+
 /* AiClient is derivable - needs class forward declaration */
 typedef struct _AiClient       AiClient;
 typedef struct _AiClientClass  AiClientClass;
+
+/* AiCliClient is derivable - needs class forward declaration */
+typedef struct _AiCliClient       AiCliClient;
+typedef struct _AiCliClientClass  AiCliClientClass;
 
 typedef struct _AiClaudeClient  AiClaudeClient;
 /* AiClaudeClient is final */
@@ -73,6 +84,15 @@ typedef struct _AiGrokClient  AiGrokClient;
 
 typedef struct _AiOllamaClient  AiOllamaClient;
 /* AiOllamaClient is final */
+
+typedef struct _AiClaudeCodeClient  AiClaudeCodeClient;
+/* AiClaudeCodeClient is final */
+
+typedef struct _AiClaudeTmuxClient  AiClaudeTmuxClient;
+/* AiClaudeTmuxClient is final */
+
+typedef struct _AiOpenCodeClient  AiOpenCodeClient;
+/* AiOpenCodeClient is final */
 
 /* Convenience types */
 typedef struct _AiSimple  AiSimple;
@@ -97,5 +117,8 @@ typedef struct _AiProviderInterface  AiProviderInterface;
 
 typedef struct _AiStreamable           AiStreamable;
 typedef struct _AiStreamableInterface  AiStreamableInterface;
+
+typedef struct _AiImageGenerator           AiImageGenerator;
+typedef struct _AiImageGeneratorInterface  AiImageGeneratorInterface;
 
 G_END_DECLS

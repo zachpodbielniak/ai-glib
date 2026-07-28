@@ -561,6 +561,9 @@ ai_image_quality_get_type(void)
             { AI_IMAGE_QUALITY_AUTO, "AI_IMAGE_QUALITY_AUTO", "auto" },
             { AI_IMAGE_QUALITY_STANDARD, "AI_IMAGE_QUALITY_STANDARD", "standard" },
             { AI_IMAGE_QUALITY_HD, "AI_IMAGE_QUALITY_HD", "hd" },
+            { AI_IMAGE_QUALITY_LOW, "AI_IMAGE_QUALITY_LOW", "low" },
+            { AI_IMAGE_QUALITY_MEDIUM, "AI_IMAGE_QUALITY_MEDIUM", "medium" },
+            { AI_IMAGE_QUALITY_HIGH, "AI_IMAGE_QUALITY_HIGH", "high" },
             { 0, NULL, NULL }
         };
 
@@ -711,6 +714,12 @@ ai_image_quality_to_string(AiImageQuality quality)
             return "standard";
         case AI_IMAGE_QUALITY_HD:
             return "hd";
+        case AI_IMAGE_QUALITY_LOW:
+            return "low";
+        case AI_IMAGE_QUALITY_MEDIUM:
+            return "medium";
+        case AI_IMAGE_QUALITY_HIGH:
+            return "high";
         default:
             return NULL;
     }
@@ -739,6 +748,18 @@ ai_image_quality_from_string(const gchar *str)
     else if (g_strcmp0(str, "hd") == 0)
     {
         return AI_IMAGE_QUALITY_HD;
+    }
+    else if (g_strcmp0(str, "low") == 0)
+    {
+        return AI_IMAGE_QUALITY_LOW;
+    }
+    else if (g_strcmp0(str, "medium") == 0)
+    {
+        return AI_IMAGE_QUALITY_MEDIUM;
+    }
+    else if (g_strcmp0(str, "high") == 0)
+    {
+        return AI_IMAGE_QUALITY_HIGH;
     }
 
     return AI_IMAGE_QUALITY_AUTO;
@@ -844,6 +865,642 @@ ai_image_response_format_from_string(const gchar *str)
     }
 
     return AI_IMAGE_RESPONSE_URL;
+}
+
+/*
+ * GType registration for AiTriState.
+ */
+GType
+ai_tri_state_get_type(void)
+{
+    static GType tri_state_type = 0;
+
+    if (g_once_init_enter(&tri_state_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_TRI_UNSET, "AI_TRI_UNSET", "unset" },
+            { AI_TRI_FALSE, "AI_TRI_FALSE", "false" },
+            { AI_TRI_TRUE, "AI_TRI_TRUE", "true" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiTriState", values);
+        g_once_init_leave(&tri_state_type, type);
+    }
+
+    return tri_state_type;
+}
+
+/*
+ * GType registration for AiImageOperation.
+ */
+GType
+ai_image_operation_get_type(void)
+{
+    static GType image_operation_type = 0;
+
+    if (g_once_init_enter(&image_operation_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_OPERATION_GENERATE, "AI_IMAGE_OPERATION_GENERATE", "generate" },
+            { AI_IMAGE_OPERATION_EDIT, "AI_IMAGE_OPERATION_EDIT", "edit" },
+            { AI_IMAGE_OPERATION_VARIATION, "AI_IMAGE_OPERATION_VARIATION", "variation" },
+            { AI_IMAGE_OPERATION_UPSCALE, "AI_IMAGE_OPERATION_UPSCALE", "upscale" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageOperation", values);
+        g_once_init_leave(&image_operation_type, type);
+    }
+
+    return image_operation_type;
+}
+
+/**
+ * ai_image_operation_to_string:
+ * @operation: an #AiImageOperation
+ *
+ * Converts an #AiImageOperation to its string representation.
+ *
+ * Returns: (transfer none): the string representation
+ */
+const gchar *
+ai_image_operation_to_string(AiImageOperation operation)
+{
+    switch (operation)
+    {
+        case AI_IMAGE_OPERATION_GENERATE:
+            return "generate";
+        case AI_IMAGE_OPERATION_EDIT:
+            return "edit";
+        case AI_IMAGE_OPERATION_VARIATION:
+            return "variation";
+        case AI_IMAGE_OPERATION_UPSCALE:
+            return "upscale";
+        default:
+            return "generate";
+    }
+}
+
+/**
+ * ai_image_operation_from_string:
+ * @str: an operation string
+ *
+ * Converts a string to an #AiImageOperation.
+ *
+ * Returns: the #AiImageOperation, or %AI_IMAGE_OPERATION_GENERATE if not
+ *   recognized
+ */
+AiImageOperation
+ai_image_operation_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_OPERATION_GENERATE;
+    }
+
+    if (g_strcmp0(str, "edit") == 0)
+    {
+        return AI_IMAGE_OPERATION_EDIT;
+    }
+    else if (g_strcmp0(str, "variation") == 0 ||
+             g_strcmp0(str, "variations") == 0)
+    {
+        return AI_IMAGE_OPERATION_VARIATION;
+    }
+    else if (g_strcmp0(str, "upscale") == 0)
+    {
+        return AI_IMAGE_OPERATION_UPSCALE;
+    }
+
+    return AI_IMAGE_OPERATION_GENERATE;
+}
+
+/*
+ * GType registration for AiImageResolution.
+ */
+GType
+ai_image_resolution_get_type(void)
+{
+    static GType image_resolution_type = 0;
+
+    if (g_once_init_enter(&image_resolution_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_RESOLUTION_AUTO, "AI_IMAGE_RESOLUTION_AUTO", "auto" },
+            { AI_IMAGE_RESOLUTION_1K, "AI_IMAGE_RESOLUTION_1K", "1K" },
+            { AI_IMAGE_RESOLUTION_2K, "AI_IMAGE_RESOLUTION_2K", "2K" },
+            { AI_IMAGE_RESOLUTION_4K, "AI_IMAGE_RESOLUTION_4K", "4K" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageResolution", values);
+        g_once_init_leave(&image_resolution_type, type);
+    }
+
+    return image_resolution_type;
+}
+
+/**
+ * ai_image_resolution_to_string:
+ * @resolution: an #AiImageResolution
+ *
+ * Converts an #AiImageResolution to the wire representation Gemini uses
+ * (`1K`, `2K`, `4K`).
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_RESOLUTION_AUTO
+ */
+const gchar *
+ai_image_resolution_to_string(AiImageResolution resolution)
+{
+    switch (resolution)
+    {
+        case AI_IMAGE_RESOLUTION_AUTO:
+            return NULL;
+        case AI_IMAGE_RESOLUTION_1K:
+            return "1K";
+        case AI_IMAGE_RESOLUTION_2K:
+            return "2K";
+        case AI_IMAGE_RESOLUTION_4K:
+            return "4K";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_resolution_from_string:
+ * @str: a resolution string
+ *
+ * Converts a string to an #AiImageResolution.  Accepts either case, so
+ * both `2k` and `2K` are understood.
+ *
+ * Returns: the #AiImageResolution, or %AI_IMAGE_RESOLUTION_AUTO if not
+ *   recognized
+ */
+AiImageResolution
+ai_image_resolution_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_RESOLUTION_AUTO;
+    }
+
+    if (g_ascii_strcasecmp(str, "1k") == 0)
+    {
+        return AI_IMAGE_RESOLUTION_1K;
+    }
+    else if (g_ascii_strcasecmp(str, "2k") == 0)
+    {
+        return AI_IMAGE_RESOLUTION_2K;
+    }
+    else if (g_ascii_strcasecmp(str, "4k") == 0)
+    {
+        return AI_IMAGE_RESOLUTION_4K;
+    }
+
+    return AI_IMAGE_RESOLUTION_AUTO;
+}
+
+/*
+ * GType registration for AiImageBackground.
+ */
+GType
+ai_image_background_get_type(void)
+{
+    static GType image_background_type = 0;
+
+    if (g_once_init_enter(&image_background_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_BACKGROUND_AUTO, "AI_IMAGE_BACKGROUND_AUTO", "auto" },
+            { AI_IMAGE_BACKGROUND_TRANSPARENT, "AI_IMAGE_BACKGROUND_TRANSPARENT", "transparent" },
+            { AI_IMAGE_BACKGROUND_OPAQUE, "AI_IMAGE_BACKGROUND_OPAQUE", "opaque" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageBackground", values);
+        g_once_init_leave(&image_background_type, type);
+    }
+
+    return image_background_type;
+}
+
+/**
+ * ai_image_background_to_string:
+ * @background: an #AiImageBackground
+ *
+ * Converts an #AiImageBackground to its string representation.
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_BACKGROUND_AUTO
+ */
+const gchar *
+ai_image_background_to_string(AiImageBackground background)
+{
+    switch (background)
+    {
+        case AI_IMAGE_BACKGROUND_AUTO:
+            return NULL;
+        case AI_IMAGE_BACKGROUND_TRANSPARENT:
+            return "transparent";
+        case AI_IMAGE_BACKGROUND_OPAQUE:
+            return "opaque";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_background_from_string:
+ * @str: a background string
+ *
+ * Converts a string to an #AiImageBackground.
+ *
+ * Returns: the #AiImageBackground, or %AI_IMAGE_BACKGROUND_AUTO if not
+ *   recognized
+ */
+AiImageBackground
+ai_image_background_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_BACKGROUND_AUTO;
+    }
+
+    if (g_strcmp0(str, "transparent") == 0)
+    {
+        return AI_IMAGE_BACKGROUND_TRANSPARENT;
+    }
+    else if (g_strcmp0(str, "opaque") == 0)
+    {
+        return AI_IMAGE_BACKGROUND_OPAQUE;
+    }
+
+    return AI_IMAGE_BACKGROUND_AUTO;
+}
+
+/*
+ * GType registration for AiImageFormat.
+ */
+GType
+ai_image_format_get_type(void)
+{
+    static GType image_format_type = 0;
+
+    if (g_once_init_enter(&image_format_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_FORMAT_AUTO, "AI_IMAGE_FORMAT_AUTO", "auto" },
+            { AI_IMAGE_FORMAT_PNG, "AI_IMAGE_FORMAT_PNG", "png" },
+            { AI_IMAGE_FORMAT_JPEG, "AI_IMAGE_FORMAT_JPEG", "jpeg" },
+            { AI_IMAGE_FORMAT_WEBP, "AI_IMAGE_FORMAT_WEBP", "webp" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageFormat", values);
+        g_once_init_leave(&image_format_type, type);
+    }
+
+    return image_format_type;
+}
+
+/**
+ * ai_image_format_to_string:
+ * @format: an #AiImageFormat
+ *
+ * Converts an #AiImageFormat to its string representation.
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_FORMAT_AUTO
+ */
+const gchar *
+ai_image_format_to_string(AiImageFormat format)
+{
+    switch (format)
+    {
+        case AI_IMAGE_FORMAT_AUTO:
+            return NULL;
+        case AI_IMAGE_FORMAT_PNG:
+            return "png";
+        case AI_IMAGE_FORMAT_JPEG:
+            return "jpeg";
+        case AI_IMAGE_FORMAT_WEBP:
+            return "webp";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_format_from_string:
+ * @str: a format string
+ *
+ * Converts a string to an #AiImageFormat.  `jpg` is accepted as a synonym
+ * for `jpeg`.
+ *
+ * Returns: the #AiImageFormat, or %AI_IMAGE_FORMAT_AUTO if not recognized
+ */
+AiImageFormat
+ai_image_format_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_FORMAT_AUTO;
+    }
+
+    if (g_ascii_strcasecmp(str, "png") == 0)
+    {
+        return AI_IMAGE_FORMAT_PNG;
+    }
+    else if (g_ascii_strcasecmp(str, "jpeg") == 0 ||
+             g_ascii_strcasecmp(str, "jpg") == 0)
+    {
+        return AI_IMAGE_FORMAT_JPEG;
+    }
+    else if (g_ascii_strcasecmp(str, "webp") == 0)
+    {
+        return AI_IMAGE_FORMAT_WEBP;
+    }
+
+    return AI_IMAGE_FORMAT_AUTO;
+}
+
+/**
+ * ai_image_format_to_mime_type:
+ * @format: an #AiImageFormat
+ *
+ * Converts an #AiImageFormat to the corresponding MIME type.
+ *
+ * Providers that let you choose an output format do not always echo the
+ * resulting MIME type back in the response, so callers need to be able to
+ * derive it from what they asked for.
+ *
+ * Returns: (transfer none) (nullable): the MIME type, or %NULL for
+ *   %AI_IMAGE_FORMAT_AUTO
+ */
+const gchar *
+ai_image_format_to_mime_type(AiImageFormat format)
+{
+    switch (format)
+    {
+        case AI_IMAGE_FORMAT_AUTO:
+            return NULL;
+        case AI_IMAGE_FORMAT_PNG:
+            return "image/png";
+        case AI_IMAGE_FORMAT_JPEG:
+            return "image/jpeg";
+        case AI_IMAGE_FORMAT_WEBP:
+            return "image/webp";
+        default:
+            return NULL;
+    }
+}
+
+/*
+ * GType registration for AiImageModeration.
+ */
+GType
+ai_image_moderation_get_type(void)
+{
+    static GType image_moderation_type = 0;
+
+    if (g_once_init_enter(&image_moderation_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_MODERATION_AUTO, "AI_IMAGE_MODERATION_AUTO", "auto" },
+            { AI_IMAGE_MODERATION_LOW, "AI_IMAGE_MODERATION_LOW", "low" },
+            { AI_IMAGE_MODERATION_NONE, "AI_IMAGE_MODERATION_NONE", "none" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageModeration", values);
+        g_once_init_leave(&image_moderation_type, type);
+    }
+
+    return image_moderation_type;
+}
+
+/**
+ * ai_image_moderation_to_string:
+ * @moderation: an #AiImageModeration
+ *
+ * Converts an #AiImageModeration to its string representation.
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_MODERATION_AUTO
+ */
+const gchar *
+ai_image_moderation_to_string(AiImageModeration moderation)
+{
+    switch (moderation)
+    {
+        case AI_IMAGE_MODERATION_AUTO:
+            return NULL;
+        case AI_IMAGE_MODERATION_LOW:
+            return "low";
+        case AI_IMAGE_MODERATION_NONE:
+            return "none";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_moderation_from_string:
+ * @str: a moderation string
+ *
+ * Converts a string to an #AiImageModeration.
+ *
+ * Returns: the #AiImageModeration, or %AI_IMAGE_MODERATION_AUTO if not
+ *   recognized
+ */
+AiImageModeration
+ai_image_moderation_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_MODERATION_AUTO;
+    }
+
+    if (g_strcmp0(str, "low") == 0)
+    {
+        return AI_IMAGE_MODERATION_LOW;
+    }
+    else if (g_strcmp0(str, "none") == 0 || g_strcmp0(str, "off") == 0)
+    {
+        return AI_IMAGE_MODERATION_NONE;
+    }
+
+    return AI_IMAGE_MODERATION_AUTO;
+}
+
+/*
+ * GType registration for AiImagePersonGeneration.
+ */
+GType
+ai_image_person_generation_get_type(void)
+{
+    static GType person_generation_type = 0;
+
+    if (g_once_init_enter(&person_generation_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_PERSON_GENERATION_DEFAULT, "AI_IMAGE_PERSON_GENERATION_DEFAULT", "default" },
+            { AI_IMAGE_PERSON_GENERATION_DONT_ALLOW, "AI_IMAGE_PERSON_GENERATION_DONT_ALLOW", "dont_allow" },
+            { AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT, "AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT", "allow_adult" },
+            { AI_IMAGE_PERSON_GENERATION_ALLOW_ALL, "AI_IMAGE_PERSON_GENERATION_ALLOW_ALL", "allow_all" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImagePersonGeneration", values);
+        g_once_init_leave(&person_generation_type, type);
+    }
+
+    return person_generation_type;
+}
+
+/**
+ * ai_image_person_generation_to_string:
+ * @person_generation: an #AiImagePersonGeneration
+ *
+ * Converts an #AiImagePersonGeneration to the wire representation Imagen
+ * uses.
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_PERSON_GENERATION_DEFAULT
+ */
+const gchar *
+ai_image_person_generation_to_string(AiImagePersonGeneration person_generation)
+{
+    switch (person_generation)
+    {
+        case AI_IMAGE_PERSON_GENERATION_DEFAULT:
+            return NULL;
+        case AI_IMAGE_PERSON_GENERATION_DONT_ALLOW:
+            return "dont_allow";
+        case AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT:
+            return "allow_adult";
+        case AI_IMAGE_PERSON_GENERATION_ALLOW_ALL:
+            return "allow_all";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_person_generation_from_string:
+ * @str: a person-generation string
+ *
+ * Converts a string to an #AiImagePersonGeneration.  Hyphens are accepted
+ * in place of underscores.
+ *
+ * Returns: the #AiImagePersonGeneration, or
+ *   %AI_IMAGE_PERSON_GENERATION_DEFAULT if not recognized
+ */
+AiImagePersonGeneration
+ai_image_person_generation_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_PERSON_GENERATION_DEFAULT;
+    }
+
+    if (g_strcmp0(str, "dont_allow") == 0 || g_strcmp0(str, "dont-allow") == 0)
+    {
+        return AI_IMAGE_PERSON_GENERATION_DONT_ALLOW;
+    }
+    else if (g_strcmp0(str, "allow_adult") == 0 ||
+             g_strcmp0(str, "allow-adult") == 0)
+    {
+        return AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT;
+    }
+    else if (g_strcmp0(str, "allow_all") == 0 ||
+             g_strcmp0(str, "allow-all") == 0)
+    {
+        return AI_IMAGE_PERSON_GENERATION_ALLOW_ALL;
+    }
+
+    return AI_IMAGE_PERSON_GENERATION_DEFAULT;
+}
+
+/*
+ * GType registration for AiImageFidelity.
+ */
+GType
+ai_image_fidelity_get_type(void)
+{
+    static GType image_fidelity_type = 0;
+
+    if (g_once_init_enter(&image_fidelity_type))
+    {
+        static const GEnumValue values[] = {
+            { AI_IMAGE_FIDELITY_AUTO, "AI_IMAGE_FIDELITY_AUTO", "auto" },
+            { AI_IMAGE_FIDELITY_LOW, "AI_IMAGE_FIDELITY_LOW", "low" },
+            { AI_IMAGE_FIDELITY_HIGH, "AI_IMAGE_FIDELITY_HIGH", "high" },
+            { 0, NULL, NULL }
+        };
+
+        GType type = g_enum_register_static("AiImageFidelity", values);
+        g_once_init_leave(&image_fidelity_type, type);
+    }
+
+    return image_fidelity_type;
+}
+
+/**
+ * ai_image_fidelity_to_string:
+ * @fidelity: an #AiImageFidelity
+ *
+ * Converts an #AiImageFidelity to its string representation.
+ *
+ * Returns: (transfer none) (nullable): the string representation, or %NULL
+ *   for %AI_IMAGE_FIDELITY_AUTO
+ */
+const gchar *
+ai_image_fidelity_to_string(AiImageFidelity fidelity)
+{
+    switch (fidelity)
+    {
+        case AI_IMAGE_FIDELITY_AUTO:
+            return NULL;
+        case AI_IMAGE_FIDELITY_LOW:
+            return "low";
+        case AI_IMAGE_FIDELITY_HIGH:
+            return "high";
+        default:
+            return NULL;
+    }
+}
+
+/**
+ * ai_image_fidelity_from_string:
+ * @str: a fidelity string
+ *
+ * Converts a string to an #AiImageFidelity.
+ *
+ * Returns: the #AiImageFidelity, or %AI_IMAGE_FIDELITY_AUTO if not
+ *   recognized
+ */
+AiImageFidelity
+ai_image_fidelity_from_string(const gchar *str)
+{
+    if (str == NULL)
+    {
+        return AI_IMAGE_FIDELITY_AUTO;
+    }
+
+    if (g_strcmp0(str, "low") == 0)
+    {
+        return AI_IMAGE_FIDELITY_LOW;
+    }
+    else if (g_strcmp0(str, "high") == 0)
+    {
+        return AI_IMAGE_FIDELITY_HIGH;
+    }
+
+    return AI_IMAGE_FIDELITY_AUTO;
 }
 
 /*

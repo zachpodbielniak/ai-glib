@@ -206,16 +206,30 @@ GType ai_image_size_get_type(void);
 /**
  * AiImageQuality:
  * @AI_IMAGE_QUALITY_AUTO: Let the provider choose (default)
- * @AI_IMAGE_QUALITY_STANDARD: Standard quality
- * @AI_IMAGE_QUALITY_HD: High definition quality
+ * @AI_IMAGE_QUALITY_STANDARD: Standard quality (DALL-E vocabulary)
+ * @AI_IMAGE_QUALITY_HD: High definition quality (DALL-E vocabulary)
+ * @AI_IMAGE_QUALITY_LOW: Low quality (GPT Image vocabulary)
+ * @AI_IMAGE_QUALITY_MEDIUM: Medium quality (GPT Image vocabulary)
+ * @AI_IMAGE_QUALITY_HIGH: High quality (GPT Image vocabulary)
  *
  * Enumeration of image quality levels.
+ *
+ * OpenAI's two image families use disjoint vocabularies for the same
+ * concept: DALL-E accepts `standard`/`hd` while GPT Image accepts
+ * `low`/`medium`/`high`/`auto`, and each rejects the other's values.  Both
+ * sets are therefore represented here, and each provider maps whichever it
+ * is given onto the vocabulary its model actually accepts -- so a caller
+ * asking for %AI_IMAGE_QUALITY_HD against a GPT Image model gets `high`
+ * rather than an API error.
  */
 typedef enum
 {
     AI_IMAGE_QUALITY_AUTO = 0,
     AI_IMAGE_QUALITY_STANDARD,
-    AI_IMAGE_QUALITY_HD
+    AI_IMAGE_QUALITY_HD,
+    AI_IMAGE_QUALITY_LOW,
+    AI_IMAGE_QUALITY_MEDIUM,
+    AI_IMAGE_QUALITY_HIGH
 } AiImageQuality;
 
 GType ai_image_quality_get_type(void);
@@ -278,6 +292,226 @@ ai_image_response_format_to_string(AiImageResponseFormat format);
 
 AiImageResponseFormat
 ai_image_response_format_from_string(const gchar *str);
+
+/**
+ * AiTriState:
+ * @AI_TRI_UNSET: Not specified -- omit the parameter entirely (default)
+ * @AI_TRI_FALSE: Explicitly false
+ * @AI_TRI_TRUE: Explicitly true
+ *
+ * A boolean that can also be "not specified".
+ *
+ * Image APIs reject parameters their model does not understand, so ai-glib
+ * must be able to distinguish "the caller wants this off" from "the caller
+ * never mentioned it".  A plain #gboolean cannot express that, and
+ * defaulting to %FALSE would serialise an opt-out the caller never asked
+ * for.
+ */
+typedef enum
+{
+    AI_TRI_UNSET = 0,
+    AI_TRI_FALSE,
+    AI_TRI_TRUE
+} AiTriState;
+
+GType ai_tri_state_get_type(void);
+#define AI_TYPE_TRI_STATE (ai_tri_state_get_type())
+
+/**
+ * AiImageOperation:
+ * @AI_IMAGE_OPERATION_GENERATE: Generate from a prompt alone (default)
+ * @AI_IMAGE_OPERATION_EDIT: Edit or recompose the supplied reference images
+ * @AI_IMAGE_OPERATION_VARIATION: Produce variations of a single reference
+ * @AI_IMAGE_OPERATION_UPSCALE: Upscale a single reference
+ *
+ * What an image request is asking the provider to do.
+ *
+ * Providers route these to different endpoints -- OpenAI has
+ * `/v1/images/generations`, `/v1/images/edits` and `/v1/images/variations`,
+ * while Gemini expresses all of them through `:generateContent` -- so the
+ * operation is part of the request rather than part of the API surface.
+ */
+typedef enum
+{
+    AI_IMAGE_OPERATION_GENERATE = 0,
+    AI_IMAGE_OPERATION_EDIT,
+    AI_IMAGE_OPERATION_VARIATION,
+    AI_IMAGE_OPERATION_UPSCALE
+} AiImageOperation;
+
+GType ai_image_operation_get_type(void);
+#define AI_TYPE_IMAGE_OPERATION (ai_image_operation_get_type())
+
+const gchar *
+ai_image_operation_to_string(AiImageOperation operation);
+
+AiImageOperation
+ai_image_operation_from_string(const gchar *str);
+
+/**
+ * AiImageResolution:
+ * @AI_IMAGE_RESOLUTION_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_RESOLUTION_1K: Roughly 1024px on the long edge
+ * @AI_IMAGE_RESOLUTION_2K: Roughly 2048px on the long edge
+ * @AI_IMAGE_RESOLUTION_4K: Roughly 4096px on the long edge
+ *
+ * A resolution tier, independent of aspect ratio.
+ *
+ * Gemini's Nano Banana Pro and Imagen express output size as a tier plus an
+ * aspect ratio rather than as explicit pixel dimensions, which is why this
+ * is distinct from #AiImageSize.
+ */
+typedef enum
+{
+    AI_IMAGE_RESOLUTION_AUTO = 0,
+    AI_IMAGE_RESOLUTION_1K,
+    AI_IMAGE_RESOLUTION_2K,
+    AI_IMAGE_RESOLUTION_4K
+} AiImageResolution;
+
+GType ai_image_resolution_get_type(void);
+#define AI_TYPE_IMAGE_RESOLUTION (ai_image_resolution_get_type())
+
+const gchar *
+ai_image_resolution_to_string(AiImageResolution resolution);
+
+AiImageResolution
+ai_image_resolution_from_string(const gchar *str);
+
+/**
+ * AiImageBackground:
+ * @AI_IMAGE_BACKGROUND_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_BACKGROUND_TRANSPARENT: Render with an alpha channel
+ * @AI_IMAGE_BACKGROUND_OPAQUE: Render on an opaque background
+ *
+ * Background treatment for the generated image.
+ *
+ * Transparency requires an output format that has an alpha channel, so
+ * pairing %AI_IMAGE_BACKGROUND_TRANSPARENT with a JPEG output format is a
+ * request the provider cannot honour.
+ */
+typedef enum
+{
+    AI_IMAGE_BACKGROUND_AUTO = 0,
+    AI_IMAGE_BACKGROUND_TRANSPARENT,
+    AI_IMAGE_BACKGROUND_OPAQUE
+} AiImageBackground;
+
+GType ai_image_background_get_type(void);
+#define AI_TYPE_IMAGE_BACKGROUND (ai_image_background_get_type())
+
+const gchar *
+ai_image_background_to_string(AiImageBackground background);
+
+AiImageBackground
+ai_image_background_from_string(const gchar *str);
+
+/**
+ * AiImageFormat:
+ * @AI_IMAGE_FORMAT_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_FORMAT_PNG: PNG
+ * @AI_IMAGE_FORMAT_JPEG: JPEG
+ * @AI_IMAGE_FORMAT_WEBP: WebP
+ *
+ * Encoding of the returned image.
+ */
+typedef enum
+{
+    AI_IMAGE_FORMAT_AUTO = 0,
+    AI_IMAGE_FORMAT_PNG,
+    AI_IMAGE_FORMAT_JPEG,
+    AI_IMAGE_FORMAT_WEBP
+} AiImageFormat;
+
+GType ai_image_format_get_type(void);
+#define AI_TYPE_IMAGE_FORMAT (ai_image_format_get_type())
+
+const gchar *
+ai_image_format_to_string(AiImageFormat format);
+
+AiImageFormat
+ai_image_format_from_string(const gchar *str);
+
+const gchar *
+ai_image_format_to_mime_type(AiImageFormat format);
+
+/**
+ * AiImageModeration:
+ * @AI_IMAGE_MODERATION_AUTO: Provider default filtering (default)
+ * @AI_IMAGE_MODERATION_LOW: Relax filtering as far as the provider allows
+ * @AI_IMAGE_MODERATION_NONE: Request no filtering
+ *
+ * How aggressively the provider should filter generated content.
+ *
+ * Providers differ in how far down they let this go; %AI_IMAGE_MODERATION_NONE
+ * is a request, not a guarantee, and a provider with no such tier maps it
+ * onto its most permissive setting.
+ */
+typedef enum
+{
+    AI_IMAGE_MODERATION_AUTO = 0,
+    AI_IMAGE_MODERATION_LOW,
+    AI_IMAGE_MODERATION_NONE
+} AiImageModeration;
+
+GType ai_image_moderation_get_type(void);
+#define AI_TYPE_IMAGE_MODERATION (ai_image_moderation_get_type())
+
+const gchar *
+ai_image_moderation_to_string(AiImageModeration moderation);
+
+AiImageModeration
+ai_image_moderation_from_string(const gchar *str);
+
+/**
+ * AiImagePersonGeneration:
+ * @AI_IMAGE_PERSON_GENERATION_DEFAULT: Provider default (default)
+ * @AI_IMAGE_PERSON_GENERATION_DONT_ALLOW: Refuse to depict people
+ * @AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT: Allow adults only
+ * @AI_IMAGE_PERSON_GENERATION_ALLOW_ALL: Allow people of any age
+ *
+ * Policy for depicting people, as exposed by Imagen.
+ */
+typedef enum
+{
+    AI_IMAGE_PERSON_GENERATION_DEFAULT = 0,
+    AI_IMAGE_PERSON_GENERATION_DONT_ALLOW,
+    AI_IMAGE_PERSON_GENERATION_ALLOW_ADULT,
+    AI_IMAGE_PERSON_GENERATION_ALLOW_ALL
+} AiImagePersonGeneration;
+
+GType ai_image_person_generation_get_type(void);
+#define AI_TYPE_IMAGE_PERSON_GENERATION (ai_image_person_generation_get_type())
+
+const gchar *
+ai_image_person_generation_to_string(AiImagePersonGeneration person_generation);
+
+AiImagePersonGeneration
+ai_image_person_generation_from_string(const gchar *str);
+
+/**
+ * AiImageFidelity:
+ * @AI_IMAGE_FIDELITY_AUTO: Let the provider choose (default)
+ * @AI_IMAGE_FIDELITY_LOW: Treat the reference loosely
+ * @AI_IMAGE_FIDELITY_HIGH: Preserve the reference closely
+ *
+ * How closely an edit should preserve its input image.
+ */
+typedef enum
+{
+    AI_IMAGE_FIDELITY_AUTO = 0,
+    AI_IMAGE_FIDELITY_LOW,
+    AI_IMAGE_FIDELITY_HIGH
+} AiImageFidelity;
+
+GType ai_image_fidelity_get_type(void);
+#define AI_TYPE_IMAGE_FIDELITY (ai_image_fidelity_get_type())
+
+const gchar *
+ai_image_fidelity_to_string(AiImageFidelity fidelity);
+
+AiImageFidelity
+ai_image_fidelity_from_string(const gchar *str);
 
 /**
  * AiSearchFreshness:
