@@ -79,8 +79,9 @@ ai interactive (provider=claude-code). Ctrl-D to exit.
 
 ** Image generation
 =--image-gen= switches the CLI from chatting to generating an image, written to
-a file rather than printed. The image options live in their own group, so
-=ai --help= stays readable and =ai --help-image= shows the full set.
+a file rather than printed. All the image options below are listed by
+=ai --help=: a long complete help beats a short one that omits most of the mode
+it is documenting.
 
 *** Model discovery
 =--list-image-models= prints every image model with its limits and capabilities,
@@ -105,6 +106,7 @@ gemini-3-pro-image-preview         gemini       14     4  reference-images,multi
 | =--image-op=OP=          | =generate=, =edit=, =variation= or =upscale=                 |
 | =--ref=FILE=             | reference image; repeatable for multi-image conditioning     |
 | =--ref-role=ROLE=        | label for the preceding =--ref=, e.g. =style=                |
+| =--ref-style=ROLE=       | alias for =--ref-role=                                       |
 | =--mask=FILE=            | edit mask; transparent areas are regenerated                 |
 | =--aspect=RATIO=         | e.g. =16:9= (Gemini, Imagen)                                 |
 | =--size=WxH=             | e.g. =1024x1024= (OpenAI)                                    |

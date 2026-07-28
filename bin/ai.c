@@ -116,15 +116,16 @@ static const GOptionEntry option_entries[] = {
 	{ "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
 	  "Print licensing information and exit", NULL },
 	{ "image-gen", 'I', 0, G_OPTION_ARG_NONE, &opt_image_gen,
-	  "Generate an image instead of text (see --help-image)", NULL },
-	{ NULL, 0, 0, 0, NULL, NULL, NULL }
-};
+	  "Generate an image instead of text; see the image options below",
+	  NULL },
 
-/*
- * Image options live in their own group so `ai --help` stays readable.
- * `ai --help-image` shows just these; `ai --help-all` shows everything.
- */
-static const GOptionEntry image_entries[] = {
+	/*
+	 * Image options are listed here rather than in a GOptionGroup of
+	 * their own.  A group would keep `--help' shorter, but it also hides
+	 * every image flag behind `--help-image', where nobody looking at
+	 * `--help' will find them.  A long complete help beats a short one
+	 * that omits most of the mode it is documenting.
+	 */
 	{ "image-out", 'o', 0, G_OPTION_ARG_FILENAME, &opt_image_out,
 	  "Write the image here (default: auto-numbered output-0000.png)", "FILE" },
 	{ "image-op", 0, 0, G_OPTION_ARG_STRING, &opt_image_op,
@@ -134,7 +135,10 @@ static const GOptionEntry image_entries[] = {
 	  "Reference image to condition on; repeatable for multi-image "
 	  "conditioning", "FILE" },
 	{ "ref-role", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_image_ref_roles,
-	  "Label for the preceding --ref, e.g. style or subject", "ROLE" },
+	  "Label for the preceding --ref, saying what that reference is for: "
+	  "style, subject, background, ...", "ROLE" },
+	{ "ref-style", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_image_ref_roles,
+	  "Alias for --ref-role", "ROLE" },
 	{ "mask", 0, 0, G_OPTION_ARG_FILENAME, &opt_image_mask,
 	  "Edit mask; transparent areas are the ones regenerated", "FILE" },
 	{ "aspect", 0, 0, G_OPTION_ARG_STRING, &opt_image_aspect,
@@ -1034,17 +1038,7 @@ main(int argc, char *argv[])
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "
-		"it to a file.");
-
-	{
-		GOptionGroup *image_group;
-
-		image_group = g_option_group_new(
-			"image", "Image Options:",
-			"Show image generation options", NULL, NULL);
-		g_option_group_add_entries(image_group, image_entries);
-		g_option_context_add_group(ctx, image_group);
-	}
+		"it to a file; the image options below apply in that mode.");
 
 	g_option_context_set_description(
 		ctx,
@@ -1071,8 +1065,9 @@ main(int argc, char *argv[])
 		"\n"
 		"Unsupported options are dropped for models that cannot honour them;\n"
 		"pass --strict to fail instead.  API keys come from the environment\n"
-		"(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY).\n"
-		"Run `ai --help-image` for the full set of image options.");
+		"(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY);\n"
+		"base URLs from OPENAI_BASE_URL, GEMINI_BASE_URL, XAI_BASE_URL and\n"
+		"ANTHROPIC_BASE_URL.");
 	if (!g_option_context_parse(ctx, &argc, &argv, &error))
 	{
 		g_printerr("ai: %s\n", error->message);
