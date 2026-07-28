@@ -52,6 +52,39 @@ static gboolean  opt_dry_run         = FALSE;
 static gboolean  opt_list_providers  = FALSE;
 static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_version         = FALSE;
+static gboolean  opt_license         = FALSE;
+
+/* Image mode.  Negative / NULL means "not given", so an untouched flag
+ * leaves the corresponding request parameter unset. */
+static gboolean  opt_image_gen          = FALSE;
+static gchar    *opt_image_out          = NULL;
+static gchar    *opt_image_op           = NULL;
+static gchar   **opt_image_refs         = NULL;
+static gchar   **opt_image_ref_roles    = NULL;
+static gchar    *opt_image_mask         = NULL;
+static gchar    *opt_image_aspect       = NULL;
+static gchar    *opt_image_size         = NULL;
+static gchar    *opt_image_resolution   = NULL;
+static gint      opt_image_count        = 0;
+static gchar    *opt_image_quality      = NULL;
+static gchar    *opt_image_style        = NULL;
+static gchar    *opt_image_background   = NULL;
+static gchar    *opt_image_format       = NULL;
+static gint      opt_image_compression  = -1;
+static gchar    *opt_image_negative     = NULL;
+static gint64    opt_image_seed         = -1;
+static gdouble   opt_image_guidance     = -1.0;
+static gint      opt_image_steps        = 0;
+static gdouble   opt_image_strength     = -1.0;
+static gchar    *opt_image_moderation   = NULL;
+static gchar    *opt_image_person       = NULL;
+static gchar    *opt_image_language     = NULL;
+static gchar    *opt_image_fidelity     = NULL;
+static gboolean  opt_image_no_watermark = FALSE;
+static gboolean  opt_image_url          = FALSE;
+static gchar   **opt_image_extra        = NULL;
+static gboolean  opt_image_list_models  = FALSE;
+static gboolean  opt_image_strict       = FALSE;
 
 static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
@@ -80,6 +113,79 @@ static const GOptionEntry option_entries[] = {
 	  "Interactive multi-turn REPL (keeps history)", NULL },
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
 	  "Print version and exit", NULL },
+	{ "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
+	  "Print licensing information and exit", NULL },
+	{ "image-gen", 'I', 0, G_OPTION_ARG_NONE, &opt_image_gen,
+	  "Generate an image instead of text (see --help-image)", NULL },
+	{ NULL, 0, 0, 0, NULL, NULL, NULL }
+};
+
+/*
+ * Image options live in their own group so `ai --help` stays readable.
+ * `ai --help-image` shows just these; `ai --help-all` shows everything.
+ */
+static const GOptionEntry image_entries[] = {
+	{ "image-out", 'o', 0, G_OPTION_ARG_FILENAME, &opt_image_out,
+	  "Write the image here (default: auto-numbered output-0000.png)", "FILE" },
+	{ "image-op", 0, 0, G_OPTION_ARG_STRING, &opt_image_op,
+	  "generate, edit, variation or upscale (default: generate, or edit "
+	  "when --ref is given)", "OP" },
+	{ "ref", 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_image_refs,
+	  "Reference image to condition on; repeatable for multi-image "
+	  "conditioning", "FILE" },
+	{ "ref-role", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_image_ref_roles,
+	  "Label for the preceding --ref, e.g. style or subject", "ROLE" },
+	{ "mask", 0, 0, G_OPTION_ARG_FILENAME, &opt_image_mask,
+	  "Edit mask; transparent areas are the ones regenerated", "FILE" },
+	{ "aspect", 0, 0, G_OPTION_ARG_STRING, &opt_image_aspect,
+	  "Aspect ratio, e.g. 16:9 (Gemini and Imagen)", "RATIO" },
+	{ "size", 0, 0, G_OPTION_ARG_STRING, &opt_image_size,
+	  "Pixel size, e.g. 1024x1024 or auto (OpenAI)", "WxH" },
+	{ "resolution", 0, 0, G_OPTION_ARG_STRING, &opt_image_resolution,
+	  "Resolution tier: 1k, 2k or 4k (Nano Banana Pro, Imagen)", "TIER" },
+	{ "count", 'n', 0, G_OPTION_ARG_INT, &opt_image_count,
+	  "How many images to generate", "N" },
+	{ "quality", 0, 0, G_OPTION_ARG_STRING, &opt_image_quality,
+	  "auto, low, medium, high, standard or hd; translated to whichever "
+	  "the model accepts", "LEVEL" },
+	{ "style", 0, 0, G_OPTION_ARG_STRING, &opt_image_style,
+	  "vivid or natural, or a provider-specific preset name", "STYLE" },
+	{ "background", 0, 0, G_OPTION_ARG_STRING, &opt_image_background,
+	  "auto, transparent or opaque (needs a format with alpha)", "MODE" },
+	{ "format", 0, 0, G_OPTION_ARG_STRING, &opt_image_format,
+	  "Output encoding: png, jpeg or webp", "FMT" },
+	{ "compression", 0, 0, G_OPTION_ARG_INT, &opt_image_compression,
+	  "Compression 0-100 for lossy formats", "N" },
+	{ "negative", 0, 0, G_OPTION_ARG_STRING, &opt_image_negative,
+	  "What to keep out of the image (Imagen)", "TEXT" },
+	{ "seed", 0, 0, G_OPTION_ARG_INT64, &opt_image_seed,
+	  "Sampling seed, for reproducible results", "N" },
+	{ "guidance", 0, 0, G_OPTION_ARG_DOUBLE, &opt_image_guidance,
+	  "How strictly to follow the prompt", "F" },
+	{ "steps", 0, 0, G_OPTION_ARG_INT, &opt_image_steps,
+	  "Sampling steps", "N" },
+	{ "strength", 0, 0, G_OPTION_ARG_DOUBLE, &opt_image_strength,
+	  "0.0-1.0; how far an edit may depart from its reference", "F" },
+	{ "moderation", 0, 0, G_OPTION_ARG_STRING, &opt_image_moderation,
+	  "Content filtering: auto, low or none", "LEVEL" },
+	{ "person-generation", 0, 0, G_OPTION_ARG_STRING, &opt_image_person,
+	  "dont_allow, allow_adult or allow_all (Imagen)", "MODE" },
+	{ "language", 0, 0, G_OPTION_ARG_STRING, &opt_image_language,
+	  "Prompt language hint, e.g. en (Imagen)", "LANG" },
+	{ "input-fidelity", 0, 0, G_OPTION_ARG_STRING, &opt_image_fidelity,
+	  "auto, low or high; how closely an edit preserves its input", "LEVEL" },
+	{ "no-watermark", 0, 0, G_OPTION_ARG_NONE, &opt_image_no_watermark,
+	  "Ask the provider not to watermark (honoured where supported)", NULL },
+	{ "image-url", 0, 0, G_OPTION_ARG_NONE, &opt_image_url,
+	  "Ask for a URL rather than inline bytes (still saved locally)", NULL },
+	{ "image-extra", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_image_extra,
+	  "Pass KEY=VALUE straight through to the provider; repeatable",
+	  "KEY=VALUE" },
+	{ "list-image-models", 0, 0, G_OPTION_ARG_NONE, &opt_image_list_models,
+	  "List image models with their capabilities and exit", NULL },
+	{ "strict", 0, 0, G_OPTION_ARG_NONE, &opt_image_strict,
+	  "Fail if the model does not support a requested option, rather than "
+	  "dropping it", NULL },
 	{ NULL, 0, 0, 0, NULL, NULL, NULL }
 };
 
@@ -456,6 +562,457 @@ run_interactive(GObject *provider)
 /* main                                                              */
 /* ---------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------- */
+/* Image generation                                                  */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Turn --ref/--ref-role pairs into reference images.
+ *
+ * --ref-role applies to the --ref that precedes it, so the two arrays are
+ * walked together: role i belongs to ref i, and a trailing ref with no
+ * role is simply unlabelled.
+ */
+static gboolean
+image_add_references(AiImageRequest *request, GError **error)
+{
+	gsize i;
+
+	if (opt_image_refs == NULL)
+		return TRUE;
+
+	for (i = 0; opt_image_refs[i] != NULL; i++)
+	{
+		const gchar *role = NULL;
+
+		if (opt_image_ref_roles != NULL)
+		{
+			gsize n;
+
+			for (n = 0; opt_image_ref_roles[n] != NULL; n++)
+				;
+			if (i < n)
+				role = opt_image_ref_roles[i];
+		}
+
+		if (!ai_image_request_add_reference_file(request, opt_image_refs[i],
+		                                         role, error))
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
+/*
+ * Apply every --image-extra KEY=VALUE to the request verbatim.
+ */
+static gboolean
+image_add_extras(AiImageRequest *request)
+{
+	gsize i;
+
+	if (opt_image_extra == NULL)
+		return TRUE;
+
+	for (i = 0; opt_image_extra[i] != NULL; i++)
+	{
+		const gchar *eq = strchr(opt_image_extra[i], '=');
+
+		if (eq == NULL)
+		{
+			g_printerr("ai: --image-extra expects KEY=VALUE, got '%s'\n",
+			           opt_image_extra[i]);
+			return FALSE;
+		}
+
+		{
+			g_autofree gchar *key = g_strndup(opt_image_extra[i],
+			                                  eq - opt_image_extra[i]);
+
+			ai_image_request_set_extra_string(request, key, eq + 1);
+		}
+	}
+
+	return TRUE;
+}
+
+/*
+ * Pick an output path when none was given.
+ *
+ * Mirrors the numbering the reference scripts use: output-0000.png,
+ * output-0001.png, and so on, first free name wins.
+ */
+static gchar *
+image_auto_filename(const gchar *extension, guint index)
+{
+	guint counter = 0;
+
+	for (;;)
+	{
+		g_autofree gchar *base = NULL;
+		gchar *candidate;
+
+		if (index > 0)
+			base = g_strdup_printf("output-%04u-%u", counter, index);
+		else
+			base = g_strdup_printf("output-%04u", counter);
+
+		candidate = g_strconcat(base, extension, NULL);
+
+		if (!g_file_test(candidate, G_FILE_TEST_EXISTS))
+			return candidate;
+
+		g_free(candidate);
+
+		if (++counter > 9999)
+			return g_strconcat("output", extension, NULL);
+	}
+}
+
+/* Map a MIME type onto the extension to save under. */
+static const gchar *
+image_extension_for_mime(const gchar *mime)
+{
+	if (g_strcmp0(mime, "image/jpeg") == 0)
+		return ".jpg";
+	if (g_strcmp0(mime, "image/webp") == 0)
+		return ".webp";
+
+	return ".png";
+}
+
+/*
+ * Build the output path for image @index of @total.
+ *
+ * With --image-out and several images, the index is appended before the
+ * extension so a batch does not overwrite itself.
+ */
+static gchar *
+image_output_path(const gchar *mime, guint index, guint total)
+{
+	const gchar *extension = image_extension_for_mime(mime);
+
+	if (opt_image_out == NULL)
+		return image_auto_filename(extension, total > 1 ? index + 1 : 0);
+
+	if (total <= 1)
+		return g_strdup(opt_image_out);
+
+	{
+		g_autofree gchar *stem = NULL;
+		const gchar *dot = strrchr(opt_image_out, '.');
+
+		if (dot != NULL && dot != opt_image_out)
+			stem = g_strndup(opt_image_out, dot - opt_image_out);
+		else
+			stem = g_strdup(opt_image_out);
+
+		return g_strdup_printf("%s-%03u%s", stem, index,
+		                       dot != NULL ? dot : extension);
+	}
+}
+
+typedef struct
+{
+	GMainLoop *loop;
+	GBytes    *bytes;
+	GError    *error;
+} ImageFetch;
+
+static void
+on_image_bytes(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	ImageFetch *fetch = user_data;
+
+	(void)source;
+
+	fetch->bytes = ai_generated_image_load_bytes_finish(NULL, result,
+	                                                    &fetch->error);
+	g_main_loop_quit(fetch->loop);
+}
+
+/*
+ * Resolve an image to bytes, whichever form the provider returned.
+ *
+ * A URL result needs a second HTTP request, so this is async under a
+ * nested loop rather than a plain accessor.
+ */
+static GBytes *
+image_resolve_bytes(AiGeneratedImage *image, GError **error)
+{
+	g_autoptr(GMainContext) context = g_main_context_new();
+	ImageFetch fetch = { NULL, NULL, NULL };
+
+	g_main_context_push_thread_default(context);
+	fetch.loop = g_main_loop_new(context, FALSE);
+
+	ai_generated_image_load_bytes_async(image, NULL, on_image_bytes, &fetch);
+	g_main_loop_run(fetch.loop);
+
+	g_main_loop_unref(fetch.loop);
+	g_main_context_pop_thread_default(context);
+
+	if (fetch.error != NULL)
+	{
+		g_propagate_error(error, fetch.error);
+		return NULL;
+	}
+
+	return fetch.bytes;
+}
+
+/*
+ * Print the model table for one provider, or for every provider that can
+ * generate images.
+ *
+ * Driven entirely off each provider's AiImageModelInfo table, so it stays
+ * correct as models and providers are added.
+ */
+static int
+list_image_models(AiConfig *config, const gchar *provider_name)
+{
+	static const AiProviderType all[] = {
+		AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI, AI_PROVIDER_GROK
+	};
+	gsize i;
+	gboolean any = FALSE;
+
+	printf("%-34s %-9s %5s %5s  %s\n",
+	       "MODEL", "PROVIDER", "REFS", "MAX-N", "CAPABILITIES");
+
+	for (i = 0; i < G_N_ELEMENTS(all); i++)
+	{
+		g_autoptr(GObject) provider = NULL;
+		GList *models;
+		GList *l;
+
+		if (provider_name != NULL &&
+		    ai_provider_type_from_string(provider_name) != all[i])
+			continue;
+
+		provider = make_provider(config, all[i]);
+		if (provider == NULL || !AI_IS_IMAGE_GENERATOR(provider))
+			continue;
+
+		models = ai_image_generator_list_image_models(
+			AI_IMAGE_GENERATOR(provider));
+
+		for (l = models; l != NULL; l = l->next)
+		{
+			AiImageModelInfo *info = l->data;
+			g_autofree gchar *caps = ai_image_capabilities_to_string(
+				ai_image_model_info_get_capabilities(info));
+			const gchar *notes = ai_image_model_info_get_notes(info);
+
+			any = TRUE;
+
+			printf("%-34s %-9s %5u %5u  %s\n",
+			       ai_image_model_info_get_id(info),
+			       ai_provider_type_to_string(all[i]),
+			       ai_image_model_info_get_max_reference_images(info),
+			       ai_image_model_info_get_max_count(info),
+			       caps);
+
+			if (notes != NULL)
+				printf("%-34s %s\n", "", notes);
+		}
+
+		g_list_free_full(models, (GDestroyNotify)ai_image_model_info_free);
+	}
+
+	if (!any)
+	{
+		g_printerr("ai: no image models for provider '%s'\n",
+		           provider_name != NULL ? provider_name : "(any)");
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Run one image generation and write the results out.
+ */
+static int
+generate_images(GObject *provider, const gchar *prompt)
+{
+	g_autoptr(AiImageRequest) request = NULL;
+	g_autoptr(AiImageResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	guint count;
+	guint i;
+
+	if (!AI_IS_IMAGE_GENERATOR(provider))
+	{
+		g_printerr("ai: provider does not support image generation "
+		           "(try -p openai, -p gemini or -p grok)\n");
+		return 2;
+	}
+
+	request = ai_image_request_new(prompt);
+
+	if (opt_model != NULL)
+		ai_image_request_set_model(request, opt_model);
+	if (opt_image_op != NULL)
+		ai_image_request_set_operation(
+			request, ai_image_operation_from_string(opt_image_op));
+	if (opt_image_aspect != NULL)
+		ai_image_request_set_aspect_ratio(request, opt_image_aspect);
+	if (opt_image_size != NULL)
+		ai_image_request_set_custom_size(request, opt_image_size);
+	if (opt_image_resolution != NULL)
+		ai_image_request_set_resolution(
+			request, ai_image_resolution_from_string(opt_image_resolution));
+	if (opt_image_count > 0)
+		ai_image_request_set_count(request, opt_image_count);
+	if (opt_image_quality != NULL)
+		ai_image_request_set_quality(
+			request, ai_image_quality_from_string(opt_image_quality));
+	if (opt_image_style != NULL)
+	{
+		AiImageStyle style = ai_image_style_from_string(opt_image_style);
+
+		/* An unrecognised name is a provider-specific preset rather than
+		 * an error, so pass it through instead of dropping it. */
+		if (style != AI_IMAGE_STYLE_AUTO)
+			ai_image_request_set_style(request, style);
+		else
+			ai_image_request_set_style_preset(request, opt_image_style);
+	}
+	if (opt_image_background != NULL)
+		ai_image_request_set_background(
+			request, ai_image_background_from_string(opt_image_background));
+	if (opt_image_format != NULL)
+		ai_image_request_set_output_format(
+			request, ai_image_format_from_string(opt_image_format));
+	if (opt_image_compression >= 0)
+		ai_image_request_set_output_compression(request,
+		                                        opt_image_compression);
+	if (opt_image_negative != NULL)
+		ai_image_request_set_negative_prompt(request, opt_image_negative);
+	if (opt_image_seed >= 0)
+		ai_image_request_set_seed(request, opt_image_seed);
+	if (opt_image_guidance >= 0.0)
+		ai_image_request_set_guidance_scale(request, opt_image_guidance);
+	if (opt_image_steps > 0)
+		ai_image_request_set_steps(request, opt_image_steps);
+	if (opt_image_strength >= 0.0)
+		ai_image_request_set_strength(request, opt_image_strength);
+	if (opt_image_moderation != NULL)
+		ai_image_request_set_moderation(
+			request, ai_image_moderation_from_string(opt_image_moderation));
+	if (opt_image_person != NULL)
+		ai_image_request_set_person_generation(
+			request,
+			ai_image_person_generation_from_string(opt_image_person));
+	if (opt_image_no_watermark)
+		ai_image_request_set_watermark(request, AI_TRI_FALSE);
+	if (opt_image_language != NULL)
+		ai_image_request_set_language(request, opt_image_language);
+	if (opt_image_fidelity != NULL)
+		ai_image_request_set_input_fidelity(
+			request, ai_image_fidelity_from_string(opt_image_fidelity));
+
+	/* Default to inline bytes: the CLI writes files, and a URL result is
+	 * an extra round trip against a link that expires. */
+	ai_image_request_set_response_format(
+		request,
+		opt_image_url ? AI_IMAGE_RESPONSE_URL : AI_IMAGE_RESPONSE_BASE64);
+
+	if (!image_add_references(request, &error))
+	{
+		g_printerr("ai: %s\n", error->message);
+		return 1;
+	}
+
+	if (opt_image_mask != NULL)
+	{
+		g_autoptr(AiImage) mask = ai_image_new_from_file(opt_image_mask,
+		                                                 &error);
+
+		if (mask == NULL)
+		{
+			g_printerr("ai: %s\n", error->message);
+			return 1;
+		}
+		ai_image_request_set_mask(request, mask);
+	}
+
+	if (!image_add_extras(request))
+		return 2;
+
+	/* Under --strict an unsupported parameter is an error rather than
+	 * being quietly dropped, so a script can tell its request through. */
+	if (opt_image_strict)
+	{
+		const AiImageModelInfo *info = ai_image_generator_get_model_info(
+			AI_IMAGE_GENERATOR(provider),
+			ai_image_request_get_model(request));
+
+		if (!ai_image_request_validate(request, info,
+		                               AI_IMAGE_VALIDATE_STRICT, &error))
+		{
+			g_printerr("ai: %s\n", error->message);
+			return 1;
+		}
+	}
+
+	response = ai_image_generator_generate_image(AI_IMAGE_GENERATOR(provider),
+	                                             request, NULL, &error);
+	if (response == NULL)
+	{
+		g_printerr("ai: %s\n", error->message);
+		return 1;
+	}
+
+	count = ai_image_response_get_image_count(response);
+	if (count == 0)
+	{
+		g_printerr("ai: the provider returned no images\n");
+		return 1;
+	}
+
+	for (i = 0; i < count; i++)
+	{
+		AiGeneratedImage *image = ai_image_response_get_image(response, i);
+		g_autoptr(GBytes) bytes = NULL;
+		g_autofree gchar *path = NULL;
+		g_autoptr(GError) local_error = NULL;
+		const gchar *revised;
+		gconstpointer data;
+		gsize length = 0;
+
+		bytes = image_resolve_bytes(image, &local_error);
+		if (bytes == NULL)
+		{
+			g_printerr("ai: could not retrieve image %u: %s\n", i + 1,
+			           local_error->message);
+			return 1;
+		}
+
+		path = image_output_path(ai_generated_image_get_mime_type(image), i,
+		                         count);
+		data = g_bytes_get_data(bytes, &length);
+
+		if (!g_file_set_contents(path, data, length, &local_error))
+		{
+			g_printerr("ai: could not write %s: %s\n", path,
+			           local_error->message);
+			return 1;
+		}
+
+		printf("%s\n", path);
+
+		/* Some models rewrite the prompt before generating; report it so
+		 * the result can be reproduced. */
+		revised = ai_generated_image_get_revised_prompt(image);
+		if (revised != NULL)
+			g_printerr("ai: revised prompt: %s\n", revised);
+	}
+
+	return 0;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -475,7 +1032,47 @@ main(int argc, char *argv[])
 	g_option_context_set_summary(
 		ctx,
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
-		"print the reply to stdout.");
+		"print the reply to stdout.\n"
+		"With --image-gen, generate an image from PROMPT instead and write "
+		"it to a file.");
+
+	{
+		GOptionGroup *image_group;
+
+		image_group = g_option_group_new(
+			"image", "Image Options:",
+			"Show image generation options", NULL, NULL);
+		g_option_group_add_entries(image_group, image_entries);
+		g_option_context_add_group(ctx, image_group);
+	}
+
+	g_option_context_set_description(
+		ctx,
+		"Image examples:\n"
+		"  ai --image-gen -o sunset.png \"a sunset over mountains\"\n"
+		"  ai --image-gen -p gemini --aspect 16:9 --resolution 2k \\\n"
+		"                 \"a brass telescope on a wooden desk\"\n"
+		"  ai --image-gen -p gemini -m gemini-3-pro-image-preview \\\n"
+		"                 --ref logo.png --ref-role style \\\n"
+		"                 --ref subject.jpg --ref-role subject \\\n"
+		"                 -o poster.png \"combine these into a poster\"\n"
+		"  ai --image-gen -p openai -m gpt-image-2 --background transparent \\\n"
+		"                 --format webp -o icon.webp \"a minimal gear icon\"\n"
+		"  ai --image-gen -n 4 --seed 42 --negative \"text, watermark\" \\\n"
+		"                 \"abstract shapes in blue\"\n"
+		"  ai --image-gen --image-op edit --ref photo.png --mask sky.png \\\n"
+		"                 \"replace the sky with a storm\"\n"
+		"  ai --list-image-models -p gemini\n"
+		"\n"
+		"Chat examples:\n"
+		"  ai \"why is the sky blue?\"\n"
+		"  git diff | ai -s \"Review this diff for bugs\"\n"
+		"  ai -p ollama -m llama3.2 --stream \"one-liner: rsync a directory\"\n"
+		"\n"
+		"Unsupported options are dropped for models that cannot honour them;\n"
+		"pass --strict to fail instead.  API keys come from the environment\n"
+		"(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY).\n"
+		"Run `ai --help-image` for the full set of image options.");
 	if (!g_option_context_parse(ctx, &argc, &argv, &error))
 	{
 		g_printerr("ai: %s\n", error->message);
@@ -486,6 +1083,21 @@ main(int argc, char *argv[])
 	{
 		printf("ai (ai-glib) %d.%d.%d\n", AI_VERSION_MAJOR,
 		       AI_VERSION_MINOR, AI_VERSION_MICRO);
+		return 0;
+	}
+
+	if (opt_license)
+	{
+		printf("ai (ai-glib) %d.%d.%d\n"
+		       "Copyright (C) 2025\n"
+		       "SPDX-License-Identifier: AGPL-3.0-or-later\n\n"
+		       "This program is free software: you may redistribute and/or\n"
+		       "modify it under the terms of the GNU Affero General Public\n"
+		       "License as published by the Free Software Foundation, either\n"
+		       "version 3 of the License, or (at your option) any later\n"
+		       "version.  There is NO WARRANTY, to the extent permitted by\n"
+		       "law.  See <https://www.gnu.org/licenses/agpl-3.0.html>.\n",
+		       AI_VERSION_MAJOR, AI_VERSION_MINOR, AI_VERSION_MICRO);
 		return 0;
 	}
 
@@ -504,6 +1116,14 @@ main(int argc, char *argv[])
 	ptype = ai_provider_type_from_string(provider_name);
 
 	config = ai_config_new();
+
+	/* Listing models needs a config but no prompt, so handle it before
+	 * the provider and prompt are resolved. */
+	if (opt_image_list_models)
+	{
+		return list_image_models(config, opt_provider);
+	}
+
 	provider = make_provider(config, ptype);
 	if (provider == NULL)
 	{
@@ -545,6 +1165,16 @@ main(int argc, char *argv[])
 			g_object_unref(provider);
 			return 2;
 		}
+	}
+
+	/* Image mode diverges here: it needs the prompt but none of the
+	 * message plumbing below. */
+	if (opt_image_gen)
+	{
+		/* `prompt` is g_autofree; do not free it here as well. */
+		status = generate_images(provider, prompt);
+		g_object_unref(provider);
+		return status;
 	}
 
 	msg = ai_message_new_user(prompt);
