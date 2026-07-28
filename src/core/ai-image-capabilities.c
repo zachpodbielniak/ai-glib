@@ -31,6 +31,7 @@ struct _AiImageModelInfo
     guint                max_reference_images;
     gchar              **sizes;
     gchar              **aspect_ratios;
+    gchar              **qualities;
     gchar               *notes;
 };
 
@@ -171,6 +172,7 @@ ai_image_model_info_copy(const AiImageModelInfo *self)
     copy->max_reference_images = self->max_reference_images;
     copy->sizes = g_strdupv(self->sizes);
     copy->aspect_ratios = g_strdupv(self->aspect_ratios);
+    copy->qualities = g_strdupv(self->qualities);
     copy->notes = g_strdup(self->notes);
 
     return copy;
@@ -194,6 +196,7 @@ ai_image_model_info_free(AiImageModelInfo *self)
     g_clear_pointer(&self->display_name, g_free);
     g_clear_pointer(&self->sizes, g_strfreev);
     g_clear_pointer(&self->aspect_ratios, g_strfreev);
+    g_clear_pointer(&self->qualities, g_strfreev);
     g_clear_pointer(&self->notes, g_free);
 
     g_slice_free(AiImageModelInfo, self);
@@ -419,6 +422,160 @@ ai_image_model_info_set_aspect_ratios(
 
     g_clear_pointer(&self->aspect_ratios, g_strfreev);
     self->aspect_ratios = g_strdupv((gchar **)aspect_ratios);
+}
+
+/**
+ * ai_image_model_info_get_qualities:
+ * @self: an #AiImageModelInfo
+ *
+ * Gets the quality values this model accepts, as its API spells them.
+ *
+ * Returns: (transfer none) (array zero-terminated=1) (nullable): the
+ *   accepted quality strings, or %NULL if quality is not selectable
+ */
+const gchar * const *
+ai_image_model_info_get_qualities(const AiImageModelInfo *self)
+{
+    g_return_val_if_fail(self != NULL, NULL);
+
+    return (const gchar * const *)self->qualities;
+}
+
+/**
+ * ai_image_model_info_set_qualities:
+ * @self: an #AiImageModelInfo
+ * @qualities: (array zero-terminated=1) (nullable): the accepted values
+ *
+ * Sets the quality values this model accepts.  The vector is copied.
+ *
+ * Recording the accepted spellings rather than assuming a single
+ * vocabulary is what lets ai_image_model_info_map_quality() translate
+ * between families -- OpenAI's DALL-E and GPT Image models name the same
+ * concept differently and each rejects the other's words.
+ */
+void
+ai_image_model_info_set_qualities(
+    AiImageModelInfo    *self,
+    const gchar * const *qualities
+){
+    g_return_if_fail(self != NULL);
+
+    g_clear_pointer(&self->qualities, g_strfreev);
+    self->qualities = g_strdupv((gchar **)qualities);
+}
+
+/*
+ * Test whether a model accepts a particular quality spelling.
+ */
+static gboolean
+ai_image_model_info_has_quality(
+    const AiImageModelInfo *self,
+    const gchar            *value
+){
+    guint i;
+
+    if (self->qualities == NULL)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; self->qualities[i] != NULL; i++)
+    {
+        if (g_strcmp0(self->qualities[i], value) == 0)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+/**
+ * ai_image_model_info_map_quality:
+ * @self: an #AiImageModelInfo
+ * @quality: the requested #AiImageQuality
+ *
+ * Translates @quality into a value this model actually accepts.
+ *
+ * The two OpenAI image families use disjoint words for the same idea --
+ * `standard`/`hd` versus `low`/`medium`/`high` -- and reject each other's,
+ * so a caller asking for %AI_IMAGE_QUALITY_HD against a GPT Image model
+ * must end up sending `high`.  Rather than hard-coding that correspondence
+ * per provider, each model declares the spellings it accepts and this maps
+ * onto the nearest one, degrading to the next-best tier when the exact
+ * word is unavailable.
+ *
+ * Returns: (transfer none) (nullable): the value to send, or %NULL to omit
+ *   the parameter entirely
+ */
+const gchar *
+ai_image_model_info_map_quality(
+    const AiImageModelInfo *self,
+    AiImageQuality          quality
+){
+    g_return_val_if_fail(self != NULL, NULL);
+
+    if (quality == AI_IMAGE_QUALITY_AUTO)
+    {
+        /* Only send "auto" when the model names it explicitly; otherwise
+         * omitting the parameter is what "auto" means. */
+        return ai_image_model_info_has_quality(self, "auto") ? "auto" : NULL;
+    }
+
+    /* Exact match first. */
+    {
+        const gchar *exact = ai_image_quality_to_string(quality);
+
+        if (exact != NULL && ai_image_model_info_has_quality(self, exact))
+        {
+            return exact;
+        }
+    }
+
+    /* Then the equivalent tier in the other family's vocabulary. */
+    switch (quality)
+    {
+        case AI_IMAGE_QUALITY_HD:
+        case AI_IMAGE_QUALITY_HIGH:
+            if (ai_image_model_info_has_quality(self, "high"))
+            {
+                return "high";
+            }
+            if (ai_image_model_info_has_quality(self, "hd"))
+            {
+                return "hd";
+            }
+            break;
+
+        case AI_IMAGE_QUALITY_STANDARD:
+        case AI_IMAGE_QUALITY_MEDIUM:
+            if (ai_image_model_info_has_quality(self, "medium"))
+            {
+                return "medium";
+            }
+            if (ai_image_model_info_has_quality(self, "standard"))
+            {
+                return "standard";
+            }
+            break;
+
+        case AI_IMAGE_QUALITY_LOW:
+            if (ai_image_model_info_has_quality(self, "low"))
+            {
+                return "low";
+            }
+            if (ai_image_model_info_has_quality(self, "standard"))
+            {
+                return "standard";
+            }
+            break;
+
+        case AI_IMAGE_QUALITY_AUTO:
+        default:
+            break;
+    }
+
+    return NULL;
 }
 
 /**

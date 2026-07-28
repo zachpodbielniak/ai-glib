@@ -204,6 +204,21 @@ ai_image_model_info_set_aspect_ratios(
     const gchar * const *aspect_ratios
 );
 
+const gchar * const *
+ai_image_model_info_get_qualities(const AiImageModelInfo *self);
+
+void
+ai_image_model_info_set_qualities(
+    AiImageModelInfo    *self,
+    const gchar * const *qualities
+);
+
+const gchar *
+ai_image_model_info_map_quality(
+    const AiImageModelInfo *self,
+    AiImageQuality          quality
+);
+
 const gchar *
 ai_image_model_info_get_notes(const AiImageModelInfo *self);
 

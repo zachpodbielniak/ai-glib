@@ -102,6 +102,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-image-request.c \
 	$(SRCDIR)/model/ai-generated-image.c \
 	$(SRCDIR)/model/ai-image-response.c \
+	$(SRCDIR)/providers/ai-image-shared.c \
 	$(SRCDIR)/providers/ai-openai-shared.c \
 	$(SRCDIR)/providers/ai-claude-launch.c \
 	$(SRCDIR)/providers/ai-claude-client.c \
