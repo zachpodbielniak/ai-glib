@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "providers/ai-gemini-client.h"
+#include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
@@ -1255,24 +1256,26 @@ ai_gemini_client_streamable_init(AiStreamableInterface *iface)
 /*
  * AiImageGenerator interface implementation
  *
- * Gemini supports two image generation APIs:
+ * Gemini serves image generation through two unrelated APIs:
  *
- * 1. Nano Banana (Native Gemini Image) - uses generateContent endpoint
- *    Models: gemini-2.5-flash-image, gemini-3-pro-image-preview
- *    Endpoint: POST /v1beta/models/{model}:generateContent
- *    Format: { contents: [...], generationConfig: { responseModalities: ["IMAGE"], imageConfig: {...} } }
+ * 1. Nano Banana (native Gemini image) -- a chat call underneath, posted to
+ *    :generateContent with responseModalities asking for an image back.
+ *    Because it is a chat call it is the only path that accepts reference
+ *    images, as additional inline_data parts, which is what makes
+ *    multi-image conditioning possible at all.
  *
- * 2. Imagen (Legacy) - uses predict endpoint
- *    Models: imagen-4.0-generate-001, imagen-3.0-generate-001
- *    Endpoint: POST /v1beta/models/{model}:predict
- *    Format: { instances: [...], parameters: {...} }
+ * 2. Imagen (legacy) -- a purely generative :predict endpoint with its own
+ *    parameter vocabulary and no reference-image support.
+ *
+ * Note the wire-format asymmetry: requests spell inline data snake_case
+ * (inline_data) while responses come back camelCase (inlineData).
  */
 
 typedef struct
 {
     AiGeminiClient *client;
     GTask          *task;
-    SoupMessage    *msg;
+    gchar          *model;
     gboolean        is_nano_banana;
 } GeminiImageGenData;
 
@@ -1280,7 +1283,7 @@ static void
 gemini_image_gen_data_free(GeminiImageGenData *data)
 {
     g_clear_object(&data->client);
-    g_clear_object(&data->msg);
+    g_clear_pointer(&data->model, g_free);
     g_slice_free(GeminiImageGenData, data);
 }
 
@@ -1322,7 +1325,10 @@ ai_gemini_is_nano_banana_model(const gchar *model)
 
 /*
  * Convert AiImageSize to aspect ratio string.
- * Nano Banana supports more aspect ratios than Imagen.
+ *
+ * Only consulted when the caller has not set an aspect ratio directly;
+ * the Gemini family thinks in ratios, so ai_image_request_set_aspect_ratio()
+ * is the natural way to drive it.
  */
 static const gchar *
 ai_gemini_size_to_aspect_ratio(AiImageSize size)
@@ -1345,6 +1351,141 @@ ai_gemini_size_to_aspect_ratio(AiImageSize size)
 }
 
 /*
+ * Resolve the aspect ratio to send: the caller's explicit choice when set,
+ * otherwise one derived from the pixel size, otherwise square.
+ */
+static const gchar *
+ai_gemini_resolve_aspect_ratio(AiImageRequest *request)
+{
+    const gchar *aspect = ai_image_request_get_aspect_ratio(request);
+
+    if (aspect != NULL)
+    {
+        return aspect;
+    }
+
+    if (ai_image_request_get_size(request) == AI_IMAGE_SIZE_CUSTOM)
+    {
+        const gchar *custom = ai_image_request_get_custom_size(request);
+
+        if (custom != NULL)
+        {
+            return custom;
+        }
+    }
+
+    return ai_gemini_size_to_aspect_ratio(ai_image_request_get_size(request));
+}
+
+/* Every ratio the Nano Banana family accepts. */
+static const gchar * const gemini_nano_banana_ratios[] = {
+    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
+    "9:16", "16:9", "21:9", NULL
+};
+
+/* Imagen is more restrictive. */
+static const gchar * const gemini_imagen_ratios[] = {
+    "1:1", "3:4", "4:3", "9:16", "16:9", NULL
+};
+
+static GList *
+ai_gemini_client_list_image_models(AiImageGenerator *generator)
+{
+    GList *models = NULL;
+    AiImageModelInfo *info;
+    AiImageCapabilities nano_banana_caps;
+
+    (void)generator;
+
+    /*
+     * Nano Banana runs as a chat completion, so it inherits the sampling
+     * and system-instruction controls that a purely generative endpoint
+     * has nowhere to put -- and, crucially, reference images.
+     */
+    nano_banana_caps =
+        AI_IMAGE_CAP_REFERENCE_IMAGES | AI_IMAGE_CAP_ASPECT_RATIO |
+        AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_SEED |
+        AI_IMAGE_CAP_SAMPLING | AI_IMAGE_CAP_SAFETY_CONTROL;
+
+    info = ai_image_model_info_new(
+        AI_GEMINI_IMAGE_MODEL_NANO_BANANA, "Nano Banana", AI_PROVIDER_GEMINI,
+        nano_banana_caps);
+    ai_image_model_info_set_aspect_ratios(info, gemini_nano_banana_ratios);
+    ai_image_model_info_set_max_count(info, 4);
+    ai_image_model_info_set_max_reference_images(info, 3);
+    ai_image_model_info_set_notes(info, "Stable native image model, up to 1K");
+    models = g_list_append(models, info);
+
+    info = ai_image_model_info_new(
+        AI_GEMINI_IMAGE_MODEL_NANO_BANANA_2, "Nano Banana 2",
+        AI_PROVIDER_GEMINI,
+        nano_banana_caps | AI_IMAGE_CAP_MULTI_REFERENCE);
+    ai_image_model_info_set_aspect_ratios(info, gemini_nano_banana_ratios);
+    ai_image_model_info_set_max_count(info, 4);
+    ai_image_model_info_set_max_reference_images(info, 6);
+    models = g_list_append(models, info);
+
+    /*
+     * Nano Banana Pro is the multi-reference workhorse: up to fourteen
+     * conditioning images and output up to 4K.
+     */
+    info = ai_image_model_info_new(
+        AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO, "Nano Banana Pro",
+        AI_PROVIDER_GEMINI,
+        nano_banana_caps | AI_IMAGE_CAP_MULTI_REFERENCE |
+        AI_IMAGE_CAP_RESOLUTION_TIER);
+    ai_image_model_info_set_aspect_ratios(info, gemini_nano_banana_ratios);
+    ai_image_model_info_set_max_count(info, 4);
+    ai_image_model_info_set_max_reference_images(info, 14);
+    ai_image_model_info_set_notes(
+        info, "Multi-reference conditioning, up to 4K");
+    models = g_list_append(models, info);
+
+    info = ai_image_model_info_new(
+        AI_GEMINI_IMAGE_MODEL_IMAGEN_4, "Imagen 4", AI_PROVIDER_GEMINI,
+        AI_IMAGE_CAP_ASPECT_RATIO | AI_IMAGE_CAP_MULTI_COUNT |
+        AI_IMAGE_CAP_NEGATIVE_PROMPT | AI_IMAGE_CAP_SEED |
+        AI_IMAGE_CAP_SAFETY_CONTROL | AI_IMAGE_CAP_WATERMARK_CONTROL |
+        AI_IMAGE_CAP_OUTPUT_FORMAT | AI_IMAGE_CAP_PROMPT_ENHANCEMENT |
+        AI_IMAGE_CAP_LANGUAGE);
+    ai_image_model_info_set_aspect_ratios(info, gemini_imagen_ratios);
+    ai_image_model_info_set_max_count(info, 4);
+    ai_image_model_info_set_notes(info, "No reference images");
+    models = g_list_append(models, info);
+
+    info = ai_image_model_info_new(
+        AI_GEMINI_IMAGE_MODEL_IMAGEN_3, "Imagen 3", AI_PROVIDER_GEMINI,
+        AI_IMAGE_CAP_ASPECT_RATIO | AI_IMAGE_CAP_MULTI_COUNT |
+        AI_IMAGE_CAP_NEGATIVE_PROMPT | AI_IMAGE_CAP_SEED |
+        AI_IMAGE_CAP_SAFETY_CONTROL | AI_IMAGE_CAP_WATERMARK_CONTROL |
+        AI_IMAGE_CAP_OUTPUT_FORMAT);
+    ai_image_model_info_set_aspect_ratios(info, gemini_imagen_ratios);
+    ai_image_model_info_set_max_count(info, 4);
+    ai_image_model_info_set_notes(info, "No reference images");
+    models = g_list_append(models, info);
+
+    return models;
+}
+
+/*
+ * Map the requested moderation level onto Imagen's safetyFilterLevel.
+ */
+static const gchar *
+ai_gemini_safety_filter_level(AiImageModeration moderation)
+{
+    switch (moderation)
+    {
+        case AI_IMAGE_MODERATION_LOW:
+            return "block_only_high";
+        case AI_IMAGE_MODERATION_NONE:
+            return "block_none";
+        case AI_IMAGE_MODERATION_AUTO:
+        default:
+            return NULL;
+    }
+}
+
+/*
  * Build the JSON request for Gemini Imagen API (legacy).
  */
 static JsonNode *
@@ -1353,14 +1494,14 @@ ai_gemini_client_build_imagen_request(
     AiImageRequest *request
 ){
     g_autoptr(JsonBuilder) builder = json_builder_new();
-    const gchar *aspect_ratio;
+    const gchar *str;
     gint count;
 
     (void)self;
 
     json_builder_begin_object(builder);
 
-    /* Instances array - contains the prompt */
+    /* Instances array - the prompt, and the negative prompt beside it */
     json_builder_set_member_name(builder, "instances");
     json_builder_begin_array(builder);
     json_builder_begin_object(builder);
@@ -1373,7 +1514,6 @@ ai_gemini_client_build_imagen_request(
     json_builder_set_member_name(builder, "parameters");
     json_builder_begin_object(builder);
 
-    /* Sample count (number of images) */
     count = ai_image_request_get_count(request);
     if (count > 0)
     {
@@ -1381,29 +1521,83 @@ ai_gemini_client_build_imagen_request(
         json_builder_add_int_value(builder, count);
     }
 
-    /* Aspect ratio */
+    json_builder_set_member_name(builder, "aspectRatio");
+    json_builder_add_string_value(builder,
+                                  ai_gemini_resolve_aspect_ratio(request));
+
+    str = ai_image_request_get_negative_prompt(request);
+    if (str != NULL)
     {
-        AiImageSize size = ai_image_request_get_size(request);
-        if (size == AI_IMAGE_SIZE_CUSTOM)
-        {
-            const gchar *custom = ai_image_request_get_custom_size(request);
-            /* For custom size, try to parse as aspect ratio */
-            aspect_ratio = custom != NULL ? custom : "1:1";
-        }
-        else
-        {
-            aspect_ratio = ai_gemini_size_to_aspect_ratio(size);
-        }
-        json_builder_set_member_name(builder, "aspectRatio");
-        json_builder_add_string_value(builder, aspect_ratio);
+        json_builder_set_member_name(builder, "negativePrompt");
+        json_builder_add_string_value(builder, str);
     }
 
-    /* Output options - always request base64 for easier handling */
+    if (ai_image_request_get_seed(request) >= 0)
+    {
+        json_builder_set_member_name(builder, "seed");
+        json_builder_add_int_value(builder,
+                                   ai_image_request_get_seed(request));
+    }
+
+    str = ai_image_person_generation_to_string(
+        ai_image_request_get_person_generation(request));
+    if (str != NULL)
+    {
+        json_builder_set_member_name(builder, "personGeneration");
+        json_builder_add_string_value(builder, str);
+    }
+
+    str = ai_gemini_safety_filter_level(
+        ai_image_request_get_moderation(request));
+    if (str != NULL)
+    {
+        json_builder_set_member_name(builder, "safetyFilterLevel");
+        json_builder_add_string_value(builder, str);
+    }
+
+    if (ai_image_request_get_watermark(request) != AI_TRI_UNSET)
+    {
+        json_builder_set_member_name(builder, "addWatermark");
+        json_builder_add_boolean_value(
+            builder,
+            ai_image_request_get_watermark(request) == AI_TRI_TRUE);
+    }
+
+    if (ai_image_request_get_enhance_prompt(request) != AI_TRI_UNSET)
+    {
+        json_builder_set_member_name(builder, "enhancePrompt");
+        json_builder_add_boolean_value(
+            builder,
+            ai_image_request_get_enhance_prompt(request) == AI_TRI_TRUE);
+    }
+
+    str = ai_image_request_get_language(request);
+    if (str != NULL)
+    {
+        json_builder_set_member_name(builder, "language");
+        json_builder_add_string_value(builder, str);
+    }
+
+    /* Output options.  Base64 comes back either way; the MIME type here
+     * chooses the encoding of the returned bytes. */
     json_builder_set_member_name(builder, "outputOptions");
     json_builder_begin_object(builder);
+
+    str = ai_image_format_to_mime_type(
+        ai_image_request_get_output_format(request));
     json_builder_set_member_name(builder, "mimeType");
-    json_builder_add_string_value(builder, "image/png");
+    json_builder_add_string_value(builder, str != NULL ? str : "image/png");
+
+    if (ai_image_request_get_output_compression(request) >= 0)
+    {
+        json_builder_set_member_name(builder, "compressionQuality");
+        json_builder_add_int_value(
+            builder, ai_image_request_get_output_compression(request));
+    }
+
     json_builder_end_object(builder);
+
+    ai_image_shared_apply_extras(builder, request);
 
     json_builder_end_object(builder); /* end parameters */
 
@@ -1414,21 +1608,12 @@ ai_gemini_client_build_imagen_request(
 
 /*
  * Build the JSON request for Nano Banana (native Gemini image generation).
- * Uses the generateContent API.
  *
- * Basic format:
- * {
- *   "contents": [{ "parts": [{ "text": "prompt" }] }]
- * }
- *
- * With config (optional):
- * {
- *   "contents": [{ "parts": [{ "text": "prompt" }] }],
- *   "generationConfig": {
- *     "responseModalities": ["TEXT", "IMAGE"],
- *     "imageConfig": { "aspectRatio": "16:9" }
- *   }
- * }
+ * generationConfig is emitted unconditionally.  It carries
+ * responseModalities, and without it the model answers a request for a
+ * picture with a paragraph of text -- so making it conditional on a
+ * non-default size, as this once did, silently broke every request that
+ * left the size alone.
  */
 static JsonNode *
 ai_gemini_client_build_nano_banana_request(
@@ -1436,63 +1621,106 @@ ai_gemini_client_build_nano_banana_request(
     AiImageRequest *request
 ){
     g_autoptr(JsonBuilder) builder = json_builder_new();
-    AiImageSize size;
+    const gchar *str;
 
     (void)self;
 
     json_builder_begin_object(builder);
 
-    /* Contents array - contains the prompt */
+    /* Contents: the prompt, plus one inline_data part per reference */
     json_builder_set_member_name(builder, "contents");
     json_builder_begin_array(builder);
     json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "role");
+    json_builder_add_string_value(builder, "user");
+
     json_builder_set_member_name(builder, "parts");
-    json_builder_begin_array(builder);
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "text");
-    json_builder_add_string_value(builder, ai_image_request_get_prompt(request));
-    json_builder_end_object(builder);
-    json_builder_end_array(builder);
+    ai_image_shared_build_gemini_parts(builder, request);
+
     json_builder_end_object(builder);
     json_builder_end_array(builder);
 
-    /* Only add generationConfig if we have non-default settings */
-    size = ai_image_request_get_size(request);
-    if (size != AI_IMAGE_SIZE_AUTO && size != AI_IMAGE_SIZE_1024)
+    str = ai_image_request_get_system_instruction(request);
+    if (str != NULL)
     {
-        const gchar *aspect_ratio;
-
-        json_builder_set_member_name(builder, "generationConfig");
+        json_builder_set_member_name(builder, "systemInstruction");
         json_builder_begin_object(builder);
-
-        /* Response modalities */
-        json_builder_set_member_name(builder, "responseModalities");
+        json_builder_set_member_name(builder, "parts");
         json_builder_begin_array(builder);
-        json_builder_add_string_value(builder, "TEXT");
-        json_builder_add_string_value(builder, "IMAGE");
-        json_builder_end_array(builder);
-
-        /* Image configuration */
-        json_builder_set_member_name(builder, "imageConfig");
         json_builder_begin_object(builder);
-
-        /* Aspect ratio */
-        if (size == AI_IMAGE_SIZE_CUSTOM)
-        {
-            const gchar *custom = ai_image_request_get_custom_size(request);
-            aspect_ratio = custom != NULL ? custom : "1:1";
-        }
-        else
-        {
-            aspect_ratio = ai_gemini_size_to_aspect_ratio(size);
-        }
-        json_builder_set_member_name(builder, "aspectRatio");
-        json_builder_add_string_value(builder, aspect_ratio);
-
-        json_builder_end_object(builder); /* end imageConfig */
-
-        json_builder_end_object(builder); /* end generationConfig */
+        json_builder_set_member_name(builder, "text");
+        json_builder_add_string_value(builder, str);
+        json_builder_end_object(builder);
+        json_builder_end_array(builder);
+        json_builder_end_object(builder);
     }
+
+    json_builder_set_member_name(builder, "generationConfig");
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "responseModalities");
+    json_builder_begin_array(builder);
+    json_builder_add_string_value(builder, "TEXT");
+    json_builder_add_string_value(builder, "IMAGE");
+    json_builder_end_array(builder);
+
+    if (ai_image_request_get_count(request) > 1)
+    {
+        json_builder_set_member_name(builder, "candidateCount");
+        json_builder_add_int_value(builder,
+                                   ai_image_request_get_count(request));
+    }
+
+    if (ai_image_request_get_seed(request) >= 0)
+    {
+        json_builder_set_member_name(builder, "seed");
+        json_builder_add_int_value(builder,
+                                   ai_image_request_get_seed(request));
+    }
+
+    if (ai_image_request_get_temperature(request) >= 0.0)
+    {
+        json_builder_set_member_name(builder, "temperature");
+        json_builder_add_double_value(
+            builder, ai_image_request_get_temperature(request));
+    }
+
+    if (ai_image_request_get_top_p(request) >= 0.0)
+    {
+        json_builder_set_member_name(builder, "topP");
+        json_builder_add_double_value(builder,
+                                      ai_image_request_get_top_p(request));
+    }
+
+    if (ai_image_request_get_top_k(request) >= 0)
+    {
+        json_builder_set_member_name(builder, "topK");
+        json_builder_add_int_value(builder,
+                                   ai_image_request_get_top_k(request));
+    }
+
+    /* Image configuration */
+    json_builder_set_member_name(builder, "imageConfig");
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "aspectRatio");
+    json_builder_add_string_value(builder,
+                                  ai_gemini_resolve_aspect_ratio(request));
+
+    str = ai_image_resolution_to_string(
+        ai_image_request_get_resolution(request));
+    if (str != NULL)
+    {
+        json_builder_set_member_name(builder, "imageSize");
+        json_builder_add_string_value(builder, str);
+    }
+
+    json_builder_end_object(builder); /* end imageConfig */
+
+    json_builder_end_object(builder); /* end generationConfig */
+
+    ai_image_shared_apply_extras(builder, request);
 
     json_builder_end_object(builder);
 
@@ -1500,18 +1728,28 @@ ai_gemini_client_build_nano_banana_request(
 }
 
 /*
- * Parse Gemini Imagen response (legacy predict API).
+ * Parse a Gemini image response.
+ *
+ * Three mutually incompatible envelopes are in circulation and any of them
+ * can turn up depending on the model and API version:
+ *
+ *   predictions[].bytesBase64Encoded       (Imagen :predict)
+ *   generatedImages[].bytesBase64Encoded   (older image endpoints)
+ *   candidates[].content.parts[].inlineData (Nano Banana :generateContent)
+ *
+ * Rather than trusting the caller's model classification to pick one, try
+ * each in turn -- the cost is three absent-member checks and it makes the
+ * parser robust to a model being served by a different envelope than
+ * expected.
  */
 static AiImageResponse *
-ai_gemini_client_parse_imagen_response(
-    JsonNode  *json,
-    GError   **error
+ai_gemini_client_parse_image_response(
+    JsonNode     *json,
+    const gchar  *model,
+    GError      **error
 ){
     JsonObject *obj;
     g_autoptr(AiImageResponse) response = NULL;
-    JsonArray *predictions;
-    guint i;
-    guint len;
     gint64 now;
 
     if (!JSON_NODE_HOLDS_OBJECT(json))
@@ -1523,7 +1761,6 @@ ai_gemini_client_parse_imagen_response(
 
     obj = json_node_get_object(json);
 
-    /* Check for error */
     if (json_object_has_member(obj, "error"))
     {
         JsonObject *err_obj = json_object_get_object_member(obj, "error");
@@ -1536,73 +1773,58 @@ ai_gemini_client_parse_imagen_response(
 
     now = g_get_real_time() / G_USEC_PER_SEC;
     response = ai_image_response_new(NULL, now);
-
-    /* Parse predictions array */
-    if (json_object_has_member(obj, "predictions"))
+    if (model != NULL)
     {
-        predictions = json_object_get_array_member(obj, "predictions");
-        len = json_array_get_length(predictions);
+        ai_image_response_set_model(response, model);
+    }
 
-        for (i = 0; i < len; i++)
+    /* Envelope 1 and 2: a flat array of base64 payloads. */
+    {
+        const gchar *keys[] = { "predictions", "generatedImages", NULL };
+        guint k;
+
+        for (k = 0; keys[k] != NULL; k++)
         {
-            JsonObject *pred = json_array_get_object_element(predictions, i);
-            AiGeneratedImage *image = NULL;
+            JsonArray *array;
+            guint len;
+            guint i;
 
-            if (json_object_has_member(pred, "bytesBase64Encoded"))
+            if (!json_object_has_member(obj, keys[k]))
             {
-                const gchar *b64 = json_object_get_string_member(pred, "bytesBase64Encoded");
-                const gchar *mime = json_object_get_string_member_with_default(
-                    pred, "mimeType", "image/png");
-                image = ai_generated_image_new_from_base64(b64, mime);
+                continue;
             }
 
-            if (image != NULL)
+            array = json_object_get_array_member(obj, keys[k]);
+            len = json_array_get_length(array);
+
+            for (i = 0; i < len; i++)
             {
-                ai_image_response_add_image(response, image);
+                JsonObject *item = json_array_get_object_element(array, i);
+                const gchar *b64;
+                const gchar *mime;
+
+                if (item == NULL)
+                {
+                    continue;
+                }
+
+                b64 = json_object_get_string_member_with_default(
+                    item, "bytesBase64Encoded", NULL);
+                if (b64 == NULL)
+                {
+                    continue;
+                }
+
+                mime = json_object_get_string_member_with_default(
+                    item, "mimeType", "image/png");
+
+                ai_image_response_add_image(
+                    response, ai_generated_image_new_from_base64(b64, mime));
             }
         }
     }
 
-    return (AiImageResponse *)g_steal_pointer(&response);
-}
-
-/*
- * Parse Nano Banana response (generateContent API).
- * Response format: { candidates: [{ content: { parts: [{ inlineData: { data, mimeType } }] } }] }
- */
-static AiImageResponse *
-ai_gemini_client_parse_nano_banana_response(
-    JsonNode  *json,
-    GError   **error
-){
-    JsonObject *obj;
-    g_autoptr(AiImageResponse) response = NULL;
-    gint64 now;
-
-    if (!JSON_NODE_HOLDS_OBJECT(json))
-    {
-        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                    "Expected JSON object in response");
-        return NULL;
-    }
-
-    obj = json_node_get_object(json);
-
-    /* Check for error */
-    if (json_object_has_member(obj, "error"))
-    {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const gchar *err_msg = json_object_get_string_member_with_default(
-            err_obj, "message", "Unknown error");
-
-        g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
-        return NULL;
-    }
-
-    now = g_get_real_time() / G_USEC_PER_SEC;
-    response = ai_image_response_new(NULL, now);
-
-    /* Parse candidates array */
+    /* Envelope 3: chat candidates carrying inline image parts. */
     if (json_object_has_member(obj, "candidates"))
     {
         JsonArray *candidates = json_object_get_array_member(obj, "candidates");
@@ -1612,40 +1834,81 @@ ai_gemini_client_parse_nano_banana_response(
         for (c = 0; c < num_candidates; c++)
         {
             JsonObject *candidate = json_array_get_object_element(candidates, c);
+            JsonObject *content;
+            JsonArray *parts;
+            guint num_parts;
+            guint p;
 
-            if (json_object_has_member(candidate, "content"))
+            if (candidate == NULL ||
+                !json_object_has_member(candidate, "content"))
             {
-                JsonObject *content = json_object_get_object_member(candidate, "content");
+                continue;
+            }
 
-                if (json_object_has_member(content, "parts"))
+            content = json_object_get_object_member(candidate, "content");
+            if (!json_object_has_member(content, "parts"))
+            {
+                continue;
+            }
+
+            parts = json_object_get_array_member(content, "parts");
+            num_parts = json_array_get_length(parts);
+
+            for (p = 0; p < num_parts; p++)
+            {
+                JsonObject *part = json_array_get_object_element(parts, p);
+                JsonObject *inline_data;
+                const gchar *b64;
+                const gchar *mime;
+
+                /* Requests use inline_data, responses inlineData; accept
+                 * both so neither spelling can surprise us. */
+                if (part == NULL)
                 {
-                    JsonArray *parts = json_object_get_array_member(content, "parts");
-                    guint num_parts = json_array_get_length(parts);
-                    guint p;
-
-                    for (p = 0; p < num_parts; p++)
-                    {
-                        JsonObject *part = json_array_get_object_element(parts, p);
-
-                        /* Check for inline_data (image) */
-                        if (json_object_has_member(part, "inlineData"))
-                        {
-                            JsonObject *inline_data = json_object_get_object_member(part, "inlineData");
-                            const gchar *b64 = json_object_get_string_member_with_default(
-                                inline_data, "data", NULL);
-                            const gchar *mime = json_object_get_string_member_with_default(
-                                inline_data, "mimeType", "image/png");
-
-                            if (b64 != NULL)
-                            {
-                                AiGeneratedImage *image = ai_generated_image_new_from_base64(b64, mime);
-                                ai_image_response_add_image(response, image);
-                            }
-                        }
-                    }
+                    continue;
                 }
+                else if (json_object_has_member(part, "inlineData"))
+                {
+                    inline_data = json_object_get_object_member(part,
+                                                                "inlineData");
+                }
+                else if (json_object_has_member(part, "inline_data"))
+                {
+                    inline_data = json_object_get_object_member(part,
+                                                                "inline_data");
+                }
+                else
+                {
+                    continue;
+                }
+
+                b64 = json_object_get_string_member_with_default(
+                    inline_data, "data", NULL);
+                if (b64 == NULL)
+                {
+                    continue;
+                }
+
+                mime = json_object_get_string_member_with_default(
+                    inline_data, "mimeType", NULL);
+                if (mime == NULL)
+                {
+                    mime = json_object_get_string_member_with_default(
+                        inline_data, "mime_type", "image/png");
+                }
+
+                ai_image_response_add_image(
+                    response, ai_generated_image_new_from_base64(b64, mime));
             }
         }
+    }
+
+    if (ai_image_response_get_image_count(response) == 0)
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                    "Gemini returned no image data; the model may have "
+                    "answered with text, or the prompt may have been refused");
+        return NULL;
     }
 
     return (AiImageResponse *)g_steal_pointer(&response);
@@ -1661,46 +1924,17 @@ on_gemini_image_response(
     g_autoptr(GBytes) response_bytes = NULL;
     g_autoptr(GError) error = NULL;
     g_autoptr(JsonParser) parser = NULL;
-    SoupMessage *msg = data->msg;
     const gchar *response_data;
     gsize response_len;
-    JsonNode *response_json;
     AiImageResponse *response;
 
     (void)source;
 
-    response_bytes = soup_session_send_and_read_finish(
-        ai_client_get_soup_session(AI_CLIENT(data->client)), result, &error);
+    response_bytes = ai_image_shared_send_finish(result, &error);
 
     if (response_bytes == NULL)
     {
         g_task_return_error(data->task, g_steal_pointer(&error));
-        gemini_image_gen_data_free(data);
-        return;
-    }
-
-    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(msg)))
-    {
-        guint status = soup_message_get_status(msg);
-
-        if (status == 401 || status == 403)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                                    "Authentication failed (HTTP %u)", status);
-        }
-        else if (status == 429)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
-                                    "Rate limited (HTTP %u)", status);
-        }
-        else
-        {
-            response_data = g_bytes_get_data(response_bytes, &response_len);
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_SERVER_ERROR,
-                                    "Request failed (HTTP %u): %.*s", status,
-                                    (int)MIN(response_len, 200), response_data);
-        }
-
         gemini_image_gen_data_free(data);
         return;
     }
@@ -1715,17 +1949,8 @@ on_gemini_image_response(
         return;
     }
 
-    response_json = json_parser_get_root(parser);
-
-    /* Use appropriate parser based on model type */
-    if (data->is_nano_banana)
-    {
-        response = ai_gemini_client_parse_nano_banana_response(response_json, &error);
-    }
-    else
-    {
-        response = ai_gemini_client_parse_imagen_response(response_json, &error);
-    }
+    response = ai_gemini_client_parse_image_response(
+        json_parser_get_root(parser), data->model, &error);
 
     if (response == NULL)
     {
@@ -1733,7 +1958,12 @@ on_gemini_image_response(
     }
     else
     {
-        g_task_return_pointer(data->task, response, (GDestroyNotify)ai_image_response_free);
+        guint count = ai_image_response_get_image_count(response);
+
+        g_signal_emit_by_name(data->client, "image-progress", count, count);
+
+        g_task_return_pointer(data->task, response,
+                              (GDestroyNotify)ai_image_response_free);
     }
 
     gemini_image_gen_data_free(data);
@@ -1752,7 +1982,9 @@ ai_gemini_client_generate_image_async(
     g_autoptr(SoupMessage) msg = NULL;
     g_autofree gchar *url = NULL;
     g_autofree gchar *request_body = NULL;
-    gsize request_len;
+    g_autoptr(GError) error = NULL;
+    const AiImageModelInfo *info;
+    gsize request_len = 0;
     AiConfig *config;
     const gchar *base_url;
     const gchar *api_key;
@@ -1763,7 +1995,6 @@ ai_gemini_client_generate_image_async(
 
     task = g_task_new(self, cancellable, callback, user_data);
 
-    /* Get the image model and determine API type */
     model = ai_image_request_get_model(request);
     if (model == NULL)
     {
@@ -1771,7 +2002,16 @@ ai_gemini_client_generate_image_async(
     }
     is_nano_banana = ai_gemini_is_nano_banana_model(model);
 
-    /* Build the appropriate request based on model type */
+    info = ai_image_generator_get_model_info(generator, model);
+
+    if (!ai_image_request_validate(request, info, AI_IMAGE_VALIDATE_NONE,
+                                   &error))
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        g_object_unref(task);
+        return;
+    }
+
     if (is_nano_banana)
     {
         request_json = ai_gemini_client_build_nano_banana_request(self, request);
@@ -1799,37 +2039,44 @@ ai_gemini_client_generate_image_async(
     base_url = ai_config_get_base_url(config, AI_PROVIDER_GEMINI);
     api_key = ai_config_get_api_key(config, AI_PROVIDER_GEMINI);
 
-    /* Build the appropriate endpoint URL based on model type */
-    if (is_nano_banana)
-    {
-        /* Nano Banana uses generateContent endpoint */
-        url = g_strdup_printf("%s/v1beta/models/%s:generateContent?key=%s",
-                              base_url, model, api_key != NULL ? api_key : "");
-    }
-    else
-    {
-        /* Imagen uses predict endpoint */
-        url = g_strdup_printf("%s/v1beta/models/%s:predict?key=%s",
-                              base_url, model, api_key != NULL ? api_key : "");
-    }
+    url = g_strdup_printf("%s/v1beta/models/%s:%s", base_url, model,
+                          is_nano_banana ? "generateContent" : "predict");
 
     msg = soup_message_new("POST", url);
-    soup_message_headers_append(soup_message_get_request_headers(msg),
-                                "Content-Type", "application/json");
+    if (msg == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid Gemini base URL: %s", base_url);
+        g_object_unref(task);
+        return;
+    }
 
-    soup_message_set_request_body_from_bytes(msg, "application/json",
+    /*
+     * The key goes in a header, not the query string.  A URL-embedded
+     * credential leaks into proxy logs, browser history and crash reports;
+     * x-goog-api-key is what the API expects and what the reference
+     * scripts use.
+     */
+    if (api_key != NULL)
+    {
+        soup_message_headers_append(soup_message_get_request_headers(msg),
+                                    "x-goog-api-key", api_key);
+    }
+
+    soup_message_set_request_body_from_bytes(
+        msg, "application/json",
         g_bytes_new_take(g_steal_pointer(&request_body), request_len));
 
     data = g_slice_new0(GeminiImageGenData);
     data->client = g_object_ref(self);
     data->task = task;
-    data->msg = g_object_ref(msg);
+    data->model = g_strdup(model);
     data->is_nano_banana = is_nano_banana;
 
-    soup_session_send_and_read_async(
+    ai_image_shared_send_async(
         ai_client_get_soup_session(AI_CLIENT(self)),
         msg,
-        G_PRIORITY_DEFAULT,
+        ai_config_get_max_retries(config),
         cancellable,
         on_gemini_image_response,
         data);
@@ -1845,31 +2092,6 @@ ai_gemini_client_generate_image_finish(
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
-static GList *
-ai_gemini_client_get_supported_sizes(AiImageGenerator *generator)
-{
-    GList *sizes = NULL;
-
-    (void)generator;
-
-    /*
-     * Gemini uses aspect ratios instead of pixel dimensions.
-     * Nano Banana supports all of these aspect ratios.
-     */
-    sizes = g_list_append(sizes, g_strdup("1:1"));
-    sizes = g_list_append(sizes, g_strdup("2:3"));
-    sizes = g_list_append(sizes, g_strdup("3:2"));
-    sizes = g_list_append(sizes, g_strdup("3:4"));
-    sizes = g_list_append(sizes, g_strdup("4:3"));
-    sizes = g_list_append(sizes, g_strdup("4:5"));
-    sizes = g_list_append(sizes, g_strdup("5:4"));
-    sizes = g_list_append(sizes, g_strdup("9:16"));
-    sizes = g_list_append(sizes, g_strdup("16:9"));
-    sizes = g_list_append(sizes, g_strdup("21:9"));
-
-    return sizes;
-}
-
 static const gchar *
 ai_gemini_client_get_image_default_model(AiImageGenerator *generator)
 {
@@ -1882,8 +2104,8 @@ ai_gemini_client_image_generator_init(AiImageGeneratorInterface *iface)
 {
     iface->generate_image_async = ai_gemini_client_generate_image_async;
     iface->generate_image_finish = ai_gemini_client_generate_image_finish;
-    iface->get_supported_sizes = ai_gemini_client_get_supported_sizes;
     iface->get_default_model = ai_gemini_client_get_image_default_model;
+    iface->list_image_models = ai_gemini_client_list_image_models;
 }
 
 /*

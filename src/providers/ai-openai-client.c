@@ -11,6 +11,7 @@
 
 #include "providers/ai-openai-client.h"
 #include "providers/ai-openai-shared.h"
+#include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
@@ -21,6 +22,8 @@
 
 #define OPENAI_COMPLETIONS_ENDPOINT "/v1/chat/completions"
 #define OPENAI_IMAGES_ENDPOINT "/v1/images/generations"
+#define OPENAI_IMAGES_EDITS_ENDPOINT "/v1/images/edits"
+#define OPENAI_IMAGES_VARIATIONS_ENDPOINT "/v1/images/variations"
 #define OPENAI_MODELS_ENDPOINT "/v1/models"
 
 /*
@@ -1184,197 +1187,119 @@ ai_openai_client_streamable_init(AiStreamableInterface *iface)
 /*
  * AiImageGenerator interface implementation
  *
- * OpenAI supports image generation via the DALL-E models and gpt-image-1.
- * Endpoint: POST /v1/images/generations
+ * OpenAI serves two image families that share an endpoint but not a
+ * parameter set: DALL-E accepts response_format and style, while GPT Image
+ * rejects both, uses a different quality vocabulary, and adds transparency,
+ * output-format and streaming controls.  Rather than branching on the model
+ * id throughout, each family is described by an AiImageModelInfo and the
+ * shared builders emit only what the chosen model declares.
+ *
+ * Endpoints: POST /v1/images/generations, /v1/images/edits, /v1/images/variations
  */
 
 typedef struct
 {
     AiOpenAIClient *client;
     GTask          *task;
-    SoupMessage    *msg;
+    gchar          *model;
 } OpenAIImageGenData;
 
 static void
 openai_image_gen_data_free(OpenAIImageGenData *data)
 {
     g_clear_object(&data->client);
-    g_clear_object(&data->msg);
+    g_clear_pointer(&data->model, g_free);
     g_slice_free(OpenAIImageGenData, data);
 }
 
 /*
- * Build the JSON request for OpenAI image generation.
+ * The GPT Image family: transparency, output encoding, editing with masks
+ * and multiple references, streaming previews.  Notably absent is
+ * URL_RESPONSE -- these models always return base64 and reject a
+ * response_format member outright -- and STYLE, which they ignore.
  */
-static JsonNode *
-ai_openai_client_build_image_request(
-    AiOpenAIClient *self,
-    AiImageRequest *request
-){
-    g_autoptr(JsonBuilder) builder = json_builder_new();
-    const gchar *model;
-    const gchar *size_str;
-    const gchar *quality_str;
-    const gchar *style_str;
-    const gchar *format_str;
+static const gchar * const openai_gpt_image_sizes[] = {
+    "1024x1024", "1536x1024", "1024x1536", "auto", NULL
+};
+static const gchar * const openai_gpt_image_qualities[] = {
+    "auto", "low", "medium", "high", NULL
+};
 
-    (void)self;
+/* DALL-E 3: one image at a time, its own quality words, plus style. */
+static const gchar * const openai_dalle3_sizes[] = {
+    "1024x1024", "1792x1024", "1024x1792", NULL
+};
+static const gchar * const openai_dalle3_qualities[] = {
+    "standard", "hd", NULL
+};
 
-    json_builder_begin_object(builder);
+/* DALL-E 2: square sizes, batch generation, single-image edits + variations. */
+static const gchar * const openai_dalle2_sizes[] = {
+    "256x256", "512x512", "1024x1024", NULL
+};
 
-    /* Prompt (required) */
-    json_builder_set_member_name(builder, "prompt");
-    json_builder_add_string_value(builder, ai_image_request_get_prompt(request));
+static AiImageModelInfo *
+ai_openai_image_model_new_gpt_image(const gchar *id, const gchar *name)
+{
+    AiImageModelInfo *info;
 
-    /* Model */
-    model = ai_image_request_get_model(request);
-    if (model == NULL)
-    {
-        model = AI_OPENAI_IMAGE_DEFAULT_MODEL;
-    }
-    json_builder_set_member_name(builder, "model");
-    json_builder_add_string_value(builder, model);
+    info = ai_image_model_info_new(
+        id, name, AI_PROVIDER_OPENAI,
+        AI_IMAGE_CAP_REFERENCE_IMAGES | AI_IMAGE_CAP_MULTI_REFERENCE |
+        AI_IMAGE_CAP_MASK | AI_IMAGE_CAP_PIXEL_SIZE |
+        AI_IMAGE_CAP_TRANSPARENCY | AI_IMAGE_CAP_OUTPUT_FORMAT |
+        AI_IMAGE_CAP_QUALITY | AI_IMAGE_CAP_MULTI_COUNT |
+        AI_IMAGE_CAP_PARTIAL_STREAMING | AI_IMAGE_CAP_SAFETY_CONTROL |
+        AI_IMAGE_CAP_INPUT_FIDELITY);
 
-    /* Size */
-    {
-        AiImageSize size = ai_image_request_get_size(request);
-        if (size == AI_IMAGE_SIZE_CUSTOM)
-        {
-            size_str = ai_image_request_get_custom_size(request);
-        }
-        else
-        {
-            size_str = ai_image_size_to_string(size);
-        }
+    ai_image_model_info_set_sizes(info, openai_gpt_image_sizes);
+    ai_image_model_info_set_qualities(info, openai_gpt_image_qualities);
+    ai_image_model_info_set_max_count(info, 10);
+    ai_image_model_info_set_max_reference_images(info, 16);
+    ai_image_model_info_set_notes(
+        info, "Always returns base64; rejects response_format and style");
 
-        if (size_str != NULL)
-        {
-            json_builder_set_member_name(builder, "size");
-            json_builder_add_string_value(builder, size_str);
-        }
-    }
-
-    /* Quality */
-    quality_str = ai_image_quality_to_string(ai_image_request_get_quality(request));
-    if (quality_str != NULL)
-    {
-        json_builder_set_member_name(builder, "quality");
-        json_builder_add_string_value(builder, quality_str);
-    }
-
-    /* Style */
-    style_str = ai_image_style_to_string(ai_image_request_get_style(request));
-    if (style_str != NULL)
-    {
-        json_builder_set_member_name(builder, "style");
-        json_builder_add_string_value(builder, style_str);
-    }
-
-    /* Number of images */
-    {
-        gint count = ai_image_request_get_count(request);
-        if (count > 1)
-        {
-            json_builder_set_member_name(builder, "n");
-            json_builder_add_int_value(builder, count);
-        }
-    }
-
-    /* Response format */
-    format_str = ai_image_response_format_to_string(ai_image_request_get_response_format(request));
-    json_builder_set_member_name(builder, "response_format");
-    json_builder_add_string_value(builder, format_str);
-
-    /* User (optional) */
-    {
-        const gchar *user = ai_image_request_get_user(request);
-        if (user != NULL)
-        {
-            json_builder_set_member_name(builder, "user");
-            json_builder_add_string_value(builder, user);
-        }
-    }
-
-    json_builder_end_object(builder);
-
-    return json_builder_get_root(builder);
+    return info;
 }
 
-/*
- * Parse OpenAI image generation response.
- */
-static AiImageResponse *
-ai_openai_client_parse_image_response(
-    JsonNode  *json,
-    GError   **error
-){
-    JsonObject *obj;
-    gint64 created;
-    g_autoptr(AiImageResponse) response = NULL;
-    JsonArray *data_array;
-    guint i;
-    guint len;
+static GList *
+ai_openai_client_list_image_models(AiImageGenerator *generator)
+{
+    GList *models = NULL;
+    AiImageModelInfo *info;
 
-    if (!JSON_NODE_HOLDS_OBJECT(json))
-    {
-        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                    "Expected JSON object in response");
-        return NULL;
-    }
+    (void)generator;
 
-    obj = json_node_get_object(json);
+    models = g_list_append(models, ai_openai_image_model_new_gpt_image(
+        AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_2, "GPT Image 2"));
+    models = g_list_append(models, ai_openai_image_model_new_gpt_image(
+        AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1_5, "GPT Image 1.5"));
+    models = g_list_append(models, ai_openai_image_model_new_gpt_image(
+        AI_OPENAI_IMAGE_MODEL_GPT_IMAGE_1, "GPT Image 1"));
 
-    /* Check for error response */
-    if (json_object_has_member(obj, "error"))
-    {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const gchar *err_msg = json_object_get_string_member_with_default(
-            err_obj, "message", "Unknown error");
+    info = ai_image_model_info_new(
+        AI_OPENAI_IMAGE_MODEL_DALL_E_3, "DALL-E 3", AI_PROVIDER_OPENAI,
+        AI_IMAGE_CAP_PIXEL_SIZE | AI_IMAGE_CAP_QUALITY |
+        AI_IMAGE_CAP_STYLE | AI_IMAGE_CAP_URL_RESPONSE |
+        AI_IMAGE_CAP_PROMPT_ENHANCEMENT);
+    ai_image_model_info_set_sizes(info, openai_dalle3_sizes);
+    ai_image_model_info_set_qualities(info, openai_dalle3_qualities);
+    ai_image_model_info_set_max_count(info, 1);
+    ai_image_model_info_set_notes(info, "One image per request; revises prompts");
+    models = g_list_append(models, info);
 
-        g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
-        return NULL;
-    }
+    info = ai_image_model_info_new(
+        AI_OPENAI_IMAGE_MODEL_DALL_E_2, "DALL-E 2", AI_PROVIDER_OPENAI,
+        AI_IMAGE_CAP_PIXEL_SIZE | AI_IMAGE_CAP_URL_RESPONSE |
+        AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_REFERENCE_IMAGES |
+        AI_IMAGE_CAP_MASK | AI_IMAGE_CAP_VARIATION);
+    ai_image_model_info_set_sizes(info, openai_dalle2_sizes);
+    ai_image_model_info_set_max_count(info, 10);
+    ai_image_model_info_set_max_reference_images(info, 1);
+    ai_image_model_info_set_notes(info, "Edits take one image plus an optional mask");
+    models = g_list_append(models, info);
 
-    created = json_object_get_int_member_with_default(obj, "created", 0);
-    response = ai_image_response_new(NULL, created);
-
-    /* Parse data array */
-    if (json_object_has_member(obj, "data"))
-    {
-        data_array = json_object_get_array_member(obj, "data");
-        len = json_array_get_length(data_array);
-
-        for (i = 0; i < len; i++)
-        {
-            JsonObject *img_obj = json_array_get_object_element(data_array, i);
-            AiGeneratedImage *image = NULL;
-
-            if (json_object_has_member(img_obj, "url"))
-            {
-                const gchar *url = json_object_get_string_member(img_obj, "url");
-                image = ai_generated_image_new_from_url(url);
-            }
-            else if (json_object_has_member(img_obj, "b64_json"))
-            {
-                const gchar *b64 = json_object_get_string_member(img_obj, "b64_json");
-                image = ai_generated_image_new_from_base64(b64, "image/png");
-            }
-
-            if (image != NULL)
-            {
-                /* Set revised prompt if present */
-                if (json_object_has_member(img_obj, "revised_prompt"))
-                {
-                    const gchar *revised = json_object_get_string_member(img_obj, "revised_prompt");
-                    ai_generated_image_set_revised_prompt(image, revised);
-                }
-
-                ai_image_response_add_image(response, image);
-            }
-        }
-    }
-
-    return (AiImageResponse *)g_steal_pointer(&response);
+    return models;
 }
 
 static void
@@ -1387,47 +1312,19 @@ on_openai_image_response(
     g_autoptr(GBytes) response_bytes = NULL;
     g_autoptr(GError) error = NULL;
     g_autoptr(JsonParser) parser = NULL;
-    SoupMessage *msg = data->msg;
     const gchar *response_data;
     gsize response_len;
-    JsonNode *response_json;
     AiImageResponse *response;
 
     (void)source;
 
-    response_bytes = soup_session_send_and_read_finish(
-        ai_client_get_soup_session(AI_CLIENT(data->client)), result, &error);
+    /* Status mapping, retries and body-excerpt error messages all happen
+     * inside the shared sender. */
+    response_bytes = ai_image_shared_send_finish(result, &error);
 
     if (response_bytes == NULL)
     {
         g_task_return_error(data->task, g_steal_pointer(&error));
-        openai_image_gen_data_free(data);
-        return;
-    }
-
-    if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(msg)))
-    {
-        guint status = soup_message_get_status(msg);
-
-        if (status == 401 || status == 403)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                                    "Authentication failed (HTTP %u)", status);
-        }
-        else if (status == 429)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
-                                    "Rate limited (HTTP %u)", status);
-        }
-        else
-        {
-            /* Try to parse error message from response body */
-            response_data = g_bytes_get_data(response_bytes, &response_len);
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_SERVER_ERROR,
-                                    "Request failed (HTTP %u): %.*s", status,
-                                    (int)MIN(response_len, 200), response_data);
-        }
-
         openai_image_gen_data_free(data);
         return;
     }
@@ -1442,8 +1339,8 @@ on_openai_image_response(
         return;
     }
 
-    response_json = json_parser_get_root(parser);
-    response = ai_openai_client_parse_image_response(response_json, &error);
+    response = ai_image_shared_parse_openai_response(
+        json_parser_get_root(parser), data->model, &error);
 
     if (response == NULL)
     {
@@ -1451,7 +1348,14 @@ on_openai_image_response(
     }
     else
     {
-        g_task_return_pointer(data->task, response, (GDestroyNotify)ai_image_response_free);
+        guint count = ai_image_response_get_image_count(response);
+
+        /* A non-streaming request has no intermediate progress to report,
+         * so this is a single terminal event rather than a series. */
+        g_signal_emit_by_name(data->client, "image-progress", count, count);
+
+        g_task_return_pointer(data->task, response,
+                              (GDestroyNotify)ai_image_response_free);
     }
 
     openai_image_gen_data_free(data);
@@ -1467,55 +1371,123 @@ ai_openai_client_generate_image_async(
 ){
     AiOpenAIClient *self = AI_OPENAI_CLIENT(generator);
     AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
-    g_autoptr(JsonNode) request_json = NULL;
     g_autoptr(SoupMessage) msg = NULL;
     g_autofree gchar *url = NULL;
-    g_autofree gchar *request_body = NULL;
-    gsize request_len;
+    g_autoptr(GError) error = NULL;
+    const AiImageModelInfo *info;
+    AiImageOperation operation;
     AiConfig *config;
     const gchar *base_url;
+    const gchar *endpoint;
+    const gchar *model;
     OpenAIImageGenData *data;
     GTask *task;
 
     task = g_task_new(self, cancellable, callback, user_data);
 
-    request_json = ai_openai_client_build_image_request(self, request);
-    if (request_json == NULL)
+    model = ai_image_request_get_model(request);
+    if (model == NULL)
     {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build image request");
+        model = AI_OPENAI_IMAGE_DEFAULT_MODEL;
+    }
+
+    info = ai_image_generator_get_model_info(generator, model);
+
+    /* Reconcile the request with what this model accepts before building
+     * anything.  Lenient by default: unsupported parameters are dropped
+     * rather than sent and rejected. */
+    if (!ai_image_request_validate(request, info, AI_IMAGE_VALIDATE_NONE,
+                                   &error))
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
         g_object_unref(task);
         return;
     }
 
-    {
-        g_autoptr(JsonGenerator) gen = json_generator_new();
-        json_generator_set_root(gen, request_json);
-        request_body = json_generator_to_data(gen, &request_len);
-    }
-
     config = ai_client_get_config(AI_CLIENT(self));
     base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
-    url = g_strconcat(base_url, OPENAI_IMAGES_ENDPOINT, NULL);
+    operation = ai_image_request_get_operation(request);
 
-    msg = soup_message_new("POST", url);
-    soup_message_headers_append(soup_message_get_request_headers(msg),
-                                "Content-Type", "application/json");
+    /* Editing and variations are multipart form posts to their own
+     * endpoints; plain generation is JSON. */
+    if (operation == AI_IMAGE_OPERATION_EDIT ||
+        operation == AI_IMAGE_OPERATION_VARIATION ||
+        ai_image_request_get_reference_image_count(request) > 0)
+    {
+        g_autoptr(SoupMultipart) multipart = NULL;
+
+        endpoint = operation == AI_IMAGE_OPERATION_VARIATION
+                   ? OPENAI_IMAGES_VARIATIONS_ENDPOINT
+                   : OPENAI_IMAGES_EDITS_ENDPOINT;
+
+        multipart = ai_image_shared_build_openai_multipart(request, model,
+                                                           info, &error);
+        if (multipart == NULL)
+        {
+            g_task_return_error(task, g_steal_pointer(&error));
+            g_object_unref(task);
+            return;
+        }
+
+        url = g_strconcat(base_url, endpoint, NULL);
+        msg = soup_message_new_from_multipart(url, multipart);
+
+        if (msg == NULL)
+        {
+            g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                    "Failed to build the multipart image request");
+            g_object_unref(task);
+            return;
+        }
+    }
+    else
+    {
+        g_autoptr(JsonNode) request_json = NULL;
+        g_autofree gchar *request_body = NULL;
+        gsize request_len = 0;
+
+        request_json = ai_image_shared_build_openai_json(request, model, info);
+        if (request_json == NULL)
+        {
+            g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                    "Failed to build image request");
+            g_object_unref(task);
+            return;
+        }
+
+        {
+            g_autoptr(JsonGenerator) gen = json_generator_new();
+            json_generator_set_root(gen, request_json);
+            request_body = json_generator_to_data(gen, &request_len);
+        }
+
+        url = g_strconcat(base_url, OPENAI_IMAGES_ENDPOINT, NULL);
+        msg = soup_message_new("POST", url);
+
+        if (msg == NULL)
+        {
+            g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                    "Invalid OpenAI base URL: %s", base_url);
+            g_object_unref(task);
+            return;
+        }
+
+        soup_message_set_request_body_from_bytes(
+            msg, "application/json",
+            g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+    }
 
     klass->add_auth_headers(AI_CLIENT(self), msg);
-
-    soup_message_set_request_body_from_bytes(msg, "application/json",
-        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
 
     data = g_slice_new0(OpenAIImageGenData);
     data->client = g_object_ref(self);
     data->task = task;
-    data->msg = g_object_ref(msg);
+    data->model = g_strdup(model);
 
-    soup_session_send_and_read_async(
+    ai_image_shared_send_async(
         ai_client_get_soup_session(AI_CLIENT(self)),
         msg,
-        G_PRIORITY_DEFAULT,
+        ai_config_get_max_retries(config),
         cancellable,
         on_openai_image_response,
         data);
@@ -1531,22 +1503,6 @@ ai_openai_client_generate_image_finish(
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
-static GList *
-ai_openai_client_get_supported_sizes(AiImageGenerator *generator)
-{
-    GList *sizes = NULL;
-
-    (void)generator;
-
-    sizes = g_list_append(sizes, g_strdup("256x256"));
-    sizes = g_list_append(sizes, g_strdup("512x512"));
-    sizes = g_list_append(sizes, g_strdup("1024x1024"));
-    sizes = g_list_append(sizes, g_strdup("1024x1792"));
-    sizes = g_list_append(sizes, g_strdup("1792x1024"));
-
-    return sizes;
-}
-
 static const gchar *
 ai_openai_client_get_image_default_model(AiImageGenerator *generator)
 {
@@ -1559,8 +1515,8 @@ ai_openai_client_image_generator_init(AiImageGeneratorInterface *iface)
 {
     iface->generate_image_async = ai_openai_client_generate_image_async;
     iface->generate_image_finish = ai_openai_client_generate_image_finish;
-    iface->get_supported_sizes = ai_openai_client_get_supported_sizes;
     iface->get_default_model = ai_openai_client_get_image_default_model;
+    iface->list_image_models = ai_openai_client_list_image_models;
 }
 
 /*
