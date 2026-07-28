@@ -517,9 +517,15 @@ ai_image_model_info_map_quality(
 
     if (quality == AI_IMAGE_QUALITY_AUTO)
     {
-        /* Only send "auto" when the model names it explicitly; otherwise
-         * omitting the parameter is what "auto" means. */
-        return ai_image_model_info_has_quality(self, "auto") ? "auto" : NULL;
+        /*
+         * AUTO is quality's "unset" sentinel, so it always means omit the
+         * parameter -- even for a model that happens to accept a literal
+         * "auto", where sending it would add nothing but would stop the
+         * provider's own default from applying if it ever diverges.  A
+         * model listing "auto" among its qualities is documenting what it
+         * does when the member is absent.
+         */
+        return NULL;
     }
 
     /* Exact match first. */

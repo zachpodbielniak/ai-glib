@@ -1274,6 +1274,7 @@ ai_grok_client_generate_image_async(
     g_autoptr(SoupMessage) msg = NULL;
     g_autofree gchar *url = NULL;
     g_autofree gchar *request_body = NULL;
+    g_autoptr(GBytes) body_bytes = NULL;
     g_autoptr(GError) error = NULL;
     const AiImageModelInfo *info;
     gsize request_len = 0;
@@ -1329,9 +1330,8 @@ ai_grok_client_generate_image_async(
         return;
     }
 
-    soup_message_set_request_body_from_bytes(
-        msg, "application/json",
-        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+    body_bytes = g_bytes_new_take(g_steal_pointer(&request_body), request_len);
+    soup_message_set_request_body_from_bytes(msg, "application/json", body_bytes);
 
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
@@ -1343,6 +1343,7 @@ ai_grok_client_generate_image_async(
     ai_image_shared_send_async(
         ai_client_get_soup_session(AI_CLIENT(self)),
         msg,
+        body_bytes,
         ai_config_get_max_retries(config),
         cancellable,
         on_grok_image_response,

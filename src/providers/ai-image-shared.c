@@ -95,22 +95,65 @@ ai_image_shared_status_to_error (
  * ----------------------------------------------------------------------
  */
 
+/*
+ * A retry has to send a *fresh* SoupMessage: once a message has been
+ * sent its request body stream is consumed, and handing the same one back
+ * to the session fails with "Source stream is already closed" rather than
+ * repeating the request.  So the pieces needed to rebuild it are snapshot
+ * up front and a new message is constructed per attempt.
+ */
 typedef struct
 {
-    SoupSession *session;
-    SoupMessage *msg;
-    GTask       *task;
-    guint        attempt;
-    guint        max_retries;
+    SoupSession        *session;
+    gchar              *method;
+    GUri               *uri;
+    SoupMessageHeaders *headers;
+    GBytes             *body;
+    gchar              *content_type;
+    SoupMessage        *msg;          /* the current attempt */
+    GTask              *task;
+    guint               attempt;
+    guint               max_retries;
 } AiImageSendData;
 
 static void
 ai_image_send_data_free (AiImageSendData *data)
 {
     g_clear_object (&data->session);
+    g_clear_pointer (&data->method, g_free);
+    g_clear_pointer (&data->uri, g_uri_unref);
+    g_clear_pointer (&data->headers, soup_message_headers_unref);
+    g_clear_pointer (&data->body, g_bytes_unref);
+    g_clear_pointer (&data->content_type, g_free);
     g_clear_object (&data->msg);
     g_clear_object (&data->task);
     g_slice_free (AiImageSendData, data);
+}
+
+static void
+ai_image_copy_header (const gchar *name, const gchar *value, gpointer user_data)
+{
+    soup_message_headers_append ((SoupMessageHeaders *) user_data, name, value);
+}
+
+/*
+ * Construct the message for the next attempt from the snapshot.
+ */
+static SoupMessage *
+ai_image_shared_new_message (AiImageSendData *data)
+{
+    SoupMessage *msg = soup_message_new_from_uri (data->method, data->uri);
+
+    soup_message_headers_foreach (data->headers, ai_image_copy_header,
+                                  soup_message_get_request_headers (msg));
+
+    if (data->body != NULL)
+    {
+        soup_message_set_request_body_from_bytes (msg, data->content_type,
+                                                  data->body);
+    }
+
+    return msg;
 }
 
 static void ai_image_shared_send_attempt (AiImageSendData *data);
@@ -211,11 +254,24 @@ ai_image_shared_on_reply (
                  delay, data->attempt, data->max_retries, status);
 
         /*
-         * A timeout source on the thread-default context rather than a
-         * sleep: this runs inside the caller's main loop, which must stay
-         * responsive while we back off.
+         * A timeout source rather than a sleep: this runs inside the
+         * caller's main loop, which must stay responsive while we back
+         * off.
+         *
+         * It must be attached to the *thread-default* context, not the
+         * global default that g_timeout_add() would use.  A synchronous
+         * caller drives a nested loop on a private context, so a timer on
+         * the global default would never be dispatched and the request
+         * would hang until it timed out rather than retrying.
          */
-        g_timeout_add (delay, ai_image_shared_retry_timeout, data);
+        {
+            GSource *timer = g_timeout_source_new (delay);
+
+            g_source_set_callback (timer, ai_image_shared_retry_timeout,
+                                   data, NULL);
+            g_source_attach (timer, g_main_context_get_thread_default ());
+            g_source_unref (timer);
+        }
         return;
     }
 
@@ -239,6 +295,9 @@ ai_image_shared_on_reply (
 static void
 ai_image_shared_send_attempt (AiImageSendData *data)
 {
+    g_clear_object (&data->msg);
+    data->msg = ai_image_shared_new_message (data);
+
     soup_session_send_and_read_async (data->session, data->msg,
                                       G_PRIORITY_DEFAULT,
                                       g_task_get_cancellable (data->task),
@@ -249,22 +308,35 @@ void
 ai_image_shared_send_async (
     SoupSession         *session,
     SoupMessage         *msg,
+    GBytes              *body,
     guint                max_retries,
     GCancellable        *cancellable,
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
     AiImageSendData *data;
+    const gchar *content_type;
 
     g_return_if_fail (SOUP_IS_SESSION (session));
     g_return_if_fail (SOUP_IS_MESSAGE (msg));
 
     data = g_slice_new0 (AiImageSendData);
     data->session = g_object_ref (session);
-    data->msg = g_object_ref (msg);
     data->task = g_task_new (NULL, cancellable, callback, user_data);
     data->attempt = 0;
     data->max_retries = max_retries;
+
+    /* Snapshot everything needed to rebuild the message on a retry. */
+    data->method = g_strdup (soup_message_get_method (msg));
+    data->uri = g_uri_ref (soup_message_get_uri (msg));
+    data->headers = soup_message_headers_new (SOUP_MESSAGE_HEADERS_REQUEST);
+    soup_message_headers_foreach (soup_message_get_request_headers (msg),
+                                  ai_image_copy_header, data->headers);
+
+    content_type = soup_message_headers_get_content_type (
+        soup_message_get_request_headers (msg), NULL);
+    data->content_type = g_strdup (content_type);
+    data->body = body != NULL ? g_bytes_ref (body) : NULL;
 
     g_task_set_source_tag (data->task, ai_image_shared_send_async);
 

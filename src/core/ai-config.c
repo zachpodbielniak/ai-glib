@@ -32,6 +32,9 @@
 #define CLAUDE_API_KEY_ENV    "CLAUDE_API_KEY"       /* Alternative for Claude */
 #define OPENAI_API_KEY_ENV    "OPENAI_API_KEY"
 #define OPENAI_BASE_URL_ENV   "OPENAI_BASE_URL"
+#define CLAUDE_BASE_URL_ENV   "ANTHROPIC_BASE_URL"
+#define GEMINI_BASE_URL_ENV   "GEMINI_BASE_URL"
+#define GROK_BASE_URL_ENV     "XAI_BASE_URL"
 #define GEMINI_API_KEY_ENV    "GEMINI_API_KEY"
 #define XAI_API_KEY_ENV       "XAI_API_KEY"
 #define GROK_API_KEY_ENV      "GROK_API_KEY"         /* Alternative for Grok */
@@ -58,8 +61,19 @@ struct _AiConfig
     gchar *grok_api_key;
     gchar *ollama_api_key;   /* Optional - Ollama may require auth in some setups */
 
-    /* Custom base URLs (overrides defaults) */
+    /*
+     * Custom base URLs (override the defaults).
+     *
+     * Every provider gets one, not just the two whose vendors advertise
+     * compatible gateways: pointing a client at a local address is how a
+     * caller inspects what ai-glib actually sends, routes through a
+     * corporate proxy, or stands a provider up against a mock in tests.
+     * Leaving them hardcoded made those providers untestable offline.
+     */
+    gchar *claude_base_url;
     gchar *openai_base_url;
+    gchar *gemini_base_url;
+    gchar *grok_base_url;
     gchar *ollama_base_url;
 
     /* Request settings */
@@ -107,7 +121,10 @@ ai_config_finalize(GObject *object)
     g_clear_pointer(&self->gemini_api_key, g_free);
     g_clear_pointer(&self->grok_api_key, g_free);
     g_clear_pointer(&self->ollama_api_key, g_free);
+    g_clear_pointer(&self->claude_base_url, g_free);
     g_clear_pointer(&self->openai_base_url, g_free);
+    g_clear_pointer(&self->gemini_base_url, g_free);
+    g_clear_pointer(&self->grok_base_url, g_free);
     g_clear_pointer(&self->ollama_base_url, g_free);
     g_clear_pointer(&self->default_model, g_free);
 
@@ -403,6 +420,16 @@ ai_config_get_base_url(
     switch (provider)
     {
         case AI_PROVIDER_CLAUDE:
+            /* Explicit setting, then environment, then the default. */
+            if (self->claude_base_url != NULL && self->claude_base_url[0] != '\0')
+            {
+                return self->claude_base_url;
+            }
+            url = g_getenv(CLAUDE_BASE_URL_ENV);
+            if (url != NULL && url[0] != '\0')
+            {
+                return url;
+            }
             return CLAUDE_BASE_URL;
 
         case AI_PROVIDER_OPENAI:
@@ -420,9 +447,27 @@ ai_config_get_base_url(
             return OPENAI_BASE_URL;
 
         case AI_PROVIDER_GEMINI:
+            if (self->gemini_base_url != NULL && self->gemini_base_url[0] != '\0')
+            {
+                return self->gemini_base_url;
+            }
+            url = g_getenv(GEMINI_BASE_URL_ENV);
+            if (url != NULL && url[0] != '\0')
+            {
+                return url;
+            }
             return GEMINI_BASE_URL;
 
         case AI_PROVIDER_GROK:
+            if (self->grok_base_url != NULL && self->grok_base_url[0] != '\0')
+            {
+                return self->grok_base_url;
+            }
+            url = g_getenv(GROK_BASE_URL_ENV);
+            if (url != NULL && url[0] != '\0')
+            {
+                return url;
+            }
             return GROK_BASE_URL;
 
         case AI_PROVIDER_OLLAMA:
@@ -450,8 +495,16 @@ ai_config_get_base_url(
  * @provider: the #AiProviderType to set the URL for
  * @base_url: (nullable): the base URL to set, or %NULL to use default
  *
- * Sets the base URL for the specified provider.
- * Only OpenAI and Ollama support custom base URLs.
+ * Sets the base URL for the specified provider, overriding both the
+ * environment variable and the built-in default.
+ *
+ * Supported for every HTTP provider.  Pointing a client at a local
+ * address is how a caller inspects the requests ai-glib actually sends,
+ * routes through a proxy or a compatible gateway, or stands a provider up
+ * against a mock server in tests.
+ *
+ * The CLI-backed providers spawn a subprocess rather than making HTTP
+ * requests, so this does nothing for them.
  */
 void
 ai_config_set_base_url(
@@ -463,9 +516,24 @@ ai_config_set_base_url(
 
     switch (provider)
     {
+        case AI_PROVIDER_CLAUDE:
+            g_clear_pointer(&self->claude_base_url, g_free);
+            self->claude_base_url = g_strdup(base_url);
+            break;
+
         case AI_PROVIDER_OPENAI:
             g_clear_pointer(&self->openai_base_url, g_free);
             self->openai_base_url = g_strdup(base_url);
+            break;
+
+        case AI_PROVIDER_GEMINI:
+            g_clear_pointer(&self->gemini_base_url, g_free);
+            self->gemini_base_url = g_strdup(base_url);
+            break;
+
+        case AI_PROVIDER_GROK:
+            g_clear_pointer(&self->grok_base_url, g_free);
+            self->grok_base_url = g_strdup(base_url);
             break;
 
         case AI_PROVIDER_OLLAMA:
@@ -473,11 +541,8 @@ ai_config_set_base_url(
             self->ollama_base_url = g_strdup(base_url);
             break;
 
-        case AI_PROVIDER_CLAUDE:
-        case AI_PROVIDER_GEMINI:
-        case AI_PROVIDER_GROK:
         default:
-            /* These providers don't support custom base URLs */
+            /* CLI providers spawn a subprocess and have no base URL. */
             break;
     }
 }

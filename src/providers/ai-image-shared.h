@@ -54,24 +54,33 @@ ai_image_shared_status_to_error (
 /*
  * ai_image_shared_send_async:
  * @session: the SoupSession to use
- * @msg: (transfer none): the message to send
+ * @msg: (transfer none): the message describing the request
+ * @body: (nullable): the request body, needed to rebuild @msg on a retry
  * @max_retries: how many times to retry a transient failure; 0 disables
  * @cancellable: (nullable): a GCancellable
  * @callback: called on completion
  * @user_data: user data for @callback
  *
- * Sends @msg, retrying transient failures (429 honouring Retry-After, 5xx
- * and network errors) with exponential backoff, and mapping a final
- * non-2xx status onto AI_ERROR.
+ * Sends the request, retrying transient failures (429 honouring
+ * Retry-After, 5xx and network errors) with exponential backoff, and
+ * mapping a final non-2xx status onto AI_ERROR.
  *
- * Unlike ai_search_http_get_json(), which sleeps, this waits with a
- * timeout source on the thread-default context -- the image paths are
- * async and must not block the caller's loop while backing off.
+ * @msg is used as a template rather than sent directly: a message whose
+ * body stream has been consumed cannot be sent again, so each attempt gets
+ * a freshly-built copy. That is why @body must be passed separately --
+ * there is no way to read it back off a SoupMessage.
+ *
+ * Unlike ai_search_http_get_json(), which sleeps, this waits on a timeout
+ * source attached to the thread-default context: the image paths are async
+ * and must not block the caller's loop while backing off, and a
+ * synchronous caller is driving a nested loop on a private context that a
+ * global-default timer would never reach.
  */
 void
 ai_image_shared_send_async (
     SoupSession         *session,
     SoupMessage         *msg,
+    GBytes              *body,
     guint                max_retries,
     GCancellable        *cancellable,
     GAsyncReadyCallback  callback,

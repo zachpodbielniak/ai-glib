@@ -1374,6 +1374,7 @@ ai_openai_client_generate_image_async(
     g_autoptr(SoupMessage) msg = NULL;
     g_autofree gchar *url = NULL;
     g_autoptr(GError) error = NULL;
+    g_autoptr(GBytes) body_bytes = NULL;
     const AiImageModelInfo *info;
     AiImageOperation operation;
     AiConfig *config;
@@ -1430,14 +1431,32 @@ ai_openai_client_generate_image_async(
         }
 
         url = g_strconcat(base_url, endpoint, NULL);
-        msg = soup_message_new_from_multipart(url, multipart);
+        msg = soup_message_new("POST", url);
 
         if (msg == NULL)
         {
             g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                    "Failed to build the multipart image request");
+                                    "Invalid OpenAI base URL: %s", base_url);
             g_object_unref(task);
             return;
+        }
+
+        /*
+         * Serialise the multipart ourselves rather than using
+         * soup_message_new_from_multipart(): the retrying sender needs the
+         * body as a GBytes it can replay onto a fresh message, and there
+         * is no way to read a body back off a SoupMessage.
+         */
+        soup_multipart_to_message(multipart,
+                                  soup_message_get_request_headers(msg),
+                                  &body_bytes);
+
+        {
+            const gchar *content_type = soup_message_headers_get_content_type(
+                soup_message_get_request_headers(msg), NULL);
+
+            soup_message_set_request_body_from_bytes(msg, content_type,
+                                                     body_bytes);
         }
     }
     else
@@ -1472,9 +1491,10 @@ ai_openai_client_generate_image_async(
             return;
         }
 
-        soup_message_set_request_body_from_bytes(
-            msg, "application/json",
-            g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+        body_bytes = g_bytes_new_take(g_steal_pointer(&request_body),
+                                      request_len);
+        soup_message_set_request_body_from_bytes(msg, "application/json",
+                                                 body_bytes);
     }
 
     klass->add_auth_headers(AI_CLIENT(self), msg);
@@ -1487,6 +1507,7 @@ ai_openai_client_generate_image_async(
     ai_image_shared_send_async(
         ai_client_get_soup_session(AI_CLIENT(self)),
         msg,
+        body_bytes,
         ai_config_get_max_retries(config),
         cancellable,
         on_openai_image_response,
