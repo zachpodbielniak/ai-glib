@@ -16,6 +16,7 @@
 #include <glib-object.h>
 #include <gio/gio.h>
 
+#include "core/ai-image-capabilities.h"
 #include "model/ai-image-request.h"
 #include "model/ai-image-response.h"
 
@@ -32,9 +33,19 @@ G_DECLARE_INTERFACE(AiImageGenerator, ai_image_generator, AI, IMAGE_GENERATOR, G
  * @generate_image_finish: finishes an asynchronous image generation
  * @get_supported_sizes: gets the list of supported image sizes
  * @get_default_model: gets the default model for image generation
+ * @list_image_models: lists the image models this provider serves
  * @_reserved: reserved for future expansion
  *
  * Interface for AI image generation providers.
+ *
+ * Only @generate_image_async and @generate_image_finish are required.
+ * Implementing @list_image_models is what makes a provider participate in
+ * capability checking, `ai --list-image-models`, and any front-end that
+ * offers only the options a chosen model accepts -- so in practice a
+ * provider implements three vfuncs and gets the rest for free.
+ *
+ * @get_supported_sizes predates @list_image_models and is derived from it
+ * when not implemented directly.
  */
 struct _AiImageGeneratorInterface
 {
@@ -51,9 +62,10 @@ struct _AiImageGeneratorInterface
                                                 GError             **error);
     GList *           (*get_supported_sizes)   (AiImageGenerator    *self);
     const gchar *     (*get_default_model)     (AiImageGenerator    *self);
+    GList *           (*list_image_models)     (AiImageGenerator    *self);
 
     /* Reserved for future expansion */
-    gpointer _reserved[8];
+    gpointer _reserved[7];
 };
 
 void
@@ -72,10 +84,40 @@ ai_image_generator_generate_image_finish(
     GError           **error
 );
 
+AiImageResponse *
+ai_image_generator_generate_image(
+    AiImageGenerator  *self,
+    AiImageRequest    *request,
+    GCancellable      *cancellable,
+    GError           **error
+);
+
 GList *
 ai_image_generator_get_supported_sizes(AiImageGenerator *self);
 
 const gchar *
 ai_image_generator_get_default_model(AiImageGenerator *self);
+
+GList *
+ai_image_generator_list_image_models(AiImageGenerator *self);
+
+const AiImageModelInfo *
+ai_image_generator_get_model_info(
+    AiImageGenerator *self,
+    const gchar      *model
+);
+
+AiImageCapabilities
+ai_image_generator_get_capabilities(
+    AiImageGenerator *self,
+    const gchar      *model
+);
+
+gboolean
+ai_image_generator_supports(
+    AiImageGenerator    *self,
+    const gchar         *model,
+    AiImageCapabilities  capability
+);
 
 G_END_DECLS

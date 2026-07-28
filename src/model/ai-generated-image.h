@@ -14,6 +14,7 @@
 #endif
 
 #include <glib-object.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -87,6 +88,21 @@ GBytes *
 ai_generated_image_get_bytes(
     AiGeneratedImage *self,
     GError          **error
+);
+
+void
+ai_generated_image_load_bytes_async(
+    AiGeneratedImage    *self,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
+GBytes *
+ai_generated_image_load_bytes_finish(
+    AiGeneratedImage  *self,
+    GAsyncResult      *result,
+    GError           **error
 );
 
 gboolean

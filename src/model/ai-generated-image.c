@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include <gio/gio.h>
+#include <libsoup/soup.h>
 
 #include "model/ai-generated-image.h"
 #include "core/ai-error.h"
@@ -280,8 +281,10 @@ ai_generated_image_set_revised_prompt(
  * @error: (out) (optional): return location for a #GError
  *
  * Gets the raw image data as a #GBytes.
- * For base64 images, this decodes the data.
- * For URL images, this returns NULL (use async fetch instead).
+ *
+ * For base64 images this decodes the payload.  For URL images it fails --
+ * fetching would block on the network -- so use
+ * ai_generated_image_load_bytes_async() instead, which handles both kinds.
  *
  * Returns: (transfer full) (nullable): the image data, or %NULL on error
  */
@@ -295,7 +298,8 @@ ai_generated_image_get_bytes(
     if (self->is_url)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                    "Cannot synchronously get bytes for URL image. Use async API.");
+                    "Cannot synchronously get bytes for a URL image; use "
+                    "ai_generated_image_load_bytes_async()");
         return NULL;
     }
 
@@ -364,4 +368,150 @@ ai_generated_image_save_to_file(
     data = g_bytes_get_data(bytes, &len);
     return g_output_stream_write_all(G_OUTPUT_STREAM(stream), data, len,
                                      NULL, NULL, error);
+}
+
+/*
+ * Completion for the network leg of ai_generated_image_load_bytes_async().
+ */
+static void
+ai_generated_image_on_url_fetched(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    g_autoptr(GTask) task = user_data;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GBytes) bytes = NULL;
+    SoupMessage *msg;
+    guint status;
+
+    bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), result,
+                                              &error);
+
+    if (bytes == NULL)
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        return;
+    }
+
+    msg = g_task_get_task_data(task);
+    status = soup_message_get_status(msg);
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(status))
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                                "Failed to fetch generated image (HTTP %u)",
+                                status);
+        return;
+    }
+
+    g_task_return_pointer(task, g_steal_pointer(&bytes),
+                          (GDestroyNotify)g_bytes_unref);
+}
+
+/**
+ * ai_generated_image_load_bytes_async:
+ * @self: an #AiGeneratedImage
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): callback to call when done
+ * @user_data: user data for the callback
+ *
+ * Asynchronously obtains the raw image data, whatever form the provider
+ * returned it in.
+ *
+ * Base64 payloads are decoded immediately; URL payloads are fetched over
+ * HTTP.  Providers differ in which they hand back for the same request --
+ * and the default #AiImageResponseFormat is a URL -- so this is the
+ * portable way to get at the bytes, and the only way that works for a URL
+ * image.
+ *
+ * The URLs providers hand out are short-lived, typically expiring within
+ * the hour, so fetch promptly rather than storing the response and
+ * resolving it later.
+ */
+void
+ai_generated_image_load_bytes_async(
+    AiGeneratedImage    *self,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    g_autoptr(GTask) task = NULL;
+    g_autoptr(SoupSession) session = NULL;
+    SoupMessage *msg;
+
+    g_return_if_fail(self != NULL);
+
+    task = g_task_new(NULL, cancellable, callback, user_data);
+    g_task_set_source_tag(task, ai_generated_image_load_bytes_async);
+
+    /* Inline data needs no network round trip. */
+    if (!self->is_url)
+    {
+        g_autoptr(GError) error = NULL;
+        GBytes *bytes;
+
+        bytes = ai_generated_image_get_bytes(self, &error);
+        if (bytes == NULL)
+        {
+            g_task_return_error(task, g_steal_pointer(&error));
+            return;
+        }
+
+        g_task_return_pointer(task, bytes, (GDestroyNotify)g_bytes_unref);
+        return;
+    }
+
+    if (self->url == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Generated image has neither data nor a URL");
+        return;
+    }
+
+    msg = soup_message_new("GET", self->url);
+    if (msg == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Generated image has a malformed URL: %s",
+                                self->url);
+        return;
+    }
+
+    /*
+     * A private session rather than the originating client's: an
+     * AiGeneratedImage is a plain boxed value with no way back to the
+     * client that produced it, and may well outlive it.  The message is
+     * kept as task data because the completion needs its status code.
+     */
+    session = soup_session_new();
+    g_task_set_task_data(task, msg, (GDestroyNotify)g_object_unref);
+
+    soup_session_send_and_read_async(session, msg, G_PRIORITY_DEFAULT,
+                                     cancellable,
+                                     ai_generated_image_on_url_fetched,
+                                     g_steal_pointer(&task));
+}
+
+/**
+ * ai_generated_image_load_bytes_finish:
+ * @self: an #AiGeneratedImage
+ * @result: the #GAsyncResult
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Finishes an ai_generated_image_load_bytes_async() call.
+ *
+ * Returns: (transfer full) (nullable): the image data, or %NULL on error
+ */
+GBytes *
+ai_generated_image_load_bytes_finish(
+    AiGeneratedImage  *self,
+    GAsyncResult      *result,
+    GError           **error
+){
+    (void)self;
+
+    g_return_val_if_fail(g_task_is_valid(result, NULL), NULL);
+
+    return g_task_propagate_pointer(G_TASK(result), error);
 }

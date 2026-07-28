@@ -43,6 +43,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-config.h \
 	$(SRCDIR)/core/ai-provider.h \
 	$(SRCDIR)/core/ai-streamable.h \
+	$(SRCDIR)/core/ai-image-capabilities.h \
 	$(SRCDIR)/core/ai-image-generator.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
@@ -83,6 +84,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \
 	$(SRCDIR)/core/ai-streamable.c \
+	$(SRCDIR)/core/ai-image-capabilities.c \
 	$(SRCDIR)/core/ai-image-generator.c \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \

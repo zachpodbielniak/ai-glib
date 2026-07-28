@@ -26,6 +26,7 @@
 #include "core/ai-config.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-image-capabilities.h"
 #include "core/ai-image-generator.h"
 #include "core/ai-client.h"
 #include "core/ai-cli-client.h"
