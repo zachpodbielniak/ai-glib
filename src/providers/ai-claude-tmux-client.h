@@ -56,6 +56,28 @@ G_DECLARE_FINAL_TYPE(AiClaudeTmuxClient, ai_claude_tmux_client,
 #define AI_CLAUDE_TMUX_DEFAULT_MODEL "sonnet"
 
 /**
+ * AI_CLAUDE_TMUX_DEFAULT_SOCKET:
+ *
+ * Default tmux server socket for these sessions (`tmux -L <name>`).
+ *
+ * Deliberately NOT tmux's "default" socket.  A bare `tmux` talks to
+ * `default`, so sharing it would put our sessions on the same server
+ * process as the user's own — where killing ours kills theirs.  Running on
+ * a private socket makes the two mutually invisible.
+ *
+ * Embedders should override this with something identifying their
+ * application (see ai_claude_tmux_client_set_socket_name()), so a user can
+ * tell whose sessions they are looking at:
+ *
+ * |[<!-- language="C" -->
+ * ai_claude_tmux_client_set_socket_name (client, "libreclaw");
+ * ]|
+ *
+ * and inspect them with `tmux -L libreclaw list-sessions`.
+ */
+#define AI_CLAUDE_TMUX_DEFAULT_SOCKET "ai-glib"
+
+/**
  * AI_CLAUDE_TMUX_MODEL_FABLE:
  * AI_CLAUDE_TMUX_MODEL_OPUS:
  * AI_CLAUDE_TMUX_MODEL_SONNET:
@@ -159,6 +181,17 @@ void
 ai_claude_tmux_client_set_tmux_path(
     AiClaudeTmuxClient *self,
     const gchar        *path
+);
+
+/* Docs live above the implementations in the .c (the GIR scanner warns
+ * on duplicate comment blocks). */
+const gchar *
+ai_claude_tmux_client_get_socket_name(AiClaudeTmuxClient *self);
+
+void
+ai_claude_tmux_client_set_socket_name(
+    AiClaudeTmuxClient *self,
+    const gchar        *name
 );
 
 /**

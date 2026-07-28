@@ -417,7 +417,10 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 
 		/* Representative session: a fresh session-id, sample paths. */
 		argv = ai_claude_tmux_client_build_session_argv(
-			tmux_bin, "ai-glib-dry-run", cwd, claude_exe,
+			tmux_bin,
+			ai_claude_tmux_client_get_socket_name(
+				AI_CLAUDE_TMUX_CLIENT(provider)),
+			"ai-glib-dry-run", cwd, claude_exe,
 			/* resuming */ FALSE, "<session-id>", "<settings.json>",
 			opt_model, opt_effort, opt_skip_perms);
 		print_argv((gchar **) argv->pdata);

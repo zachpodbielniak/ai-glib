@@ -22,6 +22,7 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-claude-tmux-client-internal.h"
@@ -41,32 +42,57 @@
 
 /*
  * Non-ollama fresh session: byte-for-byte the historical argv -- claude
- * runs directly with its own --model.
+ * runs directly with its own --model -- behind the "-L <socket>" prefix.
  */
 static void
 test_tmux_session_argv_plain_fresh(void)
 {
     g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
-        "tmux", "sess", "/work", "/usr/bin/claude",
+        "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
         "sonnet", NULL, FALSE);
 
     g_assert_cmpstr(AT(argv, 0), ==, "tmux");
-    g_assert_cmpstr(AT(argv, 1), ==, "new-session");
-    g_assert_cmpstr(AT(argv, 2), ==, "-d");
-    g_assert_cmpstr(AT(argv, 3), ==, "-s");
-    g_assert_cmpstr(AT(argv, 4), ==, "sess");
-    g_assert_cmpstr(AT(argv, 5), ==, "-c");
-    g_assert_cmpstr(AT(argv, 6), ==, "/work");
-    g_assert_cmpstr(AT(argv, 7), ==, "--");
-    g_assert_cmpstr(AT(argv, 8), ==, "/usr/bin/claude");
-    g_assert_cmpstr(AT(argv, 9), ==, "--session-id");
-    g_assert_cmpstr(AT(argv, 10), ==, "SID");
-    g_assert_cmpstr(AT(argv, 11), ==, "--settings");
-    g_assert_cmpstr(AT(argv, 12), ==, "/tmp/settings.json");
-    g_assert_cmpstr(AT(argv, 13), ==, "--model");
-    g_assert_cmpstr(AT(argv, 14), ==, "sonnet");
-    g_assert_null(g_ptr_array_index(argv, 15));
+    g_assert_cmpstr(AT(argv, 1), ==, "-L");
+    g_assert_cmpstr(AT(argv, 2), ==, "sock");
+    g_assert_cmpstr(AT(argv, 3), ==, "new-session");
+    g_assert_cmpstr(AT(argv, 4), ==, "-d");
+    g_assert_cmpstr(AT(argv, 5), ==, "-s");
+    g_assert_cmpstr(AT(argv, 6), ==, "sess");
+    g_assert_cmpstr(AT(argv, 7), ==, "-c");
+    g_assert_cmpstr(AT(argv, 8), ==, "/work");
+    g_assert_cmpstr(AT(argv, 9), ==, "--");
+    g_assert_cmpstr(AT(argv, 10), ==, "/usr/bin/claude");
+    g_assert_cmpstr(AT(argv, 11), ==, "--session-id");
+    g_assert_cmpstr(AT(argv, 12), ==, "SID");
+    g_assert_cmpstr(AT(argv, 13), ==, "--settings");
+    g_assert_cmpstr(AT(argv, 14), ==, "/tmp/settings.json");
+    g_assert_cmpstr(AT(argv, 15), ==, "--model");
+    g_assert_cmpstr(AT(argv, 16), ==, "sonnet");
+    g_assert_null(g_ptr_array_index(argv, 17));
+}
+
+/*
+ * The socket flag itself.  -L is a tmux *server* option, so it has to sit
+ * between the binary and the subcommand; anywhere else and tmux either
+ * rejects it or reads it as an argument to new-session.  Getting this
+ * wrong silently puts the session back on the user's default socket,
+ * which is what let a LibreClaw teardown reap a user's own tmux session.
+ */
+static void
+test_tmux_session_argv_dedicated_socket(void)
+{
+    g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
+        "tmux", "libreclaw", "sess", "/work", "/usr/bin/claude",
+        /* resuming */ FALSE, "SID", "/tmp/settings.json",
+        "sonnet", NULL, FALSE);
+
+    g_assert_cmpstr(AT(argv, 1), ==, "-L");
+    g_assert_cmpstr(AT(argv, 2), ==, "libreclaw");
+    g_assert_cmpstr(AT(argv, 3), ==, "new-session");
+
+    /* And never the shared socket a bare `tmux` uses. */
+    g_assert_cmpstr(AT(argv, 2), !=, "default");
 }
 
 /*
@@ -82,23 +108,23 @@ test_tmux_session_argv_ollama_fresh(void)
 
     g_unsetenv("OLLAMA_PATH");
     argv = ai_claude_tmux_client_build_session_argv(
-        "tmux", "sess", "/work", "/usr/bin/claude",
+        "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
         "ollama/glm-5.2:cloud", NULL, FALSE);
 
-    g_assert_cmpstr(AT(argv, 7), ==, "--");
-    g_assert_cmpstr(AT(argv, 8), ==, "ollama");
-    g_assert_cmpstr(AT(argv, 9), ==, "launch");
-    g_assert_cmpstr(AT(argv, 10), ==, "claude");
-    g_assert_cmpstr(AT(argv, 11), ==, "--model");
-    g_assert_cmpstr(AT(argv, 12), ==, "glm-5.2:cloud");
-    g_assert_cmpstr(AT(argv, 13), ==, "--");
-    g_assert_cmpstr(AT(argv, 14), ==, "--session-id");
-    g_assert_cmpstr(AT(argv, 15), ==, "SID");
-    g_assert_cmpstr(AT(argv, 16), ==, "--settings");
-    g_assert_cmpstr(AT(argv, 17), ==, "/tmp/settings.json");
+    g_assert_cmpstr(AT(argv, 9), ==, "--");
+    g_assert_cmpstr(AT(argv, 10), ==, "ollama");
+    g_assert_cmpstr(AT(argv, 11), ==, "launch");
+    g_assert_cmpstr(AT(argv, 12), ==, "claude");
+    g_assert_cmpstr(AT(argv, 13), ==, "--model");
+    g_assert_cmpstr(AT(argv, 14), ==, "glm-5.2:cloud");
+    g_assert_cmpstr(AT(argv, 15), ==, "--");
+    g_assert_cmpstr(AT(argv, 16), ==, "--session-id");
+    g_assert_cmpstr(AT(argv, 17), ==, "SID");
+    g_assert_cmpstr(AT(argv, 18), ==, "--settings");
+    g_assert_cmpstr(AT(argv, 19), ==, "/tmp/settings.json");
     /* No claude --model after the wrapper. */
-    g_assert_null(g_ptr_array_index(argv, 18));
+    g_assert_null(g_ptr_array_index(argv, 20));
 
     if (old_ollama != NULL)
         g_setenv("OLLAMA_PATH", old_ollama, TRUE);
@@ -113,14 +139,14 @@ test_tmux_session_argv_ollama_resume(void)
 
     g_unsetenv("OLLAMA_PATH");
     argv = ai_claude_tmux_client_build_session_argv(
-        "tmux", "sess", "/work", "/usr/bin/claude",
+        "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ TRUE, "SID", "/tmp/settings.json",
         "ollama/x", NULL, FALSE);
 
-    g_assert_cmpstr(AT(argv, 8), ==, "ollama");
-    g_assert_cmpstr(AT(argv, 13), ==, "--");
-    g_assert_cmpstr(AT(argv, 14), ==, "--resume");
-    g_assert_cmpstr(AT(argv, 15), ==, "SID");
+    g_assert_cmpstr(AT(argv, 10), ==, "ollama");
+    g_assert_cmpstr(AT(argv, 15), ==, "--");
+    g_assert_cmpstr(AT(argv, 16), ==, "--resume");
+    g_assert_cmpstr(AT(argv, 17), ==, "SID");
 
     if (old_ollama != NULL)
         g_setenv("OLLAMA_PATH", old_ollama, TRUE);
@@ -140,7 +166,7 @@ test_tmux_session_argv_ollama_effort_skip(void)
 
     g_unsetenv("OLLAMA_PATH");
     argv = ai_claude_tmux_client_build_session_argv(
-        "tmux", "sess", "/work", "/usr/bin/claude",
+        "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
         "ollama/x", "high", TRUE);
 
@@ -1221,6 +1247,319 @@ test_chat_precancelled_returns_cancelled(void)
 }
 
 /* ================================================================== */
+/* Dedicated tmux socket (-L)                                          */
+/* ================================================================== */
+
+/*
+ * Background: every tmux command this client runs used to omit -L, so it
+ * landed on the *default* server socket ($TMUX_TMPDIR/tmux-<uid>/default)
+ * — the very same server a user gets from a bare `tmux`.  Our sessions sat
+ * next to the user's hand-started ones on one shared server process, and
+ * anything that killed that server took the user's work with it.  That is
+ * not hypothetical: it cost a live working session on fai-vm.
+ *
+ * A dedicated socket makes the two physically invisible to each other.
+ * The two tests below lock that shut from both ends — every argv we build,
+ * and the socket that actually appears on disk.
+ */
+
+/*
+ * The socket name is a property, so an embedder can brand it ("libreclaw")
+ * — but it must never be settable to nothing.  An empty socket name would
+ * emit a bare "-L" followed by the subcommand, which tmux reads as a
+ * socket literally named "new-session"; worse, any code that treated
+ * empty as "no -L" would silently drop us back onto the shared default
+ * server.  Empty and NULL therefore both snap back to the default.
+ */
+static void
+test_socket_name_property(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autofree gchar *via_prop = NULL;
+
+    /* Default is a private socket, never tmux's shared "default". */
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), ==,
+                    AI_CLAUDE_TMUX_DEFAULT_SOCKET);
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), !=,
+                    "default");
+
+    ai_claude_tmux_client_set_socket_name(client, "libreclaw");
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), ==,
+                    "libreclaw");
+
+    /* Round-trips through the GObject property too (bindings use this). */
+    g_object_get(client, "socket-name", &via_prop, NULL);
+    g_assert_cmpstr(via_prop, ==, "libreclaw");
+
+    g_object_set(client, "socket-name", "other", NULL);
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), ==,
+                    "other");
+
+    /* Empty and NULL both restore the default rather than clearing it. */
+    ai_claude_tmux_client_set_socket_name(client, "");
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), ==,
+                    AI_CLAUDE_TMUX_DEFAULT_SOCKET);
+
+    ai_claude_tmux_client_set_socket_name(client, "libreclaw");
+    ai_claude_tmux_client_set_socket_name(client, NULL);
+    g_assert_cmpstr(ai_claude_tmux_client_get_socket_name(client), ==,
+                    AI_CLAUDE_TMUX_DEFAULT_SOCKET);
+}
+
+/*
+ * Drive one turn against a fake tmux that records every argv it is handed,
+ * then assert EVERY invocation carried "-L <socket>".
+ *
+ * This has to hold for all of them, not just new-session: a stray
+ * `kill-session` or `send-keys` without -L is aimed straight at the user's
+ * server.
+ *
+ * The turn itself is expected to fail — the fake tmux never starts a real
+ * claude, so the SessionStart ready-file never appears and the turn ends at
+ * the startup deadline.  We only care about what got spawned on the way.
+ */
+static void
+test_socket_every_invocation_uses_dedicated_socket(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("hello");
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *tmpdir = NULL;
+    g_autofree gchar *logfile = NULL;
+    g_autofree gchar *fake_tmux = NULL;
+    g_autofree gchar *script = NULL;
+    g_autofree gchar *log_contents = NULL;
+    g_auto(GStrv) lines = NULL;
+    GList *messages = NULL;
+    CancelTestCtx ctx = { 0 };
+    guint i;
+    guint seen = 0;
+
+    tmpdir = g_dir_make_tmp("ai-glib-tmux-socket-XXXXXX", &err);
+    g_assert_no_error(err);
+    logfile = g_build_filename(tmpdir, "tmux-argv.log", NULL);
+    fake_tmux = g_build_filename(tmpdir, "fake-tmux", NULL);
+
+    /*
+     * Record the whole argv, one invocation per line.  has-session must
+     * exit non-zero, otherwise the orphan reaper concludes there is a
+     * stale session to kill and the log gains a turn-dependent line.
+     */
+    script = g_strdup_printf(
+        "#!/bin/sh\n"
+        "printf '%%s\\n' \"$*\" >> '%s'\n"
+        "for a in \"$@\"; do\n"
+        "  if [ \"$a\" = has-session ]; then exit 1; fi\n"
+        "done\n"
+        "exit 0\n",
+        logfile);
+    g_file_set_contents(fake_tmux, script, -1, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(g_chmod(fake_tmux, 0755), ==, 0);
+
+    g_object_set(client,
+                 "tmux-path", fake_tmux,
+                 "socket-name", "test-socket",
+                 "startup-timeout-ms", 1200,
+                 "command-timeout-ms", 5000,
+                 NULL);
+
+    ctx.loop = g_main_loop_new(NULL, FALSE);
+    messages = g_list_append(messages, msg);
+
+    ai_provider_chat_async(AI_PROVIDER(client), messages, NULL, 0, NULL,
+                           NULL, on_cancelled_chat_finish, &ctx);
+    g_main_loop_run(ctx.loop);
+
+    g_assert_true(ctx.done);
+    /* Expected: claude never became ready behind the fake tmux. */
+    g_clear_error(&ctx.error);
+    g_clear_object(&ctx.response);
+
+    g_file_get_contents(logfile, &log_contents, NULL, &err);
+    g_assert_no_error(err);
+
+    lines = g_strsplit(log_contents, "\n", -1);
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        if (lines[i][0] == '\0')
+            continue;
+        seen++;
+        if (!g_str_has_prefix(lines[i], "-L test-socket "))
+        {
+            g_test_fail_printf(
+                "tmux invoked without '-L test-socket' — this command "
+                "would hit the user's own default socket: 'tmux %s'",
+                lines[i]);
+        }
+    }
+
+    /* Guard against a vacuous pass: the fake tmux really did run. */
+    g_assert_cmpuint(seen, >, 0);
+
+    /*
+     * The server is also made durable up front.  Without `exit-empty off`
+     * the tmux server exits with its last session — i.e. after every turn
+     * — and each replacement server is born into whatever cgroup that
+     * turn happened to run in, dying with it and taking any sibling
+     * sessions along.
+     */
+    g_assert_nonnull(strstr(log_contents, "start-server"));
+    g_assert_nonnull(strstr(log_contents, "set-option -s exit-empty off"));
+
+    g_list_free(messages);
+    g_main_loop_unref(ctx.loop);
+    g_unlink(logfile);
+    g_unlink(fake_tmux);
+    g_rmdir(tmpdir);
+}
+
+/*
+ * Kill every tmux server holding a socket in @socket_dir, so a failed run
+ * cannot strand a server.  Safe by construction: @socket_dir lives under
+ * the test's private TMUX_TMPDIR, so the user's real sockets are not in it.
+ */
+static void
+kill_tmux_servers_in(const gchar *socket_dir)
+{
+    g_autoptr(GDir) dir = g_dir_open(socket_dir, 0, NULL);
+    const gchar *name;
+
+    if (dir == NULL)
+        return;
+
+    while ((name = g_dir_read_name(dir)) != NULL)
+    {
+        const gchar *argv[] = { "tmux", "-L", name, "kill-server", NULL };
+        g_spawn_sync(NULL, (gchar **) argv, NULL,
+                     G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL
+                         | G_SPAWN_STDERR_TO_DEV_NULL,
+                     NULL, NULL, NULL, NULL, NULL, NULL);
+    }
+}
+
+/*
+ * The reported symptom, reproduced against a real tmux: after a turn, the
+ * default socket must not exist at all.
+ *
+ * Hermetic and zero-risk — TMUX_TMPDIR is redirected into a private temp
+ * dir for the duration, so this test can neither see nor disturb the
+ * developer's (or CI's) real tmux sessions.  claude is stubbed by a script
+ * that just sleeps, which keeps the session alive long enough to inspect;
+ * debug-preserve-tmux stops the failure path from tearing it down first.
+ */
+static void
+test_socket_real_tmux_never_touches_default_socket(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = NULL;
+    g_autoptr(AiMessage) msg = NULL;
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *old_tmux_tmpdir = NULL;
+    g_autofree gchar *old_claude_path = NULL;
+    g_autofree gchar *tmpdir = NULL;
+    g_autofree gchar *fake_claude = NULL;
+    g_autofree gchar *script = NULL;
+    g_autofree gchar *socket_dir = NULL;
+    g_autofree gchar *default_sock = NULL;
+    g_autofree gchar *ours_sock = NULL;
+    GList *messages = NULL;
+    CancelTestCtx ctx = { 0 };
+    gboolean default_existed;
+    gboolean ours_existed;
+
+    {
+        /* transfer full — must be freed even though we only test != NULL */
+        g_autofree gchar *tmux_bin = g_find_program_in_path("tmux");
+        if (tmux_bin == NULL)
+        {
+            g_test_skip("tmux not on PATH");
+            return;
+        }
+    }
+
+    old_tmux_tmpdir = g_strdup(g_getenv("TMUX_TMPDIR"));
+    old_claude_path = g_strdup(g_getenv("CLAUDE_CODE_PATH"));
+
+    tmpdir = g_dir_make_tmp("ai-glib-tmux-realsock-XXXXXX", &err);
+    g_assert_no_error(err);
+    fake_claude = g_build_filename(tmpdir, "fake-claude", NULL);
+
+    /* Ignore every argument, just stay alive so the session persists. */
+    script = g_strdup("#!/bin/sh\nexec sleep 30\n");
+    g_file_set_contents(fake_claude, script, -1, &err);
+    g_assert_no_error(err);
+    g_assert_cmpint(g_chmod(fake_claude, 0755), ==, 0);
+
+    g_setenv("TMUX_TMPDIR", tmpdir, TRUE);
+    g_setenv("CLAUDE_CODE_PATH", fake_claude, TRUE);
+
+    client = ai_claude_tmux_client_new();
+    msg = ai_message_new_user("hello");
+    g_object_set(client,
+                 "startup-timeout-ms", 1500,
+                 "command-timeout-ms", 5000,
+                 "debug-preserve-tmux", TRUE,
+                 NULL);
+
+    ctx.loop = g_main_loop_new(NULL, FALSE);
+    messages = g_list_append(messages, msg);
+
+    ai_provider_chat_async(AI_PROVIDER(client), messages, NULL, 0, NULL,
+                           NULL, on_cancelled_chat_finish, &ctx);
+    g_main_loop_run(ctx.loop);
+    g_assert_true(ctx.done);
+    g_clear_error(&ctx.error);
+    g_clear_object(&ctx.response);
+
+    socket_dir = g_strdup_printf("%s/tmux-%u", tmpdir, (guint) getuid());
+    default_sock = g_build_filename(socket_dir, "default", NULL);
+    ours_sock = g_build_filename(
+        socket_dir, ai_claude_tmux_client_get_socket_name(client), NULL);
+    default_existed = g_file_test(default_sock, G_FILE_TEST_EXISTS);
+    ours_existed = g_file_test(ours_sock, G_FILE_TEST_EXISTS);
+
+    /* Tear the server down before asserting, so a failure cannot leak it. */
+    kill_tmux_servers_in(socket_dir);
+
+    if (old_tmux_tmpdir != NULL)
+        g_setenv("TMUX_TMPDIR", old_tmux_tmpdir, TRUE);
+    else
+        g_unsetenv("TMUX_TMPDIR");
+    if (old_claude_path != NULL)
+        g_setenv("CLAUDE_CODE_PATH", old_claude_path, TRUE);
+    else
+        g_unsetenv("CLAUDE_CODE_PATH");
+
+    /*
+     * THE assertion.  A default socket here means we spawned onto the
+     * shared server — the exact condition that reaped a user's session.
+     */
+    if (default_existed)
+    {
+        g_test_fail_printf(
+            "tmux spawned on the DEFAULT socket (%s): LibreClaw is sharing "
+            "a server with the user's own tmux sessions", default_sock);
+    }
+
+    /*
+     * Guard against a vacuous pass: "no default socket" is only evidence
+     * of isolation if we actually started a server somewhere.  Had the
+     * turn died before reaching tmux, neither socket would exist and the
+     * check above would pass while proving nothing.
+     */
+    if (!ours_existed)
+    {
+        g_test_fail_printf(
+            "no tmux server on our own socket (%s) either — the turn never "
+            "reached tmux, so this test proved nothing", ours_sock);
+    }
+
+    g_list_free(messages);
+    g_main_loop_unref(ctx.loop);
+    g_unlink(fake_claude);
+}
+
+/* ================================================================== */
 /* sentinel / inactivity wait                                          */
 /* ================================================================== */
 
@@ -1533,6 +1872,17 @@ main(int argc, char *argv[])
                     test_tmux_session_argv_ollama_resume);
     g_test_add_func("/claude-tmux/session-argv/ollama-effort-skip",
                     test_tmux_session_argv_ollama_effort_skip);
+
+    g_test_add_func("/claude-tmux/session-argv/dedicated-socket",
+                    test_tmux_session_argv_dedicated_socket);
+
+    /* Dedicated socket: never share the user's default tmux server. */
+    g_test_add_func("/claude-tmux/socket/name-property",
+                    test_socket_name_property);
+    g_test_add_func("/claude-tmux/socket/every-invocation-has-L",
+                    test_socket_every_invocation_uses_dedicated_socket);
+    g_test_add_func("/claude-tmux/socket/real-tmux-avoids-default",
+                    test_socket_real_tmux_never_touches_default_socket);
 
     return g_test_run();
 }

@@ -49,13 +49,48 @@ exists or is accepted.
 =ai_provider_list_models()= reports all seven: the four aliases followed by
 the three pinned Claude 5 IDs.
 
+** Dedicated tmux socket (=-L=)
+Every tmux command this client runs is pinned to its own server socket via
+=tmux -L <socket>=. The default is =ai-glib=; embedders should set their own:
+
+#+begin_src C
+ai_claude_tmux_client_set_socket_name(client, "libreclaw");
+#+end_src
+
+This is a safety property, not a preference. A bare =tmux= talks to the
+=default= socket, so a client that omitted =-L= would put its sessions on the
+*same server process* as any tmux the user started by hand --- and a tmux
+server is all-or-nothing: whatever kills it kills every session on it. A
+session-teardown on our side, or anything that reaps the server's cgroup,
+would take the user's own work down with it. That is not theoretical; it cost
+a live working session before this was fixed. On a private socket the two are
+mutually invisible: we cannot see or kill the user's sessions, and they cannot
+see ours.
+
+Inspect or attach to a session with the same =-L=:
+
+#+begin_example
+tmux -L libreclaw list-sessions
+tmux -L libreclaw attach -t claudetmux-<uuid>
+#+end_example
+
+Setting the socket name to =NULL= or ="= restores the default rather than
+falling back to =default=, so the isolation cannot be lost by accident.
+
+On first use the client also runs =start-server= and =set-option -s exit-empty
+off= on that socket. Without =exit-empty off= the server exits as soon as its
+last session ends --- i.e. after every turn --- and each turn's replacement
+server is born into whatever cgroup that turn happened to run in. Both
+commands are best-effort: failures are logged at =g_debug= and the turn
+proceeds (=new-session= starts a server by itself).
+
 ** Ollama transport ("ollama/" models)
 Like the [[file:claude-code.org][non-tmux client]], a model name beginning with =ollama/= routes
 the turn through Ollama as the transport. The =ollama launch claude= wrapper
 is inlined inside the tmux command, *after* the tmux =--=:
 
 #+begin_example
-tmux new-session -d -s <name> -c <cwd> -- \
+tmux -L <socket> new-session -d -s <name> -c <cwd> -- \
      ollama launch claude --model <suffix> -- \
      --session-id <uuid> --settings <json> [args]
 #+end_example
@@ -72,7 +107,7 @@ Each call to =ai_provider_chat_sync()= (or its async equivalent) goes through th
 
 1. *Generate a session UUID* (or reuse the configured one). If a transcript already exists for that UUID the session is /resumed/ (=claude --resume=) rather than created fresh (=claude --session-id=).
 2. *Write the prompt* to a temp file atomically.
-3. *Spawn* =tmux new-session -d -s <name> -- claude [--session-id|--resume] <uuid> --settings '<json>' [args]=. The settings install a =Stop= hook that touches a per-session sentinel file when claude finishes a turn, and a =SessionStart= hook that touches a /ready/ sentinel once claude's TUI is initialized.
+3. *Spawn* =tmux -L <socket> new-session -d -s <name> -- claude [--session-id|--resume] <uuid> --settings '<json>' [args]=. The settings install a =Stop= hook that touches a per-session sentinel file when claude finishes a turn, and a =SessionStart= hook that touches a /ready/ sentinel once claude's TUI is initialized.
 4. *Wait* for the =SessionStart= ready sentinel --- proof the TUI is live and able to receive input.
 5. *Dismiss the resume-mode picker* (resumed sessions only) --- see /Resume-mode picker/ below.
 6. *Capture the byte offset* of the JSONL file as =jsonl_size_before= --- the high-water mark for "everything written before this turn."
@@ -202,7 +237,7 @@ ai_claude_tmux_client_set_debug_preserve_tmux(client, TRUE);
 
 This:
 
-- Skips =tmux kill-session= after the turn --- you can =tmux attach -t claudetmux-<uuid>= to see the interactive session.
+- Skips =tmux kill-session= after the turn --- you can =tmux -L <socket> attach -t claudetmux-<uuid>= to see the interactive session. Note the =-L=: without it you are talking to your *own* default tmux server, where the session does not exist.
 - Skips unlinking the prompt file and sentinel files.
 - Implies =keep-artifacts= behaviour.
 

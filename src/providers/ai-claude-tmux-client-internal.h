@@ -25,7 +25,10 @@ G_BEGIN_DECLS
 
 /*
  * Build the argv for
- *   tmux new-session -d -s NAME -c CWD -- <program> <claude args>
+ *   tmux -L SOCKET new-session -d -s NAME -c CWD -- <program> <claude args>
+ *
+ * -L pins the session to our own tmux server so it can never share one
+ * with (or be reaped alongside) the user's default-socket sessions.
  *
  * For a normal model <program> is @claude_exec_path. For an
  * "ollama/<model>" transport model the program becomes the launcher and
@@ -42,6 +45,7 @@ G_BEGIN_DECLS
 GPtrArray *
 ai_claude_tmux_client_build_session_argv(
     const gchar *tmux_bin,
+    const gchar *socket_name,
     const gchar *session_name,
     const gchar *cwd,
     const gchar *claude_exec_path,

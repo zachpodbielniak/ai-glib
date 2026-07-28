@@ -63,7 +63,7 @@ $ ai -p claude-code -m ollama/glm-5.2:cloud --dry-run "hi"
 /usr/bin/ollama launch claude --model glm-5.2:cloud -- --print --output-format json ...
 
 $ ai -p claude-tmux -m ollama/glm-5.2:cloud --dry-run "hi"
-tmux new-session -d -s ai-glib-dry-run -c <cwd> -- ollama launch claude --model glm-5.2:cloud -- --session-id <session-id> --settings <settings.json>
+tmux -L ai-glib new-session -d -s ai-glib-dry-run -c <cwd> -- ollama launch claude --model glm-5.2:cloud -- --session-id <session-id> --settings <settings.json>
 
 $ ai -p claude-code -m sonnet --dry-run "hi"
 /path/to/claude --print --output-format json --model sonnet ...

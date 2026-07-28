@@ -22,6 +22,7 @@
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +43,8 @@ struct _AiClaudeTmuxClient
     AiCliClient parent_instance;
 
     gchar    *tmux_path;            /* override for tmux binary */
+    gchar    *socket_name;          /* tmux -L <name>: our OWN server, never
+                                     * the user's default socket */
     gchar    *claude_project_dir;   /* override for ~/.claude/projects */
     gint      turn_timeout_ms;      /* default 10 min */
     gint      startup_timeout_ms;   /* default 30 sec */
@@ -70,6 +73,9 @@ struct _AiClaudeTmuxClient
                                      * owns a live tmux session (a turn
                                      * is in flight), 0 otherwise — gates
                                      * orphaned-session reaping */
+    gint      server_ready;         /* atomic flag: 1 once we have run the
+                                     * one-shot server setup (start-server
+                                     * + exit-empty off) for this client */
     gdouble   total_cost;           /* last parsed cost in USD */
 };
 
@@ -77,6 +83,7 @@ enum
 {
     PROP_0,
     PROP_TMUX_PATH,
+    PROP_SOCKET_NAME,
     PROP_CLAUDE_PROJECT_DIR,
     PROP_TURN_TIMEOUT_MS,
     PROP_STARTUP_TIMEOUT_MS,
@@ -824,7 +831,7 @@ wait_for_file(
     g_autoptr(GMainContext) ctx_main = NULL;
     g_autoptr(GMainLoop) loop = NULL;
     WaitForFileCtx ctx = { 0 };
-    guint timeout_id;
+    g_autoptr(GSource) timeout_source = NULL;
     gulong sig_id = 0;
     gulong cancel_id = 0;
 
@@ -871,7 +878,17 @@ wait_for_file(
         goto out;
     }
 
-    timeout_id = g_timeout_add(timeout_ms, on_wait_timeout, &ctx);
+    /*
+     * Attach the deadline to ctx_main explicitly.  g_timeout_add() would
+     * put it on the GLOBAL default context, while the GFileMonitor above
+     * and the loop below live on ctx_main (pushed as thread-default) —
+     * so the timer would only ever fire if some *unrelated* loop happened
+     * to be iterating the default context.  On a worker thread with no
+     * such loop, nothing bounds this wait and it blocks forever.
+     */
+    timeout_source = g_timeout_source_new(timeout_ms);
+    g_source_set_callback(timeout_source, on_wait_timeout, &ctx, NULL);
+    g_source_attach(timeout_source, ctx_main);
 
     if (cancellable != NULL)
     {
@@ -896,7 +913,14 @@ wait_for_file(
     {
         g_cancellable_disconnect(cancellable, cancel_id);
     }
-    g_source_remove(timeout_id);
+    /*
+     * g_source_destroy() rather than g_source_remove(): on_wait_timeout
+     * returns G_SOURCE_REMOVE, so when the deadline *did* fire the id is
+     * already gone and g_source_remove() criticals ("Source ID N was not
+     * found").  Destroying the source we still hold a ref to is correct
+     * either way.
+     */
+    g_source_destroy(timeout_source);
 
 out:
     g_signal_handler_disconnect(monitor, sig_id);
@@ -1000,6 +1024,51 @@ ai_claude_tmux_client_wait_for_sentinel_or_idle(
 }
 
 /*
+ * Build the argv for one tmux command, ALWAYS pinned to our own server
+ * socket:
+ *
+ *     tmux -L <socket_name> <subcommand> [args...]
+ *
+ * Every tmux invocation in this file goes through here (or through
+ * ai_claude_tmux_client_build_session_argv, which does the same thing).
+ * That is deliberate: -L is what keeps our sessions on a server the user
+ * cannot see and we cannot reach from theirs.  A single call site that
+ * forgot it would put us back on /tmp/tmux-<uid>/default alongside the
+ * user's hand-started sessions, where our teardown reaps their work.
+ * Funnelling the construction through one varargs helper makes omitting
+ * it structurally impossible rather than a review item.
+ *
+ * -L is a tmux *server* option, so it must precede the subcommand.
+ *
+ * Returns: (transfer full): NULL-terminated argv; free with
+ *   g_ptr_array_unref().
+ */
+static GPtrArray *
+tmux_argv_new(
+    const gchar *tmux_bin,
+    const gchar *socket_name,
+    ...
+){
+    GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+    const gchar *arg;
+    va_list ap;
+
+    g_ptr_array_add(argv, g_strdup(tmux_bin));
+    g_ptr_array_add(argv, g_strdup("-L"));
+    g_ptr_array_add(argv, g_strdup(socket_name));
+
+    va_start(ap, socket_name);
+    while ((arg = va_arg(ap, const gchar *)) != NULL)
+    {
+        g_ptr_array_add(argv, g_strdup(arg));
+    }
+    va_end(ap);
+
+    g_ptr_array_add(argv, NULL);
+    return argv;
+}
+
+/*
  * Run a one-shot child process synchronously, capturing exit status.
  * Returns TRUE on exit-zero, FALSE otherwise.  When @capture_stderr
  * is non-NULL, stderr is captured (used for diagnostics on failure).
@@ -1057,6 +1126,71 @@ run_command_sync(
 }
 
 /*
+ * One-shot per client: bring up our tmux server and make it durable.
+ *
+ * Two things happen here, both cheap and both idempotent:
+ *
+ *   tmux -L <socket> start-server
+ *   tmux -L <socket> set-option -s exit-empty off
+ *
+ * `exit-empty off` is the one that matters.  By default a tmux server
+ * exits as soon as its last session goes away, so with one session per
+ * turn the server was being destroyed and recreated on every single
+ * message — which is why the socket file kept reappearing with a fresh
+ * mtime.  A server that is continually torn down and rebuilt inherits
+ * whatever cgroup/scope the turn that recreated it happened to run in,
+ * and dies with it, taking every sibling session along.  Keeping one
+ * long-lived server breaks that cycle.
+ *
+ * Deliberately best-effort: neither command is required for correctness
+ * (new-session starts a server by itself), so a failure is logged and
+ * ignored rather than failing the turn.  Older tmux without `exit-empty`
+ * simply errors on the set-option and carries on.
+ *
+ * Note this cannot, by itself, move an already-running server out of a
+ * cgroup it was born into — see the socket-isolation note in the header
+ * for why -L is what actually protects the user's sessions.
+ */
+static void
+ensure_tmux_server(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    GCancellable       *cancellable
+){
+    g_autoptr(GPtrArray) start_argv = NULL;
+    g_autoptr(GPtrArray) opt_argv = NULL;
+    g_autoptr(GError) start_err = NULL;
+    g_autoptr(GError) opt_err = NULL;
+
+    /* Run once per client (and again if the socket name changes). */
+    if (!g_atomic_int_compare_and_exchange(&self->server_ready, 0, 1))
+    {
+        return;
+    }
+
+    start_argv = tmux_argv_new(tmux_bin, socket_name, "start-server", NULL);
+    if (!run_command_sync((const gchar * const *) start_argv->pdata, NULL,
+                          self->command_timeout_ms, cancellable, &start_err))
+    {
+        g_debug("claude-tmux: `tmux -L %s start-server` failed (%s) — "
+                "new-session will start it instead", socket_name,
+                start_err->message);
+        return;
+    }
+
+    opt_argv = tmux_argv_new(tmux_bin, socket_name,
+                             "set-option", "-s", "exit-empty", "off", NULL);
+    if (!run_command_sync((const gchar * const *) opt_argv->pdata, NULL,
+                          self->command_timeout_ms, cancellable, &opt_err))
+    {
+        g_debug("claude-tmux: could not set exit-empty off on socket '%s' "
+                "(%s) — the server will be recreated per turn",
+                socket_name, opt_err->message);
+    }
+}
+
+/*
  * ---------- direct cancel -> tmux teardown ----------
  *
  * A user !stop / !kill cancels the per-turn GCancellable.  Relying on
@@ -1084,6 +1218,7 @@ run_command_sync(
 typedef struct
 {
     const gchar *tmux_bin;            /* borrowed; valid for the turn */
+    const gchar *socket_name;         /* borrowed; valid for the turn */
     const gchar *tmux_session_name;   /* borrowed; valid for the turn */
     gint         command_timeout_ms;  /* bound for the kill-session cmd */
 } TurnCancelKillCtx;
@@ -1094,9 +1229,9 @@ on_turn_cancelled_kill_session(
     gpointer      user_data
 ){
     const TurnCancelKillCtx *ctx = user_data;
-    const gchar *kill_argv[] = {
-        ctx->tmux_bin, "kill-session", "-t", ctx->tmux_session_name, NULL
-    };
+    g_autoptr(GPtrArray) kill_argv = tmux_argv_new(
+        ctx->tmux_bin, ctx->socket_name,
+        "kill-session", "-t", ctx->tmux_session_name, NULL);
 
     (void)cancellable;
 
@@ -1104,7 +1239,8 @@ on_turn_cancelled_kill_session(
               "tmux session '%s' directly", ctx->tmux_session_name);
 
     /* Best-effort: the session may already be gone. */
-    run_command_sync(kill_argv, NULL, ctx->command_timeout_ms, NULL, NULL);
+    run_command_sync((const gchar * const *) kill_argv->pdata, NULL,
+                     ctx->command_timeout_ms, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1124,6 +1260,9 @@ ai_claude_tmux_client_get_property(
     {
         case PROP_TMUX_PATH:
             g_value_set_string(value, self->tmux_path);
+            break;
+        case PROP_SOCKET_NAME:
+            g_value_set_string(value, self->socket_name);
             break;
         case PROP_CLAUDE_PROJECT_DIR:
             g_value_set_string(value, self->claude_project_dir);
@@ -1181,6 +1320,10 @@ ai_claude_tmux_client_set_property(
             g_free(self->tmux_path);
             self->tmux_path = g_value_dup_string(value);
             break;
+        case PROP_SOCKET_NAME:
+            ai_claude_tmux_client_set_socket_name(
+                self, g_value_get_string(value));
+            break;
         case PROP_CLAUDE_PROJECT_DIR:
             g_free(self->claude_project_dir);
             self->claude_project_dir = g_value_dup_string(value);
@@ -1226,6 +1369,7 @@ ai_claude_tmux_client_finalize(GObject *object)
     AiClaudeTmuxClient *self = AI_CLAUDE_TMUX_CLIENT(object);
 
     g_free(self->tmux_path);
+    g_free(self->socket_name);
     g_free(self->claude_project_dir);
 
     G_OBJECT_CLASS(ai_claude_tmux_client_parent_class)->finalize(object);
@@ -1287,6 +1431,17 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "tmux-path", "Tmux Path",
         "Path to tmux binary (NULL to search PATH)",
         NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_SOCKET_NAME] = g_param_spec_string(
+        "socket-name", "Tmux Socket Name",
+        "tmux server socket to use (tmux -L <name>).  Our sessions live "
+        "on this server and nowhere else, so they are invisible to the "
+        "user's default-socket tmux and cannot be reaped along with it.  "
+        "Never set this to \"default\": that is the shared socket a bare "
+        "`tmux` uses.  Empty/NULL resets to "
+        AI_CLAUDE_TMUX_DEFAULT_SOCKET,
+        AI_CLAUDE_TMUX_DEFAULT_SOCKET,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_CLAUDE_PROJECT_DIR] = g_param_spec_string(
         "claude-project-dir", "Claude Project Dir",
@@ -1383,6 +1538,7 @@ static void
 ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
 {
     self->tmux_path = NULL;
+    self->socket_name = g_strdup(AI_CLAUDE_TMUX_DEFAULT_SOCKET);
     self->claude_project_dir = NULL;
     self->turn_timeout_ms = 600000;     /* 10 min */
     self->startup_timeout_ms = 15000;   /* 15 sec — TUI ready delay (resume needs more) */
@@ -1395,6 +1551,7 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->prompt_send_exponential_backoff = TRUE;
     self->command_timeout_ms = 30000;   /* 30 sec */
     self->turn_active = 0;
+    self->server_ready = 0;
     self->total_cost = 0.0;
 
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_TMUX_DEFAULT_MODEL);
@@ -1493,7 +1650,8 @@ resolve_session_cwd(AiClaudeTmuxClient *self)
 }
 
 /*
- * Assemble the argv for `tmux new-session -d -s NAME -c CWD -- CMD ARGS`.
+ * Assemble the argv for
+ * `tmux -L SOCKET new-session -d -s NAME -c CWD -- CMD ARGS`.
  *
  * Non-static so unit tests (and the `ai` CLI --dry-run) can assert the
  * exact command line, including the Ollama transport rewrite. See
@@ -1502,6 +1660,7 @@ resolve_session_cwd(AiClaudeTmuxClient *self)
 GPtrArray *
 ai_claude_tmux_client_build_session_argv(
     const gchar *tmux_bin,
+    const gchar *socket_name,
     const gchar *session_name,
     const gchar *cwd,
     const gchar *claude_exec_path,
@@ -1516,6 +1675,12 @@ ai_claude_tmux_client_build_session_argv(
     g_autofree gchar *program = NULL;
 
     g_ptr_array_add(argv, g_strdup(tmux_bin));
+    /*
+     * -L first: it is a server option, and it is what keeps this session
+     * off the socket the user's own tmux is on.
+     */
+    g_ptr_array_add(argv, g_strdup("-L"));
+    g_ptr_array_add(argv, g_strdup(socket_name));
     g_ptr_array_add(argv, g_strdup("new-session"));
     g_ptr_array_add(argv, g_strdup("-d"));
     g_ptr_array_add(argv, g_strdup("-s"));
@@ -1603,11 +1768,12 @@ ai_claude_tmux_client_chat_sync_real(
     g_autofree gchar *claude_exec_path = NULL;
     g_autoptr(AiResponse) response = NULL;
     const gchar *tmux_bin;
+    const gchar *socket_name;
     const gchar *configured_session_id;
     gboolean resuming_existing_session = FALSE;
     goffset jsonl_size_before = 0;
     gdouble cost = 0.0;
-    TurnCancelKillCtx kill_ctx = { NULL, NULL, 0 };
+    TurnCancelKillCtx kill_ctx = { NULL, NULL, NULL, 0 };
     gulong kill_cancel_id = 0;
 
     /*
@@ -1694,6 +1860,18 @@ ai_claude_tmux_client_chat_sync_real(
         tmux_bin = "tmux";
     }
 
+    /*
+     * Resolve the socket.  set_socket_name() rejects empty, and _init()
+     * seeds the default, so this is belt-and-braces: a NULL here would
+     * mean "-L" followed by the subcommand, which tmux would read as a
+     * socket named "new-session".
+     */
+    socket_name = (self->socket_name != NULL && self->socket_name[0] != '\0')
+                      ? self->socket_name
+                      : AI_CLAUDE_TMUX_DEFAULT_SOCKET;
+
+    ensure_tmux_server(self, tmux_bin, socket_name, cancellable);
+
     /* Resolve claude path — reuse the parent's logic. */
     claude_exec_path = ai_cli_client_resolve_executable(
         AI_CLI_CLIENT(self), error);
@@ -1744,25 +1922,25 @@ ai_claude_tmux_client_chat_sync_real(
      */
     if (g_atomic_int_get(&self->turn_active) == 0)
     {
-        const gchar *has_argv[] = {
-            tmux_bin, "has-session", "-t", tmux_session_name, NULL
-        };
+        g_autoptr(GPtrArray) has_argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "has-session", "-t", tmux_session_name, NULL);
         /* has-session exits 0 iff the session exists; any non-zero
          * (no such session, no server running) means nothing to reap. */
-        if (run_command_sync(has_argv, NULL, self->command_timeout_ms,
-                             cancellable, NULL))
+        if (run_command_sync((const gchar * const *) has_argv->pdata, NULL,
+                             self->command_timeout_ms, cancellable, NULL))
         {
-            const gchar *kill_argv[] = {
-                tmux_bin, "kill-session", "-t", tmux_session_name, NULL
-            };
+            g_autoptr(GPtrArray) kill_argv = tmux_argv_new(
+                tmux_bin, socket_name,
+                "kill-session", "-t", tmux_session_name, NULL);
             g_warning("claude-tmux: reaping orphaned tmux session '%s' "
                       "(no turn in flight — likely a prior libreclaw "
                       "process that exited without cleaning up) before "
                       "spawning a fresh one", tmux_session_name);
             /* Best-effort: if it vanished between the check and now,
              * kill-session just fails harmlessly. */
-            run_command_sync(kill_argv, NULL, self->command_timeout_ms,
-                             NULL, NULL);
+            run_command_sync((const gchar * const *) kill_argv->pdata, NULL,
+                             self->command_timeout_ms, NULL, NULL);
         }
     }
 
@@ -1780,6 +1958,7 @@ ai_claude_tmux_client_chat_sync_real(
 
         argv = ai_claude_tmux_client_build_session_argv(
             tmux_bin,
+            socket_name,
             tmux_session_name,
             cwd,
             claude_exec_path,
@@ -1821,6 +2000,7 @@ ai_claude_tmux_client_chat_sync_real(
     if (cancellable != NULL)
     {
         kill_ctx.tmux_bin = tmux_bin;
+        kill_ctx.socket_name = socket_name;
         kill_ctx.tmux_session_name = tmux_session_name;
         kill_ctx.command_timeout_ms = self->command_timeout_ms;
         kill_cancel_id = g_cancellable_connect(
@@ -1893,16 +2073,14 @@ ai_claude_tmux_client_chat_sync_real(
      */
     if (resuming_existing_session && self->dismiss_resume_prompt)
     {
-        const gchar *dismiss_argv[] = {
-            tmux_bin, "send-keys", "-l", "-t", tmux_session_name,
-            "2", NULL
-        };
-        const gchar *clean_argv[] = {
-            tmux_bin, "send-keys", "-t", tmux_session_name,
-            "BSpace", NULL
-        };
-        if (!run_command_sync(dismiss_argv, NULL,
-                              self->command_timeout_ms, cancellable,
+        g_autoptr(GPtrArray) dismiss_argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "send-keys", "-l", "-t", tmux_session_name, "2", NULL);
+        g_autoptr(GPtrArray) clean_argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "send-keys", "-t", tmux_session_name, "BSpace", NULL);
+        if (!run_command_sync((const gchar * const *) dismiss_argv->pdata,
+                              NULL, self->command_timeout_ms, cancellable,
                               error))
         {
             g_prefix_error(error,
@@ -1911,8 +2089,8 @@ ai_claude_tmux_client_chat_sync_real(
             goto cleanup_and_fail;
         }
         g_usleep((gulong)self->prompt_resend_interval_ms * 1000);
-        if (!run_command_sync(clean_argv, NULL,
-                              self->command_timeout_ms, cancellable,
+        if (!run_command_sync((const gchar * const *) clean_argv->pdata,
+                              NULL, self->command_timeout_ms, cancellable,
                               error))
         {
             g_prefix_error(error,
@@ -1961,10 +2139,10 @@ ai_claude_tmux_client_chat_sync_real(
      */
     {
         g_autofree gchar *buffer_name = g_strconcat("clawd-", session_id, NULL);
-        const gchar *load_argv[] = {
-            tmux_bin, "load-buffer", "-b", buffer_name, prompt_path, NULL
-        };
-        if (!run_command_sync(load_argv, NULL,
+        g_autoptr(GPtrArray) load_argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "load-buffer", "-b", buffer_name, prompt_path, NULL);
+        if (!run_command_sync((const gchar * const *) load_argv->pdata, NULL,
                               self->command_timeout_ms, cancellable,
                               error))
         {
@@ -1972,12 +2150,13 @@ ai_claude_tmux_client_chat_sync_real(
             goto cleanup_and_fail;
         }
         {
-            const gchar *paste_argv[] = {
-                tmux_bin, "paste-buffer", "-b", buffer_name,
-                "-t", tmux_session_name, "-d", NULL  /* -d = delete buffer after */
-            };
-            if (!run_command_sync(paste_argv, NULL,
-                                  self->command_timeout_ms,
+            /* -d = delete buffer after pasting */
+            g_autoptr(GPtrArray) paste_argv = tmux_argv_new(
+                tmux_bin, socket_name,
+                "paste-buffer", "-b", buffer_name,
+                "-t", tmux_session_name, "-d", NULL);
+            if (!run_command_sync((const gchar * const *) paste_argv->pdata,
+                                  NULL, self->command_timeout_ms,
                                   cancellable, error))
             {
                 g_prefix_error(error, "tmux paste-buffer failed: ");
@@ -2031,10 +2210,9 @@ ai_claude_tmux_client_chat_sync_real(
      * harmless — it hits an empty draft box, which the TUI ignores.
      */
     {
-        const gchar *enter_argv[] = {
-            tmux_bin, "send-keys", "-t", tmux_session_name,
-            "Enter", NULL
-        };
+        g_autoptr(GPtrArray) enter_argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "send-keys", "-t", tmux_session_name, "Enter", NULL);
         const gint poll_ms = 100;
         gboolean prompt_accepted = FALSE;
         gint attempt;
@@ -2091,7 +2269,8 @@ ai_claude_tmux_client_chat_sync_real(
                               : "");
             }
 
-            if (!run_command_sync(enter_argv, NULL,
+            if (!run_command_sync((const gchar * const *) enter_argv->pdata,
+                                  NULL,
                                   self->command_timeout_ms,
                                   cancellable, error))
             {
@@ -2270,19 +2449,22 @@ ai_claude_tmux_client_chat_sync_real(
     /* ---------- cleanup (success path) ---------- */
     if (!self->debug_preserve_tmux)
     {
-        const gchar *argv[] = {
-            tmux_bin, "kill-session", "-t", tmux_session_name, NULL
-        };
+        g_autoptr(GPtrArray) argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "kill-session", "-t", tmux_session_name, NULL);
         /* Best-effort: ignore errors — the session may have already
          * exited on its own. */
-        run_command_sync(argv, NULL, self->command_timeout_ms,
-                         NULL, NULL);
+        run_command_sync((const gchar * const *) argv->pdata, NULL,
+                         self->command_timeout_ms, NULL, NULL);
     }
     else
     {
+        /* The -L is not optional in this hint: without it the user is
+         * sent to their own default-socket server, where the session
+         * does not exist. */
         g_info("debug_preserve_tmux: leaving tmux session '%s' alive "
-               "(attach with: tmux attach -t %s)",
-               tmux_session_name, tmux_session_name);
+               "(attach with: tmux -L %s attach -t %s)",
+               tmux_session_name, socket_name, tmux_session_name);
     }
 
     if (!self->keep_artifacts && !self->debug_preserve_tmux)
@@ -2307,17 +2489,17 @@ ai_claude_tmux_client_chat_sync_real(
 cleanup_and_fail:
     if (!self->debug_preserve_tmux)
     {
-        const gchar *argv[] = {
-            tmux_bin, "kill-session", "-t", tmux_session_name, NULL
-        };
-        run_command_sync(argv, NULL, self->command_timeout_ms,
-                         NULL, NULL);
+        g_autoptr(GPtrArray) argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "kill-session", "-t", tmux_session_name, NULL);
+        run_command_sync((const gchar * const *) argv->pdata, NULL,
+                         self->command_timeout_ms, NULL, NULL);
     }
     else
     {
         g_info("debug_preserve_tmux: leaving tmux session '%s' alive "
-               "after failure (attach with: tmux attach -t %s)",
-               tmux_session_name, tmux_session_name);
+               "after failure (attach with: tmux -L %s attach -t %s)",
+               tmux_session_name, socket_name, tmux_session_name);
     }
     if (!self->keep_artifacts && !self->debug_preserve_tmux)
     {
@@ -2568,6 +2750,61 @@ ai_claude_tmux_client_set_tmux_path(
     g_free(self->tmux_path);
     self->tmux_path = g_strdup(path);
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_TMUX_PATH]);
+}
+
+/**
+ * ai_claude_tmux_client_get_socket_name:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns the tmux server socket these sessions run on (`tmux -L <name>`).
+ * Never %NULL and never empty.
+ *
+ * Returns: (transfer none): the socket name
+ */
+const gchar *
+ai_claude_tmux_client_get_socket_name(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), NULL);
+    return self->socket_name;
+}
+
+/**
+ * ai_claude_tmux_client_set_socket_name:
+ * @self: an #AiClaudeTmuxClient
+ * @name: (nullable): socket name, or %NULL/"" to restore the default
+ *
+ * Sets the tmux server socket to run sessions on.
+ *
+ * The point of a dedicated socket is isolation: a `tmux -L <name>` server
+ * is a different process with a different socket from the one a bare
+ * `tmux` talks to, so this client can neither see nor kill the user's own
+ * sessions — and nothing that tears down our server can take theirs with
+ * it.  Passing %NULL or "" restores %AI_CLAUDE_TMUX_DEFAULT_SOCKET rather
+ * than falling back to tmux's shared "default" socket, because an empty
+ * socket name is exactly how that isolation gets lost by accident.
+ */
+void
+ai_claude_tmux_client_set_socket_name(
+    AiClaudeTmuxClient *self,
+    const gchar        *name
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+
+    if (name == NULL || name[0] == '\0')
+    {
+        name = AI_CLAUDE_TMUX_DEFAULT_SOCKET;
+    }
+
+    if (g_strcmp0(self->socket_name, name) == 0)
+    {
+        return;
+    }
+
+    g_free(self->socket_name);
+    self->socket_name = g_strdup(name);
+    /* A new socket means a different server: redo the one-shot setup. */
+    g_atomic_int_set(&self->server_ready, 0);
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_SOCKET_NAME]);
 }
 
 const gchar *
