@@ -77,6 +77,106 @@ ai interactive (provider=claude-code). Ctrl-D to exit.
 ...
 #+end_example
 
+** Image generation
+=--image-gen= switches the CLI from chatting to generating an image, written to
+a file rather than printed. The image options live in their own group, so
+=ai --help= stays readable and =ai --help-image= shows the full set.
+
+*** Model discovery
+=--list-image-models= prints every image model with its limits and capabilities,
+generated from the providers' own tables rather than a hand-maintained list:
+
+#+begin_src sh
+ai --list-image-models            # all providers
+ai --list-image-models -p gemini  # one provider
+#+end_src
+
+#+begin_example
+MODEL                              PROVIDER   REFS MAX-N  CAPABILITIES
+gemini-3-pro-image-preview         gemini       14     4  reference-images,multi-reference,seed,...
+                                   Multi-reference conditioning, up to 4K
+#+end_example
+
+*** Options
+| Option                   | Meaning                                                     |
+|--------------------------+-------------------------------------------------------------|
+| =-I, --image-gen=        | generate an image instead of text                            |
+| =-o, --image-out=FILE=   | output path; default auto-numbered =output-0000.png=         |
+| =--image-op=OP=          | =generate=, =edit=, =variation= or =upscale=                 |
+| =--ref=FILE=             | reference image; repeatable for multi-image conditioning     |
+| =--ref-role=ROLE=        | label for the preceding =--ref=, e.g. =style=                |
+| =--mask=FILE=            | edit mask; transparent areas are regenerated                 |
+| =--aspect=RATIO=         | e.g. =16:9= (Gemini, Imagen)                                 |
+| =--size=WxH=             | e.g. =1024x1024= (OpenAI)                                    |
+| =--resolution=TIER=      | =1k=, =2k=, =4k=                                             |
+| =-n, --count=N=          | how many images                                              |
+| =--quality=LEVEL=        | translated to whichever vocabulary the model accepts         |
+| =--style=STYLE=          | =vivid=, =natural=, or a provider-specific preset            |
+| =--background=MODE=      | =transparent= needs a format with alpha                      |
+| =--format=FMT=           | =png=, =jpeg=, =webp=                                        |
+| =--compression=N=        | 0-100, lossy formats                                         |
+| =--negative=TEXT=        | what to keep out (Imagen)                                    |
+| =--seed=N=               | reproducible sampling                                        |
+| =--guidance=F=, =--steps=N=, =--strength=F= | sampler controls                          |
+| =--moderation=LEVEL=     | =auto=, =low=, =none=                                        |
+| =--person-generation=MODE= | =dont_allow=, =allow_adult=, =allow_all= (Imagen)          |
+| =--language=LANG=        | prompt language hint (Imagen)                                |
+| =--input-fidelity=LEVEL= | how closely an edit preserves its input                      |
+| =--no-watermark=         | where the provider allows it                                 |
+| =--image-url=            | request a URL rather than inline bytes; still saved locally  |
+| =--image-extra=KEY=VALUE= | passed straight through; repeatable                         |
+| =--strict=               | fail on an unsupported option instead of dropping it         |
+
+*** Examples
+
+#+begin_src sh
+# Simplest case.
+ai --image-gen -o sunset.png "a sunset over mountains"
+
+# Gemini geometry: ratio plus resolution tier.
+ai --image-gen -p gemini --aspect 16:9 --resolution 2k \
+   "a brass telescope on a wooden desk"
+
+# Multi-reference conditioning, each input given a job.
+ai --image-gen -p gemini -m gemini-3-pro-image-preview \
+   --ref palette.png --ref-role style \
+   --ref macaw.jpg   --ref-role subject \
+   -o poster.png "combine these into a concert poster"
+
+# A transparent WebP icon.
+ai --image-gen -p openai -m gpt-image-2 \
+   --background transparent --format webp -o icon.webp \
+   "a minimal gear icon"
+
+# Masked edit.
+ai --image-gen --image-op edit --ref photo.png --mask sky.png \
+   "replace the sky with a storm"
+
+# Four reproducible variations.
+ai --image-gen -n 4 --seed 42 --negative "text, watermark" \
+   "abstract shapes in blue"
+#+end_src
+
+The path of each image written is printed on stdout, one per line, so the
+command composes:
+
+#+begin_src sh
+ai --image-gen -o out.png "a cat" | xargs -r feh
+#+end_src
+
+A revised prompt, when the model rewrites one, goes to stderr so it does not
+pollute that list.
+
+*** Behaviour worth knowing
+- Options a model cannot honour are dropped, and the request proceeds. Pass
+  =--strict= to fail instead, which is what you want in a script.
+- Reference images beyond a model's limit are always an error, never truncated.
+- With =-n= above 1 and an explicit =--image-out=, the index is inserted before
+  the extension so a batch does not overwrite itself.
+- API keys come from the environment: =ANTHROPIC_API_KEY=, =OPENAI_API_KEY=,
+  =GEMINI_API_KEY=, =XAI_API_KEY=. Base URLs can be overridden with
+  =OPENAI_BASE_URL=, =GEMINI_BASE_URL=, =XAI_BASE_URL=, =ANTHROPIC_BASE_URL=.
+
 ** Notes
 - =--dry-run= prints the real argv for the =claude-code= and =claude-tmux=
   providers (executable resolved, Ollama transport applied). For other

@@ -2,13 +2,48 @@
 Interface for AI image generation providers.
 
 ** Overview
-=AiImageGenerator= is a GObject interface that providers implement to support image generation. It provides an async API for generating images from text prompts.
+=AiImageGenerator= is a GObject interface that providers implement to support
+image generation, from a text prompt alone or conditioned on reference images.
 
-Currently implemented by:
+Implemented by:
 
-- =AiOpenAIClient= - OpenAI DALL-E models
-- =AiGrokClient= - xAI Grok image models
-- =AiGeminiClient= - Google Gemini Nano Banana and Imagen models
+| Client            | Models                                                    |
+|-------------------+-----------------------------------------------------------|
+| =AiOpenAIClient=  | GPT Image 2 / 1.5 / 1, DALL-E 3 / 2                       |
+| =AiGeminiClient=  | Nano Banana, Nano Banana 2, Nano Banana Pro, Imagen 4 / 3  |
+| =AiGrokClient=    | Grok Imagine, Grok 2 Image                                |
+
+Claude and Ollama do not implement it -- neither exposes an image-generation
+API -- so check with =AI_IS_IMAGE_GENERATOR()= before casting.
+
+Only =generate_image_async= and =generate_image_finish= are required of an
+implementor. Implementing =list_image_models= as well is what makes a provider
+participate in capability checking and =ai --list-image-models=; everything else
+is derived. In practice a provider implements three vfuncs and a static model
+table.
+
+** Signals
+*** image-progress
+#+begin_src C
+void (*image_progress) (AiImageGenerator *generator,
+                        guint completed, guint total);
+#+end_src
+
+Emitted as each image of a multi-image request becomes available. Generating
+four images takes four times as long as generating one with nothing to show in
+between, so this gives a front-end something to report. Providers that answer in
+a single response emit one terminal event rather than a series.
+
+*** partial-image
+#+begin_src C
+void (*partial_image) (AiImageGenerator *generator,
+                       GBytes *preview, guint index);
+#+end_src
+
+Emitted when a provider streams a partial preview of an image still being
+generated. Only fires for models advertising =AI_IMAGE_CAP_PARTIAL_STREAMING=,
+and only when the request asked for previews via
+=ai_image_request_set_partial_images()=.
 
 ** Interface Methods
 *** generate_image_async
@@ -52,6 +87,51 @@ Finishes an asynchronous image generation request.
 - =error= - Return location for errors
 
 *Returns:* =(transfer full)= An =AiImageResponse=, or =NULL= on error
+
+*** generate_image (synchronous)
+#+begin_src C
+AiImageResponse *
+ai_image_generator_generate_image(
+    AiImageGenerator  *self,
+    AiImageRequest    *request,
+    GCancellable      *cancellable,
+    GError           **error
+);
+#+end_src
+
+Blocks until the image arrives.
+
+Implemented generically on top of the asynchronous pair by running a nested
+=GMainLoop= on a *private* =GMainContext=, so every provider gets it without
+implementing anything. The private context is what makes it safe to call from
+inside an application that is already running a main loop: the nested loop
+dispatches only this request's own sources and cannot re-enter the caller's.
+
+Image generation takes tens of seconds, so this blocks for a long time. Prefer
+the async form anywhere responsiveness matters; this exists for scripts,
+command-line tools and synchronous embedding APIs that have no other option.
+
+One consequence worth knowing when testing: a mock server attached to the
+*default* context will never be dispatched while this call is in flight. Run the
+server on its own thread with its own context.
+
+*** Capability queries
+#+begin_src C
+GList *ai_image_generator_list_image_models (AiImageGenerator *self);
+
+const AiImageModelInfo *
+ai_image_generator_get_model_info (AiImageGenerator *self, const gchar *model);
+
+AiImageCapabilities
+ai_image_generator_get_capabilities (AiImageGenerator *self, const gchar *model);
+
+gboolean
+ai_image_generator_supports (AiImageGenerator *self, const gchar *model,
+                             AiImageCapabilities capability);
+#+end_src
+
+Passing =NULL= for =model= asks about the provider's default. See
+[[file:ai-image-capabilities.org][AiImageCapabilities]].
 
 *** get_supported_sizes
 #+begin_src C

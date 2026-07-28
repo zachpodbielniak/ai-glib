@@ -245,6 +245,35 @@ Important: the model API's =AiMessage= representation is provider-agnostic. Appl
 For the easiest path through the multi-turn loop see =AiToolExecutor=. To hand-roll the loop see [[../examples/tool-use.org][=examples/tool-use.md=]].
 
 ** Image Generation
+*** Capability matrix
+| Model           | Refs | Max n | Quality words        | Notable                                  |
+|-----------------+------+-------+----------------------+------------------------------------------|
+| =gpt-image-2=   |   16 |    10 | auto/low/medium/high | transparency, output format, edits, masks |
+| =gpt-image-1.5= |   16 |    10 | auto/low/medium/high | as above                                  |
+| =gpt-image-1=   |   16 |    10 | auto/low/medium/high | as above                                  |
+| =dall-e-3=      |    0 |     1 | standard/hd          | style, URL responses, revises prompts     |
+| =dall-e-2=      |    1 |    10 | ---                  | edits with a mask, variations             |
+
+The two families are not interchangeable. GPT Image models *reject*
+=response_format= and =style= outright and use =low=/=medium=/=high= for
+quality; DALL-E accepts both members and uses =standard=/=hd=. ai-glib sends
+only what the chosen model declares, and translates quality between the two
+vocabularies -- so asking for =AI_IMAGE_QUALITY_HD= against GPT Image sends
+=high= rather than failing.
+
+GPT Image always returns base64 and never a URL, which is why it does not
+advertise =AI_IMAGE_CAP_URL_RESPONSE=.
+
+*** Editing and variations
+Reference images route to =/v1/images/edits= as a multipart form. GPT Image
+models take a repeated =image[]= control; DALL-E 2 takes a single =image= plus
+an optional =mask=. Variations go to =/v1/images/variations= and take no prompt
+at all.
+
+Sizes: =1024x1024=, =1536x1024=, =1024x1536=, =auto= for GPT Image;
+=1024x1024=, =1792x1024=, =1024x1792= for DALL-E 3; =256x256=, =512x512=,
+=1024x1024= for DALL-E 2.
+
 OpenAI provides comprehensive image generation through DALL-E models.
 
 *** Image Models

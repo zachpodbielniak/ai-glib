@@ -8,6 +8,10 @@ A GLib/GObject-based C library for interacting with AI providers.
 - *Async Support*: Non-blocking operations via GAsyncResult/GTask
 - *Streaming*: Real-time response streaming with signals
 - *Tool Use*: Function calling / tool use support
+- *Image Generation*: OpenAI, Gemini and Grok, with multi-image reference
+  conditioning (up to 14 references on Nano Banana Pro), editing, masks and
+  variations; unsupported options are reconciled per model rather than sent and
+  rejected (see [[file:docs/examples/image-generation.org][docs/examples/image-generation.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
 - *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
 - *Environment Variables*: Standard env var configuration

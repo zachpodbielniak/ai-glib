@@ -1,0 +1,98 @@
+* AiImage
+Binary image payload -- the input side of image generation.
+
+** Overview
+=AiImage= is a boxed type holding raw image bytes plus their metadata. It is the
+counterpart to [[file:../examples/image-generation.org][AiGeneratedImage]]: where that represents an image a provider produced,
+=AiImage= represents one you hand *to* a provider, as a reference for
+multi-image conditioning or as the subject of an edit, variation or upscale.
+
+Beyond the bytes and MIME type it carries three optional hints:
+
+- the pixel dimensions, when the caller happens to know them,
+- a source URI, purely as provenance for diagnostics, and
+- a *role* label such as ="style"= or ="subject"=.
+
+The role is what makes multi-reference conditioning legible to a model.
+Providers that accept several reference images -- Gemini's Nano Banana Pro takes
+up to fourteen -- send them as an ordered list with no field describing what
+each one is for. ai-glib folds the role labels into the prompt text, which is
+the only channel the model actually reads.
+
+** Construction
+
+#+begin_src C
+AiImage *ai_image_new_from_bytes  (GBytes *bytes, const gchar *mime_type);
+AiImage *ai_image_new_from_data   (gconstpointer data, gsize length,
+                                   const gchar *mime_type);
+AiImage *ai_image_new_from_file   (const gchar *path, GError **error);
+AiImage *ai_image_new_from_base64 (const gchar *base64_data,
+                                   const gchar *mime_type);
+#+end_src
+
+=ai_image_new_from_file()= is the usual entry point. It sniffs the MIME type
+from the file's contents, falling back to the extension and finally to
+=image/png=, and retains the basename -- which matters, because OpenAI's
+multipart endpoints infer the image format from the form part's filename.
+
+A =NULL= MIME type is never propagated: it would serialise as a null JSON member
+and be rejected, so it becomes =image/png=.
+
+#+begin_src C
+g_autoptr(GError) error = NULL;
+g_autoptr(AiImage) logo = ai_image_new_from_file("logo.png", &error);
+
+if (logo == NULL)
+{
+    g_printerr("%s\n", error->message);
+    return;
+}
+
+ai_image_set_role(logo, "style");
+#+end_src
+
+** Accessors
+
+| Function                        | Returns                                     |
+|---------------------------------+---------------------------------------------|
+| =ai_image_get_bytes()=          | the payload, transfer none                  |
+| =ai_image_get_size()=           | payload size in bytes                       |
+| =ai_image_get_mime_type()=      | the MIME type                               |
+| =ai_image_dup_base64()=         | base64 form, transfer full, cached          |
+| =ai_image_get_width/height()=   | pixel dimensions, or 0 when unknown         |
+| =ai_image_get_uri()=            | where it came from, or =NULL=               |
+| =ai_image_get_role()=           | the role label, or =NULL=                   |
+| =ai_image_get_filename()=       | multipart form filename, or =NULL=          |
+
+=ai_image_dup_base64()= computes the encoding on first use and caches it, so
+serialising the same reference across a retry or across the turns of an edit
+loop costs one encode rather than one per request. Each call still returns an
+independently-owned copy.
+
+ai-glib never decodes image data, so =ai_image_get_width()= and
+=ai_image_get_height()= only report what a caller has recorded with
+=ai_image_set_dimensions()=.
+
+** Memory
+Copying an =AiImage= shares the underlying =GBytes= rather than duplicating it,
+so passing reference images around is cheap regardless of their size.
+
+#+begin_src C
+g_autoptr(AiImage) image = ai_image_new_from_file("photo.jpg", NULL);
+g_autoptr(AiImage) copy  = ai_image_copy(image);   /* payload is shared */
+#+end_src
+
+=ai_image_request_add_reference_image()= takes a copy, so the caller keeps
+ownership of whatever it passed in.
+
+** Saving
+
+#+begin_src C
+gboolean ai_image_save_to_file (AiImage *self, const gchar *path,
+                                GError **error);
+#+end_src
+
+** See also
+- [[file:ai-image-capabilities.org][AiImageCapabilities]] --- what a given model will accept
+- [[file:ai-image-generator.org][AiImageGenerator]] --- the generation interface
+- [[file:../examples/image-generation.org][Image Generation]] --- worked examples

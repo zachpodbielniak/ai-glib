@@ -60,23 +60,30 @@ GObject
     AiTextContent  (final)
     AiToolUse      (final)
     AiToolResult   (final)
-  AiClient         (derivable, implements AiProvider, AiStreamable)
-    AiClaudeClient (final)
-    AiOpenAIClient (final)
-    AiGrokClient   (final)
-    AiGeminiClient (final)
-    AiOllamaClient (final)
-  AiCliClient      (derivable, implements AiProvider, AiStreamable)
+  AiClient         (derivable; the concrete subclasses implement the interfaces)
+    AiClaudeClient (final, AiProvider, AiStreamable)
+    AiOpenAIClient (final, AiProvider, AiStreamable, AiImageGenerator)
+    AiGrokClient   (final, AiProvider, AiStreamable, AiImageGenerator)
+    AiGeminiClient (final, AiProvider, AiStreamable, AiImageGenerator)
+    AiOllamaClient (final, AiProvider, AiStreamable)
+  AiCliClient      (derivable; subclasses implement the interfaces)
     AiClaudeCodeClient (final)
+    AiClaudeTmuxClient (final)
     AiOpenCodeClient   (final)
 
 GBoxed
   AiUsage
+  AiImage
+  AiImageRequest
+  AiGeneratedImage
+  AiImageResponse
+  AiImageModelInfo
 
 GInterface
   AiProvider
   AiStreamable
   AiImageGenerator
+  AiSearchProvider
 #+end_example
 
 ** Interfaces

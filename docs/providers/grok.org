@@ -179,6 +179,18 @@ Grok uses an OpenAI-compatible API:
 Grok's API is OpenAI-compatible, so ai-glib uses the same wire-format serializer as the OpenAI client. See the [[file:openai.org#tool-calling][OpenAI Tool Calling section]] for the details --- the behavior is identical: tool definitions wrapped in ={type:"function", ...}=, prior assistant tool calls round-tripped as =tool_calls=, and tool results emitted as separate =role:"tool"= messages.
 
 ** Image Generation
+*** Capability matrix
+| Model                        | Refs | Max n | Notable                        |
+|------------------------------+------+-------+--------------------------------|
+| =grok-imagine-image=         |    1 |    10 | single input image             |
+| =grok-imagine-image-quality= |    1 |    10 | single input image             |
+| =grok-2-image=               |    0 |    10 | legacy; no reference images    |
+
+Grok has the thinnest image API of the three providers: prompt, model, count and
+response format. Everything else an =AiImageRequest= can express is declared
+unsupported, so it is dropped by the validator rather than sent and rejected.
+Pass =AI_IMAGE_VALIDATE_STRICT= (or =ai --strict=) if you would rather know.
+
 Grok provides basic image generation through an OpenAI-compatible API.
 
 *** Image / Video Models

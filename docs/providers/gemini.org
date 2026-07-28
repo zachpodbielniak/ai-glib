@@ -219,6 +219,40 @@ Gemini models offer large context windows:
 | Gemini 1.5 Flash | 1M tokens                |
 
 ** Image Generation
+*** Capability matrix
+| Model                          | Refs | Max n | Geometry              | Notable                          |
+|--------------------------------+------+-------+-----------------------+----------------------------------|
+| =gemini-2.5-flash-image=       |    3 |     4 | aspect ratio          | seed, sampling, safety           |
+| =gemini-3.1-flash-image-preview= |  6 |     4 | aspect ratio          | multi-reference                  |
+| =gemini-3-pro-image-preview=   |   14 |     4 | aspect ratio + tier   | multi-reference, up to 4K        |
+| =imagen-4.0-generate-001=      |    0 |     4 | aspect ratio          | negative prompt, watermark, language |
+| =imagen-3.0-generate-001=      |    0 |     4 | aspect ratio          | negative prompt, watermark       |
+
+Gemini expresses geometry as an aspect ratio, not pixel dimensions, so
+=ai_image_request_set_aspect_ratio()= is the natural control here;
+=ai_image_request_set_size()= is dropped for these models. Nano Banana Pro adds
+a resolution tier (=1K=/=2K=/=4K=).
+
+Only the Nano Banana models accept reference images. They run as chat
+completions under =:generateContent=, which is what gives them somewhere to put
+extra image parts -- Imagen's =:predict= endpoint is purely generative and
+rejects references outright.
+
+Supported ratios: =1:1=, =2:3=, =3:2=, =3:4=, =4:3=, =4:5=, =5:4=, =9:16=,
+=16:9=, =21:9= for Nano Banana; Imagen accepts the first five plus =9:16= and
+=16:9=.
+
+*** Wire-format notes
+- Requests spell inline image data snake_case (=inline_data=); responses come
+  back camelCase (=inlineData=). Both are handled.
+- The API key travels in the =x-goog-api-key= header rather than the query
+  string, so it does not leak into proxy logs.
+- Three different response envelopes are in circulation (=predictions=,
+  =generatedImages=, =candidates=); all three are parsed.
+- If the model answers with text instead of an image -- which it will if asked
+  for something it declines to draw -- that surfaces as
+  =AI_ERROR_INVALID_RESPONSE= rather than an empty success.
+
 Gemini supports image generation through the =AiImageGenerator= interface. Two APIs are available:
 
 *** Nano Banana (Recommended)

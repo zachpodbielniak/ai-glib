@@ -359,6 +359,63 @@ options, caches the formatted result (5 min), and — when `fetch_content` is se
    the `endpoint` property to test against loopback)
 6. Document it in `docs/web-search.org` + `docs/api-reference/ai-search-provider.org`
 
+## Image Generation Subsystem
+
+Image generation hangs off the `AiImageGenerator` interface
+(`src/core/ai-image-generator.{h,c}`), implemented by the OpenAI, Gemini and
+Grok clients. The request type (`src/model/ai-image-request.c`) is deliberately a
+**superset** of every parameter the supported APIs accept — roughly thirty of
+them — because those APIs overlap only partly and reject anything they do not
+recognise.
+
+The rule that makes that workable: each provider projects the request through
+the chosen model's `AiImageModelInfo` and calls `ai_image_request_validate()`
+before serialising. Unsupported parameters are dropped with a `g_debug` by
+default, or raise `AI_ERROR_INVALID_REQUEST` under `AI_IMAGE_VALIDATE_STRICT`.
+**Never add a parameter to a provider's builder without a capability gate** —
+that is exactly how the `response_format`-to-GPT-Image bug got in.
+
+Pieces:
+
+- `src/model/ai-image.{h,c}` — `AiImage`, the input-side payload (bytes, MIME,
+  optional role label). Roles are folded into the prompt text because no wire
+  format has a field for them.
+- `src/core/ai-image-capabilities.{h,c}` — capability flags, `AiImageModelInfo`,
+  and the validator.
+- `src/providers/ai-image-shared.{h,c}` — **private**. OpenAI-compatible JSON and
+  multipart builders, the Gemini parts builder, status→error mapping, and an
+  async send with retry/backoff.
+
+Three things to know before touching the send path:
+
+1. Retries must build a **fresh** `SoupMessage`; a message whose body stream has
+   been consumed cannot be resent. That is why the body is passed separately —
+   it cannot be read back off a `SoupMessage`.
+2. Timeout sources must attach to the **thread-default** context, not the global
+   default `g_timeout_add()` uses. A synchronous caller drives a nested loop on a
+   private context that a global-default timer never reaches.
+3. `ai_image_generator_generate_image()` (sync) runs that nested loop on a
+   private context deliberately. A mock server on the default context will never
+   be dispatched while it is in flight — run test servers on their own thread.
+
+### Adding an image-generation provider
+
+1. Implement `AiImageGenerator` on the client: `generate_image_async`,
+   `generate_image_finish`, `get_default_model`, `list_image_models`.
+2. Declare a static table of `AiImageModelInfo` in `list_image_models` — id,
+   capability flags, `max_count`, `max_reference_images`, sizes or aspect
+   ratios, quality vocabulary, notes. **That table is the registration.**
+3. In `generate_image_async`: resolve the model, `get_model_info`, call
+   `ai_image_request_validate()`, build the body, then
+   `ai_image_shared_send_async()`.
+4. For an OpenAI-compatible API, `ai_image_shared_build_openai_json()` and
+   `ai_image_shared_parse_openai_response()` do the work — see the Grok client,
+   which is the minimal example at roughly 80 lines.
+5. Emit `image-progress` when the response is parsed.
+6. Cover the wire format in `tests/test-image-serialize.c` and the round trip in
+   `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
+7. Document it in `docs/providers/<name>.org` with a capability matrix.
+
 ## Common Patterns
 
 ### Basic Chat Request

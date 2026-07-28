@@ -53,6 +53,8 @@ see their provider pages.
 - [[file:api-reference/ai-client.org][AiClient]] - Base client class
 - [[file:api-reference/ai-provider.org][AiProvider]] - Provider interface
 - [[file:api-reference/ai-image-generator.org][AiImageGenerator]] - Image generation interface
+- [[file:api-reference/ai-image.org][AiImage]] - Reference-image payload (boxed type)
+- [[file:api-reference/ai-image-capabilities.org][AiImageCapabilities]] - What a given image model accepts
 - [[file:api-reference/ai-message.org][AiMessage]] - Message class
 - [[file:api-reference/ai-response.org][AiResponse]] - Response class
 - [[file:api-reference/ai-tool.org][AiTool]] - Tool definition
@@ -67,7 +69,7 @@ see their provider pages.
 - [[file:examples/streaming.org][Streaming]] - Streaming responses
 - [[file:examples/tool-use.org][Tool Use]] - Function calling
 - [[file:examples/web-search.org][Web Search]] - Search the web with a provider
-- [[file:examples/image-generation.org][Image Generation]] - Generate images from text
+- [[file:examples/image-generation.org][Image Generation]] - Generate images from text, with reference-image conditioning
 
 *** Contributing
 - [[file:contributing.org][Contributing]] - How to contribute to ai-glib

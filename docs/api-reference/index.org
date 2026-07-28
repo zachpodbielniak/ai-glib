@@ -21,6 +21,12 @@ Complete API documentation for ai-glib.
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface   |
 | [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface         |
 
+** Image Generation
+| Class                                                    | Description                            |
+|----------------------------------------------------------+----------------------------------------|
+| [[file:ai-image.org][AiImage]]                          | Reference-image payload (boxed type)   |
+| [[file:ai-image-capabilities.org][AiImageCapabilities]] | What a given model accepts             |
+
 ** Model Classes
 | Class                               | Description                            |
 |-------------------------------------+----------------------------------------|

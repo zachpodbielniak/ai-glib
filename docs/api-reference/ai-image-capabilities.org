@@ -1,0 +1,153 @@
+* AiImageCapabilities and AiImageModelInfo
+What a given image model will actually accept.
+
+** Why this exists
+Image APIs reject parameters their model does not understand rather than
+ignoring them. Sending =response_format= to an OpenAI GPT Image model is not a
+cosmetic mistake; it is a failed request. So "which knobs exist" is a per-model
+fact that has to be known *before* a request is serialised, not discovered from
+the resulting error.
+
+[[file:../examples/image-generation.org][AiImageRequest]] is deliberately a superset of every supported API. Each provider
+projects it through the =AiImageModelInfo= of the model in play, and
+=ai_image_request_validate()= decides what happens to anything that model cannot
+express. That single choke point is what lets one request type serve APIs whose
+parameter sets barely overlap.
+
+** AiImageCapabilities
+A flags set naming each parameter family a model honours.
+
+| Flag                             | Meaning                                    |
+|----------------------------------+--------------------------------------------|
+| =REFERENCE_IMAGES=               | accepts at least one reference image       |
+| =MULTI_REFERENCE=                | accepts more than one                      |
+| =MASK=                           | accepts an edit mask                       |
+| =NEGATIVE_PROMPT=                | accepts a negative prompt                  |
+| =SEED=                           | accepts a sampling seed                    |
+| =ASPECT_RATIO=                   | geometry is expressed as a ratio           |
+| =PIXEL_SIZE=                     | geometry is expressed as pixel dimensions  |
+| =RESOLUTION_TIER=                | accepts a 1K/2K/4K tier                    |
+| =TRANSPARENCY=                   | can render a transparent background        |
+| =OUTPUT_FORMAT=                  | output encoding is selectable              |
+| =QUALITY=, =STYLE=               | accepts a quality / style setting          |
+| =MULTI_COUNT=                    | more than one image per request            |
+| =VARIATION=, =UPSCALE=           | supports those operations                  |
+| =PARTIAL_STREAMING=              | can stream partial previews                |
+| =SAFETY_CONTROL=                 | content filtering is tunable               |
+| =WATERMARK_CONTROL=              | watermarking is tunable                    |
+| =URL_RESPONSE=                   | can return a URL instead of inline bytes   |
+| =SAMPLING=                       | accepts temperature / top-p / top-k        |
+| =PROMPT_ENHANCEMENT=             | may rewrite the prompt before use          |
+| =LANGUAGE=                       | accepts a prompt language hint             |
+| =INPUT_FIDELITY=                 | accepts an edit input-fidelity setting     |
+
+=AI_IMAGE_CAP_URL_RESPONSE= is worth singling out. Its *absence* means "omit the
+=response_format= member entirely", not "send =b64_json="; GPT Image models
+reject the member however it is spelled.
+
+** AiImageModelInfo
+A boxed descriptor for one model: identifier, display name, provider,
+capability flags, and the limits it enforces.
+
+#+begin_src C
+const AiImageModelInfo *info =
+    ai_image_generator_get_model_info(AI_IMAGE_GENERATOR(client),
+                                      "gemini-3-pro-image-preview");
+
+if (ai_image_model_info_supports(info, AI_IMAGE_CAP_MULTI_REFERENCE))
+{
+    guint limit = ai_image_model_info_get_max_reference_images(info);
+    g_print("accepts up to %u reference images\n", limit);
+}
+#+end_src
+
+Passing several bits at once means "all of them":
+
+#+begin_src C
+ai_image_model_info_supports(info,
+    AI_IMAGE_CAP_REFERENCE_IMAGES | AI_IMAGE_CAP_MASK);
+#+end_src
+
+A model the provider has no entry for returns =NULL=. Treat that as *unknown*,
+not *unsupported* -- a model released after your ai-glib build should still
+work, so validation passes an unknown model through untouched rather than
+second-guessing it.
+
+*** Quality vocabularies
+=ai_image_model_info_get_qualities()= records the quality spellings a model
+accepts, and =ai_image_model_info_map_quality()= translates onto the nearest
+one. OpenAI's two families name the same idea differently -- =standard=/=hd=
+versus =low=/=medium=/=high= -- and each rejects the other's words, so asking
+for =AI_IMAGE_QUALITY_HD= against a GPT Image model sends =high= rather than
+failing.
+
+=AI_IMAGE_QUALITY_AUTO= is the unset sentinel: it always omits the parameter,
+even for a model that accepts a literal ="auto"=, so the provider's own default
+applies.
+
+** Validation
+
+#+begin_src C
+gboolean ai_image_request_validate (AiImageRequest *request,
+                                    const AiImageModelInfo *info,
+                                    AiImageValidateFlags flags,
+                                    GError **error);
+#+end_src
+
+Providers call this themselves before serialising, so you rarely need to. Call
+it directly when you want to know in advance whether a request will survive
+intact.
+
+| Mode                         | Behaviour                                       |
+|------------------------------+-------------------------------------------------|
+| =AI_IMAGE_VALIDATE_NONE=     | drop unsupported parameters, log at debug level  |
+| =AI_IMAGE_VALIDATE_STRICT=   | fail with =AI_ERROR_INVALID_REQUEST=             |
+
+The lenient default suits interactive callers, which would rather get a slightly
+different image than an error. Strict suits scripted callers that need to know
+their request was not honoured as written; =ai --image-gen --strict= exposes it.
+
+*** What is never dropped silently
+Some things are errors even in lenient mode, because quietly proceeding would
+produce a plausible-looking but wrong result the caller cannot detect:
+
+- *Reference images the model cannot take*, or more than its limit. Dropping a
+  reference changes the image invisibly.
+- *An unsupported operation.* Silently generating from scratch when an edit was
+  requested is not a degraded result, it is a different one.
+- *A mask with no reference image* to apply it to.
+- *A transparent background with a JPEG output format*, which is
+  self-contradictory however capable the model is -- JPEG has no alpha channel,
+  so the result would silently be opaque.
+
+Counts are clamped rather than rejected, since receiving fewer images than
+asked for is visible in the response.
+
+** Enumerating models
+
+#+begin_src C
+GList *models = ai_image_generator_list_image_models(AI_IMAGE_GENERATOR(client));
+
+for (GList *l = models; l != NULL; l = l->next)
+{
+    AiImageModelInfo *info = l->data;
+    g_autofree gchar *caps = ai_image_capabilities_to_string(
+        ai_image_model_info_get_capabilities(info));
+
+    g_print("%-32s %s\n", ai_image_model_info_get_id(info), caps);
+}
+
+g_list_free_full(models, (GDestroyNotify)ai_image_model_info_free);
+#+end_src
+
+This is what backs =ai --list-image-models=.
+
+** Adding a provider
+A provider declares a static table of =AiImageModelInfo= and implements
+=list_image_models=. That table *is* the registration -- see the "Adding an
+image-generation provider" recipe in =CLAUDE.md=.
+
+** See also
+- [[file:ai-image.org][AiImage]] --- reference-image payloads
+- [[file:ai-image-generator.org][AiImageGenerator]] --- the generation interface
+- [[file:../cli.org][CLI]] --- =ai --list-image-models=

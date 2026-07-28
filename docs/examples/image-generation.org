@@ -1,42 +1,62 @@
 * Image Generation
-Generate images from text prompts using AI providers.
+Generate images from text prompts, optionally conditioned on reference images.
 
 ** Overview
-ai-glib supports image generation through the =AiImageGenerator= interface. Currently supported providers:
+Image generation goes through the =AiImageGenerator= interface. Three providers
+implement it:
 
-| Provider | Models                                 | Notes                  |
-|----------+----------------------------------------+------------------------|
-| OpenAI   | DALL-E 2, DALL-E 3, GPT Image 1        | Full parameter support |
-| Grok     | grok-2-image                           | Basic generation only  |
-| Gemini   | Nano Banana, Nano Banana Pro, Imagen 4 | Aspect ratio mapping   |
+| Provider | Models                                                    | Reference images                          |
+|----------+-----------------------------------------------------------+-------------------------------------------|
+| OpenAI   | GPT Image 2 / 1.5 / 1, DALL-E 3 / 2                       | up to 16 (GPT Image); 1 + mask (DALL-E 2) |
+| Gemini   | Nano Banana, Nano Banana 2, Nano Banana Pro, Imagen 4 / 3 | up to 14 (Nano Banana Pro); none (Imagen) |
+| Grok     | Grok Imagine, Grok Imagine Quality, Grok 2 Image          | 1 (Imagine); none (Grok 2)                |
 
-** Quick Start
+Claude and Ollama expose no image API and do not implement the interface, so
+check with =AI_IS_IMAGE_GENERATOR()= before casting.
+
+The request type, =AiImageRequest=, is a superset of every parameter these APIs
+accept. No provider honours all of it; each one projects the request through the
+chosen model's capability descriptor and drops what that model cannot express
+(or fails, under =AI_IMAGE_VALIDATE_STRICT=). You can therefore set whatever you
+like without knowing which provider will serve it. See
+[[file:../api-reference/ai-image-capabilities.org][AiImageCapabilities]].
+
+** Quick start
+The synchronous form is the shortest thing that works:
+
 #+begin_src C
 #include <ai-glib.h>
 
-/* Create client and request */
-g_autoptr(AiOpenAIClient) client = ai_openai_client_new();
-g_autoptr(AiImageRequest) request = ai_image_request_new("a sunset over mountains");
+int main(void)
+{
+    g_autoptr(AiGeminiClient) client = ai_gemini_client_new();
+    g_autoptr(AiImageRequest) request = ai_image_request_new("a brass telescope");
+    g_autoptr(AiImageResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
 
-/* Generate image */
-ai_image_generator_generate_image_async(
-    AI_IMAGE_GENERATOR(client),
-    request,
-    NULL,
-    on_complete,
-    user_data
-);
+    response = ai_image_generator_generate_image(AI_IMAGE_GENERATOR(client),
+                                                 request, NULL, &error);
+    if (response == NULL)
+    {
+        g_printerr("%s\n", error->message);
+        return 1;
+    }
+
+    ai_generated_image_save_to_file(
+        ai_image_response_get_image(response, 0), "telescope.png", &error);
+
+    return 0;
+}
 #+end_src
 
-** Provider Examples
-*** OpenAI (DALL-E)
-OpenAI supports the most comprehensive set of image generation parameters.
+It blocks for tens of seconds. Anywhere responsiveness matters, use the async
+form below instead.
+
+** Asynchronous generation
 
 #+begin_src C
-#include <ai-glib.h>
-
 static void
-on_image_complete(GObject *source, GAsyncResult *result, gpointer user_data)
+on_complete(GObject *source, GAsyncResult *result, gpointer user_data)
 {
     GMainLoop *loop = user_data;
     g_autoptr(AiImageResponse) response = NULL;
@@ -45,248 +65,207 @@ on_image_complete(GObject *source, GAsyncResult *result, gpointer user_data)
     response = ai_image_generator_generate_image_finish(
         AI_IMAGE_GENERATOR(source), result, &error);
 
-    if (error != NULL)
+    if (response == NULL)
     {
         g_printerr("Error: %s\n", error->message);
         g_main_loop_quit(loop);
         return;
     }
 
-    /* Get the generated image */
-    AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+    /* DALL-E 3 and Imagen may rewrite the prompt before generating. */
+    {
+        AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+        const gchar *revised = ai_generated_image_get_revised_prompt(image);
 
-    /* Check for revised prompt (DALL-E 3 may modify prompts) */
-    const gchar *revised = ai_generated_image_get_revised_prompt(image);
-    if (revised != NULL)
-    {
-        g_print("Revised prompt: %s\n", revised);
-    }
-
-    /* Save to file */
-    if (!ai_generated_image_save_to_file(image, "dalle-output.png", &error))
-    {
-        g_printerr("Save failed: %s\n", error->message);
-    }
-    else
-    {
-        g_print("Image saved to dalle-output.png\n");
+        if (revised != NULL)
+            g_print("Revised prompt: %s\n", revised);
     }
 
     g_main_loop_quit(loop);
 }
 
-int main(int argc, char *argv[])
-{
-    g_autoptr(AiOpenAIClient) client = ai_openai_client_new();
-    g_autoptr(AiImageRequest) request = ai_image_request_new(
-        "a futuristic city at night with neon lights"
-    );
-    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
-
-    /* Configure for best quality */
-    ai_image_request_set_model(request, AI_OPENAI_IMAGE_MODEL_DALL_E_3);
-    ai_image_request_set_size(request, AI_IMAGE_SIZE_1024);
-    ai_image_request_set_quality(request, AI_IMAGE_QUALITY_HD);
-    ai_image_request_set_style(request, AI_IMAGE_STYLE_VIVID);
-
-    ai_image_generator_generate_image_async(
-        AI_IMAGE_GENERATOR(client),
-        request,
-        NULL,
-        on_image_complete,
-        loop
-    );
-
-    g_main_loop_run(loop);
-    return 0;
-}
+ai_image_generator_generate_image_async(AI_IMAGE_GENERATOR(client), request,
+                                        NULL, on_complete, loop);
 #+end_src
 
-*Environment:* =OPENAI_API_KEY=
-
-*** Grok
-Grok provides basic image generation through an OpenAI-compatible API.
+** Getting at the bytes
+A provider may return inline base64 or a URL, and which one you get depends on
+the model as much as on your request. =ai_generated_image_load_bytes_async()=
+handles both: inline payloads short-circuit, URLs are fetched.
 
 #+begin_src C
-#include <ai-glib.h>
-
-int main(int argc, char *argv[])
+static void
+on_bytes(GObject *source, GAsyncResult *result, gpointer user_data)
 {
-    g_autoptr(AiGrokClient) client = ai_grok_client_new();
-    g_autoptr(AiImageRequest) request = ai_image_request_new(
-        "a robot playing chess"
-    );
-    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+    g_autoptr(GBytes) bytes = NULL;
+    g_autoptr(GError) error = NULL;
 
-    /* Grok ignores size/quality/style parameters */
-    ai_image_request_set_model(request, AI_GROK_IMAGE_MODEL_GROK_2_IMAGE);
-
-    ai_image_generator_generate_image_async(
-        AI_IMAGE_GENERATOR(client),
-        request,
-        NULL,
-        on_image_complete,
-        loop
-    );
-
-    g_main_loop_run(loop);
-    return 0;
+    bytes = ai_generated_image_load_bytes_finish(NULL, result, &error);
+    if (bytes != NULL)
+        g_file_set_contents("out.png", g_bytes_get_data(bytes, NULL),
+                            g_bytes_get_size(bytes), NULL);
 }
+
+ai_generated_image_load_bytes_async(image, NULL, on_bytes, NULL);
 #+end_src
 
-*Environment:* =XAI_API_KEY= or =GROK_API_KEY=
+=ai_generated_image_get_bytes()= is the synchronous shortcut, but it fails on a
+URL-backed image rather than blocking on the network. The URLs providers hand
+out are short-lived -- typically an hour -- so resolve them promptly rather than
+storing the response and fetching later.
 
-*** Gemini (Nano Banana)
-Gemini offers native image generation through "Nano Banana" (gemini-*-image models) and the legacy Imagen API.
-
-*Nano Banana* is the recommended approach - it's Gemini's native image generation:
+** Reference images
+This is the capability that makes Nano Banana Pro interesting: several input
+images, each doing a different job.
 
 #+begin_src C
-#include <ai-glib.h>
-
-int main(int argc, char *argv[])
-{
-    g_autoptr(AiGeminiClient) client = ai_gemini_client_new();
-    g_autoptr(AiImageRequest) request = ai_image_request_new(
-        "a cat wearing a space helmet floating in space"
-    );
-    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
-
-    /* Use Nano Banana (native Gemini image generation) */
-    ai_image_request_set_model(request, AI_GEMINI_IMAGE_MODEL_NANO_BANANA);
-
-    /* Size maps to aspect ratio: 1024 = 1:1 square */
-    ai_image_request_set_size(request, AI_IMAGE_SIZE_1024);
-
-    ai_image_generator_generate_image_async(
-        AI_IMAGE_GENERATOR(client),
-        request,
-        NULL,
-        on_image_complete,
-        loop
-    );
-
-    g_main_loop_run(loop);
-    return 0;
-}
-#+end_src
-
-*Available Gemini image models:*
-
-| Model                      | Define                                  | Description              |
-|----------------------------+-----------------------------------------+--------------------------|
-| gemini-2.5-flash-image     | =AI_GEMINI_IMAGE_MODEL_NANO_BANANA=     | Fast, up to 1K (default) |
-| gemini-3-pro-image-preview | =AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO= | Pro, up to 4K            |
-| imagen-4.0-generate-001    | =AI_GEMINI_IMAGE_MODEL_IMAGEN_4=        | Legacy Imagen            |
-| imagen-3.0-generate-001    | =AI_GEMINI_IMAGE_MODEL_IMAGEN_3=        | Legacy Imagen            |
-
-*Environment:* =GEMINI_API_KEY=
-
-** Parameter Support by Provider
-| Parameter       | OpenAI              | Grok | Gemini             |
-|-----------------+---------------------+------+--------------------|
-| prompt          | Yes                 | Yes  | Yes                |
-| model           | Yes                 | Yes  | Yes                |
-| size            | Yes (pixels)        | No   | Yes (aspect ratio) |
-| quality         | Yes (standard/hd)   | No   | No                 |
-| style           | Yes (vivid/natural) | No   | No                 |
-| count           | Yes (1-10)          | Yes  | Yes                |
-| response_format | Yes (url/b64)       | Yes  | b64 only           |
-
-** Working with Generated Images
-*** Saving to File
-#+begin_src C
-AiGeneratedImage *image = ai_image_response_get_image(response, 0);
+g_autoptr(AiGeminiClient) client = ai_gemini_client_new();
+g_autoptr(AiImageRequest) request =
+    ai_image_request_new("combine these into a concert poster");
 g_autoptr(GError) error = NULL;
 
-if (!ai_generated_image_save_to_file(image, "output.png", &error))
-{
-    g_printerr("Failed to save: %s\n", error->message);
-}
+ai_image_request_set_model(request, AI_GEMINI_IMAGE_MODEL_NANO_BANANA_PRO);
+
+ai_image_request_add_reference_file(request, "palette.png", "style", &error);
+ai_image_request_add_reference_file(request, "macaw.jpg", "subject", &error);
+ai_image_request_add_reference_file(request, "venue.jpg", "background", &error);
 #+end_src
 
-*** Getting Raw Bytes
+Order is preserved and significant. The roles matter because the wire formats
+carry references as a bare ordered list with no field saying what each is for --
+ai-glib folds the labels into the prompt text, which is the only channel the
+model reads. Unlabelled references are simply passed through in order.
+
+Asking for more references than a model accepts is an error even in lenient
+mode: silently dropping one would change the image in a way you could not see.
+
+** Editing and variations
+Set the operation. On OpenAI this routes to =/v1/images/edits= or
+=/v1/images/variations= as a multipart post; on Gemini everything goes through
+the same chat-shaped endpoint.
+
 #+begin_src C
-g_autoptr(GBytes) bytes = ai_generated_image_get_bytes(image, &error);
-if (bytes != NULL)
-{
-    gsize size;
-    gconstpointer data = g_bytes_get_data(bytes, &size);
-    /* process raw image data */
-}
+g_autoptr(AiImageRequest) request =
+    ai_image_request_new("replace the sky with a storm");
+g_autoptr(AiImage) mask = ai_image_new_from_file("sky-mask.png", NULL);
+
+ai_image_request_set_operation(request, AI_IMAGE_OPERATION_EDIT);
+ai_image_request_add_reference_file(request, "photo.png", NULL, NULL);
+ai_image_request_set_mask(request, mask);
+ai_image_request_set_input_fidelity(request, AI_IMAGE_FIDELITY_HIGH);
 #+end_src
 
-*** Checking Image Type
+The transparent areas of the mask are the ones regenerated.
+=AI_IMAGE_FIDELITY_HIGH= is what you want when a face or a logo has to survive
+the round trip recognisably.
+
+** Geometry
+The two families disagree about how to express size, so ai-glib carries both and
+lets the capability check sort it out.
+
 #+begin_src C
-if (ai_generated_image_is_url(image))
-{
-    const gchar *url = ai_generated_image_get_url(image);
-    g_print("Image URL: %s\n", url);
-}
-else if (ai_generated_image_is_base64(image))
-{
-    const gchar *mime = ai_generated_image_get_mime_type(image);
-    g_print("Got base64 image (%s)\n", mime);
-}
+/* Gemini: a ratio plus a resolution tier. */
+ai_image_request_set_aspect_ratio(request, "16:9");
+ai_image_request_set_resolution(request, AI_IMAGE_RESOLUTION_4K);
+
+/* OpenAI: explicit pixel dimensions. */
+ai_image_request_set_custom_size(request, "1536x1024");
 #+end_src
 
-*** Multiple Images
+Setting one does not disturb the other, so a request can be aimed at either
+without the caller knowing which is in play.
+
+** Transparency and output encoding
+
+#+begin_src C
+ai_image_request_set_background(request, AI_IMAGE_BACKGROUND_TRANSPARENT);
+ai_image_request_set_output_format(request, AI_IMAGE_FORMAT_WEBP);
+ai_image_request_set_output_compression(request, 80);
+#+end_src
+
+Transparency needs a format with an alpha channel. Pairing it with
+=AI_IMAGE_FORMAT_JPEG= is rejected rather than silently producing an opaque
+image.
+
+** Reproducibility
+
+#+begin_src C
+ai_image_request_set_seed(request, 42);
+ai_image_request_set_negative_prompt(request, "text, watermark, signature");
+#+end_src
+
+Reproducibility is best-effort, and only holds while the model and the rest of
+the parameters are fixed.
+
+** Batches and progress
+
 #+begin_src C
 ai_image_request_set_count(request, 4);
 
-/* ... generate ... */
-
-guint count = ai_image_response_get_image_count(response);
-for (guint i = 0; i < count; i++)
-{
-    AiGeneratedImage *img = ai_image_response_get_image(response, i);
-    g_autofree gchar *filename = g_strdup_printf("output-%u.png", i);
-    ai_generated_image_save_to_file(img, filename, NULL);
-}
+g_signal_connect(client, "image-progress", G_CALLBACK(on_progress), NULL);
 #+end_src
 
-** Building the Examples
-The library includes ready-to-run examples:
+A count above the model's maximum is clamped rather than rejected, since getting
+fewer images than asked for is visible in the response.
+
+** Anything not modelled here
+New API parameters appear faster than a binding can track them, so there is an
+escape hatch. Extras are spliced verbatim into the request body and applied
+last, so they override any modelled parameter serialising to the same member.
+
+#+begin_src C
+ai_image_request_set_extra_string(request, "brand_new_param", "value");
+ai_image_request_set_extra(request, "count_of_things", g_variant_new_int32(3));
+#+end_src
+
+Nothing is validated: an unknown key reaches the provider exactly as written,
+and whatever the provider says about it comes back as the request error.
+
+** Checking before you send
+
+#+begin_src C
+const AiImageModelInfo *info =
+    ai_image_generator_get_model_info(AI_IMAGE_GENERATOR(client), NULL);
+
+if (!ai_image_model_info_supports(info, AI_IMAGE_CAP_TRANSPARENCY))
+    g_print("this model cannot do transparent backgrounds\n");
+#+end_src
+
+Or let it fail loudly instead of degrading:
+
+#+begin_src C
+if (!ai_image_request_validate(request, info, AI_IMAGE_VALIDATE_STRICT, &error))
+    g_printerr("%s\n", error->message);
+#+end_src
+
+** Errors
+Failures arrive in the =AI_ERROR= domain with the provider's own explanation
+quoted into the message, which is usually the useful part. Notable cases:
+
+| Code                        | Typical cause                                                            |
+|-----------------------------+--------------------------------------------------------------------------|
+| =AI_ERROR_INVALID_API_KEY=  | missing or wrong key                                                     |
+| =AI_ERROR_RATE_LIMITED=     | 429; retried with backoff before surfacing                               |
+| =AI_ERROR_INVALID_REQUEST=  | content-policy refusal, or an unsupported option under strict validation |
+| =AI_ERROR_INVALID_RESPONSE= | the model answered with text instead of an image                         |
+
+Transient failures (429, 5xx, transport errors) are retried automatically with
+exponential backoff, honouring =Retry-After=. The budget comes from
+=ai_config_set_max_retries()=.
+
+** From the command line
+Everything above is reachable from the =ai= binary; see [[file:../cli.org][the CLI documentation]].
 
 #+begin_src sh
-make
-
-# Run with appropriate API key
-OPENAI_API_KEY=sk-... ./build/release/examples/image-gen-openai "a mountain landscape"
-XAI_API_KEY=xai-... ./build/release/examples/image-gen-grok "a robot"
-GEMINI_API_KEY=AI... ./build/release/examples/image-gen-gemini "a cat in space"
+ai --image-gen -p gemini -m gemini-3-pro-image-preview \
+   --ref palette.png --ref-role style \
+   --ref macaw.jpg   --ref-role subject \
+   --aspect 16:9 --resolution 2k -o poster.png \
+   "combine these into a concert poster"
 #+end_src
 
-** Error Handling
-#+begin_src C
-response = ai_image_generator_generate_image_finish(
-    AI_IMAGE_GENERATOR(source), result, &error);
-
-if (error != NULL)
-{
-    if (error->domain == AI_ERROR)
-    {
-        switch (error->code)
-        {
-            case AI_ERROR_INVALID_API_KEY:
-                g_printerr("Invalid API key\n");
-                break;
-            case AI_ERROR_RATE_LIMITED:
-                g_printerr("Rate limited - try again later\n");
-                break;
-            case AI_ERROR_CONTENT_FILTER:
-                g_printerr("Content was filtered\n");
-                break;
-            default:
-                g_printerr("Error: %s\n", error->message);
-                break;
-        }
-    }
-}
-#+end_src
-
-** See Also
-- [[../api-reference/ai-image-generator.org][AiImageGenerator API Reference]]
-- [[../providers/openai.org][OpenAI Provider]]
-- [[../providers/grok.org][Grok Provider]]
-- [[../providers/gemini.org][Gemini Provider]]
+** See also
+- [[file:../api-reference/ai-image.org][AiImage]] --- reference-image payloads
+- [[file:../api-reference/ai-image-capabilities.org][AiImageCapabilities]] --- per-model support
+- [[file:../api-reference/ai-image-generator.org][AiImageGenerator]] --- the interface
+- [[file:../providers/gemini.org][Gemini]], [[file:../providers/openai.org][OpenAI]], [[file:../providers/grok.org][Grok]] --- per-provider notes
