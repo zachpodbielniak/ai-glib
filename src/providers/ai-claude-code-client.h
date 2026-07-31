@@ -71,4 +71,11 @@ ai_claude_code_client_set_skip_permissions(
     gboolean            skip
 );
 
+const gchar *
+ai_claude_code_client_get_mcp_config_path(AiClaudeCodeClient *self);
+
+void
+ai_claude_code_client_set_mcp_config_path(AiClaudeCodeClient *self,
+                                          const gchar        *path);
+
 G_END_DECLS

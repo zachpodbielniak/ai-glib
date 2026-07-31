@@ -422,7 +422,9 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 				AI_CLAUDE_TMUX_CLIENT(provider)),
 			"ai-glib-dry-run", cwd, claude_exe,
 			/* resuming */ FALSE, "<session-id>", "<settings.json>",
-			opt_model, opt_effort, opt_skip_perms);
+			opt_model, opt_effort, opt_skip_perms,
+			ai_claude_tmux_client_get_mcp_config_path(
+				AI_CLAUDE_TMUX_CLIENT(provider)));
 		print_argv((gchar **) argv->pdata);
 		return 0;
 	}

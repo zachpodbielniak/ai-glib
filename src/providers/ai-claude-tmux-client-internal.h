@@ -38,6 +38,7 @@ G_BEGIN_DECLS
  *
  * @resuming_existing_session: TRUE selects "--resume", FALSE "--session-id".
  * @effort: (nullable): per-turn effort level, or NULL/"" to omit.
+ * @mcp_config_path: (nullable): emitted as --mcp-config, or NULL to omit.
  *
  * Returns: (transfer full): a NULL-terminated #GPtrArray (free func g_free);
  *   free with g_ptr_array_unref().
@@ -54,7 +55,8 @@ ai_claude_tmux_client_build_session_argv(
     const gchar *settings_path,
     const gchar *model,
     const gchar *effort,
-    gboolean     skip_permissions
+    gboolean     skip_permissions,
+    const gchar *mcp_config_path
 );
 
 G_END_DECLS

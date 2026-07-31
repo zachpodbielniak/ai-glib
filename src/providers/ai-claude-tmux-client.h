@@ -587,4 +587,11 @@ ai_claude_tmux_client_wait_for_sentinel_or_idle(
     GError      **error
 );
 
+const gchar *
+ai_claude_tmux_client_get_mcp_config_path(AiClaudeTmuxClient *self);
+
+void
+ai_claude_tmux_client_set_mcp_config_path(AiClaudeTmuxClient *self,
+                                          const gchar        *path);
+
 G_END_DECLS

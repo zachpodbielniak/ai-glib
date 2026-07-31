@@ -49,6 +49,7 @@ struct _AiClaudeTmuxClient
     gint      turn_timeout_ms;      /* default 10 min */
     gint      startup_timeout_ms;   /* default 30 sec */
     gboolean  skip_permissions;     /* --dangerously-skip-permissions */
+    gchar    *mcp_config_path;      /* nullable: --mcp-config <path> */
     gboolean  keep_artifacts;       /* leave prompt/sentinel on disk */
     gboolean  debug_preserve_tmux;   /* keep tmux session + artifacts alive */
     gint      prompt_resend_interval_ms; /* wait-for-user-entry window before
@@ -88,6 +89,7 @@ enum
     PROP_TURN_TIMEOUT_MS,
     PROP_STARTUP_TIMEOUT_MS,
     PROP_SKIP_PERMISSIONS,
+    PROP_MCP_CONFIG_PATH,
     PROP_KEEP_ARTIFACTS,
     PROP_DEBUG_PRESERVE_TMUX,
     PROP_PROMPT_RESEND_INTERVAL_MS,
@@ -1276,6 +1278,9 @@ ai_claude_tmux_client_get_property(
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
+        case PROP_MCP_CONFIG_PATH:
+            g_value_set_string(value, self->mcp_config_path);
+            break;
         case PROP_KEEP_ARTIFACTS:
             g_value_set_boolean(value, self->keep_artifacts);
             break;
@@ -1337,6 +1342,10 @@ ai_claude_tmux_client_set_property(
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
+        case PROP_MCP_CONFIG_PATH:
+            g_free(self->mcp_config_path);
+            self->mcp_config_path = g_value_dup_string(value);
+            break;
         case PROP_KEEP_ARTIFACTS:
             self->keep_artifacts = g_value_get_boolean(value);
             break;
@@ -1371,6 +1380,7 @@ ai_claude_tmux_client_finalize(GObject *object)
     g_free(self->tmux_path);
     g_free(self->socket_name);
     g_free(self->claude_project_dir);
+    g_free(self->mcp_config_path);
 
     G_OBJECT_CLASS(ai_claude_tmux_client_parent_class)->finalize(object);
 }
@@ -1465,6 +1475,13 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "skip-permissions", "Skip Permissions",
         "Pass --dangerously-skip-permissions to claude",
         FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_MCP_CONFIG_PATH] = g_param_spec_string(
+        "mcp-config-path",
+        "MCP Config Path",
+        "Path passed to claude as --mcp-config",
+        NULL,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_KEEP_ARTIFACTS] = g_param_spec_boolean(
         "keep-artifacts", "Keep Artifacts",
@@ -1669,7 +1686,8 @@ ai_claude_tmux_client_build_session_argv(
     const gchar *settings_path,
     const gchar *model,
     const gchar *effort,
-    gboolean     skip_permissions
+    gboolean     skip_permissions,
+    const gchar *mcp_config_path
 ){
     GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
     g_autofree gchar *program = NULL;
@@ -1737,6 +1755,13 @@ ai_claude_tmux_client_build_session_argv(
     if (skip_permissions)
     {
         g_ptr_array_add(argv, g_strdup("--dangerously-skip-permissions"));
+    }
+    /* Additive, like the claude-code client: no --strict-mcp-config, so
+     * the workspace's own servers survive. */
+    if (mcp_config_path != NULL && mcp_config_path[0] != '\0')
+    {
+        g_ptr_array_add(argv, g_strdup("--mcp-config"));
+        g_ptr_array_add(argv, g_strdup(mcp_config_path));
     }
     g_ptr_array_add(argv, NULL);
 
@@ -1967,7 +1992,8 @@ ai_claude_tmux_client_chat_sync_real(
             settings_path,
             ai_cli_client_get_model(AI_CLI_CLIENT(self)),
             ai_cli_client_get_effort_level(AI_CLI_CLIENT(self)),
-            self->skip_permissions);
+            self->skip_permissions,
+            self->mcp_config_path);
 
         ok = run_command_sync(
             (const gchar * const *)argv->pdata, NULL,
@@ -2998,4 +3024,42 @@ ai_claude_tmux_client_set_command_timeout_ms(
     self->command_timeout_ms = timeout_ms;
     g_object_notify_by_pspec(G_OBJECT(self),
         properties[PROP_COMMAND_TIMEOUT_MS]);
+}
+
+/**
+ * ai_claude_tmux_client_get_mcp_config_path:
+ * @self: an #AiClaudeTmuxClient
+ *
+ * Returns: (transfer none) (nullable): the configured MCP config path
+ *
+ * Since: 0.2.0
+ */
+const gchar *
+ai_claude_tmux_client_get_mcp_config_path(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), NULL);
+
+    return self->mcp_config_path;
+}
+
+/**
+ * ai_claude_tmux_client_set_mcp_config_path:
+ * @self: an #AiClaudeTmuxClient
+ * @path: (nullable): path to an MCP server config, or %NULL to clear
+ *
+ * Since: 0.2.0
+ */
+void
+ai_claude_tmux_client_set_mcp_config_path(AiClaudeTmuxClient *self,
+                                          const gchar        *path)
+{
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+
+    if (g_strcmp0(self->mcp_config_path, path) == 0)
+        return;
+
+    g_free(self->mcp_config_path);
+    self->mcp_config_path = g_strdup(path);
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_MCP_CONFIG_PATH]);
 }

@@ -27,6 +27,7 @@ struct _AiClaudeCodeClient
 
     gdouble  total_cost;
     gboolean skip_permissions;
+    gchar   *mcp_config_path;    /* nullable: --mcp-config <path> */
     gint     last_input_tokens;  /* tracks input tokens for compaction detection */
 
     /* Cached summary for the re-prompt fallback when the AI
@@ -54,6 +55,7 @@ enum
     PROP_0,
     PROP_TOTAL_COST,
     PROP_SKIP_PERMISSIONS,
+    PROP_MCP_CONFIG_PATH,
     N_PROPS
 };
 
@@ -87,6 +89,9 @@ ai_claude_code_client_get_property(
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
+        case PROP_MCP_CONFIG_PATH:
+            g_value_set_string(value, self->mcp_config_path);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -106,6 +111,10 @@ ai_claude_code_client_set_property(
     {
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
+            break;
+        case PROP_MCP_CONFIG_PATH:
+            g_free(self->mcp_config_path);
+            self->mcp_config_path = g_value_dup_string(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -172,6 +181,13 @@ ai_claude_code_client_build_argv(
     if (self->skip_permissions)
     {
         g_ptr_array_add(args, g_strdup("--dangerously-skip-permissions"));
+    }
+
+    /* Extra MCP servers for this session. */
+    if (self->mcp_config_path != NULL && self->mcp_config_path[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--mcp-config"));
+        g_ptr_array_add(args, g_strdup(self->mcp_config_path));
     }
 
     /* Output format */
@@ -551,6 +567,7 @@ ai_claude_code_client_finalize(GObject *object)
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(object);
 
     g_free(self->last_tool_summary);
+    g_free(self->mcp_config_path);
 
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
@@ -597,6 +614,20 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
                              "Whether to pass --dangerously-skip-permissions to the CLI",
                              FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /*
+     * Path to an extra MCP server config, emitted as `--mcp-config
+     * <path>`.  Deliberately additive: without --strict-mcp-config the
+     * session keeps whatever servers its workspace .mcp.json already
+     * declares and gains these as well, so pointing this at a
+     * per-session file cannot clobber a user-authored one.
+     */
+    properties[PROP_MCP_CONFIG_PATH] =
+        g_param_spec_string("mcp-config-path",
+                            "MCP Config Path",
+                            "Path passed to claude as --mcp-config",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
@@ -799,6 +830,11 @@ attempt_text_retry(
     g_ptr_array_add(rargs, g_strdup("--print"));
     if (client->skip_permissions)
         g_ptr_array_add(rargs, g_strdup("--dangerously-skip-permissions"));
+    if (client->mcp_config_path != NULL && client->mcp_config_path[0] != '\0')
+    {
+        g_ptr_array_add(rargs, g_strdup("--mcp-config"));
+        g_ptr_array_add(rargs, g_strdup(client->mcp_config_path));
+    }
     g_ptr_array_add(rargs, g_strdup("--output-format"));
     g_ptr_array_add(rargs, g_strdup("json"));
     /* claude's own --model is omitted in Ollama mode (see build_argv). */
@@ -1461,4 +1497,45 @@ ai_claude_code_client_set_skip_permissions(
     self->skip_permissions = skip;
 
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_SKIP_PERMISSIONS]);
+}
+
+/**
+ * ai_claude_code_client_get_mcp_config_path:
+ * @self: an #AiClaudeCodeClient
+ *
+ * Returns: (transfer none) (nullable): the configured MCP config path
+ *
+ * Since: 0.2.0
+ */
+const gchar *
+ai_claude_code_client_get_mcp_config_path(AiClaudeCodeClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_CODE_CLIENT(self), NULL);
+
+    return self->mcp_config_path;
+}
+
+/**
+ * ai_claude_code_client_set_mcp_config_path:
+ * @self: an #AiClaudeCodeClient
+ * @path: (nullable): path to an MCP server config, or %NULL to clear
+ *
+ * Makes the client pass `--mcp-config @path` to claude, adding those
+ * servers on top of whatever the workspace already configures.
+ *
+ * Since: 0.2.0
+ */
+void
+ai_claude_code_client_set_mcp_config_path(AiClaudeCodeClient *self,
+                                          const gchar        *path)
+{
+    g_return_if_fail(AI_IS_CLAUDE_CODE_CLIENT(self));
+
+    if (g_strcmp0(self->mcp_config_path, path) == 0)
+        return;
+
+    g_free(self->mcp_config_path);
+    self->mcp_config_path = g_strdup(path);
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_MCP_CONFIG_PATH]);
 }
