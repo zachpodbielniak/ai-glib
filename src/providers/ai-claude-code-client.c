@@ -940,6 +940,19 @@ typedef struct
 static void
 chat_async_data_free(ChatAsyncData *data)
 {
+    /*
+     * g_task_return_*() does NOT consume the reference chat_async() took
+     * from g_task_new(); the async function owns it until the operation is
+     * finished with. The early-error paths unref directly, so only the
+     * completion paths -- which hand the task to `data` -- came through
+     * here, and every one of them leaked a GTask and its result.
+     *
+     * Safe against the retry hand-off, which sets data->task to NULL before
+     * freeing precisely so the task survives into the second attempt.
+     *
+     * Every other provider in this library already does this.
+     */
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_clear_pointer(&data->stdin_data, g_free);
@@ -962,6 +975,7 @@ typedef struct
 static void
 retry_async_data_free(RetryAsyncData *data)
 {
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_free(data->tool_summary);
@@ -1373,6 +1387,7 @@ typedef struct
 static void
 stream_async_data_free(StreamAsyncData *data)
 {
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_clear_object(&data->data_stream);
