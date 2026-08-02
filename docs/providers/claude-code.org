@@ -256,6 +256,45 @@ if (error != NULL)
 }
 #+end_src
 
+** Tool access
+
+The client can grant the CLI its tools two ways.
+
+#+begin_src c
+/* The blanket bypass: --dangerously-skip-permissions */
+g_object_set(client, "skip-permissions", TRUE, NULL);
+
+/* Narrower: a permission mode plus an allow-list */
+g_object_set(client,
+             "permission-mode", "acceptEdits",
+             "allowed-tools", "Read,Edit,Write",
+             "additional-directories", "/srv/reference",
+             NULL);
+#+end_src
+
+| Property | Flag | Notes |
+|---+---+---|
+| =skip-permissions= | =--dangerously-skip-permissions= | Wins if both are set, with a warning |
+| =permission-mode= | =--permission-mode= | =acceptEdits=, =auto=, =bypassPermissions=, =manual=, =dontAsk=, =plan=. An unrecognised value warns and is omitted rather than passed through |
+| =allowed-tools= | =--allowedTools= | Comma-separated in, one argv word per tool out |
+| =disallowed-tools= | =--disallowedTools= | Same shape |
+| =additional-directories= | =--add-dir= | For trees outside the working directory |
+
+*The working directory is the boundary, not the permission mode.* Every mode
+that can write can write anywhere the process can reach, so set
+=AiCliClient:working-directory= to bound it:
+
+#+begin_src c
+ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/project");
+#+end_src
+
+Until recently that property had *no effect on this client*: it derives from
+=AiCliClient=, whose spawn path applies the directory through a
+=GSubprocessLauncher=, but this client built and spawned its own argv with a
+bare =g_subprocess_newv()= at three sites and never created a launcher. A
+caller that named a directory to bound what the CLI could reach got whatever
+directory the parent process was started in. It is applied now.
+
 ** See Also
 - [[file:claude.org][AiClaudeClient]] - HTTP API client for Claude
 - [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers

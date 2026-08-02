@@ -30,6 +30,16 @@ struct _AiClaudeCodeClient
     gchar   *mcp_config_path;    /* nullable: --mcp-config <path> */
     gint     last_input_tokens;  /* tracks input tokens for compaction detection */
 
+    /*
+     * Tool access short of --dangerously-skip-permissions. Each is emitted
+     * only when set, so an unconfigured client builds the same argv it
+     * always did.
+     */
+    gchar   *permission_mode;
+    gchar   *allowed_tools;
+    gchar   *disallowed_tools;
+    gchar   *additional_directories;
+
     /* Cached summary for the re-prompt fallback when the AI
      * produces no text (empty "result" with tool use only). */
     gchar *last_tool_summary;
@@ -56,6 +66,10 @@ enum
     PROP_TOTAL_COST,
     PROP_SKIP_PERMISSIONS,
     PROP_MCP_CONFIG_PATH,
+    PROP_PERMISSION_MODE,
+    PROP_ALLOWED_TOOLS,
+    PROP_DISALLOWED_TOOLS,
+    PROP_ADDITIONAL_DIRECTORIES,
     N_PROPS
 };
 
@@ -92,6 +106,18 @@ ai_claude_code_client_get_property(
         case PROP_MCP_CONFIG_PATH:
             g_value_set_string(value, self->mcp_config_path);
             break;
+        case PROP_PERMISSION_MODE:
+            g_value_set_string(value, self->permission_mode);
+            break;
+        case PROP_ALLOWED_TOOLS:
+            g_value_set_string(value, self->allowed_tools);
+            break;
+        case PROP_DISALLOWED_TOOLS:
+            g_value_set_string(value, self->disallowed_tools);
+            break;
+        case PROP_ADDITIONAL_DIRECTORIES:
+            g_value_set_string(value, self->additional_directories);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -116,10 +142,161 @@ ai_claude_code_client_set_property(
             g_free(self->mcp_config_path);
             self->mcp_config_path = g_value_dup_string(value);
             break;
+        case PROP_PERMISSION_MODE:
+            g_free(self->permission_mode);
+            self->permission_mode = g_value_dup_string(value);
+            break;
+        case PROP_ALLOWED_TOOLS:
+            g_free(self->allowed_tools);
+            self->allowed_tools = g_value_dup_string(value);
+            break;
+        case PROP_DISALLOWED_TOOLS:
+            g_free(self->disallowed_tools);
+            self->disallowed_tools = g_value_dup_string(value);
+            break;
+        case PROP_ADDITIONAL_DIRECTORIES:
+            g_free(self->additional_directories);
+            self->additional_directories = g_value_dup_string(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
     }
+}
+
+/*
+ * The permission modes the claude CLI accepts. Validated here rather than
+ * passed straight through so a typo produces one clear warning instead of a
+ * subprocess that exits non-zero with the CLI's own usage text.
+ */
+static const gchar *AI_CLAUDE_PERMISSION_MODES[] = {
+    "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan",
+    NULL
+};
+
+static gboolean
+permission_mode_is_valid(const gchar *mode)
+{
+    gsize i;
+
+    for (i = 0; AI_CLAUDE_PERMISSION_MODES[i] != NULL; i++)
+    {
+        if (g_strcmp0(mode, AI_CLAUDE_PERMISSION_MODES[i]) == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Append a comma-separated value as one flag followed by each item as its
+ * own argv word, which is the shape --allowedTools and --add-dir take.
+ * Empty items are dropped; an all-empty list emits nothing at all rather
+ * than a dangling flag.
+ */
+static void
+emit_list_flag(GPtrArray *args, const gchar *flag, const gchar *csv)
+{
+    g_auto(GStrv) parts = NULL;
+    gsize i;
+    gboolean emitted_flag = FALSE;
+
+    if (csv == NULL || csv[0] == '\0')
+        return;
+
+    parts = g_strsplit(csv, ",", -1);
+
+    for (i = 0; parts[i] != NULL; i++)
+    {
+        g_strstrip(parts[i]);
+        if (parts[i][0] == '\0')
+            continue;
+
+        if (!emitted_flag)
+        {
+            g_ptr_array_add(args, g_strdup(flag));
+            emitted_flag = TRUE;
+        }
+
+        g_ptr_array_add(args, g_strdup(parts[i]));
+    }
+}
+
+/*
+ * Emit the tool-permission arguments shared by the one-shot and resume
+ * argv builders.
+ *
+ * --dangerously-skip-permissions wins when both are set: the two say
+ * different things about the same session and the CLI should not be left to
+ * arbitrate. Saying so is the point -- a caller that set a narrow mode and
+ * silently got a full bypass is exactly the failure worth surfacing.
+ */
+static void
+emit_permission_args(AiClaudeCodeClient *self, GPtrArray *args)
+{
+    if (self->skip_permissions)
+    {
+        if (self->permission_mode != NULL && self->permission_mode[0] != '\0')
+        {
+            g_warning("claude-code: skip-permissions and permission-mode '%s' "
+                      "are both set; using --dangerously-skip-permissions",
+                      self->permission_mode);
+        }
+
+        g_ptr_array_add(args, g_strdup("--dangerously-skip-permissions"));
+    }
+    else if (self->permission_mode != NULL && self->permission_mode[0] != '\0')
+    {
+        if (permission_mode_is_valid(self->permission_mode))
+        {
+            g_ptr_array_add(args, g_strdup("--permission-mode"));
+            g_ptr_array_add(args, g_strdup(self->permission_mode));
+        }
+        else
+        {
+            g_warning("claude-code: unknown permission mode '%s'; omitting "
+                      "the flag. Valid modes: acceptEdits, auto, "
+                      "bypassPermissions, manual, dontAsk, plan",
+                      self->permission_mode);
+        }
+    }
+
+    emit_list_flag(args, "--allowedTools", self->allowed_tools);
+    emit_list_flag(args, "--disallowedTools", self->disallowed_tools);
+    emit_list_flag(args, "--add-dir", self->additional_directories);
+}
+
+/*
+ * Spawn with the client's working directory applied.
+ *
+ * AiCliClient already does this (ai-cli-client.c), but this client builds and
+ * spawns its own argv, and for a long time it did so with a bare
+ * g_subprocess_newv() -- so working-directory was accepted, stored, and had
+ * no effect. Callers that named a directory to bound what the CLI could
+ * reach got the directory the parent process happened to be started in.
+ */
+static GSubprocess *
+claude_code_spawn(
+    AiClaudeCodeClient   *self,
+    const gchar * const  *argv,
+    GSubprocessFlags      flags,
+    GError              **error
+){
+    const gchar *cwd;
+
+    cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+
+    if (cwd != NULL && cwd[0] != '\0')
+    {
+        g_autoptr(GSubprocessLauncher) launcher = NULL;
+
+        launcher = g_subprocess_launcher_new(flags);
+        g_subprocess_launcher_set_cwd(launcher, cwd);
+
+        return g_subprocess_launcher_spawnv(launcher, argv, error);
+    }
+
+    return g_subprocess_newv(argv, flags, error);
 }
 
 /*
@@ -177,11 +354,8 @@ ai_claude_code_client_build_argv(
     /* Print mode (required for non-interactive use) */
     g_ptr_array_add(args, g_strdup("--print"));
 
-    /* Skip permissions if enabled (allows tool use without interactive approval) */
-    if (self->skip_permissions)
-    {
-        g_ptr_array_add(args, g_strdup("--dangerously-skip-permissions"));
-    }
+    /* Tool access: skip-permissions, or a permission mode and allow-lists. */
+    emit_permission_args(self, args);
 
     /* Extra MCP servers for this session. */
     if (self->mcp_config_path != NULL && self->mcp_config_path[0] != '\0')
@@ -568,6 +742,10 @@ ai_claude_code_client_finalize(GObject *object)
 
     g_free(self->last_tool_summary);
     g_free(self->mcp_config_path);
+    g_free(self->permission_mode);
+    g_free(self->allowed_tools);
+    g_free(self->disallowed_tools);
+    g_free(self->additional_directories);
 
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
@@ -626,6 +804,64 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
         g_param_spec_string("mcp-config-path",
                             "MCP Config Path",
                             "Path passed to claude as --mcp-config",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:permission-mode:
+     *
+     * The CLI's --permission-mode. Grants tool use without the blanket
+     * bypass of #AiClaudeCodeClient:skip-permissions -- "acceptEdits" in
+     * particular lets the model edit files under the working directory
+     * while still refusing everything else.
+     *
+     * The working directory, not this property, is the boundary that
+     * matters: every mode that can write can write anywhere the process
+     * can reach. See #AiCliClient:working-directory.
+     */
+    properties[PROP_PERMISSION_MODE] =
+        g_param_spec_string("permission-mode",
+                            "Permission Mode",
+                            "CLI --permission-mode (acceptEdits, auto, "
+                            "bypassPermissions, manual, dontAsk, plan)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:allowed-tools:
+     *
+     * Comma-separated tool names for --allowedTools, e.g. "Read,Edit,Write".
+     * Each becomes its own argv word.
+     */
+    properties[PROP_ALLOWED_TOOLS] =
+        g_param_spec_string("allowed-tools",
+                            "Allowed Tools",
+                            "Comma-separated tool names for --allowedTools",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:disallowed-tools:
+     *
+     * Comma-separated tool names for --disallowedTools.
+     */
+    properties[PROP_DISALLOWED_TOOLS] =
+        g_param_spec_string("disallowed-tools",
+                            "Disallowed Tools",
+                            "Comma-separated tool names for --disallowedTools",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:additional-directories:
+     *
+     * Comma-separated paths for --add-dir, for trees the model must read
+     * that sit outside the working directory.
+     */
+    properties[PROP_ADDITIONAL_DIRECTORIES] =
+        g_param_spec_string("additional-directories",
+                            "Additional Directories",
+                            "Comma-separated paths for --add-dir",
                             NULL,
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
@@ -828,8 +1064,7 @@ attempt_text_retry(
      */
     ai_claude_launch_emit_tokens(rargs, model, exe);
     g_ptr_array_add(rargs, g_strdup("--print"));
-    if (client->skip_permissions)
-        g_ptr_array_add(rargs, g_strdup("--dangerously-skip-permissions"));
+    emit_permission_args(client, rargs);
     if (client->mcp_config_path != NULL && client->mcp_config_path[0] != '\0')
     {
         g_ptr_array_add(rargs, g_strdup("--mcp-config"));
@@ -848,7 +1083,8 @@ attempt_text_retry(
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);
 
-    rproc = g_subprocess_newv(
+    rproc = claude_code_spawn(
+        client,
         (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
@@ -1035,7 +1271,7 @@ ai_claude_code_client_chat_async(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = g_subprocess_newv((const gchar * const *)argv,
+    subprocess = claude_code_spawn(self, (const gchar * const *)argv,
                                    flags, &error);
     if (subprocess == NULL)
     {
@@ -1367,7 +1603,7 @@ ai_claude_code_client_chat_stream_async(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = g_subprocess_newv((const gchar * const *)argv,
+    subprocess = claude_code_spawn(self, (const gchar * const *)argv,
                                    flags, &error);
     if (subprocess == NULL)
     {
