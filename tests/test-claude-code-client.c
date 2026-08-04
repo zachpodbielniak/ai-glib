@@ -343,6 +343,73 @@ test_claude_code_client_gtype(void)
 	g_assert_cmpstr(g_type_name(type), ==, "AiClaudeCodeClient");
 }
 
+/*
+ * The CLI emits an Anthropic message whose "type" is "message" and whose
+ * text lives in a "content" array of blocks.  The parser used to read
+ * message->text, which no event has, so every streamed reply arrived
+ * empty while the run itself reported success.
+ */
+static void
+test_claude_code_parse_stream_content_blocks(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	g_autoptr(AiResponse) resp = ai_response_new("test", "test-model");
+	g_autofree gchar *delta = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *line =
+		"{\"type\":\"assistant\",\"message\":{\"type\":\"message\","
+		"\"role\":\"assistant\",\"content\":["
+		"{\"type\":\"thinking\",\"thinking\":\"deliberating\"},"
+		"{\"type\":\"text\",\"text\":\"Hello\"},"
+		"{\"type\":\"text\",\"text\":\", world\"}]}}";
+
+	g_assert_nonnull(klass->parse_stream_line);
+	g_assert_true(klass->parse_stream_line(AI_CLI_CLIENT(client), line,
+	                                       resp, &delta, &error));
+	g_assert_no_error(error);
+	g_assert_nonnull(delta);
+	/* Text blocks concatenated; the thinking block is not the answer. */
+	g_assert_cmpstr(delta, ==, "Hello, world");
+}
+
+/* The older flat shape must keep working. */
+static void
+test_claude_code_parse_stream_flat_text(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	g_autoptr(AiResponse) resp = ai_response_new("test", "test-model");
+	g_autofree gchar *delta = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *line =
+		"{\"type\":\"assistant\",\"message\":"
+		"{\"type\":\"text\",\"text\":\"flat\"}}";
+
+	g_assert_true(klass->parse_stream_line(AI_CLI_CLIENT(client), line,
+	                                       resp, &delta, &error));
+	g_assert_cmpstr(delta, ==, "flat");
+}
+
+/* A message carrying no text block yields no delta rather than "". */
+static void
+test_claude_code_parse_stream_no_text_block(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	g_autoptr(AiResponse) resp = ai_response_new("test", "test-model");
+	g_autofree gchar *delta = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *line =
+		"{\"type\":\"assistant\",\"message\":{\"type\":\"message\","
+		"\"content\":[{\"type\":\"thinking\",\"thinking\":\"hm\"}]}}";
+
+	g_assert_true(klass->parse_stream_line(AI_CLI_CLIENT(client), line,
+	                                       resp, &delta, &error));
+	g_assert_null(delta);
+}
+
+
 int
 main(
 	int   argc,
@@ -369,6 +436,13 @@ main(
 	                test_claude_code_build_argv_ollama_streaming);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama-skip-system",
 	                test_claude_code_build_argv_ollama_skip_and_system);
+
+	g_test_add_func("/ai-glib/claude-code-client/parse-stream-content-blocks",
+	                test_claude_code_parse_stream_content_blocks);
+	g_test_add_func("/ai-glib/claude-code-client/parse-stream-flat-text",
+	                test_claude_code_parse_stream_flat_text);
+	g_test_add_func("/ai-glib/claude-code-client/parse-stream-no-text-block",
+	                test_claude_code_parse_stream_no_text_block);
 
 	return g_test_run();
 }

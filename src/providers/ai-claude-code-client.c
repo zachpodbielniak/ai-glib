@@ -684,8 +684,55 @@ ai_claude_code_client_parse_stream_line(
 
             if (g_strcmp0(msg_type, "text") == 0)
             {
+                /* Flat shape: {"message": {"type": "text", "text": ...}} */
                 const gchar *text = json_object_get_string_member_with_default(msg_obj, "text", "");
                 *delta_text = g_strdup(text);
+            }
+            else if (json_object_has_member(msg_obj, "content"))
+            {
+                /*
+                 * What the CLI actually emits: an Anthropic message whose
+                 * "type" is "message" and whose text lives in a "content"
+                 * array of blocks.  Reading msg_obj->text instead found
+                 * nothing on every event, so a streamed reply arrived
+                 * empty while the run itself reported success.
+                 *
+                 * Only "text" blocks are emitted as deltas.  A "thinking"
+                 * block is not the answer, and "tool_use" is handled by
+                 * the caller.
+                 */
+                JsonNode *content = json_object_get_member(msg_obj, "content");
+
+                if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+                {
+                    JsonArray *blocks = json_node_get_array(content);
+                    guint n = json_array_get_length(blocks);
+                    GString *acc = g_string_new(NULL);
+                    guint i;
+
+                    for (i = 0; i < n; i++)
+                    {
+                        JsonNode *bn = json_array_get_element(blocks, i);
+                        JsonObject *b;
+                        const gchar *bt;
+
+                        if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn)) continue;
+                        b = json_node_get_object(bn);
+                        bt = json_object_get_string_member_with_default(b, "type", "");
+                        if (g_strcmp0(bt, "text") == 0)
+                        {
+                            g_string_append(
+                                acc,
+                                json_object_get_string_member_with_default(
+                                    b, "text", ""));
+                        }
+                    }
+
+                    if (acc->len > 0)
+                        *delta_text = g_string_free(acc, FALSE);
+                    else
+                        g_string_free(acc, TRUE);
+                }
             }
         }
     }
