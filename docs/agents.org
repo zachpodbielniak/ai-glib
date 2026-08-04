@@ -1,0 +1,111 @@
+#+title: Agent orchestration
+#+description: Running several agents, with budgets, workers and hosts
+
+* What this is
+
+A runtime for coordinating agents: each one a provider plus a tool
+executor plus a budget, and a brigade that tracks them.
+
+The library deliberately does not decide *how* an agent runs, *where* its
+tools come from, *where* its records live, or *what* it is allowed to
+touch. Those are four interfaces the embedding application implements,
+because every one of them is a place where a real application already has
+opinions and existing machinery.
+
+* Types
+
+| Type               | What it is                                        |
+|--------------------+---------------------------------------------------|
+| =AiAgent=            | one run: provider, executor, budget, state        |
+| =AiBrigade=          | tracks agents, caps concurrency, shares a budget  |
+| =AiBudget=           | hard ceilings on tokens, turns, cost and time     |
+| =AiPriceTable=       | model rates → integer micro-dollars               |
+| =AiMockProvider=     | a scripted provider, for tests                    |
+
+And four interfaces:
+
+| Interface          | Decides                                           |
+|--------------------+---------------------------------------------------|
+| =AiAgentWorker=      | how an agent executes                             |
+| =AiAgentHost=        | what tools it reaches, and how a human is asked   |
+| =AiAgentStore=       | where records survive a restart                   |
+| =AiAgentIsolation=   | where it is allowed to make a mess                |
+
+* Concurrency
+
+The reason the async executor API exists.
+
+=ai_tool_executor_run()= drives its own nested =GMainLoop=, so two
+conversations at once meant two threads. =ai_tool_executor_run_async()=
+leaves callbacks pending on the caller's context instead, and N
+concurrent runs are N sets of pending callbacks on one thread.
+
+*One executor supports one run at a time* — it holds the tool list and
+the active provider for the duration. That is why an agent owns its own
+executor rather than sharing one, and it is also what makes an allowlist
+structural: an agent is handed an executor built from what it may call,
+so calling anything else is not refused, it is unrepresentable.
+
+* Budgets
+
+Ceilings, not guidance. An agent that reaches one stops.
+
+Both levels are enforced: an agent's own budget catches one runaway,
+while the brigade's shared budget catches fifty well-behaved agents that
+add up to too much. Neither subsumes the other.
+
+Cost is carried in micro-dollars as a =gint64=, because it is summed
+across thousands of turns and floating point drift in the one figure a
+limit acts on would be the worst place for it. A model with no price is
+reported as *unpriced*, never as free — the two are indistinguishable
+once summed, and treating unknown as free silently understates spend.
+
+* Why =AiAgentWorker= is an interface
+
+So that a job registry which double-forks detached processes and tracks
+them with sentinel files becomes *an implementation*, rather than a
+special case threaded through the orchestrator.
+
+Such a worker cannot push: its children are reparented to init, so no
+=SIGCHLD= reaches the spawning process and there is no completion
+callback to hook. It implements =poll_state= and the brigade sweeps it.
+An in-process worker leaves =poll_state= NULL and simply emits
+=AiAgent::state-changed=. =ai_brigade_sweep()= is harmless when nothing
+needs polling.
+
+=AI_AGENT_STATE_INTERRUPTED= exists for the same reason. An agent that
+was running when the process stopped did not fail and did not finish;
+saying so is what stops anything resuming work whose outcome nobody
+observed.
+
+* Testing
+
+=AiMockProvider= ships in the library rather than the test suite, because
+anything embedding ai-glib has the same problem the library does:
+exercising a tool loop without a network, an API key or a bill.
+
+Until it existed the multi-turn loop had *no test at all*.
+
+#+begin_src c
+g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+
+ai_mock_provider_push_tool_use(mock, "echo", "{\"text\":\"hi\"}");
+ai_mock_provider_push_text(mock, "all done");
+
+ai_tool_executor_run_async(exec, AI_PROVIDER(mock), messages,
+                           NULL, 0, /* max_turns */ 5, NULL, cb, data);
+#+end_src
+
+Set a delay to make concurrency observable — without one, each run
+finishes before the next starts and nothing actually overlaps.
+
+* Turn limits
+
+=max_turns= counts provider round trips, which is the thing that costs
+money, and fires on receiving the Nth. A cap of 3 means three requests
+were made and the third reply was refused rather than acted on, so two
+tool calls ran.
+
+It is a parameter rather than a constant because an orchestrator budgets
+turns per agent, and a limit the caller cannot set is one they have to
+work around.

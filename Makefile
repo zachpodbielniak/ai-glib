@@ -75,7 +75,17 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/convenience/ai-bing-search.h \
 	$(SRCDIR)/convenience/ai-brave-search.h \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.h \
-	$(SRCDIR)/convenience/ai-tool-executor.h
+	$(SRCDIR)/convenience/ai-tool-executor.h \
+	$(SRCDIR)/agent/ai-agent-enums.h \
+	$(SRCDIR)/agent/ai-budget.h \
+	$(SRCDIR)/agent/ai-price-table.h \
+	$(SRCDIR)/agent/ai-agent-worker.h \
+	$(SRCDIR)/agent/ai-agent-host.h \
+	$(SRCDIR)/agent/ai-agent-store.h \
+	$(SRCDIR)/agent/ai-agent-isolation.h \
+	$(SRCDIR)/agent/ai-agent.h \
+	$(SRCDIR)/agent/ai-brigade.h \
+	$(SRCDIR)/agent/ai-mock-provider.h
 
 # Library source files
 LIB_SOURCES = \
@@ -121,7 +131,17 @@ LIB_SOURCES = \
 	$(SRCDIR)/convenience/ai-bing-search.c \
 	$(SRCDIR)/convenience/ai-brave-search.c \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.c \
-	$(SRCDIR)/convenience/ai-tool-executor.c
+	$(SRCDIR)/convenience/ai-tool-executor.c \
+	$(SRCDIR)/agent/ai-agent-enums.c \
+	$(SRCDIR)/agent/ai-budget.c \
+	$(SRCDIR)/agent/ai-price-table.c \
+	$(SRCDIR)/agent/ai-agent-worker.c \
+	$(SRCDIR)/agent/ai-agent-host.c \
+	$(SRCDIR)/agent/ai-agent-store.c \
+	$(SRCDIR)/agent/ai-agent-isolation.c \
+	$(SRCDIR)/agent/ai-agent.c \
+	$(SRCDIR)/agent/ai-brigade.c \
+	$(SRCDIR)/agent/ai-mock-provider.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
@@ -339,6 +359,7 @@ install: all install-gir
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience
+	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/agent
 	install -d $(DESTDIR)$(PKGCONFIGDIR)
 	install -m 644 $(LIB_SHARED) $(DESTDIR)$(LIBDIR)/
 	install -m 644 $(LIB_STATIC) $(DESTDIR)$(LIBDIR)/
@@ -351,6 +372,7 @@ install: all install-gir
 	install -m 644 $(filter $(SRCDIR)/model/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
 	install -m 644 $(filter $(SRCDIR)/providers/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
 	install -m 644 $(filter $(SRCDIR)/convenience/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience/
+	install -m 644 $(filter $(SRCDIR)/agent/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/agent/
 	install -m 644 $(PROJECT_NAME)-1.0.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	@echo "Installation complete!"
 

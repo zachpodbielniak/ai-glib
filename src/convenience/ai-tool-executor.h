@@ -210,4 +210,24 @@ ai_tool_executor_run (
     GError         **error
 );
 
+void
+ai_tool_executor_run_async (
+    AiToolExecutor      *self,
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    gint                 max_turns,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
+gchar *
+ai_tool_executor_run_finish (
+    AiToolExecutor  *self,
+    GAsyncResult    *result,
+    GError         **error
+);
+
 G_END_DECLS

@@ -89,20 +89,61 @@ G_DEFINE_TYPE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT)
 
 typedef struct
 {
+    /* Exactly one of these is set.  `loop' means a synchronous caller is
+     * blocked in ai_tool_executor_run(); `task' means an asynchronous
+     * one is waiting on ai_tool_executor_run_finish().  Everything else
+     * about the turn loop is identical, which is why they share one
+     * context rather than one being reimplemented in terms of the
+     * other. */
     GMainLoop      *loop;
+    GTask          *task;
+
     AiToolExecutor *executor;
     AiProvider     *provider;
     GList          *messages;      /* owned, grows during loop */
-    const gchar    *system_prompt;
+    gchar          *system_prompt; /* owned in async mode, borrowed in sync */
     gint            max_tokens;
+    gint            max_turns;
     GCancellable   *cancellable;
     gint            turn_count;
     gchar          *result;        /* final text (transfer full to caller) */
     GError         *error;         /* propagated to caller */
 } RunContext;
 
+static void run_context_finish (RunContext *ctx);
+
 /* Forward declaration */
 static void run_context_send (RunContext *ctx);
+
+/* End the run.  In synchronous mode the blocked caller resumes and does
+ * its own teardown; in asynchronous mode nobody is waiting on the stack,
+ * so the context owns itself and must clean up here. */
+static void
+run_context_finish (RunContext *ctx)
+{
+    if (ctx->loop != NULL)
+    {
+        g_main_loop_quit (ctx->loop);
+        return;
+    }
+
+    if (ctx->error != NULL)
+        g_task_return_error (ctx->task, g_steal_pointer (&ctx->error));
+    else
+        g_task_return_pointer (ctx->task, g_steal_pointer (&ctx->result),
+                               g_free);
+
+    /* g_task_return_* does not consume the reference from g_task_new. */
+    g_clear_object (&ctx->task);
+    g_clear_object (&ctx->executor);
+    g_clear_object (&ctx->provider);
+    g_clear_object (&ctx->cancellable);
+    g_list_free_full (ctx->messages, g_object_unref);
+    g_free (ctx->system_prompt);
+    g_free (ctx->result);
+    g_clear_error (&ctx->error);
+    g_free (ctx);
+}
 
 static void
 on_run_response (
@@ -120,7 +161,7 @@ on_run_response (
     if (err != NULL)
     {
         ctx->error = g_steal_pointer (&err);
-        g_main_loop_quit (ctx->loop);
+        run_context_finish (ctx);
         return;
     }
 
@@ -130,17 +171,17 @@ on_run_response (
     {
         /* Final answer — grab text and quit */
         ctx->result = ai_response_get_text (response);
-        g_main_loop_quit (ctx->loop);
+        run_context_finish (ctx);
         return;
     }
 
     /* Guard against infinite loops */
-    if (ctx->turn_count >= MAX_TURNS)
+    if (ctx->turn_count >= ctx->max_turns)
     {
         g_set_error (&ctx->error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
                      "ai_tool_executor_run: reached maximum turn limit (%d)",
-                     MAX_TURNS);
-        g_main_loop_quit (ctx->loop);
+                     ctx->max_turns);
+        run_context_finish (ctx);
         return;
     }
 
@@ -180,7 +221,11 @@ on_run_response (
             gboolean          is_error   = FALSE;
             AiMessage        *result_msg;
 
-            g_warning ("ToolExecutor turn %d: calling tool '%s' (id=%s)",
+            /* g_debug, not g_warning: a tool call is the loop working
+             * as designed.  As a warning it aborted any program run
+             * with G_DEBUG=fatal-warnings -- including a GTest suite,
+             * which is why the loop had no test until now. */
+            g_debug ("ToolExecutor turn %d: calling tool '%s' (id=%s)",
                        ctx->turn_count, tool_name, tool_id);
 
             tool_result = ai_tool_executor_execute (
@@ -2022,11 +2067,14 @@ ai_tool_executor_run (
      * thread-default-bound async I/O) from the caller's own default
      * context. */
     ctx.loop          = g_main_loop_new (g_main_context_get_thread_default (), FALSE);
+    ctx.task          = NULL;
     ctx.executor      = self;
     ctx.provider      = provider;
     ctx.messages      = NULL;
-    ctx.system_prompt = system_prompt;
+    /* Borrowed in synchronous mode: the caller outlives the run. */
+    ctx.system_prompt = (gchar *) system_prompt;
     ctx.max_tokens    = (max_tokens > 0) ? max_tokens : DEFAULT_MAX_TOKENS;
+    ctx.max_turns     = MAX_TURNS;
     ctx.cancellable   = cancellable;
     ctx.turn_count    = 0;
     ctx.result        = NULL;
@@ -2057,4 +2105,91 @@ ai_tool_executor_run (
 
     result = ctx.result;
     return result;
+}
+
+/**
+ * ai_tool_executor_run_async:
+ * @self: an #AiToolExecutor
+ * @provider: the #AiProvider to send requests to
+ * @messages: (element-type AiMessage): initial conversation messages
+ * @system_prompt: (nullable): optional system prompt
+ * @max_tokens: maximum tokens per response, or 0 for the default
+ * @max_turns: maximum tool-use turns, or 0 for the default of 20
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): called when the loop finishes
+ * @user_data: data for @callback
+ *
+ * Runs the tool-use conversation loop without blocking.
+ *
+ * This is what lets several agents run at once.  The synchronous
+ * ai_tool_executor_run() drives its own nested #GMainLoop, so a caller
+ * wanting two conversations in flight had to find two threads; this
+ * version simply leaves callbacks pending on the caller's context, and N
+ * concurrent runs are N sets of pending callbacks on one thread.
+ *
+ * @max_turns is a parameter rather than a constant because an
+ * orchestrator budgets turns per agent, and a limit the caller cannot
+ * set is a limit they have to work around.
+ *
+ * One executor supports one run at a time: it holds the tool list and
+ * the active provider for the duration.  That is why an agent owns its
+ * own executor rather than sharing one.
+ */
+void
+ai_tool_executor_run_async (
+    AiToolExecutor      *self,
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    gint                 max_turns,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    RunContext *ctx;
+    GList      *iter;
+
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+    g_return_if_fail (AI_IS_PROVIDER (provider));
+
+    ctx = g_new0 (RunContext, 1);
+    ctx->loop          = NULL;
+    ctx->task          = g_task_new (self, cancellable, callback, user_data);
+    ctx->executor      = g_object_ref (self);
+    ctx->provider      = g_object_ref (provider);
+    ctx->messages      = NULL;
+    /* Owned here: the caller's string may not outlive an async run. */
+    ctx->system_prompt = g_strdup (system_prompt);
+    ctx->max_tokens    = (max_tokens > 0) ? max_tokens : DEFAULT_MAX_TOKENS;
+    ctx->max_turns     = (max_turns  > 0) ? max_turns  : MAX_TURNS;
+    ctx->cancellable   = cancellable ? g_object_ref (cancellable) : NULL;
+
+    self->active_provider = provider;
+
+    for (iter = messages; iter != NULL; iter = iter->next)
+        ctx->messages = g_list_append (ctx->messages, g_object_ref (iter->data));
+
+    run_context_send (ctx);
+}
+
+/**
+ * ai_tool_executor_run_finish:
+ * @self: an #AiToolExecutor
+ * @result: the #GAsyncResult
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Returns: (transfer full) (nullable): the final response text, or %NULL
+ *   on error.
+ */
+gchar *
+ai_tool_executor_run_finish (
+    AiToolExecutor  *self,
+    GAsyncResult    *result,
+    GError         **error
+){
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+
+    self->active_provider = NULL;
+    return g_task_propagate_pointer (G_TASK (result), error);
 }

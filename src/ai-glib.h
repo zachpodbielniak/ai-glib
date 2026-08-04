@@ -68,4 +68,16 @@
 #include "convenience/ai-duckduckgo-search.h"
 #include "convenience/ai-tool-executor.h"
 
+/* Agent orchestration */
+#include "agent/ai-agent-enums.h"
+#include "agent/ai-budget.h"
+#include "agent/ai-price-table.h"
+#include "agent/ai-agent-worker.h"
+#include "agent/ai-agent-host.h"
+#include "agent/ai-agent-store.h"
+#include "agent/ai-agent-isolation.h"
+#include "agent/ai-agent.h"
+#include "agent/ai-brigade.h"
+#include "agent/ai-mock-provider.h"
+
 #undef AI_GLIB_INSIDE
