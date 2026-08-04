@@ -95,6 +95,112 @@ test_tmux_session_argv_dedicated_socket(void)
     g_assert_cmpstr(AT(argv, 2), !=, "default");
 }
 
+/* TRUE if @flag appears anywhere in @argv. */
+static gboolean
+argv_has(GPtrArray *argv, const gchar *flag)
+{
+    guint i;
+
+    for (i = 0; i < argv->len; i++)
+    {
+        if (g_strcmp0((const gchar *) g_ptr_array_index(argv, i), flag) == 0)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*
+ * The prompt paste MUST be bracketed.
+ *
+ * tmux(1): paste-buffer "replaces any linefeed (LF) characters with a
+ * separator, by default carriage return (CR)".  A CR is Enter.  So
+ * without -p a multi-line prompt is not pasted at all — it is typed and
+ * submitted line by line: the first line starts a turn, the remainder
+ * queue behind it, and the draft box is left EMPTY.
+ *
+ * The damage shows up far from the cause.  The submit-Enter retry loop
+ * then presses Enter into an empty box until it exhausts its ladder, and
+ * anything appended after the user's text (a trailing policy directive,
+ * for instance) never reaches the model as part of the prompt.  It reads
+ * as "the TUI swallowed the keystroke", which is not what happened.
+ *
+ * One missing character caused all of that, so it gets its own test.
+ */
+static void
+test_tmux_paste_argv_is_bracketed(void)
+{
+    g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_paste_argv(
+        "tmux", "libreclaw", "buf-1", "sess");
+
+    g_assert_true(argv_has(argv, "-p"));
+}
+
+static void
+test_tmux_paste_argv_keeps_linefeeds(void)
+{
+    g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_paste_argv(
+        "tmux", "libreclaw", "buf-1", "sess");
+
+    /* -r suppresses the LF->CR rewrite, so the draft holds the author's
+     * newlines rather than carriage returns. */
+    g_assert_true(argv_has(argv, "-r"));
+}
+
+static void
+test_tmux_paste_argv_targets_and_cleans_up(void)
+{
+    g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_paste_argv(
+        "tmux", "libreclaw", "buf-1", "sess");
+
+    g_assert_cmpstr(AT(argv, 0), ==, "tmux");
+    g_assert_cmpstr(AT(argv, 1), ==, "-L");
+    g_assert_cmpstr(AT(argv, 2), ==, "libreclaw");
+    g_assert_cmpstr(AT(argv, 3), ==, "paste-buffer");
+
+    g_assert_true(argv_has(argv, "buf-1"));
+    g_assert_true(argv_has(argv, "sess"));
+
+    /* -d: the buffer is deleted after pasting.  Leaking one per turn
+     * would grow tmux's buffer list for the life of the server. */
+    g_assert_true(argv_has(argv, "-d"));
+}
+
+/*
+ * Delivery passes exist because an exhausted Enter ladder means the
+ * draft box is empty, and no further Enter can fix that — the prompt has
+ * to be pasted again.  A default of 1 would silently restore the old
+ * single-shot behaviour.
+ */
+static void
+test_tmux_delivery_passes_default_and_setter(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+
+    g_assert_cmpint(
+        ai_claude_tmux_client_get_max_prompt_delivery_passes(client),
+        ==, 3);
+
+    ai_claude_tmux_client_set_max_prompt_delivery_passes(client, 5);
+    g_assert_cmpint(
+        ai_claude_tmux_client_get_max_prompt_delivery_passes(client),
+        ==, 5);
+
+    /* Reachable as a property too, so a binding can set it. */
+    {
+        gint via_prop = 0;
+
+        g_object_get(client, "max-prompt-delivery-passes", &via_prop, NULL);
+        g_assert_cmpint(via_prop, ==, 5);
+
+        g_object_set(client, "max-prompt-delivery-passes", 2, NULL);
+        g_assert_cmpint(
+            ai_claude_tmux_client_get_max_prompt_delivery_passes(client),
+            ==, 2);
+    }
+}
+
 /*
  * Ollama fresh session: claude is wrapped by `ollama launch claude
  * --model <suffix> --` after the tmux `--`, and claude's own --model is
@@ -1875,6 +1981,15 @@ main(int argc, char *argv[])
 
     g_test_add_func("/claude-tmux/session-argv/dedicated-socket",
                     test_tmux_session_argv_dedicated_socket);
+
+    g_test_add_func("/claude-tmux/paste-argv/bracketed",
+                    test_tmux_paste_argv_is_bracketed);
+    g_test_add_func("/claude-tmux/paste-argv/keeps-linefeeds",
+                    test_tmux_paste_argv_keeps_linefeeds);
+    g_test_add_func("/claude-tmux/paste-argv/target-and-cleanup",
+                    test_tmux_paste_argv_targets_and_cleans_up);
+    g_test_add_func("/claude-tmux/delivery-passes/default-and-setter",
+                    test_tmux_delivery_passes_default_and_setter);
 
     /* Dedicated socket: never share the user's default tmux server. */
     g_test_add_func("/claude-tmux/socket/name-property",

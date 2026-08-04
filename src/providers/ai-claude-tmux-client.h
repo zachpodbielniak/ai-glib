@@ -359,6 +359,15 @@ ai_claude_tmux_client_set_max_prompt_send_attempts(
     gint                attempts
 );
 
+gint
+ai_claude_tmux_client_get_max_prompt_delivery_passes(AiClaudeTmuxClient *self);
+
+void
+ai_claude_tmux_client_set_max_prompt_delivery_passes(
+    AiClaudeTmuxClient *self,
+    gint                passes
+);
+
 /**
  * ai_claude_tmux_client_get_dismiss_resume_prompt:
  * @self: an #AiClaudeTmuxClient

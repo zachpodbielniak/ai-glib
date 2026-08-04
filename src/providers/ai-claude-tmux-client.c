@@ -56,6 +56,10 @@ struct _AiClaudeTmuxClient
                                           * re-pressing Enter (default 2 sec) */
     gint      max_prompt_send_attempts;  /* max Enter keystrokes to land the
                                           * prompt before failing (default 5) */
+    gint      max_prompt_delivery_passes; /* how many times to re-paste the
+                                           * prompt when a whole Enter ladder
+                                           * fails, i.e. the draft box was
+                                           * empty (default 3) */
     gboolean  dismiss_resume_prompt;     /* press Enter once on resume to
                                           * clear claude's resume-mode
                                           * picker (default TRUE) */
@@ -94,6 +98,7 @@ enum
     PROP_DEBUG_PRESERVE_TMUX,
     PROP_PROMPT_RESEND_INTERVAL_MS,
     PROP_MAX_PROMPT_SEND_ATTEMPTS,
+    PROP_MAX_PROMPT_DELIVERY_PASSES,
     PROP_DISMISS_RESUME_PROMPT,
     PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF,
     PROP_COMMAND_TIMEOUT_MS,
@@ -1293,6 +1298,9 @@ ai_claude_tmux_client_get_property(
         case PROP_MAX_PROMPT_SEND_ATTEMPTS:
             g_value_set_int(value, self->max_prompt_send_attempts);
             break;
+        case PROP_MAX_PROMPT_DELIVERY_PASSES:
+            g_value_set_int(value, self->max_prompt_delivery_passes);
+            break;
         case PROP_DISMISS_RESUME_PROMPT:
             g_value_set_boolean(value, self->dismiss_resume_prompt);
             break;
@@ -1357,6 +1365,9 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_MAX_PROMPT_SEND_ATTEMPTS:
             self->max_prompt_send_attempts = g_value_get_int(value);
+            break;
+        case PROP_MAX_PROMPT_DELIVERY_PASSES:
+            self->max_prompt_delivery_passes = g_value_get_int(value);
             break;
         case PROP_DISMISS_RESUME_PROMPT:
             self->dismiss_resume_prompt = g_value_get_boolean(value);
@@ -1509,6 +1520,15 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         1, G_MAXINT, 5,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    properties[PROP_MAX_PROMPT_DELIVERY_PASSES] = g_param_spec_int(
+        "max-prompt-delivery-passes", "Max Prompt Delivery Passes",
+        "How many times to paste the prompt into the claude TUI. A whole "
+        "Enter ladder failing means the draft box is empty -- the paste "
+        "never landed -- which no further Enter keystroke can fix, so the "
+        "prompt is cleared and re-pasted and the ladder restarts",
+        1, G_MAXINT, 3,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_DISMISS_RESUME_PROMPT] = g_param_spec_boolean(
         "dismiss-resume-prompt", "Dismiss Resume Prompt",
         "When resuming an existing session, type \"2\" before "
@@ -1564,6 +1584,7 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->debug_preserve_tmux = FALSE;
     self->prompt_resend_interval_ms = 2000;  /* 2 sec */
     self->max_prompt_send_attempts = 5;
+    self->max_prompt_delivery_passes = 3;
     self->dismiss_resume_prompt = TRUE;
     self->prompt_send_exponential_backoff = TRUE;
     self->command_timeout_ms = 30000;   /* 30 sec */
@@ -1664,6 +1685,129 @@ resolve_session_cwd(AiClaudeTmuxClient *self)
     /* realpath failed (path doesn't exist yet, etc.) — use the raw
      * value rather than NULL. */
     return g_steal_pointer(&raw);
+}
+
+/*
+ * Put @prompt_path into the claude TUI's draft box as ONE unsubmitted
+ * message.
+ *
+ * The `-p` is not optional and not cosmetic.  Per tmux(1), paste-buffer
+ * "replaces any linefeed (LF) characters with a separator, by default
+ * carriage return (CR)" — i.e. without it every newline in the prompt
+ * arrives as an Enter keystroke.  A multi-line prompt is then submitted
+ * line by line: the first line starts a turn, the rest queue behind it,
+ * and the draft box ends up EMPTY.  Everything downstream then goes
+ * wrong in a way that looks like a different bug — the submit-Enter
+ * retry loop below presses Enter into an empty box until it gives up,
+ * and any trailing content (a policy directive appended after the user's
+ * text, say) never reaches the model as part of the prompt at all.
+ *
+ * `-p` wraps the text in bracketed-paste control codes, so the TUI takes
+ * it as a genuine paste and holds it as a single draft. This is what the
+ * surrounding code always intended; the flag was simply missing.
+ *
+ * `-r` additionally suppresses the LF→CR rewrite, so the draft holds the
+ * author's newlines rather than carriage returns.
+ */
+GPtrArray *
+ai_claude_tmux_client_build_paste_argv(
+    const gchar *tmux_bin,
+    const gchar *socket_name,
+    const gchar *buffer_name,
+    const gchar *session_name
+){
+    /* -d deletes the buffer after pasting; -p brackets it; -r keeps the
+     * author's linefeeds instead of rewriting them to carriage returns. */
+    return tmux_argv_new(
+        tmux_bin, socket_name,
+        "paste-buffer", "-b", buffer_name,
+        "-t", session_name, "-d", "-p", "-r", NULL);
+}
+
+static gboolean
+paste_prompt_into_tui(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    const gchar        *tmux_session_name,
+    const gchar        *session_id,
+    const gchar        *prompt_path,
+    GCancellable       *cancellable,
+    GError            **error
+){
+    g_autofree gchar *buffer_name = g_strconcat("clawd-", session_id, NULL);
+    g_autoptr(GPtrArray) load_argv = tmux_argv_new(
+        tmux_bin, socket_name,
+        "load-buffer", "-b", buffer_name, prompt_path, NULL);
+
+    if (!run_command_sync((const gchar * const *) load_argv->pdata, NULL,
+                          self->command_timeout_ms, cancellable, error))
+    {
+        g_prefix_error(error, "tmux load-buffer failed: ");
+        return FALSE;
+    }
+
+    {
+        g_autoptr(GPtrArray) paste_argv =
+            ai_claude_tmux_client_build_paste_argv(
+                tmux_bin, socket_name, buffer_name, tmux_session_name);
+
+        if (!run_command_sync((const gchar * const *) paste_argv->pdata,
+                              NULL, self->command_timeout_ms,
+                              cancellable, error))
+        {
+            g_prefix_error(error, "tmux paste-buffer failed: ");
+            return FALSE;
+        }
+    }
+
+    /*
+     * Give the TUI a beat to finish ingesting the paste before the
+     * submit keystroke.  An immediate Enter can be swallowed while the
+     * input box is still applying the paste and updating its draft
+     * state, leaving the message sitting un-submitted.
+     */
+    g_usleep(500 * 1000);   /* 500 ms */
+    return TRUE;
+}
+
+/*
+ * Empty the claude TUI's draft box.
+ *
+ * Only used before RE-pasting a prompt, so that a draft which did land
+ * (and whose Enter was merely swallowed) is not duplicated by the retry.
+ *
+ * Ctrl-U is a kill-to-start-of-line and clears one line per press, so a
+ * multi-line draft needs several; the count is generous because pressing
+ * it against an already-empty box is a no-op.  Escape does NOT clear the
+ * box — verified against the TUI — so it is not a substitute.
+ *
+ * Best-effort by design: a failure here is not worth aborting a turn
+ * for, and the re-paste that follows is still more likely to help than
+ * to hurt.
+ */
+static void
+clear_tui_draft(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    const gchar        *tmux_session_name,
+    GCancellable       *cancellable
+){
+    guint i;
+
+    for (i = 0; i < 12; i++)
+    {
+        g_autoptr(GPtrArray) argv = tmux_argv_new(
+            tmux_bin, socket_name,
+            "send-keys", "-t", tmux_session_name, "C-u", NULL);
+
+        if (!run_command_sync((const gchar * const *) argv->pdata, NULL,
+                              self->command_timeout_ms, cancellable, NULL))
+        {
+            return;
+        }
+    }
 }
 
 /*
@@ -2156,48 +2300,15 @@ ai_claude_tmux_client_chat_sync_real(
 
     /*
      * ---------- deliver the prompt ----------
-     * Avoid claude TUI's @<file> syntax — send-keys doesn't trigger
-     * its file-reference expansion reliably.  Instead, load the
-     * prompt text into a tmux paste buffer and paste it: the TUI
-     * receives this as a real paste event (bracketed paste), which
-     * handles multi-line text without each newline being interpreted
-     * as Enter.
+     * See paste_prompt_into_tui() for why this is a bracketed paste and
+     * what happens when it is not.
      */
+    if (!paste_prompt_into_tui(self, tmux_bin, socket_name,
+                               tmux_session_name, session_id, prompt_path,
+                               cancellable, error))
     {
-        g_autofree gchar *buffer_name = g_strconcat("clawd-", session_id, NULL);
-        g_autoptr(GPtrArray) load_argv = tmux_argv_new(
-            tmux_bin, socket_name,
-            "load-buffer", "-b", buffer_name, prompt_path, NULL);
-        if (!run_command_sync((const gchar * const *) load_argv->pdata, NULL,
-                              self->command_timeout_ms, cancellable,
-                              error))
-        {
-            g_prefix_error(error, "tmux load-buffer failed: ");
-            goto cleanup_and_fail;
-        }
-        {
-            /* -d = delete buffer after pasting */
-            g_autoptr(GPtrArray) paste_argv = tmux_argv_new(
-                tmux_bin, socket_name,
-                "paste-buffer", "-b", buffer_name,
-                "-t", tmux_session_name, "-d", NULL);
-            if (!run_command_sync((const gchar * const *) paste_argv->pdata,
-                                  NULL, self->command_timeout_ms,
-                                  cancellable, error))
-            {
-                g_prefix_error(error, "tmux paste-buffer failed: ");
-                goto cleanup_and_fail;
-            }
-        }
+        goto cleanup_and_fail;
     }
-    /*
-     * Give claude TUI a beat to finish ingesting the bracketed-paste
-     * event before we deliver the submit keystroke.  Without this,
-     * an immediate Enter can be swallowed while the input box is
-     * still applying the paste and updating its draft state, and the
-     * message ends up sitting in the input box un-submitted.
-     */
-    g_usleep(500 * 1000);   /* 500 ms */
 
     /*
      * ---------- deliver the submit keystroke, verified ----------
@@ -2227,13 +2338,24 @@ ai_claude_tmux_client_chat_sync_real(
      *
      * If neither shape shows up within prompt_resend_interval_ms the
      * Enter genuinely did not register — press it again, up to
-     * max_prompt_send_attempts times before giving up.
+     * max_prompt_send_attempts times.
      *
-     * We re-send only Enter, never the prompt text: the bracketed
-     * paste already deposited the prompt in the draft box, and
-     * re-pasting would duplicate it.  A spurious resend (the prompt
-     * actually did land, the entry was just slow to flush) is
-     * harmless — it hits an empty draft box, which the TUI ignores.
+     * Exhausting that ladder means the draft box is almost certainly
+     * EMPTY: had it held the prompt, one of N Enters over that whole
+     * window would have landed.  An empty box is unrecoverable by more
+     * Enter keystrokes — the TUI ignores them — so the outer loop
+     * re-pastes the prompt and starts a fresh ladder, up to
+     * max_prompt_delivery_passes times.
+     *
+     * This used to be a single pass on the assumption that "the
+     * bracketed paste already deposited the prompt in the draft box".
+     * When the paste itself failed to land, that assumption turned a
+     * recoverable hiccup into a lost turn plus minutes of pointless
+     * Enter-pressing.
+     *
+     * The draft is cleared before each re-paste, so the case where the
+     * prompt DID land and every Enter was genuinely swallowed does not
+     * end up submitting the text twice.
      */
     {
         g_autoptr(GPtrArray) enter_argv = tmux_argv_new(
@@ -2243,102 +2365,130 @@ ai_claude_tmux_client_chat_sync_real(
         gboolean prompt_accepted = FALSE;
         gint attempt;
         gint total_waited_ms = 0;
+        gint pass;
 
-        for (attempt = 1;
-             attempt <= self->max_prompt_send_attempts && !prompt_accepted;
-             attempt++)
+        for (pass = 1;
+             pass <= self->max_prompt_delivery_passes && !prompt_accepted;
+             pass++)
         {
-            gint this_wait_ms;
-            gint waited = 0;
+            if (pass > 1)
+            {
+                g_warning("claude-tmux: prompt never accepted after %d Enter "
+                          "keystroke(s) — the draft box is empty, so the paste "
+                          "did not land. Clearing it and re-injecting the "
+                          "prompt (delivery pass %d/%d)",
+                          self->max_prompt_send_attempts, pass,
+                          self->max_prompt_delivery_passes);
 
-            /*
-             * Per-attempt wait: exponential when the backoff knob is on
-             * (the default — attempt N waits base << (N-1)), or a flat
-             * base every attempt when it's off.  Exponential is the
-             * pre-flight remedy for large resumed transcripts: claude's
-             * auto-compaction of a 2+ MB JSONL can keep the TUI busy
-             * for tens of seconds, well past the flat 10 s budget the
-             * old loop allowed.
-             */
-            if (self->prompt_send_exponential_backoff)
-            {
-                /*
-                 * Cap the shift count to keep the wait inside gint and
-                 * keep the *total* budget tractable.  We multiply by
-                 * 1 << (attempt-1); with a 2000 ms base, shift 14 is
-                 * already 32 768 × 2 s ≈ 18 hours, so 20 is plenty of
-                 * head-room without risking overflow.
-                 */
-                gint shift = attempt - 1;
-                if (shift > 20) shift = 20;
-                if (G_MAXINT / (1 << shift) < self->prompt_resend_interval_ms)
-                    this_wait_ms = G_MAXINT;
-                else
-                    this_wait_ms = self->prompt_resend_interval_ms
-                                   << shift;
-            }
-            else
-            {
-                this_wait_ms = self->prompt_resend_interval_ms;
-            }
+                clear_tui_draft(self, tmux_bin, socket_name,
+                                tmux_session_name, cancellable);
 
-            if (attempt > 1)
-            {
-                g_warning("claude-tmux: prompt not accepted after Enter "
-                          "(attempt %d/%d) — submit keystroke was "
-                          "swallowed by the TUI, re-sending Enter and "
-                          "waiting %d ms for proof of acceptance%s",
-                          attempt - 1, self->max_prompt_send_attempts,
-                          this_wait_ms,
-                          self->prompt_send_exponential_backoff
-                              ? " (exponential backoff)"
-                              : "");
-            }
-
-            if (!run_command_sync((const gchar * const *) enter_argv->pdata,
-                                  NULL,
-                                  self->command_timeout_ms,
-                                  cancellable, error))
-            {
-                g_prefix_error(error,
-                               "tmux send-keys (Enter) failed: ");
-                goto cleanup_and_fail;
-            }
-
-            while (waited < this_wait_ms)
-            {
-                /* Honour !stop / !kill promptly: the direct hook has
-                 * already killed the tmux session, so bail out instead
-                 * of polling a transcript that will never advance. */
-                if (cancellable != NULL &&
-                    g_cancellable_is_cancelled(cancellable))
+                if (!paste_prompt_into_tui(self, tmux_bin, socket_name,
+                                           tmux_session_name, session_id,
+                                           prompt_path, cancellable, error))
                 {
-                    g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
-                                "Turn cancelled while waiting for the "
-                                "prompt to be accepted by the claude TUI");
                     goto cleanup_and_fail;
                 }
-                if (slice_has_accepted_prompt(jsonl_path, jsonl_size_before))
-                {
-                    prompt_accepted = TRUE;
-                    break;
-                }
-                g_usleep(poll_ms * 1000);
-                waited += poll_ms;
             }
-            total_waited_ms += waited;
+
+            for (attempt = 1;
+                 attempt <= self->max_prompt_send_attempts && !prompt_accepted;
+                 attempt++)
+            {
+                gint this_wait_ms;
+                gint waited = 0;
+
+                /*
+                 * Per-attempt wait: exponential when the backoff knob is on
+                 * (the default — attempt N waits base << (N-1)), or a flat
+                 * base every attempt when it's off.  Exponential is the
+                 * pre-flight remedy for large resumed transcripts: claude's
+                 * auto-compaction of a 2+ MB JSONL can keep the TUI busy
+                 * for tens of seconds, well past the flat 10 s budget the
+                 * old loop allowed.
+                 */
+                if (self->prompt_send_exponential_backoff)
+                {
+                    /*
+                     * Cap the shift count to keep the wait inside gint and
+                     * keep the *total* budget tractable.  We multiply by
+                     * 1 << (attempt-1); with a 2000 ms base, shift 14 is
+                     * already 32 768 × 2 s ≈ 18 hours, so 20 is plenty of
+                     * head-room without risking overflow.
+                     */
+                    gint shift = attempt - 1;
+                    if (shift > 20) shift = 20;
+                    if (G_MAXINT / (1 << shift) < self->prompt_resend_interval_ms)
+                        this_wait_ms = G_MAXINT;
+                    else
+                        this_wait_ms = self->prompt_resend_interval_ms
+                                       << shift;
+                }
+                else
+                {
+                    this_wait_ms = self->prompt_resend_interval_ms;
+                }
+
+                if (attempt > 1)
+                {
+                    g_warning("claude-tmux: prompt not accepted after Enter "
+                              "(attempt %d/%d) — submit keystroke was "
+                              "swallowed by the TUI, re-sending Enter and "
+                              "waiting %d ms for proof of acceptance%s",
+                              attempt - 1, self->max_prompt_send_attempts,
+                              this_wait_ms,
+                              self->prompt_send_exponential_backoff
+                                  ? " (exponential backoff)"
+                                  : "");
+                }
+
+                if (!run_command_sync((const gchar * const *) enter_argv->pdata,
+                                      NULL,
+                                      self->command_timeout_ms,
+                                      cancellable, error))
+                {
+                    g_prefix_error(error,
+                                   "tmux send-keys (Enter) failed: ");
+                    goto cleanup_and_fail;
+                }
+
+                while (waited < this_wait_ms)
+                {
+                    /* Honour !stop / !kill promptly: the direct hook has
+                     * already killed the tmux session, so bail out instead
+                     * of polling a transcript that will never advance. */
+                    if (cancellable != NULL &&
+                        g_cancellable_is_cancelled(cancellable))
+                    {
+                        g_set_error(error, AI_ERROR, AI_ERROR_CANCELLED,
+                                    "Turn cancelled while waiting for the "
+                                    "prompt to be accepted by the claude TUI");
+                        goto cleanup_and_fail;
+                    }
+                    if (slice_has_accepted_prompt(jsonl_path, jsonl_size_before))
+                    {
+                        prompt_accepted = TRUE;
+                        break;
+                    }
+                    g_usleep(poll_ms * 1000);
+                    waited += poll_ms;
+                }
+                total_waited_ms += waited;
+            }
         }
 
         if (!prompt_accepted)
         {
             g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                        "Prompt was pasted into the claude TUI but "
-                        "neither a user entry nor a queued submission "
-                        "ever appeared in transcript '%s' after %d "
-                        "Enter keystroke(s) over ~%d ms — the submit "
-                        "keystroke never registered (pre-prompt size "
-                        "%" G_GOFFSET_FORMAT ")",
-                        jsonl_path, self->max_prompt_send_attempts,
+                        "Prompt never reached claude: neither a user "
+                        "entry nor a queued submission appeared in "
+                        "transcript '%s' after %d delivery pass(es) of "
+                        "%d Enter keystroke(s) over ~%d ms total "
+                        "(pre-prompt size %" G_GOFFSET_FORMAT "). The "
+                        "prompt was re-pasted on each pass, so both the "
+                        "paste and the submit keystroke failed to land",
+                        jsonl_path, self->max_prompt_delivery_passes,
+                        self->max_prompt_send_attempts,
                         total_waited_ms,
                         jsonl_size_before);
             goto cleanup_and_fail;
@@ -2968,6 +3118,25 @@ ai_claude_tmux_client_set_max_prompt_send_attempts(
     self->max_prompt_send_attempts = attempts;
     g_object_notify_by_pspec(G_OBJECT(self),
         properties[PROP_MAX_PROMPT_SEND_ATTEMPTS]);
+}
+
+gint
+ai_claude_tmux_client_get_max_prompt_delivery_passes(AiClaudeTmuxClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), 0);
+    return self->max_prompt_delivery_passes;
+}
+
+void
+ai_claude_tmux_client_set_max_prompt_delivery_passes(
+    AiClaudeTmuxClient *self,
+    gint                passes
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+    g_return_if_fail(passes > 0);
+    self->max_prompt_delivery_passes = passes;
+    g_object_notify_by_pspec(G_OBJECT(self),
+        properties[PROP_MAX_PROMPT_DELIVERY_PASSES]);
 }
 
 gboolean

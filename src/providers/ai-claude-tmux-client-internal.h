@@ -59,4 +59,26 @@ ai_claude_tmux_client_build_session_argv(
     const gchar *mcp_config_path
 );
 
+/*
+ * Build the argv for
+ *   tmux -L SOCKET paste-buffer -b BUF -t SESSION -d -p -r
+ *
+ * Exposed for one reason: "-p" is load-bearing and invisible.  Without
+ * it tmux rewrites every LF in the prompt to CR, so a multi-line prompt
+ * is submitted line by line and the draft box ends up empty — a failure
+ * that surfaces far downstream as "the submit keystroke was swallowed".
+ * A test that asserts the flag is present is the only thing that stops
+ * it being dropped again.
+ *
+ * Returns: (transfer full): a NULL-terminated #GPtrArray (free func g_free);
+ *   free with g_ptr_array_unref().
+ */
+GPtrArray *
+ai_claude_tmux_client_build_paste_argv(
+    const gchar *tmux_bin,
+    const gchar *socket_name,
+    const gchar *buffer_name,
+    const gchar *session_name
+);
+
 G_END_DECLS
