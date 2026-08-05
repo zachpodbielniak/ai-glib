@@ -79,6 +79,7 @@ struct _AiToolExecutor
     AiSearchProvider *search_provider; /* nullable, ref'd */
     GHashTable       *callbacks;       /* str -> CallbackEntry, owned */
     AiProvider       *active_provider; /* borrowed; set only during a run() */
+    gchar            *working_directory; /* nullable, owned */
 };
 
 G_DEFINE_TYPE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT)
@@ -270,6 +271,29 @@ run_context_send (RunContext *ctx)
  * Built-in tool implementations
  * ================================================================ */
 
+/* Resolve PATH against the executor's working directory.
+ *
+ * An agent is given work to do somewhere -- a project, a checkout, a
+ * notes tree -- and says "src/main.c", not an absolute path.  Without
+ * this every relative path resolved against whatever directory the
+ * host process happened to be in, which for an editor is wherever the
+ * user last visited a file.  An absolute path is left alone, and with
+ * no working directory set the behaviour is exactly as before. */
+static gchar *
+executor_resolve_path (
+    AiToolExecutor  *self,
+    const gchar     *path
+){
+    if (path == NULL)
+        path = ".";
+
+    if (self == NULL || self->working_directory == NULL
+        || g_path_is_absolute (path))
+        return g_strdup (path);
+
+    return g_build_filename (self->working_directory, path, NULL);
+}
+
 static gchar *
 tool_bash (
     AiToolExecutor  *self,
@@ -277,15 +301,14 @@ tool_bash (
     GCancellable    *cancellable,
     GError         **error
 ){
-    const gchar *command;
-    FILE        *fp;
-    GString     *output;
-    gchar        buf[4096];
-    int          exit_status;
-    gchar       *result;
-
-    (void)self;
-    (void)cancellable;
+    const gchar                  *command;
+    g_autoptr (GSubprocessLauncher) launcher = NULL;
+    g_autoptr (GSubprocess)         proc     = NULL;
+    g_autoptr (GBytes)              out      = NULL;
+    gconstpointer                   data;
+    gsize                           len      = 0;
+    gchar                          *result;
+    gint                            exit_status;
 
     command = ai_tool_use_get_input_string (tool_use, "command");
     if (command == NULL)
@@ -295,32 +318,38 @@ tool_bash (
         return NULL;
     }
 
-    {
-        g_autofree gchar *cmd_merged = g_strdup_printf ("%s 2>&1", command);
-        fp = popen (cmd_merged, "r");
-    }
+    /* GSubprocess rather than popen(): popen inherits the host
+     * process's working directory with no way to override it, and
+     * cannot be cancelled.  Both matter -- an agent is given work to do
+     * in a particular tree, and a caller that gives up on a run should
+     * not leave a build running. */
+    launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE
+                                          | G_SUBPROCESS_FLAGS_STDERR_MERGE);
+    if (self != NULL && self->working_directory != NULL)
+        g_subprocess_launcher_set_cwd (launcher, self->working_directory);
 
-    if (fp == NULL)
-    {
-        g_set_error_literal (error, AI_ERROR, AI_ERROR_TOOL_ERROR,
-                             "bash: popen() failed");
+    proc = g_subprocess_launcher_spawn (launcher, error,
+                                        "/bin/sh", "-c", command, NULL);
+    if (proc == NULL)
         return NULL;
-    }
 
-    output = g_string_new (NULL);
-    while (fgets (buf, (int)sizeof (buf), fp) != NULL)
-        g_string_append (output, buf);
+    if (!g_subprocess_communicate (proc, NULL, cancellable, &out, NULL, error))
+        return NULL;
 
-    exit_status = pclose (fp);
+    data = out ? g_bytes_get_data (out, &len) : NULL;
+    /* Command output is arbitrary bytes -- a build log carries progress
+     * bars and stray locale-encoded text -- and it is about to become a
+     * JSON string, so it has to be valid UTF-8 first. */
+    result = data ? g_utf8_make_valid ((const gchar *) data, (gssize) len)
+                  : g_strdup ("");
 
-    result = g_string_free (output, FALSE);
+    exit_status = g_subprocess_get_if_exited (proc)
+                  ? g_subprocess_get_exit_status (proc) : -1;
 
-    /* Prefix with exit code on failure */
-    if (exit_status != 0 && exit_status != -1 && WIFEXITED (exit_status)
-        && WEXITSTATUS (exit_status) != 0)
+    if (exit_status > 0)
     {
         gchar *prefixed = g_strdup_printf ("[exit code %d]\n%s",
-                                           WEXITSTATUS (exit_status), result);
+                                           exit_status, result);
         g_free (result);
         result = prefixed;
     }
@@ -342,8 +371,8 @@ tool_read (
     gint              limit;
     const gchar      *start;
     gsize             available;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
 
     path = ai_tool_use_get_input_string (tool_use, "path");
@@ -353,6 +382,9 @@ tool_read (
                              "read: missing required parameter 'path'");
         return NULL;
     }
+
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     if (!g_file_get_contents (path, &contents, &length, error))
         return NULL;
@@ -383,8 +415,8 @@ tool_write (
 ){
     const gchar *path;
     const gchar *content;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
 
     path    = ai_tool_use_get_input_string (tool_use, "path");
@@ -396,6 +428,9 @@ tool_write (
                              "write: missing required parameter 'path'");
         return NULL;
     }
+
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     if (content == NULL)
         content = "";
@@ -421,8 +456,8 @@ tool_edit (
     gchar            *found;
     GString          *rebuilt;
     gsize             prefix_len;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
 
     path       = ai_tool_use_get_input_string (tool_use, "path");
@@ -436,6 +471,9 @@ tool_edit (
                              "path, old_string, new_string");
         return NULL;
     }
+
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     if (!g_file_get_contents (path, &contents, &length, error))
         return NULL;
@@ -508,8 +546,8 @@ tool_glob (
     const gchar          *path;
     g_autoptr(GPatternSpec) pattern = NULL;
     GString              *output;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
     (void)error;
 
@@ -522,8 +560,8 @@ tool_glob (
     }
 
     path = ai_tool_use_get_input_string (tool_use, "path");
-    if (path == NULL)
-        path = ".";
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     pattern = g_pattern_spec_new (pattern_str);
     output  = g_string_new (NULL);
@@ -610,8 +648,8 @@ tool_grep (
     g_autoptr(GRegex)      regex        = NULL;
     g_autoptr(GPatternSpec) file_pattern = NULL;
     GString               *output;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
 
     pattern_str = ai_tool_use_get_input_string (tool_use, "pattern");
@@ -632,8 +670,8 @@ tool_grep (
     if (glob_str != NULL)
         file_pattern = g_pattern_spec_new (glob_str);
 
-    if (path == NULL)
-        path = ".";
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     output = g_string_new (NULL);
 
@@ -656,13 +694,13 @@ tool_ls (
     GDir        *dir;
     const gchar *name;
     GString     *output;
+    g_autofree gchar *resolved = NULL;
 
-    (void)self;
     (void)cancellable;
 
     path = ai_tool_use_get_input_string (tool_use, "path");
-    if (path == NULL)
-        path = ".";
+    resolved = executor_resolve_path (self, path);
+    path = resolved;
 
     dir = g_dir_open (path, 0, error);
     if (dir == NULL)
@@ -1736,6 +1774,7 @@ ai_tool_executor_finalize (GObject *object)
     self->tools = NULL;
     g_clear_object (&self->search_provider);
     g_clear_pointer (&self->callbacks, g_hash_table_unref);
+    g_clear_pointer (&self->working_directory, g_free);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
 }
@@ -2040,6 +2079,50 @@ ai_tool_executor_unregister (
             break;
         }
     }
+}
+
+/**
+ * ai_tool_executor_set_working_directory:
+ * @self: an #AiToolExecutor
+ * @path: (nullable): directory the built-in tools work in, or %NULL
+ *
+ * Set the directory the built-in tools resolve relative paths against
+ * and run commands in.
+ *
+ * An agent is given work to do somewhere -- a project, a checkout, a
+ * notes tree -- and refers to "src/main.c", not to an absolute path.
+ * Without this, every relative path and every `bash` command resolved
+ * against the host process's own working directory, which for an editor
+ * is wherever the user last visited a file.
+ *
+ * %NULL restores that behaviour.  An absolute path from the model is
+ * always used as given.
+ */
+void
+ai_tool_executor_set_working_directory (
+    AiToolExecutor  *self,
+    const gchar     *path
+){
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    g_free (self->working_directory);
+    self->working_directory = g_strdup (path);
+}
+
+/**
+ * ai_tool_executor_get_working_directory:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: (nullable) (transfer none): the directory set by
+ *   ai_tool_executor_set_working_directory(), or %NULL.
+ */
+const gchar *
+ai_tool_executor_get_working_directory (
+    AiToolExecutor  *self
+){
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+
+    return self->working_directory;
 }
 
 gchar *

@@ -14,6 +14,29 @@
 | =web_fetch=  | Fetch a URL; HTML converted to text, optional model extraction |
 | =web_search= | Search the web; ranked results + optional page fetch (below)   |
 
+** Working directory
+All seven filesystem tools resolve relative paths against the executor's working
+directory, and =bash= runs its command there:
+
+#+begin_src C
+ai_tool_executor_set_working_directory (executor, "/home/me/src/project");
+#+end_src
+
+An agent is given work to do /somewhere/ -- a project, a checkout, a notes tree
+-- and refers to =src/main.c=, not to an absolute path. With no working
+directory set (the default) those resolve against the host process's own
+current directory, which for something long-lived like an editor is wherever the
+user last visited a file: almost never what the model meant.
+
+An absolute path from the model is always used as given. Pass =NULL= to restore
+the default.
+
+=bash= spawns through =GSubprocess= rather than =popen()= so the directory can
+be set at all, which also makes the command cancellable through the
+=GCancellable= passed to the run and keeps its output valid UTF-8 -- a build log
+carries progress bars and stray locale-encoded bytes, and that output is about
+to become a JSON string.
+
 ** Quick Start
 #+begin_src C
 #include <ai-glib.h>

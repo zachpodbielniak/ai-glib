@@ -199,6 +199,20 @@ ai_tool_executor_unregister (
  * Returns: (transfer full) (nullable): the final response text, or %NULL on
  *   error. Free with g_free().
  */
+/* Directory the built-in tools resolve relative paths against and run
+ * commands in.  NULL (the default) means the host process's own working
+ * directory, which for an editor is wherever the user last was. */
+void
+ai_tool_executor_set_working_directory (
+    AiToolExecutor  *self,
+    const gchar     *path
+);
+
+const gchar *
+ai_tool_executor_get_working_directory (
+    AiToolExecutor  *self
+);
+
 gchar *
 ai_tool_executor_run (
     AiToolExecutor  *self,
