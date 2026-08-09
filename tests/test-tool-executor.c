@@ -12,6 +12,7 @@
 #include "convenience/ai-tool-executor.h"
 #include "convenience/ai-search-provider.h"
 #include "model/ai-tool-use.h"
+#include "agent/ai-mock-provider.h"
 
 /* ================================================================
  * Helpers
@@ -463,6 +464,128 @@ test_executor_register_callback (void)
  * main
  * ================================================================ */
 
+/* ================================================================
+ * run_full: handing back the conversation the run produced
+ * ================================================================ */
+
+/* The plain run() drops every message it generated, so a caller who
+ * wants to carry on has the final text and no record of how the model
+ * got there -- and a follow-up sent on top of that shows the model none
+ * of its own previous turn.  run_full() is what makes continuing
+ * possible, so what matters is that it returns exactly the new messages
+ * and none of the caller's. */
+static void
+test_executor_run_full_returns_new_messages (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("hello");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+
+    ai_mock_provider_push_text (mock, "hi there");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+
+    g_assert_no_error (error);
+    g_assert_cmpstr (reply, ==, "hi there");
+
+    /* The assistant turn, and only it: the caller's own message must not
+     * come back, or appending the result to a session would duplicate
+     * every message on every turn. */
+    g_assert_nonnull (produced);
+    g_assert_cmpuint (g_list_length (produced), ==, 1);
+    g_assert_true (produced->data != (gpointer) user);
+
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
+/* A tool call means the run generates an assistant turn AND a tool
+ * result; both have to come back or the replayed history is invalid --
+ * a tool_use with no matching tool_result is rejected by every provider
+ * that checks. */
+static void
+test_executor_run_full_includes_tool_results (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("run something");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+
+    ai_mock_provider_push_tool_use (mock, "bash",
+                                    "{\"command\": \"echo hi\"}");
+    ai_mock_provider_push_text (mock, "it said hi");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+
+    g_assert_no_error (error);
+    g_assert_cmpstr (reply, ==, "it said hi");
+    /* assistant(tool_use) + tool_result + assistant(text) */
+    g_assert_cmpuint (g_list_length (produced), >=, 3);
+
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
+/* Passing NULL must behave exactly like the old entry point, since that
+ * is now literally what run() is. */
+static void
+test_executor_run_full_null_out_is_plain_run (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("hello");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+
+    ai_mock_provider_push_text (mock, "same answer");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, NULL, &error);
+
+    g_assert_no_error (error);
+    g_assert_cmpstr (reply, ==, "same answer");
+    g_list_free (messages);
+}
+
+/* On failure the caller gets NULL and no out parameter to remember to
+ * free -- a half-finished exchange is not something to graft onto a
+ * conversation that is about to be abandoned. */
+static void
+test_executor_run_full_error_clears_out (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("hello");
+    g_autoptr (GError) error = NULL;
+    gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = (GList *) 0x1; /* must be overwritten, not read */
+
+    ai_mock_provider_push_error (mock, "the sky fell in");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+
+    g_assert_null (reply);
+    g_assert_nonnull (error);
+    g_assert_null (produced);
+    g_list_free (messages);
+}
+
 int
 main (
     int   argc,
@@ -494,6 +617,14 @@ main (
                      test_executor_unknown_tool);
     g_test_add_func ("/ai-glib/tool-executor/register-callback",
                      test_executor_register_callback);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
+                     test_executor_run_full_returns_new_messages);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
+                     test_executor_run_full_includes_tool_results);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/null-out",
+                     test_executor_run_full_null_out_is_plain_run);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/error-clears-out",
+                     test_executor_run_full_error_clears_out);
 
     return g_test_run ();
 }

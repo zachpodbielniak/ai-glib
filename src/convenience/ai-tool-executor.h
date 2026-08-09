@@ -224,6 +224,18 @@ ai_tool_executor_run (
     GError         **error
 );
 
+gchar *
+ai_tool_executor_run_full (
+    AiToolExecutor  *self,
+    AiProvider      *provider,
+    GList           *messages,
+    const gchar     *system_prompt,
+    gint             max_tokens,
+    GCancellable    *cancellable,
+    GList          **out_new_messages,
+    GError         **error
+);
+
 void
 ai_tool_executor_run_async (
     AiToolExecutor      *self,

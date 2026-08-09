@@ -190,6 +190,42 @@ Registering a callback whose name matches a built-in (e.g. ="bash"=) replaces th
 
 A full worked example lives in [[file:examples/tool-use-executor.org][=examples/tool-use-executor.c=]].
 
+** Continuing a conversation
+
+=ai_tool_executor_run()= works on a private copy of your message list.  It
+appends each assistant turn and tool result to that copy and frees the lot on
+the way out, so you get the final text and no record of how the model got
+there.  Send a follow-up on top of that and the model cannot see its own
+previous turn --- which is not a continuation at all.
+
+=ai_tool_executor_run_full()= hands the generated messages back:
+
+#+begin_src C
+GList *produced = NULL;
+g_autofree gchar *reply = ai_tool_executor_run_full (
+    exec, provider, messages, system_prompt, 4096, NULL,
+    &produced, &error);
+
+/* `produced' holds only what this run generated -- the assistant turns
+   and tool results -- and never your originals.  Append it to whatever
+   owns the conversation, and the next run continues rather than
+   restarting. */
+for (GList *l = produced; l != NULL; l = l->next)
+    my_session_append (session, l->data);
+
+g_list_free_full (produced, g_object_unref);
+#+end_src
+
+The out parameter is =(transfer full)=: you own the list and the messages in
+it.  Passing =NULL= for it is exactly =ai_tool_executor_run()=, which is now
+literally a wrapper.  On error the list is cleared and set to =NULL=, so a
+caller who got =NULL= back has nothing to remember to free.
+
+The final assistant message is included even though nothing in the run itself
+reads it again --- it is the one message a continuation needs most, and
+omitting it would leave the model's actual answer as the single thing missing
+from the replayed history.
+
 ** Low-level API
 For cases where you manage the provider loop yourself:
 

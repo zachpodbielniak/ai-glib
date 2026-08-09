@@ -170,8 +170,21 @@ on_run_response (
 
     if (!ai_response_has_tool_use (response))
     {
-        /* Final answer — grab text and quit */
+        /* Final answer — grab text and quit.
+         *
+         * The assistant turn is appended to the message list on the way
+         * out, even though nothing in this run will read it again.  A
+         * caller using ai_tool_executor_run_full() to continue the
+         * conversation needs it more than any of the intermediate ones:
+         * without it the model's actual answer is the single thing
+         * missing from the replayed history, so the next turn reads as a
+         * follow-up to a question the model never appeared to answer. */
         ctx->result = ai_response_get_text (response);
+        if (ctx->result != NULL)
+        {
+            AiMessage *final_msg = ai_message_new_assistant (ctx->result);
+            ctx->messages = g_list_append (ctx->messages, final_msg);
+        }
         run_context_finish (ctx);
         return;
     }
@@ -2125,23 +2138,70 @@ ai_tool_executor_get_working_directory (
     return self->working_directory;
 }
 
+/* g_clear_pointer needs a one-argument free; g_list_free_full takes two. */
+static void
+ai_tool_executor__free_messages (
+    GList   *messages
+){
+    g_list_free_full (messages, g_object_unref);
+}
+
+/**
+ * ai_tool_executor_run_full:
+ * @self: an #AiToolExecutor
+ * @provider: the #AiProvider to send requests to
+ * @messages: (element-type AiMessage): initial conversation messages
+ * @system_prompt: (nullable): optional system prompt
+ * @max_tokens: maximum tokens for each response (0 for default 4096)
+ * @cancellable: (nullable): a #GCancellable
+ * @out_new_messages: (out) (optional) (nullable) (element-type AiMessage)
+ *   (transfer full): return location for the messages the run produced --
+ *   the assistant turns and tool results appended during the loop, and
+ *   NOT the caller's originals. Free with
+ *   g_list_free_full(list, g_object_unref).
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Like ai_tool_executor_run(), but also hands back the conversation the
+ * run generated.
+ *
+ * The plain ai_tool_executor_run() drops it. It works on a private copy
+ * of @messages, appends each assistant turn and tool result to that
+ * copy, and frees the lot on the way out -- so a caller who wants to
+ * continue the conversation afterwards has the final text and no record
+ * of how the model got there. Sending a follow-up on top of that means
+ * the model cannot see its own previous turn, which is not a
+ * continuation at all.
+ *
+ * Pass @out_new_messages to get those messages back and append them to
+ * whatever holds the conversation. Passing %NULL is exactly
+ * ai_tool_executor_run().
+ *
+ * Returns: (transfer full) (nullable): the final response text, or %NULL on
+ *   error. Free with g_free().
+ */
 gchar *
-ai_tool_executor_run (
+ai_tool_executor_run_full (
     AiToolExecutor  *self,
     AiProvider      *provider,
     GList           *messages,
     const gchar     *system_prompt,
     gint             max_tokens,
     GCancellable    *cancellable,
+    GList          **out_new_messages,
     GError         **error
 ){
     RunContext  ctx;
     GList      *iter;
     gchar      *result;
+    guint       n_input;
+    guint       i;
 
     g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
     g_return_val_if_fail (AI_IS_PROVIDER (provider), NULL);
     g_return_val_if_fail (messages != NULL, NULL);
+
+    if (out_new_messages != NULL)
+        *out_new_messages = NULL;
 
     /* Bind the loop to the caller's thread-default context (NULL when
      * none is pushed, i.e. the process-global default -- unchanged from
@@ -2168,8 +2228,12 @@ ai_tool_executor_run (
     self->active_provider = provider;
 
     /* Shallow-copy the caller's messages so we can extend the list */
+    n_input = 0;
     for (iter = messages; iter != NULL; iter = iter->next)
+    {
         ctx.messages = g_list_append (ctx.messages, g_object_ref (iter->data));
+        n_input++;
+    }
 
     run_context_send (&ctx);
     g_main_loop_run (ctx.loop);
@@ -2177,17 +2241,60 @@ ai_tool_executor_run (
 
     self->active_provider = NULL;
 
-    /* Free our message list (caller keeps ownership of their originals) */
-    g_list_free_full (ctx.messages, g_object_unref);
+    /* Split our list at the caller's originals.  Everything past the
+     * first n_input entries was appended during the loop -- the
+     * assistant turns and the tool results -- and is what a caller
+     * continuing the conversation needs.  Our ref on each is handed over
+     * rather than dropped and re-taken. */
+    if (out_new_messages != NULL)
+    {
+        GList *tail = NULL;
+
+        i = 0;
+        for (iter = ctx.messages; iter != NULL; iter = iter->next, i++)
+        {
+            if (i < n_input)
+                g_object_unref (iter->data);
+            else
+                tail = g_list_append (tail, iter->data);
+        }
+        g_list_free (ctx.messages);
+        *out_new_messages = tail;
+    }
+    else
+    {
+        /* Free our message list (caller keeps ownership of their originals) */
+        g_list_free_full (ctx.messages, g_object_unref);
+    }
 
     if (ctx.error != NULL)
     {
+        /* Nothing on the error path: a caller who got NULL should not
+         * have to remember to free an out parameter as well, and a
+         * half-finished exchange is not something to graft onto a
+         * conversation that is about to be abandoned anyway. */
+        if (out_new_messages != NULL)
+            g_clear_pointer (out_new_messages, ai_tool_executor__free_messages);
         g_propagate_error (error, ctx.error);
         return NULL;
     }
 
     result = ctx.result;
     return result;
+}
+
+gchar *
+ai_tool_executor_run (
+    AiToolExecutor  *self,
+    AiProvider      *provider,
+    GList           *messages,
+    const gchar     *system_prompt,
+    gint             max_tokens,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    return ai_tool_executor_run_full (self, provider, messages, system_prompt,
+                                      max_tokens, cancellable, NULL, error);
 }
 
 /**
