@@ -1814,6 +1814,12 @@ ai_tool_executor_init (AiToolExecutor *self)
  * ================================================================ */
 
 AiToolExecutor *
+ai_tool_executor_new_empty (void)
+{
+    return g_object_new (AI_TYPE_TOOL_EXECUTOR, NULL);
+}
+
+AiToolExecutor *
 ai_tool_executor_new (void)
 {
     AiToolExecutor *self = g_object_new (AI_TYPE_TOOL_EXECUTOR, NULL);

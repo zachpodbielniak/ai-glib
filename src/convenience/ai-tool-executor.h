@@ -82,6 +82,27 @@ AiToolExecutor *
 ai_tool_executor_new (void);
 
 /**
+ * ai_tool_executor_new_empty:
+ *
+ * Creates an #AiToolExecutor with NO tools at all -- not even the
+ * built-ins.
+ *
+ * Use this whenever the model should be able to do exactly what the host
+ * application registers and nothing else. ai_tool_executor_new() hands the
+ * model `bash`, `read`, `write` and `edit`, which for an agent that lives
+ * inside somebody's accounts, records or infrastructure is a far larger
+ * grant than the host usually intends -- and one that
+ * ai_tool_executor_unregister() cannot take back, since it does not remove
+ * built-ins.
+ *
+ * The registration API is identical; only the starting set differs.
+ *
+ * Returns: (transfer full): a new #AiToolExecutor with no tools
+ */
+AiToolExecutor *
+ai_tool_executor_new_empty (void);
+
+/**
  * ai_tool_executor_set_search_provider:
  * @self: an #AiToolExecutor
  * @provider: an #AiSearchProvider implementation

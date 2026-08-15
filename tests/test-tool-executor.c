@@ -586,6 +586,66 @@ test_executor_run_full_error_clears_out (void)
     g_list_free (messages);
 }
 
+/*
+ * ai_tool_executor_new_empty() must hand the model nothing at all.
+ *
+ * The difference matters more than it looks: the default constructor
+ * includes `bash`, `read`, `write` and `edit`, and unregister() cannot
+ * remove a built-in. An application that wants the model confined to its
+ * own tools has no way to get there except by starting empty, so this test
+ * pins the guarantee it depends on.
+ */
+static void
+test_new_empty_has_no_tools (void)
+{
+    g_autoptr(AiToolExecutor) empty = ai_tool_executor_new_empty ();
+    g_autoptr(AiToolExecutor) full = ai_tool_executor_new ();
+    GList *l;
+
+    g_assert_null (ai_tool_executor_get_tools (empty));
+
+    /* And the default really does carry the dangerous ones, which is why
+     * the empty constructor exists. */
+    g_assert_nonnull (ai_tool_executor_get_tools (full));
+
+    for (l = ai_tool_executor_get_tools (full); l != NULL; l = l->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (AI_TOOL (l->data)), "bash") == 0)
+        {
+            break;
+        }
+    }
+
+    g_assert_nonnull (l);
+}
+
+static gchar *
+stub_callback (AiToolUse    *tool_use,
+               GCancellable *cancellable,
+               GError      **error,
+               gpointer      user_data)
+{
+    return g_strdup ("{}");
+}
+
+/*
+ * Registering onto an empty executor yields exactly one tool: the host's.
+ */
+static void
+test_new_empty_registers_only_host_tools (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new_empty ();
+    g_autoptr(AiTool) tool = ai_tool_new ("app_query", "The app's own tool");
+    GList *tools;
+
+    ai_tool_executor_register_callback (executor, tool, stub_callback, NULL,
+                                        NULL);
+
+    tools = ai_tool_executor_get_tools (executor);
+    g_assert_cmpint ((gint) g_list_length (tools), ==, 1);
+    g_assert_cmpstr (ai_tool_get_name (AI_TOOL (tools->data)), ==, "app_query");
+}
+
 int
 main (
     int   argc,
@@ -617,6 +677,10 @@ main (
                      test_executor_unknown_tool);
     g_test_add_func ("/ai-glib/tool-executor/register-callback",
                      test_executor_register_callback);
+    g_test_add_func ("/ai-glib/tool-executor/new-empty/has-no-tools",
+                     test_new_empty_has_no_tools);
+    g_test_add_func ("/ai-glib/tool-executor/new-empty/only-host-tools",
+                     test_new_empty_registers_only_host_tools);
     g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
                      test_executor_run_full_returns_new_messages);
     g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
