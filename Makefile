@@ -51,6 +51,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
+	$(SRCDIR)/model/ai-image-content.h \
 	$(SRCDIR)/model/ai-tool.h \
 	$(SRCDIR)/model/ai-tool-use.h \
 	$(SRCDIR)/model/ai-tool-result.h \
@@ -103,6 +104,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
+	$(SRCDIR)/model/ai-image-content.c \
 	$(SRCDIR)/model/ai-tool.c \
 	$(SRCDIR)/model/ai-tool-use.c \
 	$(SRCDIR)/model/ai-tool-result.c \

@@ -42,6 +42,7 @@
 #include "model/ai-message.h"
 #include "model/ai-response.h"
 #include "model/ai-image.h"
+#include "model/ai-image-content.h"
 #include "model/ai-image-request.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"

@@ -6,11 +6,13 @@
  */
 
 #include <glib.h>
+#include <string.h>
 #include <json-glib/json-glib.h>
 
 #include "providers/ai-openai-shared.h"
 #include "model/ai-message.h"
 #include "model/ai-text-content.h"
+#include "model/ai-image-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
 #include "core/ai-enums.h"
@@ -283,6 +285,83 @@ test_args_as_object_for_ollama(void)
     g_assert_cmpint(json_object_get_int_member(args, "b"), ==, 7);
 }
 
+/* ================================================================
+ * Vision
+ * ================================================================ */
+
+/*
+ * A user message carrying a screenshot must serialize as a content ARRAY of
+ * parts -- text plus image_url with a data: URL -- not as a plain string.
+ * Serialized as a string, the image silently disappears and the model
+ * answers about a screenshot it was never shown.
+ */
+static void
+test_user_with_image(void)
+{
+    g_autoptr(AiMessage) msg = ai_message_new_user("What is in this ad?");
+    g_autoptr(GBytes) bytes = g_bytes_new_static("\x89PNGfake", 9);
+    g_autoptr(AiImageContent) image = ai_image_content_new_from_bytes(bytes, "image/png");
+    g_autoptr(JsonArray) messages = NULL;
+    GList *list = NULL;
+    JsonObject *user;
+    JsonArray *content;
+    JsonObject *part;
+    const gchar *url;
+
+    ai_message_add_content_block(msg, AI_CONTENT_BLOCK(g_object_ref(image)));
+
+    list = g_list_append(list, msg);
+    messages = serialize_with_flags(list, NULL, AI_OPENAI_SERIALIZE_DEFAULT);
+    g_list_free(list);
+
+    g_assert_cmpint((gint)json_array_get_length(messages), ==, 1);
+
+    user = json_array_get_object_element(messages, 0);
+    g_assert_cmpstr(json_object_get_string_member(user, "role"), ==, "user");
+
+    /* The content is an array, and the text survives beside the image. */
+    content = json_object_get_array_member(user, "content");
+    g_assert_cmpint((gint)json_array_get_length(content), ==, 2);
+
+    part = json_array_get_object_element(content, 0);
+    g_assert_cmpstr(json_object_get_string_member(part, "type"), ==, "text");
+    g_assert_cmpstr(json_object_get_string_member(part, "text"), ==,
+                    "What is in this ad?");
+
+    part = json_array_get_object_element(content, 1);
+    g_assert_cmpstr(json_object_get_string_member(part, "type"), ==, "image_url");
+
+    url = json_object_get_string_member(
+        json_object_get_object_member(part, "image_url"), "url");
+    g_assert_true(g_str_has_prefix(url, "data:image/png;base64,"));
+}
+
+/*
+ * The generic (Anthropic) path spells the same image differently: an image
+ * block with a base64 source. Both providers must be reachable from one
+ * message, since which one is in use is a configuration value.
+ */
+static void
+test_image_block_anthropic_shape(void)
+{
+    g_autoptr(GBytes) bytes = g_bytes_new_static("\x89PNGfake", 9);
+    g_autoptr(AiImageContent) image = ai_image_content_new_from_bytes(bytes, "image/webp");
+    g_autoptr(JsonNode) node = ai_content_block_to_json(AI_CONTENT_BLOCK(image));
+    JsonObject *obj;
+    JsonObject *source;
+
+    g_assert_true(JSON_NODE_HOLDS_OBJECT(node));
+    obj = json_node_get_object(node);
+
+    g_assert_cmpstr(json_object_get_string_member(obj, "type"), ==, "image");
+
+    source = json_object_get_object_member(obj, "source");
+    g_assert_cmpstr(json_object_get_string_member(source, "type"), ==, "base64");
+    g_assert_cmpstr(json_object_get_string_member(source, "media_type"), ==,
+                    "image/webp");
+    g_assert_cmpuint(strlen(json_object_get_string_member(source, "data")), >, 0);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -298,6 +377,9 @@ main(int argc, char *argv[])
                     test_user_with_two_tool_results);
     g_test_add_func("/openai-serialize/mixed-transcript",
                     test_mixed_transcript);
+    g_test_add_func("/openai-serialize/user-with-image", test_user_with_image);
+    g_test_add_func("/openai-serialize/image-block-anthropic-shape",
+                    test_image_block_anthropic_shape);
     g_test_add_func("/openai-serialize/args-as-object-ollama",
                     test_args_as_object_for_ollama);
 

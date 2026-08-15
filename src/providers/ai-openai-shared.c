@@ -13,6 +13,7 @@
 
 #include "core/ai-enums.h"
 #include "model/ai-text-content.h"
+#include "model/ai-image-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
 
@@ -212,6 +213,65 @@ emit_tool_result_message(
     json_builder_end_object(builder);
 }
 
+/*
+ * Emit a user message whose content is an array of parts: the text, then
+ * one image_url part per image. This is how OpenAI-compatible providers --
+ * OpenAI, Grok, and anything else speaking Chat Completions -- accept
+ * vision input, as against Anthropic's image/source/base64 block.
+ *
+ * The images travel as data: URLs rather than links, because the caller's
+ * screenshot is not on the public internet and should not have to be.
+ */
+static void
+emit_multimodal_user_message(
+    JsonBuilder *builder,
+    const gchar *text,
+    GList       *images
+){
+    GList *i;
+
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "role");
+    json_builder_add_string_value(builder, "user");
+
+    json_builder_set_member_name(builder, "content");
+    json_builder_begin_array(builder);
+
+    if (text != NULL && text[0] != '\0')
+    {
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type");
+        json_builder_add_string_value(builder, "text");
+        json_builder_set_member_name(builder, "text");
+        json_builder_add_string_value(builder, text);
+        json_builder_end_object(builder);
+    }
+
+    for (i = images; i != NULL; i = i->next)
+    {
+        g_autofree gchar *url = ai_image_content_to_data_url(AI_IMAGE_CONTENT(i->data));
+
+        if (url == NULL)
+        {
+            continue;
+        }
+
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type");
+        json_builder_add_string_value(builder, "image_url");
+        json_builder_set_member_name(builder, "image_url");
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "url");
+        json_builder_add_string_value(builder, url);
+        json_builder_end_object(builder);
+        json_builder_end_object(builder);
+    }
+
+    json_builder_end_array(builder);
+    json_builder_end_object(builder);
+}
+
 void
 ai_openai_shared_serialize_messages_array(
     JsonBuilder            *builder,
@@ -236,6 +296,7 @@ ai_openai_shared_serialize_messages_array(
         GList *b;
         g_autoptr(GList) tool_uses = NULL;
         g_autoptr(GList) tool_results = NULL;
+        g_autoptr(GList) images = NULL;
         gboolean has_text = FALSE;
         g_autofree gchar *text = NULL;
 
@@ -250,6 +311,10 @@ ai_openai_shared_serialize_messages_array(
             else if (AI_IS_TOOL_USE(block))
             {
                 tool_uses = g_list_append(tool_uses, block);
+            }
+            else if (AI_IS_IMAGE_CONTENT(block))
+            {
+                images = g_list_append(images, block);
             }
             else if (AI_IS_TOOL_RESULT(block))
             {
@@ -276,7 +341,11 @@ ai_openai_shared_serialize_messages_array(
         else
         {
             /* user role */
-            if (text != NULL)
+            if (images != NULL)
+            {
+                emit_multimodal_user_message(builder, text, images);
+            }
+            else if (text != NULL)
             {
                 emit_simple_text_message(builder, "user", text);
             }
@@ -288,7 +357,8 @@ ai_openai_shared_serialize_messages_array(
 
             /* User messages with only tool_uses are nonsensical for OpenAI;
              * skip them silently. */
-            if (text == NULL && tool_results == NULL && tool_uses == NULL)
+            if (text == NULL && tool_results == NULL && tool_uses == NULL &&
+                images == NULL)
             {
                 /* Truly empty user message — emit empty content so the
                  * transcript stays well-formed. */
