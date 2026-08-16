@@ -41,17 +41,24 @@ typedef enum
  * AiCompletionItem:
  * @text: what to put in the buffer, replacing the range
  * @display: what to show in a menu
- * @description: (nullable): a second column --- a summary, or an origin
+ * @description: (nullable): a one-line summary
+ * @origin: (nullable): which harness's directory it came from
  * @kind: which sort of completion this is
  * @is_directory: whether a path candidate names a directory
  *
  * One candidate.
+ *
+ * @origin is separate from @description rather than folded into it
+ * because a menu truncates: with them joined, the one piece that
+ * disambiguates two commands of the same name is the first thing to fall
+ * off the end.
  */
 typedef struct
 {
     gchar            *text;
     gchar            *display;
     gchar            *description;
+    gchar            *origin;
     AiCompletionKind  kind;
     gboolean          is_directory;
 } AiCompletionItem;
@@ -99,6 +106,7 @@ ai_completion_result_get_item_fields(
     const gchar        **out_text,
     const gchar        **out_display,
     const gchar        **out_description,
+    const gchar        **out_origin,
     gboolean            *out_is_directory
 );
 

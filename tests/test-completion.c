@@ -215,9 +215,14 @@ test_command_candidates_carry_their_origin(void)
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 1);
 	item = ai_completion_result_get_item(r, 0);
 
-	/* When two harnesses both define "review", the only useful thing a
-	 * menu can say is which one this is. */
-	g_assert_nonnull(strstr(item->description, "claude"));
+	/*
+	 * The origin is its own field, not appended to the description. When
+	 * two harnesses both define "review" the origin is the only thing
+	 * that tells them apart -- and a menu truncates the description, so
+	 * joining them would drop exactly the useful half.
+	 */
+	g_assert_cmpstr(item->origin, ==, "claude");
+	g_assert_cmpstr(item->description, ==, "A thing");
 	g_assert_cmpint(item->kind, ==, AI_COMPLETION_COMMAND);
 	g_assert_false(item->is_directory);
 }
@@ -542,6 +547,7 @@ test_item_fields_out_parameters(void)
 	const gchar                   *text = NULL;
 	const gchar                   *display = NULL;
 	const gchar                   *description = NULL;
+	const gchar                   *origin = NULL;
 	gboolean                       is_directory = TRUE;
 
 	/*
@@ -550,36 +556,40 @@ test_item_fields_out_parameters(void)
 	 * Emacs path breaks with it.
 	 */
 	g_assert_true(ai_completion_result_get_item_fields(
-		r, 0, &text, &display, &description, &is_directory));
+		r, 0, &text, &display, &description, &origin, &is_directory));
 	g_assert_cmpstr(text, ==, "README.org");
 	g_assert_cmpstr(display, ==, "README.org");
 	g_assert_null(description);
+	g_assert_null(origin);
 	g_assert_false(is_directory);
 
 	/* Out of range leaves the outputs untouched. */
 	text = (const gchar *)0x1;
 	g_assert_false(ai_completion_result_get_item_fields(
-		r, 99, &text, NULL, NULL, NULL));
+		r, 99, &text, NULL, NULL, NULL, NULL));
 	g_assert_true(text == (const gchar *)0x1);
 
 	g_assert_null(ai_completion_result_get_item(r, 99));
 	g_assert_true(ai_completion_result_get_item_fields(r, 0, NULL, NULL,
-	                                                   NULL, NULL));
+	                                                   NULL, NULL, NULL));
 }
 
 static void
 test_item_boxed_type(void)
 {
-	AiCompletionItem  item = { NULL, NULL, NULL, AI_COMPLETION_PATH, TRUE };
+	AiCompletionItem  item = { NULL, NULL, NULL, NULL, AI_COMPLETION_PATH,
+	                           TRUE };
 	AiCompletionItem *copy;
 
 	item.text = g_strdup("a");
 	item.display = g_strdup("b");
 	item.description = g_strdup("c");
+	item.origin = g_strdup("d");
 
 	copy = ai_completion_item_copy(&item);
 	g_assert_cmpstr(copy->text, ==, "a");
 	g_assert_cmpstr(copy->description, ==, "c");
+	g_assert_cmpstr(copy->origin, ==, "d");
 	g_assert_true(copy->is_directory);
 	ai_completion_item_free(copy);
 
@@ -591,6 +601,7 @@ test_item_boxed_type(void)
 	g_free(item.text);
 	g_free(item.display);
 	g_free(item.description);
+	g_free(item.origin);
 }
 
 static void

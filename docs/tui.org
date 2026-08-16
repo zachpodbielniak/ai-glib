@@ -99,6 +99,11 @@ an =@= anywhere lists paths.
 | =Enter=   | Accept the highlighted candidate (it does not send)      |
 | =Escape=  | Dismiss, until the line changes again                    |
 
+Each row is the name in bold, its description dimmed, and the harness it
+came from right-aligned --- the origin has its own column because the
+description is what gets truncated, and the origin is the half that tells
+two same-named commands apart.
+
 =Tab= inserts a single candidate outright. With several it inserts their
 common prefix if that adds anything, and steps the highlight otherwise
 --- so the first =Tab= makes progress and the second is a choice rather

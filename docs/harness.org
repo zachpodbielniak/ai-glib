@@ -402,11 +402,16 @@ Candidates are read through out-parameters:
 const gchar *text = NULL;
 const gchar *display = NULL;
 const gchar *description = NULL;
+const gchar *origin = NULL;
 gboolean is_directory = FALSE;
 
 ai_completion_result_get_item_fields (result, i, &text, &display,
-                                      &description, &is_directory);
+                                      &description, &origin, &is_directory);
 #+end_src
+
+=origin= is separate from =description= rather than folded into it,
+because a menu truncates and the origin is the one piece that tells two
+same-named commands apart. Give it its own column.
 
 for the same reason =ai_rendered_text_get_span()= exists: a plain struct
 behind a pointer does not survive =g-ir-scanner= usefully, and this API
@@ -517,11 +522,12 @@ below goes through GObject Introspection; nothing is C-only.
           ;; Out-parameters, because a struct behind a pointer does not
           ;; survive introspection. Bindings get (ok text display
           ;; description is-directory).
-          (pcase-let ((`(,_ok ,text ,display ,description ,dir-p)
+          (pcase-let ((`(,_ok ,text ,display ,description ,origin ,dir-p)
                        (gir-call result "get_item_fields" i)))
             (push (propertize text
                               :display display
                               :annotation description
+                              :origin origin
                               :directory dir-p)
                   items)))
         (list (byte-to-position (1+ start))

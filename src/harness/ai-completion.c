@@ -35,6 +35,7 @@ completion_item_new(
     const gchar      *text,
     const gchar      *display,
     const gchar      *description,
+    const gchar      *origin,
     AiCompletionKind  kind,
     gboolean          is_directory
 ){
@@ -43,6 +44,7 @@ completion_item_new(
     self->text = g_strdup(text);
     self->display = g_strdup(display != NULL ? display : text);
     self->description = g_strdup(description);
+    self->origin = g_strdup(origin);
     self->kind = kind;
     self->is_directory = is_directory;
 
@@ -64,7 +66,7 @@ ai_completion_item_copy(const AiCompletionItem *self)
     }
 
     return completion_item_new(self->text, self->display, self->description,
-                               self->kind, self->is_directory);
+                               self->origin, self->kind, self->is_directory);
 }
 
 /**
@@ -84,6 +86,7 @@ ai_completion_item_free(AiCompletionItem *self)
     g_free(self->text);
     g_free(self->display);
     g_free(self->description);
+    g_free(self->origin);
     g_slice_free(AiCompletionItem, self);
 }
 
@@ -217,8 +220,10 @@ ai_completion_result_get_item(
  * @index: which candidate
  * @out_text: (out) (optional) (transfer none): what to insert
  * @out_display: (out) (optional) (transfer none): what to show
- * @out_description: (out) (optional) (transfer none) (nullable): the
- *   second column
+ * @out_description: (out) (optional) (transfer none) (nullable): a
+ *   one-line summary
+ * @out_origin: (out) (optional) (transfer none) (nullable): which
+ *   harness's directory it came from
  * @out_is_directory: (out) (optional): whether it names a directory
  *
  * Reads one candidate through out-parameters.
@@ -237,6 +242,7 @@ ai_completion_result_get_item_fields(
     const gchar        **out_text,
     const gchar        **out_display,
     const gchar        **out_description,
+    const gchar        **out_origin,
     gboolean            *out_is_directory
 ){
     const AiCompletionItem *item;
@@ -263,6 +269,11 @@ ai_completion_result_get_item_fields(
     if (out_description != NULL)
     {
         *out_description = item->description;
+    }
+
+    if (out_origin != NULL)
+    {
+        *out_origin = item->origin;
     }
 
     if (out_is_directory != NULL)
@@ -638,7 +649,6 @@ complete_commands(
     {
         AiCommand   *command = iter->data;
         const gchar *name = ai_command_get_name(command);
-        g_autofree gchar *description = NULL;
 
         if (name == NULL || !g_str_has_prefix(name, fragment))
         {
@@ -650,26 +660,12 @@ complete_commands(
             break;
         }
 
-        /*
-         * The origin is part of the description, not a separate field a
-         * frontend has to know about: when two harnesses both define
-         * "review", the only useful thing a menu can say is which one
-         * this is.
-         */
-        if (ai_command_get_description(command) != NULL)
-        {
-            description = g_strdup_printf("%s  (%s)",
-                                          ai_command_get_description(command),
-                                          ai_command_get_origin(command));
-        }
-        else
-        {
-            description = g_strdup(ai_command_get_origin(command));
-        }
-
-        g_ptr_array_add(result->items,
-                        completion_item_new(name, name, description,
-                                            AI_COMPLETION_COMMAND, FALSE));
+        g_ptr_array_add(
+            result->items,
+            completion_item_new(name, name,
+                                ai_command_get_description(command),
+                                ai_command_get_origin(command),
+                                AI_COMPLETION_COMMAND, FALSE));
     }
 
     g_list_free_full(commands, g_object_unref);
@@ -754,7 +750,7 @@ complete_paths(
                                is_dir ? "/" : "");
 
         g_ptr_array_add(result->items,
-                        completion_item_new(text, entry, NULL,
+                        completion_item_new(text, entry, NULL, NULL,
                                             AI_COMPLETION_PATH, is_dir));
 
         if (result->items->len >= self->max_items)

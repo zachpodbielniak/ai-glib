@@ -40,6 +40,7 @@ gboolean ai_completion_result_get_item_fields (AiCompletionResult *self,
                                                const gchar **out_text,
                                                const gchar **out_display,
                                                const gchar **out_description,
+                                               const gchar **out_origin,
                                                gboolean *out_is_directory);
 
 /* The longest prefix every candidate shares, never splitting a UTF-8
@@ -70,6 +71,11 @@ layer]].
   into them.
 - Hidden entries appear only once the fragment starts with a dot; =.git=,
   =node_modules= and friends never appear.
+
+** The origin is its own field
+Not appended to the description, because a menu truncates --- and with the
+two joined, the one piece that tells two same-named commands apart is the
+first thing to fall off the end. Give it its own column.
 
 ** Why out-parameters
 =ai_completion_result_get_item_fields()= exists for the same reason

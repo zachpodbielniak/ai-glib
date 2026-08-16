@@ -101,6 +101,7 @@ show_completion(
     {
         const gchar *text = NULL;
         const gchar *description = NULL;
+        const gchar *origin = NULL;
         gboolean     is_directory = FALSE;
 
         /*
@@ -109,10 +110,13 @@ show_completion(
          * path an Emacs frontend takes.
          */
         ai_completion_result_get_item_fields(result, i, &text, NULL,
-                                             &description, &is_directory);
+                                             &description, &origin,
+                                             &is_directory);
 
-        g_print("    %-40s %s%s\n", text, is_directory ? "(dir) " : "",
-                description != NULL ? description : "");
+        g_print("    %-40s %s%s%s%s\n", text, is_directory ? "(dir) " : "",
+                description != NULL ? description : "",
+                origin != NULL ? "  " : "",
+                origin != NULL ? origin : "");
     }
 }
 

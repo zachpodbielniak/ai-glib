@@ -309,10 +309,12 @@ def main():
         assert result.get_end() == 4
         assert result.get_n_items() == 1
 
-        ok, text, display, description, is_dir = result.get_item_fields(0)
+        ok, text, display, description, origin, is_dir = \
+            result.get_item_fields(0)
         assert ok is True
         assert text == "hello.c"
         assert is_dir is False
+        assert origin is None
 
         result = ctx.query("/dep", 4)
         assert result.get_kind() == AiGlib.CompletionKind.COMMAND

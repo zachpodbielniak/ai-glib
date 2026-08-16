@@ -204,6 +204,9 @@ attr_for_tag(AiStyleTag tag)
  */
 #define ESCAPE_SETTLE_MS (30)
 
+/* How many candidates the menu shows at once. */
+#define MENU_MAX_ROWS (10)
+
 /* ================================================================
  * The application
  * ================================================================ */
@@ -1536,7 +1539,7 @@ completion_accept(App *app)
 
     if (!ai_completion_result_get_item_fields(app->candidates,
                                               app->candidate_index, &text,
-                                              NULL, NULL, NULL))
+                                              NULL, NULL, NULL, NULL))
     {
         completion_close(app);
         return;
@@ -1554,7 +1557,60 @@ completion_accept(App *app)
     completion_close(app);
 }
 
-/* Draw the popup over the bottom of the transcript. */
+/*
+ * Truncate to @columns terminal columns, with an ellipsis if it did not
+ * fit. Returns a new string.
+ */
+static gchar *
+fit_to_width(const gchar *text, gint columns)
+{
+    const gchar *p;
+    gint         used = 0;
+
+    if (text == NULL)
+    {
+        return g_strdup("");
+    }
+
+    if (columns <= 1)
+    {
+        return g_strdup("");
+    }
+
+    if ((gint)ai_style_text_width(text) <= columns)
+    {
+        return g_strdup(text);
+    }
+
+    /* It does not fit, so one column goes to the ellipsis. Deciding that
+     * up front is what stops a name that fits exactly from losing its
+     * last character to a truncation that was not needed. */
+    for (p = text; *p != '\0'; p = g_utf8_next_char(p))
+    {
+        gint w = g_unichar_iswide(g_utf8_get_char(p)) ? 2 : 1;
+
+        if (used + w > columns - 1)
+        {
+            g_autofree gchar *head = g_strndup(text, (gsize)(p - text));
+
+            return g_strdup_printf("%s…", head);
+        }
+
+        used += w;
+    }
+
+    return g_strdup(text);
+}
+
+/*
+ * Draw the completion menu over the bottom of the transcript.
+ *
+ * Contrast is the whole job here. The first version drew both columns in
+ * the same dim blue, which on a dark theme was legible only if you
+ * already knew what it said. Now the name carries the weight, the
+ * description is the one that recedes, and the row under the cursor is
+ * reversed --- three levels, so the eye lands on the name first.
+ */
 static void
 draw_completion(App *app)
 {
@@ -1563,6 +1619,8 @@ draw_completion(App *app)
     gint  width;
     gint  rows;
     gint  first;
+    gint  name_column;
+    gint  origin_width;
     gint  i;
 
     if (app->candidates == NULL)
@@ -1578,34 +1636,121 @@ draw_completion(App *app)
     }
 
     getmaxyx(app->transcript_win, height, width);
-    rows = MIN((gint)n, MIN(10, height));
+
+    /* One line goes to the rule, which is what separates the menu from
+     * the conversation behind it. */
+    rows = MIN((gint)n, MIN(MENU_MAX_ROWS, height - 1));
+
+    if (rows < 1)
+    {
+        return;
+    }
 
     /* Keep the highlighted entry on screen when the list is long. */
     first = MAX(0, (gint)app->candidate_index - rows + 1);
+    first = MIN(first, MAX(0, (gint)n - rows));
+
+    /* Size the name column to what is actually showing, so short names do
+     * not push the descriptions half a screen away. */
+    name_column = 0;
+    origin_width = 0;
+
+    for (i = 0; i < rows; i++)
+    {
+        const gchar *display = NULL;
+        const gchar *origin = NULL;
+
+        if (ai_completion_result_get_item_fields(app->candidates,
+                                                 (guint)(first + i), NULL,
+                                                 &display, NULL, &origin,
+                                                 NULL))
+        {
+            name_column = MAX(name_column, (gint)ai_style_text_width(display));
+
+            if (origin != NULL)
+            {
+                origin_width = MAX(origin_width,
+                                   (gint)ai_style_text_width(origin));
+            }
+        }
+    }
+
+    name_column = CLAMP(name_column + 3, 12, MAX(12, width / 2));
+
+    /* The origin gets its own right-hand column rather than trailing the
+     * description, because the description is what gets truncated --- and
+     * the origin is the one piece that tells two same-named commands
+     * apart. */
+    origin_width = (origin_width > 0) ? origin_width + 3 : 0;
+
+    /* The rule, with a count when there is more than fits. */
+    {
+        gint y = height - rows - 1;
+
+        wattrset(app->transcript_win, A_DIM);
+        mvwhline(app->transcript_win, y, 0, ACS_HLINE, width);
+
+        if ((gint)n > rows)
+        {
+            g_autofree gchar *count =
+                g_strdup_printf(" %u/%u ", app->candidate_index + 1, n);
+            gint              at = MAX(0, width - (gint)strlen(count) - 2);
+
+            mvwaddstr(app->transcript_win, y, at, count);
+        }
+    }
 
     for (i = 0; i < rows; i++)
     {
         const gchar *display = NULL;
         const gchar *description = NULL;
+        const gchar *origin = NULL;
         guint        index = (guint)(first + i);
         gboolean     selected = (index == app->candidate_index);
         gint         y = height - rows + i;
+        gint         text_room = width - name_column - origin_width - 2;
+        g_autofree gchar *name = NULL;
 
         if (!ai_completion_result_get_item_fields(app->candidates, index,
                                                   NULL, &display,
-                                                  &description, NULL))
+                                                  &description, &origin,
+                                                  NULL))
         {
             break;
         }
 
-        wattrset(app->transcript_win,
-                 selected ? A_REVERSE : attr_for_tag(AI_STYLE_DIM));
+        /* Fill first, so the row is a band rather than text floating over
+         * whatever the transcript had there. */
+        wattrset(app->transcript_win, selected ? A_REVERSE : A_NORMAL);
         mvwhline(app->transcript_win, y, 0, ' ', width);
-        mvwaddnstr(app->transcript_win, y, 1, display, width - 2);
 
-        if (description != NULL && width > 40)
+        name = fit_to_width(display, name_column - 3);
+        wattrset(app->transcript_win, selected ? A_REVERSE : A_BOLD);
+        mvwaddstr(app->transcript_win, y, 2, name);
+
+        if (description != NULL && description[0] != '\0' && text_room > 8)
         {
-            mvwaddnstr(app->transcript_win, y, 32, description, width - 33);
+            g_autofree gchar *summary =
+                fit_to_width(description, text_room);
+
+            /*
+             * Plain A_DIM, not the DIM style tag: that one is blue, which
+             * is what made the first version of this menu unreadable on a
+             * dark theme. And a reversed row keeps one attribute
+             * throughout --- A_DIM inside a highlight reads as a
+             * rendering fault, not as a hierarchy.
+             */
+            wattrset(app->transcript_win, selected ? A_REVERSE : A_DIM);
+            mvwaddstr(app->transcript_win, y, name_column, summary);
+        }
+
+        if (origin != NULL && origin[0] != '\0' && origin_width > 0 &&
+            width > name_column + origin_width)
+        {
+            gint at = width - (gint)ai_style_text_width(origin) - 2;
+
+            wattrset(app->transcript_win, selected ? A_REVERSE : A_DIM);
+            mvwaddstr(app->transcript_win, y, at, origin);
         }
     }
 
