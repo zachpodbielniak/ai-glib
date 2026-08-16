@@ -384,39 +384,6 @@ emit_execution_args(AiGrokBuildClient *self, GPtrArray *args)
 }
 
 /*
- * Spawn with the client's working directory applied.
- *
- * This client builds and spawns its own argv on the async and streaming
- * paths, so it must honour working-directory itself; the inherited
- * ai_cli_client_chat_sync() does the same for the synchronous path. Every
- * spawn in this file goes through here so the directory that bounds what
- * the CLI can reach is never quietly dropped.
- */
-static GSubprocess *
-grok_build_spawn(
-    AiGrokBuildClient   *self,
-    const gchar * const *argv,
-    GSubprocessFlags     flags,
-    GError             **error
-){
-    const gchar *cwd;
-
-    cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
-
-    if (cwd != NULL && cwd[0] != '\0')
-    {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_set_cwd(launcher, cwd);
-
-        return g_subprocess_launcher_spawnv(launcher, argv, error);
-    }
-
-    return g_subprocess_newv(argv, flags, error);
-}
-
-/*
  * Get the executable path for the grok CLI.
  * Checks the GROK_PATH environment variable first, then falls back to
  * searching PATH for "grok".
@@ -1555,8 +1522,8 @@ attempt_text_retry(
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);
 
-    rproc = grok_build_spawn(
-        client,
+    rproc = ai_cli_client_spawn(
+        AI_CLI_CLIENT(client),
         (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
@@ -1741,8 +1708,9 @@ ai_grok_build_client_chat_async(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = grok_build_spawn(self, (const gchar * const *)argv,
-                                  flags, &error);
+    subprocess = ai_cli_client_spawn(AI_CLI_CLIENT(self),
+                                     (const gchar * const *)argv,
+                                     flags, &error);
     if (subprocess == NULL)
     {
         g_free(stdin_data);
@@ -1823,203 +1791,12 @@ ai_grok_build_client_provider_init(AiProviderInterface *iface)
 
 /*
  * AiStreamable interface implementation
+ *
+ * The read loop lives in AiCliClient. All this client contributes is the
+ * translation from its wire format into events -- the parse_stream_events
+ * vfunc above. Spawning, line reading, signal emission, the deadline and
+ * the response assembly are shared with every other CLI wrapper.
  */
-
-typedef struct
-{
-    AiGrokBuildClient *client;
-    GTask             *task;
-    GSubprocess       *subprocess;
-    GDataInputStream  *data_stream;
-    GCancellable      *cancellable;
-    AiResponse        *response;
-    GString           *accumulated_text;
-    gboolean           stream_started;
-    gchar             *stdin_data;
-} StreamAsyncData;
-
-static void
-stream_async_data_free(StreamAsyncData *data)
-{
-    g_clear_object(&data->task);
-    g_clear_object(&data->client);
-    g_clear_object(&data->subprocess);
-    g_clear_object(&data->data_stream);
-    g_clear_object(&data->cancellable);
-    g_clear_object(&data->response);
-    g_clear_pointer(&data->stdin_data, g_free);
-
-    if (data->accumulated_text != NULL)
-    {
-        g_string_free(data->accumulated_text, TRUE);
-    }
-
-    g_slice_free(StreamAsyncData, data);
-}
-
-static void read_next_stream_line(StreamAsyncData *data);
-
-static void
-on_stream_line_read(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = NULL;
-    g_autofree gchar *delta_text = NULL;
-    AiCliClientClass *klass;
-    gsize length;
-
-    (void)source;
-
-    line = g_data_input_stream_read_line_finish(data->data_stream, result,
-                                                &length, &error);
-
-    if (error != NULL)
-    {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-        }
-        return;
-    }
-
-    if (line == NULL)
-    {
-        /* EOF — the stream is complete */
-        if (data->response != NULL)
-        {
-            /* Add accumulated text as a content block if not already done */
-            if (data->accumulated_text != NULL &&
-                data->accumulated_text->len > 0 &&
-                ai_response_get_content_blocks(data->response) == NULL)
-            {
-                g_autoptr(AiTextContent) content =
-                    ai_text_content_new(data->accumulated_text->str);
-                ai_response_add_content_block(data->response,
-                    (AiContentBlock *)g_steal_pointer(&content));
-            }
-
-            g_signal_emit_by_name(data->client, "stream-end", data->response);
-            g_task_return_pointer(data->task, g_object_ref(data->response),
-                                  g_object_unref);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR,
-                                    AI_ERROR_INVALID_RESPONSE,
-                                    "Stream ended without a valid response");
-        }
-
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Parse the line */
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    if (klass->parse_stream_line(AI_CLI_CLIENT(data->client), line,
-                                 data->response, &delta_text, &error))
-    {
-        if (delta_text != NULL && delta_text[0] != '\0')
-        {
-            /* Emit stream-start on the first delta */
-            if (!data->stream_started)
-            {
-                data->stream_started = TRUE;
-                g_signal_emit_by_name(data->client, "stream-start");
-            }
-
-            /* Accumulate text */
-            g_string_append(data->accumulated_text, delta_text);
-
-            /* Emit delta signal */
-            g_signal_emit_by_name(data->client, "delta", delta_text);
-        }
-    }
-    else if (error != NULL)
-    {
-        /*
-         * The CLI reported an error mid-stream. Fail the operation rather
-         * than returning the empty response EOF would otherwise produce.
-         */
-        g_task_return_error(data->task, g_steal_pointer(&error));
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Read the next line */
-    read_next_stream_line(data);
-}
-
-static void
-read_next_stream_line(StreamAsyncData *data)
-{
-    g_data_input_stream_read_line_async(
-        data->data_stream,
-        G_PRIORITY_DEFAULT,
-        data->cancellable,
-        on_stream_line_read,
-        data);
-}
-
-static void
-start_stream_reader(StreamAsyncData *data)
-{
-    g_autoptr(GError) error = NULL;
-    GInputStream *stdout_stream;
-    GOutputStream *stdin_stream;
-
-    /*
-     * Write the prompt into the subprocess, then close the stdin pipe:
-     * grok is reading it back through --prompt-file /dev/stdin and needs
-     * the EOF to know the prompt is complete.
-     */
-    if (data->stdin_data != NULL)
-    {
-        stdin_stream = g_subprocess_get_stdin_pipe(data->subprocess);
-        if (stdin_stream != NULL)
-        {
-            g_output_stream_write_all(stdin_stream,
-                                      data->stdin_data,
-                                      strlen(data->stdin_data),
-                                      NULL, NULL, &error);
-            g_output_stream_close(stdin_stream, NULL, NULL);
-        }
-
-        if (error != NULL)
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-            return;
-        }
-    }
-
-    /* Get the stdout pipe */
-    stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
-    if (stdout_stream == NULL)
-    {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "Failed to get subprocess stdout");
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Wrap in a data input stream for line-by-line reading */
-    data->data_stream = g_data_input_stream_new(stdout_stream);
-    g_data_input_stream_set_newline_type(data->data_stream,
-                                         G_DATA_STREAM_NEWLINE_TYPE_ANY);
-
-    /* Create the response object */
-    data->response = ai_response_new("",
-        ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
-    data->accumulated_text = g_string_new("");
-
-    /* Start reading lines */
-    read_next_stream_line(data);
-}
 
 static void
 ai_grok_build_client_chat_stream_async(
@@ -2032,79 +1809,11 @@ ai_grok_build_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    AiGrokBuildClient *self = AI_GROK_BUILD_CLIENT(streamable);
-    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *executable = NULL;
-    g_auto(GStrv) argv = NULL;
-    gchar *stdin_data = NULL;
-    g_autoptr(GSubprocess) subprocess = NULL;
-    StreamAsyncData *data;
-    GTask *task;
-    GSubprocessFlags flags;
-
     (void)tools;  /* Tools not yet supported via CLI */
 
-    task = g_task_new(self, cancellable, callback, user_data);
-
-    /* Resolve executable path */
-    executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
-    if (executable == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build command line arguments for streaming */
-    argv = klass->build_argv(AI_CLI_CLIENT(self), messages, system_prompt,
-                             max_tokens, TRUE);
-    if (argv == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build command line arguments");
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build stdin data if the subclass provides it */
-    if (klass->build_stdin != NULL)
-    {
-        stdin_data = klass->build_stdin(AI_CLI_CLIENT(self), messages);
-    }
-
-    /* Replace the placeholder with the resolved executable path */
-    g_free(argv[0]);
-    argv[0] = g_steal_pointer(&executable);
-
-    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
-    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
-    if (stdin_data != NULL)
-    {
-        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
-    }
-
-    subprocess = grok_build_spawn(self, (const gchar * const *)argv,
-                                  flags, &error);
-    if (subprocess == NULL)
-    {
-        g_free(stdin_data);
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Set up callback data */
-    data = g_slice_new0(StreamAsyncData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->subprocess = g_object_ref(subprocess);
-    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
-    data->stream_started = FALSE;
-    data->stdin_data = stdin_data;  /* ownership transferred */
-
-    /* Write stdin and start reading stdout */
-    start_stream_reader(data);
+    ai_cli_client_stream_run_async(AI_CLI_CLIENT(streamable), messages,
+                                   system_prompt, max_tokens,
+                                   cancellable, callback, user_data);
 }
 
 static AiResponse *
@@ -2113,8 +1822,8 @@ ai_grok_build_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)streamable;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    return ai_cli_client_stream_run_finish(AI_CLI_CLIENT(streamable),
+                                           result, error);
 }
 
 static void

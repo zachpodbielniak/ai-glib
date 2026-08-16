@@ -222,12 +222,13 @@ ai_opencode_client_set_property(
  */
 static GSubprocess *
 ai_opencode_client_spawn(
-    AiOpenCodeClient       *self,
+    AiCliClient            *client,
     const gchar *const     *argv,
     GSubprocessFlags        flags,
     GError                **error
 ){
-    const gchar *cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
+    const gchar *cwd = ai_cli_client_get_working_directory(client);
 
     if (self->skip_permissions || (cwd != NULL && cwd[0] != '\0'))
     {
@@ -978,6 +979,12 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;
     cli_class->parse_stream_line = ai_opencode_client_parse_stream_line;
 
+    /*
+     * opencode is the one wrapper that needs more than a working directory
+     * from the launcher, so it is the one that overrides spawn.
+     */
+    cli_class->spawn = ai_opencode_client_spawn;
+
     /**
      * AiOpenCodeClient:skip-permissions:
      *
@@ -1346,8 +1353,8 @@ attempt_text_retry(
     emit_execution_args(client, rargs);
     g_ptr_array_add(rargs, NULL);
 
-    rproc = ai_opencode_client_spawn(
-        client, (const gchar *const *)rargs->pdata,
+    rproc = ai_cli_client_spawn(
+        AI_CLI_CLIENT(client), (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
         G_SUBPROCESS_FLAGS_STDERR_PIPE,
@@ -1533,8 +1540,8 @@ ai_opencode_client_chat_async(
     stdin_buf = klass->build_stdin(AI_CLI_CLIENT(self), messages);
 
     /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
-    subprocess = ai_opencode_client_spawn(
-        self, (const gchar *const *)argv,
+    subprocess = ai_cli_client_spawn(
+        AI_CLI_CLIENT(self), (const gchar *const *)argv,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
         G_SUBPROCESS_FLAGS_STDERR_PIPE,
@@ -1630,162 +1637,12 @@ ai_opencode_client_provider_init(AiProviderInterface *iface)
 
 /*
  * AiStreamable interface implementation
+ *
+ * The read loop lives in AiCliClient. All this client contributes is the
+ * translation from its wire format into events -- the parse_stream_events
+ * vfunc above. Spawning, line reading, signal emission, the deadline and
+ * the response assembly are shared with every other CLI wrapper.
  */
-
-typedef struct
-{
-    AiOpenCodeClient *client;
-    GTask            *task;
-    GSubprocess      *subprocess;
-    GDataInputStream *data_stream;
-    GCancellable     *cancellable;
-    AiResponse       *response;
-    GString          *accumulated_text;
-    gboolean          stream_started;
-} StreamAsyncData;
-
-static void
-stream_async_data_free(StreamAsyncData *data)
-{
-    g_clear_object(&data->client);
-    g_clear_object(&data->subprocess);
-    g_clear_object(&data->data_stream);
-    g_clear_object(&data->cancellable);
-    g_clear_object(&data->response);
-
-    if (data->accumulated_text != NULL)
-    {
-        g_string_free(data->accumulated_text, TRUE);
-    }
-
-    g_slice_free(StreamAsyncData, data);
-}
-
-static void read_next_stream_line(StreamAsyncData *data);
-
-static void
-on_stream_line_read(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = NULL;
-    g_autofree gchar *delta_text = NULL;
-    AiCliClientClass *klass;
-    gsize length;
-
-    (void)source;
-
-    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
-
-    if (error != NULL)
-    {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-        }
-        return;
-    }
-
-    if (line == NULL)
-    {
-        /* EOF - stream is complete */
-        if (data->response != NULL)
-        {
-            /* Add accumulated text as content block if not already done */
-            if (data->accumulated_text != NULL && data->accumulated_text->len > 0 &&
-                ai_response_get_content_blocks(data->response) == NULL)
-            {
-                g_autoptr(AiTextContent) content = ai_text_content_new(data->accumulated_text->str);
-                ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
-            }
-
-            g_signal_emit_by_name(data->client, "stream-end", data->response);
-            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                                    "Stream ended without a valid response");
-        }
-
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Parse the line */
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    if (klass->parse_stream_line(AI_CLI_CLIENT(data->client), line, data->response,
-                                  &delta_text, &error))
-    {
-        if (delta_text != NULL && delta_text[0] != '\0')
-        {
-            /* Emit stream-start on first delta */
-            if (!data->stream_started)
-            {
-                data->stream_started = TRUE;
-                g_signal_emit_by_name(data->client, "stream-start");
-            }
-
-            /* Accumulate text */
-            g_string_append(data->accumulated_text, delta_text);
-
-            /* Emit delta signal */
-            g_signal_emit_by_name(data->client, "delta", delta_text);
-        }
-    }
-
-    /* Read next line */
-    read_next_stream_line(data);
-}
-
-static void
-read_next_stream_line(StreamAsyncData *data)
-{
-    g_data_input_stream_read_line_async(
-        data->data_stream,
-        G_PRIORITY_DEFAULT,
-        data->cancellable,
-        on_stream_line_read,
-        data);
-}
-
-static void
-on_stream_subprocess_started(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    GInputStream *stdout_stream;
-
-    (void)source;
-    (void)result;
-
-    /* Get stdout pipe */
-    stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
-    if (stdout_stream == NULL)
-    {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "Failed to get subprocess stdout");
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Wrap in data input stream for line-by-line reading */
-    data->data_stream = g_data_input_stream_new(stdout_stream);
-    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
-
-    /* Create response object */
-    data->response = ai_response_new("", ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
-    data->accumulated_text = g_string_new("");
-
-    /* Start reading lines */
-    read_next_stream_line(data);
-}
 
 static void
 ai_opencode_client_chat_stream_async(
@@ -1798,82 +1655,11 @@ ai_opencode_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(streamable);
-    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *executable = NULL;
-    g_auto(GStrv) argv = NULL;
-    g_autoptr(GSubprocess) subprocess = NULL;
-    StreamAsyncData *data;
-    GTask *task;
-
     (void)tools;  /* Tools not yet supported via CLI */
 
-    task = g_task_new(self, cancellable, callback, user_data);
-
-    /* Resolve executable path */
-    executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
-    if (executable == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build command line arguments for streaming */
-    argv = klass->build_argv(AI_CLI_CLIENT(self), messages, system_prompt,
-                             max_tokens, TRUE);
-    if (argv == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build command line arguments");
-        g_object_unref(task);
-        return;
-    }
-
-    /* Replace first element with resolved executable path */
-    g_free(argv[0]);
-    argv[0] = g_steal_pointer(&executable);
-
-    /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
-    subprocess = ai_opencode_client_spawn(
-        self, (const gchar *const *)argv,
-        G_SUBPROCESS_FLAGS_STDIN_PIPE |
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-        G_SUBPROCESS_FLAGS_STDERR_PIPE,
-        &error);
-    if (subprocess == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Write the prompt to stdin and close it so opencode can start */
-    {
-        g_autofree gchar *stdin_buf =
-            klass->build_stdin(AI_CLI_CLIENT(self), messages);
-        GOutputStream *stdin_pipe = g_subprocess_get_stdin_pipe(subprocess);
-
-        if (stdin_buf != NULL && stdin_pipe != NULL)
-        {
-            g_output_stream_write_all(stdin_pipe, stdin_buf, strlen(stdin_buf),
-                                      NULL, NULL, NULL);
-        }
-        if (stdin_pipe != NULL)
-            g_output_stream_close(stdin_pipe, NULL, NULL);
-    }
-
-    /* Set up callback data */
-    data = g_slice_new0(StreamAsyncData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->subprocess = g_object_ref(subprocess);
-    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
-    data->stream_started = FALSE;
-
-    /* Use idle to start reading (subprocess is already running) */
-    on_stream_subprocess_started(NULL, NULL, data);
+    ai_cli_client_stream_run_async(AI_CLI_CLIENT(streamable), messages,
+                                   system_prompt, max_tokens,
+                                   cancellable, callback, user_data);
 }
 
 static AiResponse *
@@ -1882,8 +1668,8 @@ ai_opencode_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)streamable;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    return ai_cli_client_stream_run_finish(AI_CLI_CLIENT(streamable),
+                                           result, error);
 }
 
 static void

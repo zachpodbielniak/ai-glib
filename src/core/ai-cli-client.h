@@ -38,6 +38,10 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  * @parse_stream_line: parses a single NDJSON line from streaming output
  * @build_stdin: builds the stdin data to pipe to the CLI subprocess,
  *   or returns %NULL if the prompt is passed via argv instead
+ * @chat_sync: full override of the argv/spawn/parse pipeline
+ * @parse_stream_events: parses a single NDJSON line into #AiEvent values
+ * @spawn: launches the CLI, so a subclass can add environment or other
+ *   launcher setup
  * @_reserved: reserved for future expansion
  *
  * Class structure for #AiCliClient.
@@ -78,8 +82,32 @@ struct _AiCliClientClass
                                          GCancellable   *cancellable,
                                          GError        **error);
 
+    /*
+     * The richer successor to parse_stream_line: appends zero or more
+     * #AiEvent values to @out_events instead of returning one delta string.
+     *
+     * A subclass that leaves this NULL still works -- the default
+     * implementation calls parse_stream_line and wraps its delta in an
+     * %AI_EVENT_TEXT_DELTA -- but it will only ever report text, which is
+     * how every CLI wrapper behaved before this existed.
+     */
+    gboolean     (*parse_stream_events) (AiCliClient    *self,
+                                         const gchar    *line,
+                                         AiResponse     *response,
+                                         GPtrArray      *out_events,
+                                         GError        **error);
+
+    /*
+     * Launches the CLI. The default honours "working-directory"; override
+     * only to add something else, as opencode does for OPENCODE_PERMISSION.
+     */
+    GSubprocess * (*spawn)              (AiCliClient          *self,
+                                         const gchar * const  *argv,
+                                         GSubprocessFlags      flags,
+                                         GError              **error);
+
     /* Reserved for future expansion */
-    gpointer _reserved[6];
+    gpointer _reserved[4];
 };
 
 AiConfig *
@@ -185,6 +213,32 @@ ai_cli_client_format_exit_error(
     gint         exit_status,
     const gchar *stderr_data,
     const gchar *stdout_data
+);
+
+GSubprocess *
+ai_cli_client_spawn(
+    AiCliClient          *self,
+    const gchar * const  *argv,
+    GSubprocessFlags      flags,
+    GError              **error
+);
+
+void
+ai_cli_client_stream_run_async(
+    AiCliClient         *self,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
+AiResponse *
+ai_cli_client_stream_run_finish(
+    AiCliClient   *self,
+    GAsyncResult  *result,
+    GError       **error
 );
 
 G_END_DECLS
