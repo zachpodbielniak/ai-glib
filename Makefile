@@ -88,6 +88,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/convenience/ai-brave-search.h \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.h \
 	$(SRCDIR)/convenience/ai-tool-executor.h \
+	$(SRCDIR)/convenience/ai-provider-factory.h \
 	$(SRCDIR)/agent/ai-agent-enums.h \
 	$(SRCDIR)/agent/ai-budget.h \
 	$(SRCDIR)/agent/ai-price-table.h \
@@ -156,6 +157,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/convenience/ai-brave-search.c \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.c \
 	$(SRCDIR)/convenience/ai-tool-executor.c \
+	$(SRCDIR)/convenience/ai-provider-factory.c \
 	$(SRCDIR)/agent/ai-agent-enums.c \
 	$(SRCDIR)/agent/ai-budget.c \
 	$(SRCDIR)/agent/ai-price-table.c \
@@ -180,7 +182,19 @@ EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(OUTDIR)/examples/%,$(EXAMPLE_S
 
 # Installable CLI binaries (e.g. the `ai` front-end)
 BIN_SOURCES = $(wildcard $(BINDIR)/*.c)
+
+# ai-tui needs ncursesw; without it, drop it rather than fail the build.
+ifneq ($(HAVE_NCURSES),1)
+BIN_SOURCES := $(filter-out $(BINDIR)/ai-tui.c,$(BIN_SOURCES))
+$(info Note: ncursesw not found, skipping ai-tui. Install ncurses-devel to build it.)
+endif
+
 BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
+
+# Target-specific, so only the one binary that needs a terminal library
+# links against one.
+$(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
+$(OUTDIR)/bin/ai-tui: LDFLAGS += $(NCURSES_LIBS)
 
 # Include common rules
 include rules.mk

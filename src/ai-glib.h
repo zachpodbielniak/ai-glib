@@ -81,6 +81,7 @@
 #include "convenience/ai-brave-search.h"
 #include "convenience/ai-duckduckgo-search.h"
 #include "convenience/ai-tool-executor.h"
+#include "convenience/ai-provider-factory.h"
 
 /* Agent orchestration */
 #include "agent/ai-agent-enums.h"

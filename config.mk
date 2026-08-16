@@ -36,6 +36,22 @@ PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS))
 # yaml-glib's build splits output by type (build/release/, build/debug/)
 # and ships the archive with an API-version suffix. We pin to release
 # since this static lib is only used at compile-time.
+# ncursesw, for the `ai-tui` front-end only.
+#
+# Optional on purpose: the library itself has no terminal dependency, and a
+# machine without ncurses should still build everything else. When it is
+# missing, ai-tui is dropped from the binaries with a notice rather than
+# failing the build.
+NCURSES_DEPS = ncursesw
+HAVE_NCURSES := $(shell pkg-config --exists $(NCURSES_DEPS) && echo 1 || echo 0)
+
+ifeq ($(HAVE_NCURSES),1)
+NCURSES_CFLAGS := $(shell pkg-config --cflags $(NCURSES_DEPS)) \
+                  $(shell pkg-config --cflags gio-unix-2.0)
+NCURSES_LIBS := $(shell pkg-config --libs $(NCURSES_DEPS)) \
+                $(shell pkg-config --libs gio-unix-2.0)
+endif
+
 YAML_GLIB_DIR = deps/yaml-glib
 YAML_GLIB_STATIC = $(YAML_GLIB_DIR)/build/release/libyaml-glib-1.0.a
 YAML_GLIB_CFLAGS = -I$(YAML_GLIB_DIR)/src
