@@ -1,0 +1,167 @@
+* AiCliClient
+=AiCliClient= is the derivable base class behind every provider that wraps a
+command-line coding agent: [[../providers/claude-code.org][Claude Code]], [[../providers/claude-code-tmux.org][Claude Code (tmux)]], [[../providers/opencode.org][OpenCode]] and
+[[../providers/grok-build.org][Grok Build]]. It is the CLI-side counterpart to [[file:ai-client.org][=AiClient=]], which is the base
+for the HTTP providers.
+
+A subclass says *what command to run and how to read its output*; the base
+class owns everything else — resolving the executable, piping the prompt,
+spawning with a timeout, checking how the process ended, and handing the
+output back to the subclass to parse.
+
+** Class Hierarchy
+#+begin_example
+GObject
+  AiCliClient          (derivable)
+    AiClaudeCodeClient (final, AiProvider, AiStreamable)
+    AiClaudeTmuxClient (final, AiProvider)
+    AiOpenCodeClient   (final, AiProvider, AiStreamable)
+    AiGrokBuildClient  (final, AiProvider, AiStreamable)
+#+end_example
+
+The interfaces live on the subclasses rather than here, because what a
+given CLI supports varies — the tmux provider, for instance, has no
+streaming mode.
+
+** Properties
+| Property              | Type    | Default | Description                                                     |
+|-----------------------+---------+---------+-----------------------------------------------------------------|
+| =config=              | object  | NULL    | An #AiConfig to construct from                                  |
+| =model=               | string  | —       | Model id; each subclass sets its own default                    |
+| =max-tokens=          | int     | 4096    | Honoured only by providers whose CLI has such a flag — none currently do |
+| =system-prompt=       | string  | NULL    | How it reaches the CLI is per-provider: a flag, or inlined into the prompt |
+| =executable-path=     | string  | NULL    | Explicit binary path. Overrides both the provider's environment variable and =$PATH= |
+| =working-directory=   | string  | NULL    | The child's working directory                                   |
+| =session-id=          | string  | NULL    | Captured from responses, replayed to resume                     |
+| =session-persistence= | boolean | TRUE    | Whether to capture and resume sessions at all                   |
+| =effort-level=        | string  | "medium" | Reasoning effort; spelled differently by each CLI (see below)   |
+| =process-timeout-ms=  | int     | 1800000 | Bounds the *synchronous* call. 0 disables the bound             |
+
+*** The working directory is the security boundary
+Every permission mode that can write can write anywhere the process can
+reach. The permission flags decide whether the model is *asked*; the
+working directory decides what it can *touch*.
+
+#+begin_src C
+ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/project");
+#+end_src
+
+*** Effort level
+One property, three spellings:
+
+| Provider   | Flag                  | Vocabulary                              |
+|------------+-----------------------+-----------------------------------------|
+| claude-code | =--effort=           | low, medium, high, xhigh, max           |
+| opencode    | =--variant=          | provider-specific (e.g. high, max, minimal) |
+| grok-build  | =--reasoning-effort= | low, medium, high, xhigh (=max= folds onto =xhigh=) |
+
+*** Timeouts
+=process-timeout-ms= bounds =ai_cli_client_chat_sync()= only. The async and
+streaming paths are built on =g_subprocess_communicate_utf8_async()= and run
+unbounded; pass a =GCancellable= if you need to be able to stop them.
+
+A zero default would mean an unbounded wait, which is the hang class that
+can pin a caller forever — hence the 30-minute default rather than none.
+
+** Signals
+| Signal         | Arguments      | When                                |
+|----------------+----------------+-------------------------------------|
+| =stream-start= | —              | Before the first text delta         |
+| =delta=        | =const gchar*= | Each text delta                     |
+| =stream-end=   | =AiResponse*=  | At EOF, with the assembled response |
+| =tool-use=     | =AiToolUse*=   | Declared here; whether it is emitted is per-provider |
+
+** The synchronous pipeline
+=ai_cli_client_chat_sync()= is what a subclass gets for free:
+
+1. resolve the executable — the =executable-path= property, else the
+   subclass's =get_executable_path= vfunc (usually an environment variable,
+   else a name to find on =$PATH=). A miss is =AI_ERROR_CLI_NOT_FOUND=;
+2. call =build_argv=;
+3. call =build_stdin=, if the subclass implements it;
+4. overwrite =argv[0]= with the resolved path — the subclass emits a
+   *placeholder* program token, which is why its argv starts with a bare
+   name;
+5. spawn, applying =working-directory= through a =GSubprocessLauncher=;
+6. communicate, bounded by =process-timeout-ms= — expiry kills the child
+   and fails with =AI_ERROR_TIMEOUT=;
+7. decide what happened, then call =parse_json_output=.
+
+*** Step 7: the exit status is not the whole story
+A failing CLI usually explains itself in its own output format before it
+exits. So on a *non-zero* exit with output on stdout, the subclass's parser
+is given first refusal: if it recognises the output as a structured error,
+that message is what the caller gets. Only its =AI_ERROR_CLI_EXECUTION=
+verdict is taken — a non-zero exit still fails the call whatever the
+process managed to print.
+
+Without that, an opencode failure surfaced as its raw JSON error event
+(with an empty stderr next to it) rather than the sentence inside it.
+
+The converse also happens: a CLI can report an error and still exit *zero*.
+grok does exactly that for a rejected argument. There the output parses as
+an error object and the parser is what catches it, which is why every
+subclass's =parse_json_output= should check for its CLI's error shape
+before anything else rather than trusting the status.
+
+** Virtual Methods
+#+begin_src C
+struct _AiCliClientClass
+{
+    GObjectClass parent_class;
+
+    gchar *      (*get_executable_path)(AiCliClient *self);
+    gchar **     (*build_argv)         (AiCliClient *self, GList *messages,
+                                        const gchar *system_prompt,
+                                        gint max_tokens, gboolean streaming);
+    AiResponse * (*parse_json_output)  (AiCliClient *self, const gchar *json,
+                                        GError **error);
+    gboolean     (*parse_stream_line)  (AiCliClient *self, const gchar *line,
+                                        AiResponse *response,
+                                        gchar **delta_text, GError **error);
+    gchar *      (*build_stdin)        (AiCliClient *self, GList *messages);
+    AiResponse * (*chat_sync)          (AiCliClient *self, GList *messages,
+                                        GCancellable *cancellable,
+                                        GError **error);
+
+    gpointer _reserved[6];
+};
+#+end_src
+
+=chat_sync= is an escape hatch for a provider that cannot use the pipeline
+at all; only the tmux client overrides it. The other five are the normal
+surface.
+
+** Methods
+| Function                                | Purpose                                            |
+|-----------------------------------------+----------------------------------------------------|
+| =ai_cli_client_chat_sync()=             | Run one turn to completion                         |
+| =ai_cli_client_resolve_executable()=    | Resolve the binary without running it — what =--dry-run= uses |
+| =ai_cli_client_format_exit_error()=     | Build the "exited with status N" message; prefers stderr, falls back to stdout |
+| Property accessors                      | =ai_cli_client_get/set_*= for each property above   |
+
+** Implementing a CLI provider
+See [[../contributing.org][Contributing]] for the full checklist. The conventions that matter most:
+
+- *Pipe the prompt, do not pass it.* A conversation in argv hits =ARG_MAX=
+  and shows up in =ps=. Emit a placeholder at =argv[0]=, put the prompt in
+  =build_stdin=, and have the CLI read it back (=--prompt-file /dev/stdin=,
+  or its own stdin handling).
+- *Expose every knob as a GObject property.* That is what makes it reachable
+  from bindings and from =ai --set= with no extra plumbing.
+- *Gate mode-specific flags on the mode*, rather than trusting the caller to
+  remember that, say, =--include-partial-messages= is only valid with
+  streaming output.
+- *Share the "how to run" flags* between =build_argv= and any re-prompt or
+  retry path, so a follow-up runs with the same agent, directory and
+  permission posture as the turn it follows.
+- *Expose the argv builder through a private =-internal.h=* (guarded on
+  =AI_GLIB_COMPILATION=, kept out of =PUBLIC_HEADERS=) so tests can assert
+  the command line without spawning anything. =ai --dry-run= does not need
+  it — it reaches =build_argv= through this vtable.
+
+** See Also
+- [[file:ai-client.org][AiClient]] - the equivalent base for HTTP providers
+- [[file:ai-provider.org][AiProvider]] / [[file:ai-error.org][AiError]]
+- [[../providers/index.org][Providers Overview]]
+- [[../cli.org][The =ai= CLI]] - =--dry-run= and =--set=

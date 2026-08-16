@@ -308,7 +308,7 @@ Every member is read through a type-checked accessor. A =usage= that is a string
 See below.
 
 ** Failure modes worth knowing
-- *An error can arrive with exit status 0.* A rejected =--reasoning-effort= prints ={"type":"error","message":"..."}= on stdout and exits 0, while a rejected =--model= exits 1. The client therefore parses stdout *before* consulting the exit status, and reports =AI_ERROR_CLI_EXECUTION= either way. Treating status alone as the signal would silently return an empty response. The status is only consulted when stdout held nothing parseable.
+- *An error can arrive with exit status 0.* A rejected =--reasoning-effort= prints ={"type":"error","message":"..."}= on stdout and exits 0, while a rejected =--model= exits 1. The client therefore parses stdout *before* consulting the exit status, and reports =AI_ERROR_CLI_EXECUTION= either way. Treating status alone as the signal would silently return an empty response. The status is only consulted when stdout held nothing parseable. The base class does the same on a non-zero exit — see [[../api-reference/ai-cli-client.org][=AiCliClient=]] — so a structured error beats a status line on every path.
 - *A run can fail after it starts.* The NDJSON result line carries =is_error=; when it is set, the reason is in =result= rather than =message=. That is reported as =AI_ERROR_CLI_EXECUTION= too, not handed back as if the failure text were the answer.
 - *Effort =max= is not accepted.* Hence the fold onto =xhigh=.
 - *An unknown sandbox profile aborts the run* rather than degrading to no sandbox.

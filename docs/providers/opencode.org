@@ -147,30 +147,123 @@ g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
 ai_cli_client_set_executable_path(AI_CLI_CLIENT(client), "/opt/opencode/bin/opencode");
 #+end_src
 
-** CLI Invocation Details
-*** Non-Streaming
-#+begin_src sh
-opencode run --format json --model anthropic/claude-sonnet-4 "prompt"
+** Options
+Everything =opencode run= accepts that makes sense headlessly is a GObject
+property, so bindings get it natively and the =ai= CLI reaches it through
+=--set= without needing a flag of its own.
+
+*** Tool access
+#+begin_src C
+/* Auto-approve everything not explicitly denied. */
+g_object_set(client, "skip-permissions", TRUE, NULL);
 #+end_src
 
-*** Streaming
-#+begin_src sh
-opencode run --format stream-json --model anthropic/claude-sonnet-4 "prompt"
+This passes =--auto=, opencode's equivalent of Claude Code's
+=--dangerously-skip-permissions=, *and* sets =OPENCODE_PERMISSION= in the
+child environment. The variable alone used to be the whole mechanism, which
+meant a synchronous call never got it: the inherited pipeline spawns without
+the client's launcher. The flag closes that gap; the variable stays for
+opencode builds that predate it.
+
+As everywhere else, the working directory rather than this property is the
+real boundary — see below.
+
+*** Session and run options
+| Property             | Flag           | Notes                                                        |
+|----------------------+----------------+--------------------------------------------------------------|
+| =agent=              | =--agent=      | Which agent to run as                                        |
+| =title=              | =--title=      | Session title; otherwise derived from the piped prompt        |
+| =files=              | =--file=       | Comma-separated; one =--file= per item                        |
+| =share=              | =--share=      | Publishes a shareable link. Off by default                    |
+| =continue-session=   | =--continue=   | Resume the most recent session; an explicit session id wins   |
+| =fork-session=       | =--fork=       | Branch the continued session. Only emitted when there is one  |
+| =attach=             | =--attach=     | URL of a running opencode server                              |
+| =port=               | =--port=       | Local server port; 0 omits the flag                           |
+| =thinking=           | =--thinking=   | Emit reasoning blocks                                         |
+| =pure=               | =--pure=       | Run without external plugins                                  |
+| =log-level=          | =--log-level=  | =DEBUG=, =INFO=, =WARN=, =ERROR=. Anything else warns and is omitted |
+| =print-logs=         | =--print-logs= | Logs to stderr; does not disturb the parsed stdout            |
+
+Credentials for a password-protected =--attach= server are deliberately
+*not* properties: an argv is visible to every process on the machine.
+opencode reads =OPENCODE_SERVER_USERNAME= and =OPENCODE_SERVER_PASSWORD=
+from the environment instead.
+
+*** Working directory
+#+begin_src C
+ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/project");
 #+end_src
+
+This does two things: it becomes the child's working directory, and it is
+passed as =--dir=, which is what tells opencode which project it is in and
+therefore which session store to use. When =attach= is set, =--dir= names a
+path on the remote server.
+
+Until recently the directory was applied *only* when =skip-permissions= was
+also on — the launcher that carried it was created solely to inject the
+permission variable. A caller who named a directory to bound what the CLI
+could reach, without also bypassing permissions, got the directory the
+parent process happened to start in.
+
+*** From the =ai= CLI
+#+begin_example
+$ ai -p opencode --skip-permissions "fix the failing test"
+$ ai -p opencode --set agent=build --set title=nightly --set pure "run the suite"
+$ ai -p opencode --set log-level=DEBUG --set print-logs --dry-run "hi"
+#+end_example
+
+** CLI Invocation Details
+The prompt is piped on stdin rather than passed as an argument, so it never
+appears in the command line or runs into =ARG_MAX=.
+
+#+begin_src sh
+opencode run --format json --model anthropic/claude-sonnet-5 --variant medium
+#+end_src
+
+=--format= has only two values, =default= and =json=; there is no
+=stream-json=. Streaming and non-streaming therefore spawn the *same*
+command, and the difference is on this side: the streaming path reads the
+JSON events line by line as they arrive instead of waiting for the process
+to exit.
+
+Inspect the exact command with:
+
+#+begin_example
+$ ai -p opencode --dry-run "hi"
+#+end_example
 
 ** Response Format
-The OpenCode CLI returns JSON responses. The exact format may vary by provider, but generally includes:
+=--format json= produces NDJSON — one JSON event per line, not a single
+document:
 
 #+begin_src json
-{
-    "type": "result",
-    "content": "response text",
-    "usage": {
-        "input_tokens": 100,
-        "output_tokens": 50
-    }
-}
+{"type":"step_start","sessionID":"ses_..."}
+{"type":"text","part":{"text":"response text"}}
+{"type":"tool_use","part":{"tool":"bash","state":{"status":"completed"}}}
+{"type":"step_finish","part":{"tokens":{"input":100,"output":50}}}
 #+end_src
+
+The parser reads every line, accumulates =text= parts, captures =sessionID=
+for session continuity, renders =tool_use= events into a fallback summary,
+and takes token counts from =step_finish=. Unparseable lines are skipped:
+a plugin writing to stdout should not fail the run.
+
+An error arrives as an =error= member, in one of three shapes — a plain
+string, an object with =message=, or opencode's own nesting:
+
+#+begin_src json
+{"type":"error","error":{"name":"UnknownError",
+                         "data":{"message":"Unexpected server error."}}}
+#+end_src
+
+All three are read. The third used to fall through to serialising the whole
+object, so a failed run reported raw JSON as its error message instead of
+the sentence inside it; it now reports =UnknownError: Unexpected server
+error.=
+
+A failing opencode run exits non-zero *and* prints that event on stdout,
+with stderr empty. The parsed message therefore takes precedence over the
+exit status — see [[../api-reference/ai-cli-client.org][=AiCliClient=]] for how that ordering works.
 
 ** Multi-Provider Comparison
 Use OpenCode to easily compare responses from different providers:

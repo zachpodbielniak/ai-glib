@@ -56,6 +56,9 @@ Complete API documentation for ai-glib.
 | AiOllamaClient | Ollama (local)   |
 
 ** Provider Clients (CLI Wrappers)
+See [[file:ai-cli-client.org][AiCliClient]] for the shared base class: the spawn pipeline, the
+properties every CLI provider inherits, and how to add one.
+
 | Class              | Provider        |
 |--------------------+-----------------|
 | AiClaudeCodeClient | Claude Code CLI |

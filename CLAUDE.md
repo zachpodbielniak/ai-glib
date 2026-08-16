@@ -228,6 +228,33 @@ ai-glib/
 | OpenCode | `OPENCODE_PATH` (override `opencode` path) |
 | Grok Build | `GROK_PATH` (override `grok` path) |
 
+## CLI provider options
+
+Every option a wrapped CLI accepts is a GObject property, never a bespoke
+setter-only field: that is what makes it reachable from bindings and from
+`ai --set` with no extra plumbing. When one of these CLIs gains a flag, add
+a property and emit it — nothing else needs to change.
+
+Two conventions worth keeping:
+
+- **Flags that only apply in a mode are gated on that mode**, not left to
+  the caller to remember. `--include-partial-messages` is emitted only when
+  streaming and `--fork-session` only alongside `--resume`, because claude
+  rejects them otherwise.
+- **Shared "how to run" flags live in one helper** (`emit_session_args` for
+  claude-code, `emit_execution_args` for opencode and grok-build) called by
+  both `build_argv` and the no-text re-prompt path. A retry that silently
+  dropped `--auto` would sit waiting for an approval nobody is there to
+  give.
+
+Per-CLI equivalents of the same idea:
+
+| Concept | claude-code | opencode | grok-build |
+|---|---|---|---|
+| Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` |
+| Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` |
+| Agent profile | `--agent` | `--agent` | `--agent` |
+
 ## Ollama-as-transport (`ollama/` models)
 
 The `claude-code` and `claude-tmux` CLI providers detect a model name that
@@ -292,6 +319,11 @@ provider, so a new provider knob needs no new flag here — add the property
 and it is reachable. A bare `--set NAME` sets a boolean true. Unknown names
 print the provider's writable properties; read-only ones and unparseable
 values are errors, not silent no-ops.
+
+`--dry-run` calls `AiCliClientClass.build_argv` through the vtable, so it
+covers every CLI provider (claude-tmux is the exception: it drives claude
+through tmux rather than the argv pipeline, so it keeps a dedicated branch
+and its own internal header). Do not add per-provider dry-run branches.
 
 `tests/test-ai-cli.c` spawns the built binary (hence `test:` depends on
 `$(BIN_BINARIES)`) and drives it against a stub `grok` via `GROK_PATH`, so

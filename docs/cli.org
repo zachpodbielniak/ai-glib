@@ -29,7 +29,7 @@ piping.
 | =--max-tokens N=        | Max output tokens (default: 4096)                                  |
 | =--temperature F=       | Sampling temperature (HTTP providers)                             |
 | =--stream=              | Stream the response as it arrives (providers that support it)      |
-| =--skip-permissions=    | Bypass tool-use approval (claude-code / claude-tmux / grok-build)  |
+| =--skip-permissions=    | Bypass tool-use approval (every CLI provider)                      |
 | =--set PROP=VALUE=      | Set any provider property; repeatable (see below)                  |
 | =--dry-run=             | Print the command that would be spawned; do not run it             |
 | =--list-providers=      | List known provider names and exit                                 |
@@ -235,10 +235,16 @@ pollute that list.
   =OPENAI_BASE_URL=, =GEMINI_BASE_URL=, =XAI_BASE_URL=, =ANTHROPIC_BASE_URL=.
 
 ** Notes
-- =--dry-run= prints the real argv for the =claude-code=, =claude-tmux= and
-  =grok-build= providers (executable resolved, and for the claude providers
-  the Ollama transport applied). For other providers it prints a short
-  summary, since they do not spawn a CLI.
+- =--dry-run= prints the real argv for *every* CLI provider — claude-code,
+  claude-tmux, opencode, grok-build — with the executable resolved and, for
+  the claude providers, the Ollama transport applied. It goes through the
+  =AiCliClient= vtable rather than a branch per provider, so a new CLI
+  provider gets it for free. HTTP providers print a short summary instead,
+  since they spawn nothing.
+- =--skip-permissions= applies to every CLI provider that has the concept,
+  each in its own spelling: =--dangerously-skip-permissions= for the claude
+  providers, =--auto= for opencode, =--permission-mode bypassPermissions=
+  for grok-build.
 - =--effort= maps to =--reasoning-effort= for =grok-build=, which accepts
   =low=, =medium=, =high= and =xhigh=; =max= is folded onto =xhigh=.
 - For the Ollama transport the =claude= binary must be installed and on

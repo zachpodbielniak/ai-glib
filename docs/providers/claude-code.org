@@ -279,6 +279,67 @@ g_object_set(client,
 | =allowed-tools= | =--allowedTools= | Comma-separated in, one argv word per tool out |
 | =disallowed-tools= | =--disallowedTools= | Same shape |
 | =additional-directories= | =--add-dir= | For trees outside the working directory |
+| =tools= | =--tools= | Which built-ins exist at all, as opposed to which are pre-approved |
+
+** Session options
+The rest of what =claude --print= accepts is exposed as GObject properties,
+so bindings get them natively and the =ai= CLI reaches them through =--set=
+without a flag per knob.
+
+*** Agent and prompt
+| Property                 | Flag                      | Notes                                                     |
+|--------------------------+---------------------------+-----------------------------------------------------------|
+| =agent=                  | =--agent=                 | Agent for this session                                    |
+| =agents-json=            | =--agents=                | JSON object defining custom subagents                     |
+| =append-system-prompt=   | =--append-system-prompt=  | *Adds to* the default prompt, where =system-prompt= replaces it; sent every turn, not only on session creation |
+| =json-schema=            | =--json-schema=           | Constrains the reply to a JSON Schema                     |
+| =autocompact=            | =--autocompact=           | =auto=, or 100k–1M tokens. Governs when the compaction that #AiClaudeCodeClient::context-compacted reports happens |
+
+*** Models and budget
+| Property           | Flag                | Notes                                                     |
+|--------------------+---------------------+-----------------------------------------------------------|
+| =fallback-model=   | =--fallback-model=  | Comma-separated list, tried in order when the primary is overloaded |
+| =max-budget-usd=   | =--max-budget-usd=  | Spend ceiling for the run; 0 omits the flag. Formatted locale-independently, since claude parses it as a number |
+
+*** Configuration and isolation
+| Property                                  | Flag                                          | Notes                                          |
+|-------------------------------------------+-----------------------------------------------+------------------------------------------------|
+| =settings=                                | =--settings=                                  | Settings file path or JSON string              |
+| =setting-sources=                         | =--setting-sources=                           | =user=, =project=, =local=. Use it to stop a run picking up settings from a repository it does not control |
+| =strict-mcp-config=                       | =--strict-mcp-config=                         | Use *only* =mcp-config-path=; without it that flag is additive |
+| =plugin-dirs= / =plugin-urls=             | =--plugin-dir= / =--plugin-url=               | Comma-separated; one flag per item. URLs are fetched and run — point them only at sources you trust |
+| =tools=                                   | =--tools=                                     | Which built-ins exist at all, where =allowed-tools= decides which may run unattended |
+| =betas=                                   | =--betas=                                     | Beta headers; API-key users only               |
+| =disable-slash-commands=                  | =--disable-slash-commands=                    | Disables all skills                            |
+| =bare=                                    | =--bare=                                      | Skips hooks, LSP, plugin sync, auto-memory and CLAUDE.md discovery. The most predictable way to run: the session sees what the client passed, not what the host has configured |
+| =safe-mode=                               | =--safe-mode=                                 | All customizations off; auth, models, built-in tools and permissions still work |
+| =exclude-dynamic-system-prompt-sections=  | =--exclude-dynamic-system-prompt-sections=    | Moves per-machine sections out of the system prompt. Worth setting for a fleet of identical runs: it is what lets them share a prompt cache |
+
+*** Sessions, streaming and diagnostics
+| Property                     | Flag                          | Notes                                             |
+|------------------------------+-------------------------------+---------------------------------------------------|
+| =fork-session=               | =--fork-session=              | Branch a resumed conversation. Only emitted alongside =--resume=, the only place claude accepts it |
+| =include-partial-messages=   | =--include-partial-messages=  | Streaming only; gated on the output format because claude rejects it elsewhere |
+| =include-hook-events=        | =--include-hook-events=       | Streaming only                                     |
+| =forward-subagent-text=      | =--forward-subagent-text=     | Streaming only                                     |
+| =debug= / =debug-filter=     | =--debug [filter]=            | A filter enables debug on its own, e.g. ="api,hooks"= or ="!1p,!file"= |
+| =debug-file=                 | =--debug-file=                | Log to a file rather than stderr, so it does not disturb the parsed output |
+
+#+begin_src C
+g_object_set(client,
+             "agent", "reviewer",
+             "max-budget-usd", 5.0,
+             "bare", TRUE,
+             "tools", "Bash,Read,Edit",
+             NULL);
+#+end_src
+
+Or from the CLI:
+
+#+begin_example
+$ ai -p claude-code --set agent=reviewer --set max-budget-usd=5 --set bare \
+     "review the diff"
+#+end_example
 
 *The working directory is the boundary, not the permission mode.* Every mode
 that can write can write anywhere the process can reach, so set
