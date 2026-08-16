@@ -97,6 +97,18 @@ struct _AiToolExecutor
     /* Provider ::event handler, live only during a run. */
     gulong            provider_event_id;
     GObject          *provider_object;
+
+    /* Where `task` and `skill` find what they run. NULL means neither
+     * tool is offered at all. */
+    AiResourceRegistry *registry;
+
+    /* The current todo list, replaced wholesale by every todo_write. */
+    GPtrArray        *todos;           /* AiTodo*, owned */
+
+    /* How many `task` calls deep this executor already is. A subagent
+     * that spawns a subagent that spawns a subagent is a runaway, not a
+     * plan. */
+    guint             task_depth;
 };
 
 static void
@@ -118,6 +130,7 @@ enum
     PROP_APPROVAL_POLICY,
     PROP_STREAM,
     PROP_WORKING_DIRECTORY,
+    PROP_RESOURCE_REGISTRY,
     N_PROPS
 };
 
@@ -126,6 +139,7 @@ static GParamSpec *properties[N_PROPS];
 enum
 {
     SIGNAL_APPROVAL_REQUESTED,
+    SIGNAL_TODOS_CHANGED,
     N_SIGNALS
 };
 
@@ -419,12 +433,25 @@ on_run_response_common (
             }
             else
             {
+                g_autoptr(GError) tool_error = NULL;
+
                 tool_result = ai_tool_executor_execute (
-                    ctx->executor, tool_use, ctx->cancellable, NULL);
+                    ctx->executor, tool_use, ctx->cancellable, &tool_error);
 
                 if (tool_result == NULL)
                 {
-                    tool_result = g_strdup ("Error: tool execution failed");
+                    /*
+                     * The message, not a generic stand-in. A tool that
+                     * says "no agent named 'reviewr'. Available:
+                     * reviewer, auditor" gives the model something to do
+                     * next; "tool execution failed" gives it nothing,
+                     * and every carefully worded error in this file was
+                     * being thrown away here.
+                     */
+                    tool_result = g_strdup_printf (
+                        "Error: %s",
+                        tool_error != NULL ? tool_error->message
+                                           : "tool execution failed");
                     is_error = TRUE;
                 }
             }
@@ -2065,6 +2092,643 @@ tool_web_search (
 }
 
 /* ================================================================
+ * Helpers shared by the harness-aware tools
+ * ================================================================ */
+
+/*
+ * A string member, or NULL if it is absent or is not a string.
+ *
+ * json-glib's json_object_get_string_member_with_default() emits a
+ * critical on a type mismatch, and a critical is fatal under
+ * G_DEBUG=fatal-warnings. This reads model output, which is untrusted in
+ * exactly the sense subprocess stdout is --- the same rule the provider
+ * translators already follow.
+ */
+static const gchar *
+executor_json_string (
+    JsonObject  *object,
+    const gchar *member
+){
+    JsonNode *node;
+
+    if (object == NULL || !json_object_has_member (object, member))
+        return NULL;
+
+    node = json_object_get_member (object, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE (node))
+        return NULL;
+
+    if (json_node_get_value_type (node) != G_TYPE_STRING)
+        return NULL;
+
+    return json_node_get_string (node);
+}
+
+/* The names of everything of one kind, for an error a model can act on. */
+static gchar *
+executor_list_resource_names (
+    AiToolExecutor *self,
+    AiResourceKind  kind
+){
+    g_autoptr(GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+    GList               *resources;
+    GList               *iter;
+
+    if (self->registry == NULL)
+        return NULL;
+
+    resources = ai_resource_registry_list (self->registry, kind);
+
+    for (iter = resources; iter != NULL; iter = iter->next)
+    {
+        const gchar *name = ai_resource_get_name (iter->data);
+
+        if (name != NULL)
+            g_ptr_array_add (names, g_strdup (name));
+    }
+
+    g_list_free (resources);
+
+    if (names->len == 0)
+        return NULL;
+
+    g_ptr_array_add (names, NULL);
+
+    return g_strjoinv (", ", (gchar **)names->pdata);
+}
+
+/* ================================================================
+ * todo_write
+ * ================================================================ */
+
+/*
+ * Replace the whole list, never patch it.
+ *
+ * The model resends every item on every call, which is what keeps this
+ * honest: there is no way for the executor's idea of the list and the
+ * model's to drift apart, and no partial-update protocol to get wrong.
+ */
+static gchar *
+tool_todo_write (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    JsonNode   *input;
+    JsonObject *object;
+    JsonArray  *array;
+    guint       n;
+    guint       i;
+    guint       in_progress = 0;
+    GString    *summary;
+
+    (void)cancellable;
+
+    input = ai_tool_use_get_input (tool_use);
+
+    if (input == NULL || !JSON_NODE_HOLDS_OBJECT (input))
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "todo_write: expected an object of parameters");
+        return NULL;
+    }
+
+    object = json_node_get_object (input);
+
+    if (!json_object_has_member (object, "todos"))
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "todo_write: missing required parameter 'todos'");
+        return NULL;
+    }
+
+    {
+        JsonNode *todos_node = json_object_get_member (object, "todos");
+
+        if (todos_node == NULL || !JSON_NODE_HOLDS_ARRAY (todos_node))
+        {
+            g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                 "todo_write: 'todos' must be an array");
+            return NULL;
+        }
+
+        array = json_node_get_array (todos_node);
+    }
+
+    g_ptr_array_set_size (self->todos, 0);
+
+    n = json_array_get_length (array);
+
+    for (i = 0; i < n; i++)
+    {
+        JsonNode    *element = json_array_get_element (array, i);
+        JsonObject  *item;
+        const gchar *content;
+        const gchar *active_form = NULL;
+        const gchar *state_name = NULL;
+        AiTodoState  state;
+
+        if (element == NULL || !JSON_NODE_HOLDS_OBJECT (element))
+        {
+            /* One malformed entry costs itself, not the list. */
+            g_debug ("todo_write: entry %u is not an object; skipping", i);
+            continue;
+        }
+
+        item = json_node_get_object (element);
+
+        /* Read every member through a type check: this is model output,
+         * and json-glib's convenience accessors emit a critical on a
+         * mismatch --- fatal under G_DEBUG=fatal-warnings. */
+        content = executor_json_string (item, "content");
+
+        if (content == NULL)
+        {
+            g_debug ("todo_write: entry %u has no content; skipping", i);
+            continue;
+        }
+
+        active_form = executor_json_string (item, "active_form");
+
+        if (active_form == NULL)
+        {
+            active_form = executor_json_string (item, "activeForm");
+        }
+
+        state_name = executor_json_string (item, "status");
+
+        if (state_name == NULL)
+        {
+            state_name = executor_json_string (item, "state");
+        }
+
+        state = ai_todo_state_from_string (state_name);
+
+        if (state == AI_TODO_IN_PROGRESS)
+        {
+            in_progress++;
+        }
+
+        g_ptr_array_add (self->todos,
+                         ai_todo_new (content, active_form, state));
+    }
+
+    if (in_progress > 1)
+    {
+        /*
+         * g_message, not g_warning: a model doing two things at once is
+         * a model being imprecise, not this program being broken, and it
+         * must not abort a run under fatal warnings.
+         */
+        g_message ("todo_write: %u items marked in progress at once",
+                   in_progress);
+    }
+
+    g_signal_emit (self, signals[SIGNAL_TODOS_CHANGED], 0);
+
+    summary = g_string_new (NULL);
+    g_string_append_printf (summary, "Todo list updated (%u item%s).\n",
+                            self->todos->len,
+                            self->todos->len == 1 ? "" : "s");
+
+    for (i = 0; i < self->todos->len; i++)
+    {
+        const AiTodo *todo = g_ptr_array_index (self->todos, i);
+
+        g_string_append_printf (summary, "  [%s] %s\n",
+                                ai_todo_state_to_string (todo->state),
+                                ai_todo_get_label (todo));
+    }
+
+    return g_string_free (summary, FALSE);
+}
+
+/* ================================================================
+ * multi_edit
+ * ================================================================ */
+
+/*
+ * Several edits to one file, all or nothing.
+ *
+ * Every replacement is applied to an in-memory copy and the file is
+ * written once, at the end. A failure on the third of four edits
+ * therefore leaves the file byte-for-byte as it was, rather than
+ * half-converted in a way that is worse than either state.
+ *
+ * Deliberately stricter than `edit`: an old_string matching more than
+ * once is refused rather than taking the first. In a batch the wrong
+ * match is buried among the right ones, and the model cannot see what it
+ * did.
+ */
+static gchar *
+tool_multi_edit (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar      *path;
+    g_autofree gchar *resolved = NULL;
+    g_autofree gchar *contents = NULL;
+    g_autoptr(GString) working = NULL;
+    JsonNode         *input;
+    JsonObject       *object;
+    JsonArray        *array;
+    gsize             length;
+    guint             n;
+    guint             i;
+
+    (void)cancellable;
+
+    path = ai_tool_use_get_input_string (tool_use, "path");
+    input = ai_tool_use_get_input (tool_use);
+
+    if (path == NULL || input == NULL || !JSON_NODE_HOLDS_OBJECT (input))
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "multi_edit: missing required parameter(s): "
+                             "path, edits");
+        return NULL;
+    }
+
+    object = json_node_get_object (input);
+
+    {
+        JsonNode *edits_node = json_object_has_member (object, "edits")
+                                   ? json_object_get_member (object, "edits")
+                                   : NULL;
+
+        if (edits_node == NULL || !JSON_NODE_HOLDS_ARRAY (edits_node))
+        {
+            g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                 "multi_edit: 'edits' must be an array");
+            return NULL;
+        }
+
+        array = json_node_get_array (edits_node);
+    }
+
+    n = json_array_get_length (array);
+
+    if (n == 0)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                             "multi_edit: 'edits' is empty");
+        return NULL;
+    }
+
+    resolved = executor_resolve_path (self, path);
+
+    if (!g_file_get_contents (resolved, &contents, &length, error))
+        return NULL;
+
+    working = g_string_new_len (contents, (gssize)length);
+
+    for (i = 0; i < n; i++)
+    {
+        JsonNode    *element = json_array_get_element (array, i);
+        JsonObject  *edit;
+        const gchar *old_string;
+        const gchar *new_string;
+        const gchar *found;
+        gsize        prefix;
+
+        if (element == NULL || !JSON_NODE_HOLDS_OBJECT (element))
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "multi_edit: edit %u is not an object", i + 1);
+            return NULL;
+        }
+
+        edit = json_node_get_object (element);
+        old_string = executor_json_string (edit, "old_string");
+        new_string = executor_json_string (edit, "new_string");
+
+        if (old_string == NULL || new_string == NULL)
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "multi_edit: edit %u needs old_string and new_string",
+                         i + 1);
+            return NULL;
+        }
+
+        if (old_string[0] == '\0')
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "multi_edit: edit %u has an empty old_string; use "
+                         "write to create a file", i + 1);
+            return NULL;
+        }
+
+        found = strstr (working->str, old_string);
+
+        if (found == NULL)
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "multi_edit: edit %u: old_string not found in '%s'; "
+                         "no edits were applied", i + 1, resolved);
+            return NULL;
+        }
+
+        if (strstr (found + 1, old_string) != NULL)
+        {
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "multi_edit: edit %u: old_string matches more than "
+                         "once in '%s'; make it unique. No edits were applied",
+                         i + 1, resolved);
+            return NULL;
+        }
+
+        prefix = (gsize)(found - working->str);
+        g_string_erase (working, (gssize)prefix, (gssize)strlen (old_string));
+        g_string_insert (working, (gssize)prefix, new_string);
+    }
+
+    if (!g_file_set_contents (resolved, working->str, (gssize)working->len,
+                              error))
+        return NULL;
+
+    return g_strdup_printf ("Applied %u edit%s to %s", n,
+                            n == 1 ? "" : "s", resolved);
+}
+
+/* ================================================================
+ * skill
+ * ================================================================ */
+
+static gchar *
+tool_skill (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar *name;
+    AiResource  *resource;
+
+    (void)cancellable;
+
+    name = ai_tool_use_get_input_string (tool_use, "name");
+
+    if (name == NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "skill: missing required parameter 'name'");
+        return NULL;
+    }
+
+    if (self->registry == NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "skill: no resource registry is configured");
+        return NULL;
+    }
+
+    resource = ai_resource_registry_lookup (self->registry, AI_RESOURCE_SKILL,
+                                            name);
+
+    if (resource == NULL)
+    {
+        g_autofree gchar *available = executor_list_resource_names (
+            self, AI_RESOURCE_SKILL);
+
+        g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                     "skill: no skill named '%s'. Available: %s", name,
+                     available != NULL ? available : "(none)");
+        return NULL;
+    }
+
+    return g_strdup (ai_resource_get_body (resource));
+}
+
+/* ================================================================
+ * task
+ * ================================================================ */
+
+/*
+ * Map a tool name as a harness spells it onto the one ai-glib uses.
+ *
+ * The agent files on disk were written for claude-code, which
+ * capitalises: "Bash", "WebFetch", "MultiEdit". Matching them by
+ * lowercasing alone would silently drop half an allowlist and leave the
+ * agent unable to do its job, with nothing to say why.
+ */
+static gchar *
+normalise_tool_name (const gchar *declared)
+{
+    static const struct
+    {
+        const gchar *harness;
+        const gchar *ours;
+    } aliases[] = {
+        { "webfetch",    "web_fetch"  },
+        { "websearch",   "web_search" },
+        { "multiedit",   "multi_edit" },
+        { "todowrite",   "todo_write" },
+        { "notebookedit", "edit"      },
+        { NULL, NULL }
+    };
+    g_autofree gchar *lower = NULL;
+    gsize             i;
+
+    if (declared == NULL)
+        return NULL;
+
+    lower = g_ascii_strdown (declared, -1);
+    g_strstrip (lower);
+
+    for (i = 0; aliases[i].harness != NULL; i++)
+    {
+        if (g_strcmp0 (lower, aliases[i].harness) == 0)
+            return g_strdup (aliases[i].ours);
+    }
+
+    return g_steal_pointer (&lower);
+}
+
+/*
+ * Build the child executor an agent runs inside.
+ *
+ * The allowlist is applied by *removing* tools, not by refusing calls to
+ * them: an agent whose `tools:` omits bash has no bash to call, so
+ * calling it is not denied, it is unrepresentable. That is the same
+ * argument ai_agent_new() already makes about owning an executor apiece.
+ *
+ * An agent that declares no tools inherits everything, which is what
+ * claude-code does and what the files on disk assume.
+ */
+static AiToolExecutor *
+build_agent_executor (
+    AiToolExecutor *self,
+    AiResource     *agent
+){
+    AiToolExecutor *child = ai_tool_executor_new ();
+    g_auto(GStrv)   declared = ai_resource_get_meta_list (agent, "tools");
+
+    ai_tool_executor_set_working_directory (child, self->working_directory);
+    ai_tool_executor_set_resource_registry (child, self->registry);
+    ai_tool_executor_set_approval_policy (child, self->approval_policy);
+    child->task_depth = self->task_depth + 1;
+
+    if (self->search_provider != NULL)
+        ai_tool_executor_set_search_provider (child, self->search_provider);
+
+    if (declared == NULL || declared[0] == NULL)
+        return child;
+
+    {
+        g_autoptr(GHashTable) allowed =
+            g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+        g_autoptr(GPtrArray)  doomed = g_ptr_array_new_with_free_func (g_free);
+        GList                *iter;
+        guint                 i;
+
+        for (i = 0; declared[i] != NULL; i++)
+        {
+            gchar *mapped = normalise_tool_name (declared[i]);
+
+            if (mapped != NULL)
+                g_hash_table_add (allowed, mapped);
+        }
+
+        for (iter = ai_tool_executor_get_tools (child); iter != NULL;
+             iter = iter->next)
+        {
+            const gchar *name = ai_tool_get_name (iter->data);
+
+            if (name != NULL && !g_hash_table_contains (allowed, name))
+                g_ptr_array_add (doomed, g_strdup (name));
+        }
+
+        for (i = 0; i < doomed->len; i++)
+            ai_tool_executor_unregister (child,
+                                         g_ptr_array_index (doomed, i));
+    }
+
+    return child;
+}
+
+/* Republish a subagent's events on the parent's stream, stamped with
+ * which agent produced them. */
+static void
+on_subagent_event (
+    GObject  *source,
+    AiEvent  *event,
+    gpointer  user_data
+){
+    AiToolExecutor *parent = user_data;
+
+    (void)source;
+
+    if (event == NULL)
+        return;
+
+    ai_event_source_emit (AI_EVENT_SOURCE (parent), event);
+}
+
+static gchar *
+tool_task (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar               *agent_name;
+    const gchar               *prompt;
+    AiResource                *agent;
+    g_autoptr(AiToolExecutor)  child = NULL;
+    g_autoptr(AiMessage)       message = NULL;
+    GList                     *messages = NULL;
+    gchar                     *result;
+    gulong                     event_id;
+
+    agent_name = ai_tool_use_get_input_string (tool_use, "agent");
+    prompt = ai_tool_use_get_input_string (tool_use, "prompt");
+
+    if (agent_name == NULL || prompt == NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "task: missing required parameter(s): "
+                             "agent, prompt");
+        return NULL;
+    }
+
+    if (self->registry == NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "task: no resource registry is configured");
+        return NULL;
+    }
+
+    /*
+     * A subagent that spawns a subagent that spawns a subagent is a
+     * runaway, not a plan. Refusing is reported to the model rather than
+     * silently truncated, so it can do the work itself instead of
+     * wondering why nothing happened.
+     */
+    if (self->task_depth >= AI_TOOL_EXECUTOR_MAX_TASK_DEPTH)
+    {
+        g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                     "task: already %u agents deep (limit %d); do this work "
+                     "yourself rather than delegating further",
+                     self->task_depth, AI_TOOL_EXECUTOR_MAX_TASK_DEPTH);
+        return NULL;
+    }
+
+    agent = ai_resource_registry_lookup (self->registry, AI_RESOURCE_AGENT,
+                                         agent_name);
+
+    if (agent == NULL)
+    {
+        g_autofree gchar *available =
+            executor_list_resource_names (self, AI_RESOURCE_AGENT);
+
+        g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                     "task: no agent named '%s'. Available: %s", agent_name,
+                     available != NULL ? available : "(none)");
+        return NULL;
+    }
+
+    /*
+     * The environment is checked last, after everything the model could
+     * have got wrong. "No agent named X" is a mistake it can correct;
+     * "no provider" is one it can do nothing about, and reporting that
+     * first would bury the useful message.
+     */
+    if (self->active_provider == NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                             "task: no provider is available to run an agent");
+        return NULL;
+    }
+
+    child = build_agent_executor (self, agent);
+
+    /* One stream: a frontend watching the parent sees the child's tool
+     * calls too, tagged with whose they are. */
+    event_id = g_signal_connect (child, "event",
+                                 G_CALLBACK (on_subagent_event), self);
+
+    message = ai_message_new_user (prompt);
+    messages = g_list_append (NULL, message);
+
+    result = ai_tool_executor_run (child, self->active_provider, messages,
+                                   ai_resource_get_body (agent),
+                                   AI_TOOL_EXECUTOR_AGENT_MAX_TOKENS,
+                                   cancellable, error);
+
+    g_signal_handler_disconnect (child, event_id);
+    g_list_free (messages);
+
+    if (result == NULL)
+        return NULL;
+
+    return result;
+}
+
+/* ================================================================
  * Tool dispatch table
  * ================================================================ */
 
@@ -2087,6 +2751,10 @@ static const ToolEntry BUILTIN_TOOLS[] = {
     { "ls",         tool_ls         },
     { "web_fetch",  tool_web_fetch  },
     { "web_search", tool_web_search },
+    { "todo_write", tool_todo_write },
+    { "multi_edit", tool_multi_edit },
+    { "task",       tool_task       },
+    { "skill",      tool_skill      },
     { NULL, NULL }
 };
 
@@ -2105,6 +2773,8 @@ ai_tool_executor_finalize (GObject *object)
     g_clear_pointer (&self->callbacks, g_hash_table_unref);
     g_clear_pointer (&self->working_directory, g_free);
     g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+    g_clear_pointer (&self->todos, g_ptr_array_unref);
+    g_clear_object (&self->registry);
     executor_unwatch_provider (self);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
@@ -2171,6 +2841,21 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
                              NULL,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiToolExecutor:resource-registry:
+     *
+     * Where the `task` and `skill` tools find what they run.
+     *
+     * %NULL by default, and while it is %NULL neither tool is offered at
+     * all --- an executor built by ai_tool_executor_new() advertises
+     * exactly the tools it always has. Setting a registry is what adds
+     * them, so nothing changes for a caller who does not want subagents.
+     */
+    properties[PROP_RESOURCE_REGISTRY] =
+        g_param_spec_object ("resource-registry", NULL, NULL,
+                             AI_TYPE_RESOURCE_REGISTRY,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties (object_class, N_PROPS, properties);
 
     /**
@@ -2206,6 +2891,23 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
                       NULL,
                       G_TYPE_INT, 1,
                       AI_TYPE_TOOL_USE);
+
+    /**
+     * AiToolExecutor::todos-changed:
+     * @self: the executor
+     *
+     * The todo list has been replaced.
+     *
+     * Emitted once per `todo_write` call, not once per item: the model
+     * resends the whole list every time, and a frontend redrawing it
+     * wants one notification per call.
+     */
+    signals[SIGNAL_TODOS_CHANGED] =
+        g_signal_new ("todos-changed",
+                      G_TYPE_FROM_CLASS (klass),
+                      G_SIGNAL_RUN_LAST,
+                      0, NULL, NULL, NULL,
+                      G_TYPE_NONE, 0);
 }
 
 static void
@@ -2227,6 +2929,9 @@ ai_tool_executor_get_property (
             break;
         case PROP_WORKING_DIRECTORY:
             g_value_set_string (value, self->working_directory);
+            break;
+        case PROP_RESOURCE_REGISTRY:
+            g_value_set_object (value, self->registry);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -2254,6 +2959,10 @@ ai_tool_executor_set_property (
         case PROP_WORKING_DIRECTORY:
             ai_tool_executor_set_working_directory (self,
                                                     g_value_get_string (value));
+            break;
+        case PROP_RESOURCE_REGISTRY:
+            ai_tool_executor_set_resource_registry (self,
+                                                    g_value_get_object (value));
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -2343,6 +3052,10 @@ ai_tool_executor_init (AiToolExecutor *self)
     self->stream          = FALSE;
     self->always_allowed  = NULL;
     self->denied_all      = FALSE;
+    self->registry        = NULL;
+    self->task_depth      = 0;
+    self->todos           = g_ptr_array_new_with_free_func (
+                                (GDestroyNotify)ai_todo_free);
     self->callbacks       = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                     g_free, callback_entry_free);
 }
@@ -2458,9 +3171,247 @@ ai_tool_executor_new (void)
                            FALSE);
     self->tools = g_list_append (self->tools, tool);
 
-    /* web_search is registered on demand by set_search_provider() */
+    /* multi_edit */
+    tool = ai_tool_new ("multi_edit",
+                        "Apply several edits to one file atomically. Every "
+                        "old_string must appear exactly once, and they are "
+                        "applied in order; if any of them fails, the file is "
+                        "left completely unchanged. Prefer this over several "
+                        "edit calls on the same file.");
+    ai_tool_add_parameter (tool, "path", "string",
+                           "Absolute or relative path to the file.", TRUE);
+    ai_tool_add_array_parameter (
+        tool, "edits",
+        "The edits to apply, in order.",
+        "{\"type\":\"object\","
+        "\"properties\":{"
+        "\"old_string\":{\"type\":\"string\","
+        "\"description\":\"The exact text to replace. Must occur exactly "
+        "once.\"},"
+        "\"new_string\":{\"type\":\"string\","
+        "\"description\":\"What to replace it with.\"}},"
+        "\"required\":[\"old_string\",\"new_string\"]}",
+        TRUE);
+    self->tools = g_list_append (self->tools, tool);
+
+    /* todo_write */
+    tool = ai_tool_new ("todo_write",
+                        "Record the plan for a multi-step task, and keep it "
+                        "current as you go. Send the whole list every time: "
+                        "it replaces the previous one. Mark exactly one item "
+                        "in_progress at a time, and mark it completed as soon "
+                        "as it is done rather than in a batch at the end.");
+    ai_tool_add_array_parameter (
+        tool, "todos",
+        "The complete list, in order.",
+        "{\"type\":\"object\","
+        "\"properties\":{"
+        "\"content\":{\"type\":\"string\","
+        "\"description\":\"The task, imperative: \\\"Add the parser\\\".\"},"
+        "\"active_form\":{\"type\":\"string\","
+        "\"description\":\"The same task in progress: \\\"Adding the "
+        "parser\\\".\"},"
+        "\"status\":{\"type\":\"string\","
+        "\"enum\":[\"pending\",\"in_progress\",\"completed\"]}},"
+        "\"required\":[\"content\",\"status\"]}",
+        TRUE);
+    self->tools = g_list_append (self->tools, tool);
+
+    /* web_search is registered on demand by set_search_provider(), and
+     * task/skill by set_resource_registry(). */
 
     return self;
+}
+
+/**
+ * ai_tool_executor_set_resource_registry:
+ * @self: an #AiToolExecutor
+ * @registry: (nullable) (transfer none): where commands, skills and
+ *   agents come from
+ *
+ * Gives the executor access to the harness resources on disk.
+ *
+ * Setting one registers the `task` and `skill` tools; clearing it
+ * removes them again. That is deliberate: an executor with no registry
+ * offers exactly the tools it always did, so adding subagent support to
+ * the library changed nothing for callers who do not want it.
+ */
+void
+ai_tool_executor_set_resource_registry (
+    AiToolExecutor     *self,
+    AiResourceRegistry *registry
+){
+    gboolean had_one;
+
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    had_one = (self->registry != NULL);
+
+    if (!g_set_object (&self->registry, registry))
+        return;
+
+    if (registry != NULL && !had_one)
+    {
+        AiTool *tool;
+
+        tool = ai_tool_new ("task",
+                            "Delegate a self-contained piece of work to a "
+                            "subagent, which runs with its own tools and "
+                            "returns only its final answer. Use it when the "
+                            "work is separable and would otherwise fill this "
+                            "conversation with detail you do not need.");
+        ai_tool_add_parameter (tool, "agent", "string",
+                               "The agent to run. Use the skill tool or ask "
+                               "for a listing if you are unsure which exist.",
+                               TRUE);
+        ai_tool_add_parameter (tool, "prompt", "string",
+                               "What the agent should do. It sees nothing of "
+                               "this conversation, so say everything it needs.",
+                               TRUE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("skill",
+                            "Load a skill's instructions into the "
+                            "conversation. A skill is a written procedure for "
+                            "a kind of task; read one before doing work it "
+                            "covers.");
+        ai_tool_add_parameter (tool, "name", "string",
+                               "The skill to load.", TRUE);
+        self->tools = g_list_append (self->tools, tool);
+    }
+    else if (registry == NULL && had_one)
+    {
+        ai_tool_executor_unregister (self, "task");
+        ai_tool_executor_unregister (self, "skill");
+    }
+
+    g_object_notify_by_pspec (G_OBJECT (self),
+                              properties[PROP_RESOURCE_REGISTRY]);
+}
+
+/**
+ * ai_tool_executor_get_resource_registry:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: (transfer none) (nullable): the registry, or %NULL
+ */
+AiResourceRegistry *
+ai_tool_executor_get_resource_registry (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+
+    return self->registry;
+}
+
+/**
+ * ai_tool_executor_get_n_todos:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: how many items are on the current todo list
+ */
+guint
+ai_tool_executor_get_n_todos (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), 0);
+
+    return self->todos->len;
+}
+
+/**
+ * ai_tool_executor_get_todo:
+ * @self: an #AiToolExecutor
+ * @index: which item
+ *
+ * Returns: (transfer none) (nullable): the item, or %NULL if @index is
+ *   out of range
+ */
+const AiTodo *
+ai_tool_executor_get_todo (
+    AiToolExecutor *self,
+    guint           index
+){
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+
+    if (index >= self->todos->len)
+        return NULL;
+
+    return g_ptr_array_index (self->todos, index);
+}
+
+/**
+ * ai_tool_executor_get_todo_fields:
+ * @self: an #AiToolExecutor
+ * @index: which item
+ * @out_label: (out) (optional) (transfer none): what to show for it
+ * @out_state: (out) (optional): where it stands
+ *
+ * Reads one item through out-parameters.
+ *
+ * The shape bindings use, for the same reason
+ * ai_rendered_text_get_span() exists --- and @out_label already applies
+ * the active-phrasing rule, so a renderer does not reimplement it.
+ *
+ * Returns: %FALSE if @index is out of range, leaving the outputs alone
+ */
+gboolean
+ai_tool_executor_get_todo_fields (
+    AiToolExecutor  *self,
+    guint            index,
+    const gchar    **out_label,
+    AiTodoState     *out_state
+){
+    const AiTodo *todo;
+
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), FALSE);
+
+    if (index >= self->todos->len)
+        return FALSE;
+
+    todo = g_ptr_array_index (self->todos, index);
+
+    if (out_label != NULL)
+        *out_label = ai_todo_get_label (todo);
+
+    if (out_state != NULL)
+        *out_state = todo->state;
+
+    return TRUE;
+}
+
+/**
+ * ai_tool_executor_get_todos:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: (transfer none) (element-type AiTodo): the current list,
+ *   owned by the executor and replaced by the next `todo_write`
+ */
+GPtrArray *
+ai_tool_executor_get_todos (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+
+    return self->todos;
+}
+
+/**
+ * ai_tool_executor_clear_todos:
+ * @self: an #AiToolExecutor
+ *
+ * Empties the todo list and emits #AiToolExecutor::todos-changed.
+ *
+ * For a frontend's `/clear`: the transcript and the list belong to the
+ * same conversation, and leaving one behind would be confusing.
+ */
+void
+ai_tool_executor_clear_todos (AiToolExecutor *self)
+{
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    if (self->todos->len == 0)
+        return;
+
+    g_ptr_array_set_size (self->todos, 0);
+    g_signal_emit (self, signals[SIGNAL_TODOS_CHANGED], 0);
 }
 
 void
@@ -2531,6 +3482,23 @@ ai_tool_executor_get_tools (AiToolExecutor *self)
     return self->tools;
 }
 
+/* Is @name in this executor's advertised tool list? */
+static gboolean
+executor_offers_tool (
+    AiToolExecutor *self,
+    const gchar    *name
+){
+    GList *iter;
+
+    for (iter = self->tools; iter != NULL; iter = iter->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (iter->data), name) == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 gchar *
 ai_tool_executor_execute (
     AiToolExecutor  *self,
@@ -2553,10 +3521,23 @@ ai_tool_executor_execute (
     if (user_entry != NULL)
         return user_entry->fn (tool_use, cancellable, error, user_entry->user_data);
 
+    /*
+     * A built-in runs only if this executor advertises it.
+     *
+     * That is what makes an allowlist structural rather than a matter of
+     * refusing calls: an executor built without bash has no bash, so
+     * calling it is not denied, it is unrepresentable. ai_tool_executor_new_empty()
+     * and the per-agent executors that `task` builds both depend on it.
+     */
     for (entry = BUILTIN_TOOLS; entry->name != NULL; entry++)
     {
-        if (g_strcmp0 (entry->name, name) == 0)
-            return entry->fn (self, tool_use, cancellable, error);
+        if (g_strcmp0 (entry->name, name) != 0)
+            continue;
+
+        if (!executor_offers_tool (self, name))
+            break;
+
+        return entry->fn (self, tool_use, cancellable, error);
     }
 
     g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,

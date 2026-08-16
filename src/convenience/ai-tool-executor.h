@@ -37,6 +37,8 @@
 #include "core/ai-provider.h"
 #include "model/ai-tool-use.h"
 #include "convenience/ai-search-provider.h"
+#include "harness/ai-resource-registry.h"
+#include "model/ai-todo.h"
 
 G_BEGIN_DECLS
 
@@ -122,9 +124,13 @@ ai_tool_executor_new (void);
  * application registers and nothing else. ai_tool_executor_new() hands the
  * model `bash`, `read`, `write` and `edit`, which for an agent that lives
  * inside somebody's accounts, records or infrastructure is a far larger
- * grant than the host usually intends -- and one that
- * ai_tool_executor_unregister() cannot take back, since it does not remove
- * built-ins.
+ * grant than the host usually intends.
+ *
+ * The tool list is the grant, not a suggestion: a built-in runs only
+ * while this executor advertises it, so ai_tool_executor_unregister()
+ * genuinely takes one away rather than merely hiding it from the model.
+ * That is what lets `task` confine a subagent to the tools its agent file
+ * declares.
  *
  * The registration API is identical; only the starting set differs.
  *
@@ -132,6 +138,57 @@ ai_tool_executor_new (void);
  */
 AiToolExecutor *
 ai_tool_executor_new_empty (void);
+
+/**
+ * AI_TOOL_EXECUTOR_MAX_TASK_DEPTH:
+ *
+ * How many nested `task` calls are allowed.
+ *
+ * A subagent delegating to a subagent delegating to a subagent is a
+ * runaway, not a plan. The limit is reported to the model rather than
+ * silently enforced, so it does the work itself instead of wondering why
+ * nothing happened.
+ */
+#define AI_TOOL_EXECUTOR_MAX_TASK_DEPTH (2)
+
+/**
+ * AI_TOOL_EXECUTOR_AGENT_MAX_TOKENS:
+ *
+ * The token budget one `task` subagent turn is given.
+ */
+#define AI_TOOL_EXECUTOR_AGENT_MAX_TOKENS (8192)
+
+void
+ai_tool_executor_set_resource_registry (
+    AiToolExecutor     *self,
+    AiResourceRegistry *registry
+);
+
+AiResourceRegistry *
+ai_tool_executor_get_resource_registry (AiToolExecutor *self);
+
+guint
+ai_tool_executor_get_n_todos (AiToolExecutor *self);
+
+const AiTodo *
+ai_tool_executor_get_todo (
+    AiToolExecutor *self,
+    guint           index
+);
+
+gboolean
+ai_tool_executor_get_todo_fields (
+    AiToolExecutor  *self,
+    guint            index,
+    const gchar    **out_label,
+    AiTodoState     *out_state
+);
+
+GPtrArray *
+ai_tool_executor_get_todos (AiToolExecutor *self);
+
+void
+ai_tool_executor_clear_todos (AiToolExecutor *self);
 
 /**
  * ai_tool_executor_set_search_provider:

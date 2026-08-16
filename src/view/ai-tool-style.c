@@ -38,6 +38,10 @@ static const AiToolStyle BUILTIN_STYLES[] = {
     { "ls",           "Listed",    "path",    "paths",    AI_TOOL_CATEGORY_FILE_READ,  "path",    FALSE },
     { "web_fetch",    "Fetched",   "page",    "pages",    AI_TOOL_CATEGORY_NETWORK,    "url",     FALSE },
     { "web_search",   "Searched",  "query",   "queries",  AI_TOOL_CATEGORY_SEARCH,     "query",   FALSE },
+    { "multi_edit",   "Edited",    "file",    "files",    AI_TOOL_CATEGORY_FILE_WRITE, "path",    TRUE  },
+    { "todo_write",   "Updated",   "todo list", "todo lists", AI_TOOL_CATEGORY_TASK,   NULL,      FALSE },
+    { "task",         "Ran",       "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent",   FALSE },
+    { "skill",        "Loaded",    "skill",   "skills",   AI_TOOL_CATEGORY_TASK,       "name",    FALSE },
 
     /* What the wrapped CLIs call theirs */
     { "Bash",         "Ran",       "command", "commands", AI_TOOL_CATEGORY_COMMAND,    "command", FALSE },
@@ -51,7 +55,8 @@ static const AiToolStyle BUILTIN_STYLES[] = {
     { "WebFetch",     "Fetched",   "page",    "pages",    AI_TOOL_CATEGORY_NETWORK,    "url",     FALSE },
     { "WebSearch",    "Searched",  "query",   "queries",  AI_TOOL_CATEGORY_SEARCH,     "query",   FALSE },
     { "Task",         "Delegated", "task",    "tasks",    AI_TOOL_CATEGORY_TASK,       "description", FALSE },
-    { "TodoWrite",    "Updated",   "todo",    "todos",    AI_TOOL_CATEGORY_TASK,       NULL,      FALSE }
+    { "TodoWrite",    "Updated",   "todo",    "todos",    AI_TOOL_CATEGORY_TASK,       NULL,      FALSE },
+    { "Skill",        "Loaded",    "skill",   "skills",   AI_TOOL_CATEGORY_TASK,       "command", FALSE }
 };
 
 /*

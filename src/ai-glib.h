@@ -46,6 +46,7 @@
 
 /* Model classes */
 #include "model/ai-usage.h"
+#include "model/ai-todo.h"
 #include "model/ai-content-block.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool.h"

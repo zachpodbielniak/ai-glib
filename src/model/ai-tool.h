@@ -54,6 +54,15 @@ ai_tool_add_enum_parameter(
     gboolean      required
 );
 
+void
+ai_tool_add_array_parameter(
+    AiTool      *self,
+    const gchar *name,
+    const gchar *description,
+    const gchar *item_schema,
+    gboolean     required
+);
+
 JsonNode *
 ai_tool_get_parameters_json(AiTool *self);
 

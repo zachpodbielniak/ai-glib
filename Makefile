@@ -59,6 +59,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/view/ai-transcript.h \
 	$(SRCDIR)/view/ai-conversation.h \
 	$(SRCDIR)/model/ai-usage.h \
+	$(SRCDIR)/model/ai-todo.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
 	$(SRCDIR)/model/ai-image-content.h \
@@ -129,6 +130,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/view/ai-transcript.c \
 	$(SRCDIR)/view/ai-conversation.c \
 	$(SRCDIR)/model/ai-usage.c \
+	$(SRCDIR)/model/ai-todo.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
 	$(SRCDIR)/model/ai-image-content.c \

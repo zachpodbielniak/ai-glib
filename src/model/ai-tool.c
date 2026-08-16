@@ -20,6 +20,7 @@ typedef struct
     gchar    *type;
     gchar    *description;
     gchar   **enum_values;
+    JsonNode *item_schema;  /* array element schema, or NULL */
     gboolean  required;
 } AiToolParameter;
 
@@ -66,6 +67,7 @@ ai_tool_parameter_free(AiToolParameter *param)
     g_free(param->type);
     g_free(param->description);
     g_strfreev(param->enum_values);
+    g_clear_pointer(&param->item_schema, json_node_unref);
     g_slice_free(AiToolParameter, param);
 }
 
@@ -308,6 +310,75 @@ ai_tool_add_enum_parameter(
 }
 
 /**
+ * ai_tool_add_array_parameter:
+ * @self: an #AiTool
+ * @name: the parameter name
+ * @description: (nullable): the parameter description
+ * @item_schema: a JSON object describing one element, e.g.
+ *   `{"type":"object","properties":{"path":{"type":"string"}}}`
+ * @required: whether the parameter is required
+ *
+ * Adds an array parameter whose elements have a schema.
+ *
+ * This exists because `{"type":"array"}` on its own is not a schema any
+ * provider can act on --- Gemini rejects it outright, and the others
+ * simply guess. A tool that takes a list of edits or a list of todos
+ * needs to say what one of them looks like.
+ *
+ * @item_schema that does not parse is dropped with a #g_message and the
+ * parameter is still added as a bare array: a malformed schema in a
+ * caller's tool definition should degrade, not take the tool away.
+ */
+void
+ai_tool_add_array_parameter(
+    AiTool      *self,
+    const gchar *name,
+    const gchar *description,
+    const gchar *item_schema,
+    gboolean     required
+){
+    AiToolParameter      *param;
+    g_autoptr(JsonParser) parser = NULL;
+    g_autoptr(GError)     local_error = NULL;
+
+    g_return_if_fail(AI_IS_TOOL(self));
+    g_return_if_fail(name != NULL);
+
+    param = g_slice_new0(AiToolParameter);
+    param->name = g_strdup(name);
+    param->type = g_strdup("array");
+    param->description = g_strdup(description);
+    param->enum_values = NULL;
+    param->required = required;
+
+    if (item_schema != NULL)
+    {
+        parser = json_parser_new();
+
+        if (json_parser_load_from_data(parser, item_schema, -1, &local_error) &&
+            json_parser_get_root(parser) != NULL)
+        {
+            param->item_schema = json_node_ref(json_parser_get_root(parser));
+        }
+        else
+        {
+            g_message("ai_tool_add_array_parameter: item schema for '%s' "
+                      "did not parse (%s); the parameter will be an "
+                      "untyped array", name,
+                      local_error != NULL ? local_error->message : "empty");
+        }
+    }
+
+    self->parameters = g_list_append(self->parameters, param);
+
+    if (required)
+    {
+        self->required_params = g_list_append(self->required_params,
+                                              param->name);
+    }
+}
+
+/**
  * ai_tool_get_parameters_json:
  * @self: an #AiTool
  *
@@ -348,6 +419,13 @@ ai_tool_get_parameters_json(AiTool *self)
         {
             json_builder_set_member_name(builder, "description");
             json_builder_add_string_value(builder, param->description);
+        }
+
+        if (param->item_schema != NULL)
+        {
+            json_builder_set_member_name(builder, "items");
+            json_builder_add_value(builder,
+                                   json_node_ref(param->item_schema));
         }
 
         if (param->enum_values != NULL)

@@ -590,10 +590,10 @@ test_executor_run_full_error_clears_out (void)
  * ai_tool_executor_new_empty() must hand the model nothing at all.
  *
  * The difference matters more than it looks: the default constructor
- * includes `bash`, `read`, `write` and `edit`, and unregister() cannot
- * remove a built-in. An application that wants the model confined to its
- * own tools has no way to get there except by starting empty, so this test
- * pins the guarantee it depends on.
+ * includes `bash`, `read`, `write` and `edit`. An application that wants
+ * the model confined to its own tools starts empty, so this test pins the
+ * guarantee it depends on -- and the companion below pins the other half,
+ * that an unadvertised built-in genuinely does not run.
  */
 static void
 test_new_empty_has_no_tools (void)
@@ -617,6 +617,88 @@ test_new_empty_has_no_tools (void)
     }
 
     g_assert_nonnull (l);
+}
+
+/*
+ * The tool list is the grant.
+ *
+ * A built-in dispatches only while the executor advertises it. Without
+ * that, `task`'s allowlist would be decoration: an agent whose tools:
+ * omits bash would still be able to call bash, because the dispatch table
+ * is global.
+ */
+static void
+test_unadvertised_builtin_does_not_run (void)
+{
+    g_autoptr(AiToolExecutor) empty = ai_tool_executor_new_empty ();
+    g_autoptr(AiToolUse)      use = NULL;
+    g_autoptr(JsonBuilder)    builder = json_builder_new ();
+    g_autoptr(JsonNode)       input = NULL;
+    g_autofree gchar         *result = NULL;
+    GError                   *error = NULL;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "command");
+    json_builder_add_string_value (builder, "echo SHOULD_NOT_RUN");
+    json_builder_end_object (builder);
+    input = json_builder_get_root (builder);
+
+    use = ai_tool_use_new ("id-1", "bash", input);
+
+    result = ai_tool_executor_execute (empty, use, NULL, &error);
+
+    g_assert_null (result);
+    g_assert_nonnull (error);
+    g_clear_error (&error);
+}
+
+/* Does the executor advertise a tool by this name? */
+static gboolean
+tool_list_contains (AiToolExecutor *executor, const gchar *name)
+{
+    GList *l;
+
+    for (l = ai_tool_executor_get_tools (executor); l != NULL; l = l->next)
+    {
+        if (g_strcmp0 (ai_tool_get_name (AI_TOOL (l->data)), name) == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * The compatibility guarantee, stated as an assertion.
+ *
+ * An executor with no resource registry offers exactly the tools it
+ * always has; a registry is what adds `task` and `skill`.
+ */
+static void
+test_registry_adds_exactly_two_tools (void)
+{
+    g_autoptr(AiToolExecutor)     executor = ai_tool_executor_new ();
+    g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new ();
+    guint                         before;
+    guint                         after;
+
+    before = g_list_length (ai_tool_executor_get_tools (executor));
+
+    g_assert_null (ai_tool_executor_get_resource_registry (executor));
+    g_assert_false (tool_list_contains (executor, "task"));
+
+    ai_tool_executor_set_resource_registry (executor, registry);
+    after = g_list_length (ai_tool_executor_get_tools (executor));
+
+    g_assert_cmpuint (after, ==, before + 2);
+    g_assert_true (tool_list_contains (executor, "task"));
+    g_assert_true (tool_list_contains (executor, "skill"));
+    g_assert_true (ai_tool_executor_get_resource_registry (executor) ==
+                   registry);
+
+    /* And clearing it takes them away again. */
+    ai_tool_executor_set_resource_registry (executor, NULL);
+    g_assert_cmpuint (g_list_length (ai_tool_executor_get_tools (executor)),
+                      ==, before);
 }
 
 static gchar *
@@ -681,6 +763,10 @@ main (
                      test_new_empty_has_no_tools);
     g_test_add_func ("/ai-glib/tool-executor/new-empty/only-host-tools",
                      test_new_empty_registers_only_host_tools);
+    g_test_add_func ("/ai-glib/tool-executor/unadvertised-builtin",
+                     test_unadvertised_builtin_does_not_run);
+    g_test_add_func ("/ai-glib/tool-executor/registry-adds-tools",
+                     test_registry_adds_exactly_two_tools);
     g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
                      test_executor_run_full_returns_new_messages);
     g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
