@@ -375,7 +375,15 @@ on_grok_chat_response(
         gsize body_len = 0;
         const gchar *body = g_bytes_get_data(response_bytes, &body_len);
 
-        g_warning("xAI API error (HTTP %u): %.*s", status, (int)body_len, body);
+        /*
+         * g_debug, not g_warning.  A server returning 500 is a runtime
+         * condition this function already handles by returning a GError,
+         * not a programming mistake -- and as a warning it aborted any
+         * program running with G_DEBUG=fatal-warnings, including a GTest
+         * suite, on a transient upstream failure.  None of the other four
+         * HTTP providers warn on a status code.
+         */
+        g_debug("xAI API error (HTTP %u): %.*s", status, (int)body_len, body);
 
         if (status == 401 || status == 403)
         {

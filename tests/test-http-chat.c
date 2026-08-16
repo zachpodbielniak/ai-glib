@@ -18,9 +18,13 @@
  * reference dropped on the floor along the way shows up as a failure rather
  * than surviving another year.
  *
- * Both wire formats are covered because they are genuinely different code:
- * OpenAI-style `choices[]` JSON with `data:`-only SSE, and Anthropic's
- * `content[]` with named `event:` frames.
+ * All five HTTP providers are covered, because their wire formats are
+ * genuinely different code rather than one parser with five URLs:
+ *
+ *   openai, grok   choices[] JSON; SSE with bare `data:` frames
+ *   claude         content[]; SSE with named `event:` frames
+ *   gemini         candidates[].content.parts[]; camelCase usageMetadata
+ *   ollama         a single message object; NDJSON, no `data:` prefix at all
  */
 
 #include <glib.h>
@@ -47,6 +51,24 @@ static const gchar *claude_ok_body =
 	"\"content\":[{\"type\":\"text\",\"text\":\"the reply\"}],"
 	"\"stop_reason\":\"end_turn\","
 	"\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}";
+
+static const gchar *grok_ok_body =
+	"{\"id\":\"grok-1\",\"model\":\"grok-4\",\"choices\":[{\"index\":0,"
+	"\"message\":{\"role\":\"assistant\",\"content\":\"the reply\"},"
+	"\"finish_reason\":\"stop\"}],"
+	"\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}";
+
+/* Gemini answers in candidates[].content.parts[], counts in camelCase. */
+static const gchar *gemini_ok_body =
+	"{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"the reply\"}]},"
+	"\"finishReason\":\"STOP\"}],"
+	"\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7}}";
+
+/* Ollama answers with one message object and its own token counts. */
+static const gchar *ollama_ok_body =
+	"{\"model\":\"llama3.2\",\"done\":true,\"done_reason\":\"stop\","
+	"\"message\":{\"role\":\"assistant\",\"content\":\"the reply\"},"
+	"\"prompt_eval_count\":11,\"eval_count\":7}";
 
 /* SSE, as each provider actually receives it. */
 static const gchar *openai_sse_body =
@@ -77,6 +99,33 @@ static const gchar *claude_sse_body =
 	"event: message_stop\n"
 	"data: {\"type\":\"message_stop\"}\n\n";
 
+/* grok speaks OpenAI's SSE dialect. */
+static const gchar *grok_sse_body =
+	"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"strea\"}}]}\n\n"
+	"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"ming\"}}]}\n\n"
+	"data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	"data: [DONE]\n\n";
+
+/* Gemini streams whole candidate objects behind `data:`, not deltas. */
+static const gchar *gemini_sse_body =
+	"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"strea\"}]}}]}\n\n"
+	"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ming\"}]}}]}\n\n"
+	"data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}],"
+	"\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7}}\n\n";
+
+/*
+ * Ollama is NDJSON, not SSE: one complete JSON object per line, no `data:`
+ * prefix at all.  A different reader, so it needs its own pass.
+ */
+static const gchar *ollama_ndjson_body =
+	"{\"model\":\"llama3.2\",\"done\":false,"
+	"\"message\":{\"role\":\"assistant\",\"content\":\"strea\"}}\n"
+	"{\"model\":\"llama3.2\",\"done\":false,"
+	"\"message\":{\"role\":\"assistant\",\"content\":\"ming\"}}\n"
+	"{\"model\":\"llama3.2\",\"done\":true,\"done_reason\":\"stop\","
+	"\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+	"\"prompt_eval_count\":11,\"eval_count\":7}\n";
+
 /* ------------------------------------------------------------------ */
 /* Clients                                                             */
 /* ------------------------------------------------------------------ */
@@ -103,6 +152,42 @@ make_claude(TServer *ts)
 	ai_config_set_max_retries(config, 0);
 
 	return ai_claude_client_new_with_config(config);
+}
+
+static AiGrokClient *
+make_grok(TServer *ts)
+{
+	g_autoptr(AiConfig) config = ai_config_new();
+
+	ai_config_set_base_url(config, AI_PROVIDER_GROK, ts->base_url);
+	ai_config_set_api_key(config, AI_PROVIDER_GROK, "test-key");
+	ai_config_set_max_retries(config, 0);
+
+	return ai_grok_client_new_with_config(config);
+}
+
+static AiGeminiClient *
+make_gemini(TServer *ts)
+{
+	g_autoptr(AiConfig) config = ai_config_new();
+
+	ai_config_set_base_url(config, AI_PROVIDER_GEMINI, ts->base_url);
+	ai_config_set_api_key(config, AI_PROVIDER_GEMINI, "test-key");
+	ai_config_set_max_retries(config, 0);
+
+	return ai_gemini_client_new_with_config(config);
+}
+
+/* Ollama is local and unauthenticated by default; no key to set. */
+static AiOllamaClient *
+make_ollama(TServer *ts)
+{
+	g_autoptr(AiConfig) config = ai_config_new();
+
+	ai_config_set_base_url(config, AI_PROVIDER_OLLAMA, ts->base_url);
+	ai_config_set_max_retries(config, 0);
+
+	return ai_ollama_client_new_with_config(config);
 }
 
 /* ------------------------------------------------------------------ */
@@ -415,6 +500,282 @@ test_claude_stream_deltas(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Grok                                                                */
+/* ------------------------------------------------------------------ */
+
+static void
+test_grok_chat_round_trip(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiGrokClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *auth = NULL;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, grok_ok_body);
+	client = make_grok(ts);
+
+	turn = chat_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "the reply");
+
+	path = tserver_dup_last_path(ts);
+	g_assert_cmpstr(path, ==, "/v1/chat/completions");
+
+	auth = tserver_dup_header(ts, "Authorization");
+	g_assert_cmpstr(auth, ==, "Bearer test-key");
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_grok_stream_deltas(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiGrokClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, "text/event-stream",
+	                          grok_sse_body);
+	client = make_grok(ts);
+
+	turn = stream_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	g_assert_cmpstr(turn->deltas->str, ==, "streaming");
+	g_assert_cmpuint(turn->ends, ==, 1);
+
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "streaming");
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+/* ------------------------------------------------------------------ */
+/* Gemini                                                              */
+/* ------------------------------------------------------------------ */
+
+static void
+test_gemini_chat_round_trip(void)
+{
+	/*
+	 * Gemini's shape shares nothing with the other four: the answer is in
+	 * candidates[].content.parts[] and the token counts are camelCase under
+	 * usageMetadata.
+	 */
+	TServer *ts = tserver_new();
+	g_autoptr(AiGeminiClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *path = NULL;
+	AiUsage *usage;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, gemini_ok_body);
+	client = make_gemini(ts);
+
+	turn = chat_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "the reply");
+
+	/* The model name is part of the path, not the body. */
+	path = tserver_dup_last_path(ts);
+	g_assert_nonnull(path);
+	g_assert_nonnull(strstr(path, "/v1beta/models/"));
+	g_assert_nonnull(strstr(path, ":generateContent"));
+
+	usage = ai_response_get_usage(turn->response);
+	g_assert_nonnull(usage);
+	g_assert_cmpint(ai_usage_get_input_tokens(usage), ==, 11);
+	g_assert_cmpint(ai_usage_get_output_tokens(usage), ==, 7);
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_gemini_key_in_header_not_url(void)
+{
+	/*
+	 * A URL-embedded credential leaks into proxy logs, browser history and
+	 * crash reports.  The image path was moved to x-goog-api-key for that
+	 * reason and carries the same assertion; chat and streaming were missed
+	 * at the time and put the key in ?key= right up until this test.
+	 */
+	TServer *ts = tserver_new();
+	g_autoptr(AiGeminiClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *key = NULL;
+	g_autofree gchar *path = NULL;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, gemini_ok_body);
+	client = make_gemini(ts);
+
+	turn = chat_once(client, NULL);
+	g_assert_no_error(turn->error);
+
+	key = tserver_dup_header(ts, "x-goog-api-key");
+	g_assert_cmpstr(key, ==, "test-key");
+
+	path = tserver_dup_last_path(ts);
+	g_assert_null(strstr(path, "test-key"));
+
+	g_mutex_lock(&ts->lock);
+	if (ts->last_query != NULL)
+	{
+		g_assert_null(strstr(ts->last_query, "test-key"));
+	}
+	g_mutex_unlock(&ts->lock);
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_gemini_stream_deltas(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiGeminiClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, "text/event-stream",
+	                          gemini_sse_body);
+	client = make_gemini(ts);
+
+	turn = stream_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	g_assert_cmpstr(turn->deltas->str, ==, "streaming");
+
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "streaming");
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_gemini_stream_key_in_header(void)
+{
+	/*
+	 * The streaming path builds its own SoupMessage rather than going
+	 * through AiClient's, so it authenticates separately -- and would have
+	 * been left behind by a fix that only touched the shared path.
+	 */
+	TServer *ts = tserver_new();
+	g_autoptr(AiGeminiClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *key = NULL;
+	g_autofree gchar *path = NULL;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, "text/event-stream",
+	                          gemini_sse_body);
+	client = make_gemini(ts);
+
+	turn = stream_once(client, NULL);
+	g_assert_no_error(turn->error);
+
+	key = tserver_dup_header(ts, "x-goog-api-key");
+	g_assert_cmpstr(key, ==, "test-key");
+
+	path = tserver_dup_last_path(ts);
+	g_assert_null(strstr(path, "test-key"));
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+/* ------------------------------------------------------------------ */
+/* Ollama                                                              */
+/* ------------------------------------------------------------------ */
+
+static void
+test_ollama_chat_round_trip(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiOllamaClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *path = NULL;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, ollama_ok_body);
+	client = make_ollama(ts);
+
+	turn = chat_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "the reply");
+
+	path = tserver_dup_last_path(ts);
+	g_assert_cmpstr(path, ==, "/api/chat");
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_ollama_chat_usage(void)
+{
+	/* Ollama names its counts prompt_eval_count / eval_count. */
+	TServer *ts = tserver_new();
+	g_autoptr(AiOllamaClient) client = NULL;
+	Turn *turn;
+	AiUsage *usage;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, ollama_ok_body);
+	client = make_ollama(ts);
+
+	turn = chat_once(client, NULL);
+	g_assert_no_error(turn->error);
+
+	usage = ai_response_get_usage(turn->response);
+	g_assert_nonnull(usage);
+	g_assert_cmpint(ai_usage_get_input_tokens(usage), ==, 11);
+	g_assert_cmpint(ai_usage_get_output_tokens(usage), ==, 7);
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+static void
+test_ollama_stream_ndjson(void)
+{
+	/*
+	 * NDJSON rather than SSE -- one complete object per line and no `data:`
+	 * prefix -- so this exercises a genuinely different reader from the
+	 * other four.
+	 */
+	TServer *ts = tserver_new();
+	g_autoptr(AiOllamaClient) client = NULL;
+	Turn *turn;
+	g_autofree gchar *text = NULL;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, "application/x-ndjson",
+	                          ollama_ndjson_body);
+	client = make_ollama(ts);
+
+	turn = stream_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	g_assert_cmpstr(turn->deltas->str, ==, "streaming");
+
+	text = ai_response_get_text(turn->response);
+	g_assert_cmpstr(text, ==, "streaming");
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
+/* ------------------------------------------------------------------ */
 /* Failure paths                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -655,6 +1016,180 @@ test_chat_cancelled_before_start(void)
 	tserver_free(ts);
 }
 
+/*
+ * Every provider, one failing turn each.
+ *
+ * The error paths take an early return before the completion handler is
+ * finished with the task, which is where a leaked reference is easiest to
+ * introduce -- so each provider gets a pass through one.
+ */
+static void
+test_every_provider_reports_a_failure(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiOpenAIClient) openai = NULL;
+	g_autoptr(AiClaudeClient) claude = NULL;
+	g_autoptr(AiGrokClient) grok = NULL;
+	g_autoptr(AiGeminiClient) gemini = NULL;
+	g_autoptr(AiOllamaClient) ollama = NULL;
+	gpointer clients[5];
+	gsize i;
+
+	tserver_set_response(ts, 500, "{\"error\":{\"message\":\"boom\"}}");
+
+	openai = make_openai(ts);
+	claude = make_claude(ts);
+	grok = make_grok(ts);
+	gemini = make_gemini(ts);
+	ollama = make_ollama(ts);
+
+	clients[0] = openai;
+	clients[1] = claude;
+	clients[2] = grok;
+	clients[3] = gemini;
+	clients[4] = ollama;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		Turn *turn = chat_once(clients[i], NULL);
+
+		g_assert_null(turn->response);
+		g_assert_nonnull(turn->error);
+
+		turn_free(turn);
+	}
+
+	tserver_free(ts);
+}
+
+static void
+test_every_provider_survives_a_null_body(void)
+{
+	/*
+	 * A bare `null` parses to a NULL root, which every parse_response()
+	 * once handed straight to JSON_NODE_HOLDS_OBJECT().  All five at once,
+	 * because the guard was added to all five at once.
+	 */
+	TServer *ts = tserver_new();
+	g_autoptr(AiOpenAIClient) openai = NULL;
+	g_autoptr(AiClaudeClient) claude = NULL;
+	g_autoptr(AiGrokClient) grok = NULL;
+	g_autoptr(AiGeminiClient) gemini = NULL;
+	g_autoptr(AiOllamaClient) ollama = NULL;
+	gpointer clients[5];
+	gsize i;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, "null");
+
+	openai = make_openai(ts);
+	claude = make_claude(ts);
+	grok = make_grok(ts);
+	gemini = make_gemini(ts);
+	ollama = make_ollama(ts);
+
+	clients[0] = openai;
+	clients[1] = claude;
+	clients[2] = grok;
+	clients[3] = gemini;
+	clients[4] = ollama;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		Turn *turn = chat_once(clients[i], NULL);
+
+		g_assert_null(turn->response);
+		g_assert_nonnull(turn->error);
+
+		turn_free(turn);
+	}
+
+	tserver_free(ts);
+}
+
+static void
+test_every_provider_survives_an_empty_body(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiOpenAIClient) openai = NULL;
+	g_autoptr(AiClaudeClient) claude = NULL;
+	g_autoptr(AiGrokClient) grok = NULL;
+	g_autoptr(AiGeminiClient) gemini = NULL;
+	g_autoptr(AiOllamaClient) ollama = NULL;
+	gpointer clients[5];
+	gsize i;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, "");
+
+	openai = make_openai(ts);
+	claude = make_claude(ts);
+	grok = make_grok(ts);
+	gemini = make_gemini(ts);
+	ollama = make_ollama(ts);
+
+	clients[0] = openai;
+	clients[1] = claude;
+	clients[2] = grok;
+	clients[3] = gemini;
+	clients[4] = ollama;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		Turn *turn = chat_once(clients[i], NULL);
+
+		g_assert_null(turn->response);
+		g_assert_nonnull(turn->error);
+
+		turn_free(turn);
+	}
+
+	tserver_free(ts);
+}
+
+static void
+test_every_provider_cancels(void)
+{
+	/* The cancellation path, once per provider, for the same reason. */
+	TServer *ts = tserver_new();
+	g_autoptr(AiOpenAIClient) openai = NULL;
+	g_autoptr(AiClaudeClient) claude = NULL;
+	g_autoptr(AiGrokClient) grok = NULL;
+	g_autoptr(AiGeminiClient) gemini = NULL;
+	g_autoptr(AiOllamaClient) ollama = NULL;
+	gpointer clients[5];
+	gsize i;
+
+	tserver_set_response(ts, SOUP_STATUS_OK, openai_ok_body);
+	tserver_set_delay(ts, 300);
+
+	openai = make_openai(ts);
+	claude = make_claude(ts);
+	grok = make_grok(ts);
+	gemini = make_gemini(ts);
+	ollama = make_ollama(ts);
+
+	clients[0] = openai;
+	clients[1] = claude;
+	clients[2] = grok;
+	clients[3] = gemini;
+	clients[4] = ollama;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		g_autoptr(GCancellable) cancellable = g_cancellable_new();
+		Turn *turn;
+
+		g_timeout_add(50, cancel_now, cancellable);
+		turn = chat_once(clients[i], cancellable);
+
+		g_assert_null(turn->response);
+		g_assert_nonnull(turn->error);
+
+		turn_free(turn);
+	}
+
+	tserver_free(ts);
+}
+
 /* ------------------------------------------------------------------ */
 /* Repetition                                                          */
 /* ------------------------------------------------------------------ */
@@ -733,6 +1268,22 @@ main(int argc, char *argv[])
 	                test_claude_chat_stop_reason);
 	g_test_add_func("/ai-glib/http-chat/claude/stream", test_claude_stream_deltas);
 
+	g_test_add_func("/ai-glib/http-chat/grok/round-trip", test_grok_chat_round_trip);
+	g_test_add_func("/ai-glib/http-chat/grok/stream", test_grok_stream_deltas);
+
+	g_test_add_func("/ai-glib/http-chat/gemini/round-trip",
+	                test_gemini_chat_round_trip);
+	g_test_add_func("/ai-glib/http-chat/gemini/key-in-header",
+	                test_gemini_key_in_header_not_url);
+	g_test_add_func("/ai-glib/http-chat/gemini/stream", test_gemini_stream_deltas);
+	g_test_add_func("/ai-glib/http-chat/gemini/stream-key-in-header",
+	                test_gemini_stream_key_in_header);
+
+	g_test_add_func("/ai-glib/http-chat/ollama/round-trip",
+	                test_ollama_chat_round_trip);
+	g_test_add_func("/ai-glib/http-chat/ollama/usage", test_ollama_chat_usage);
+	g_test_add_func("/ai-glib/http-chat/ollama/stream", test_ollama_stream_ndjson);
+
 	g_test_add_func("/ai-glib/http-chat/error/http-500", test_chat_http_error);
 	g_test_add_func("/ai-glib/http-chat/error/unauthorized", test_chat_unauthorized);
 	g_test_add_func("/ai-glib/http-chat/error/rate-limited", test_chat_rate_limited);
@@ -749,6 +1300,14 @@ main(int argc, char *argv[])
 	                test_stream_cancelled_mid_request);
 	g_test_add_func("/ai-glib/http-chat/cancel/before-start",
 	                test_chat_cancelled_before_start);
+
+	g_test_add_func("/ai-glib/http-chat/all/failure",
+	                test_every_provider_reports_a_failure);
+	g_test_add_func("/ai-glib/http-chat/all/null-body",
+	                test_every_provider_survives_a_null_body);
+	g_test_add_func("/ai-glib/http-chat/all/empty-body",
+	                test_every_provider_survives_an_empty_body);
+	g_test_add_func("/ai-glib/http-chat/all/cancel", test_every_provider_cancels);
 
 	g_test_add_func("/ai-glib/http-chat/repeat/chat", test_many_turns_on_one_client);
 	g_test_add_func("/ai-glib/http-chat/repeat/stream",

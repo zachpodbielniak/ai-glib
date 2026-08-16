@@ -446,8 +446,10 @@ ai_gemini_client_get_endpoint_url(AiClient *client)
         model = AI_GEMINI_DEFAULT_MODEL;
     }
 
-    return g_strdup_printf("%s/v1beta/models/%s:generateContent?key=%s",
-                           base_url, model, api_key != NULL ? api_key : "");
+    (void)api_key;
+
+    return g_strdup_printf("%s/v1beta/models/%s:generateContent",
+                           base_url, model);
 }
 
 static void
@@ -455,9 +457,24 @@ ai_gemini_client_add_auth_headers(
     AiClient    *client,
     SoupMessage *msg
 ){
-    /* Gemini uses API key in URL, not headers */
-    (void)client;
-    (void)msg;
+    AiConfig *config = ai_client_get_config(client);
+    const gchar *api_key = ai_config_get_api_key(config, AI_PROVIDER_GEMINI);
+
+    /*
+     * The key goes in a header, not the query string.  A URL-embedded
+     * credential leaks into proxy logs, browser history and crash reports;
+     * x-goog-api-key is what the API expects and what the reference
+     * scripts use.
+     *
+     * The image path was moved to the header for exactly this reason and
+     * carries a test asserting the key never reaches the URL; chat and
+     * streaming were simply missed at the time.
+     */
+    if (api_key != NULL)
+    {
+        soup_message_headers_append(soup_message_get_request_headers(msg),
+                                    "x-goog-api-key", api_key);
+    }
 }
 
 static void
@@ -1215,9 +1232,12 @@ ai_gemini_client_get_stream_endpoint_url(AiClient *client)
         model = AI_GEMINI_DEFAULT_MODEL;
     }
 
-    /* Use streamGenerateContent instead of generateContent */
-    return g_strdup_printf("%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s",
-                           base_url, model, api_key != NULL ? api_key : "");
+    /* Use streamGenerateContent instead of generateContent.  The key rides
+     * in x-goog-api-key, as on every other Gemini path. */
+    (void)api_key;
+
+    return g_strdup_printf("%s/v1beta/models/%s:streamGenerateContent?alt=sse",
+                           base_url, model);
 }
 
 static void
@@ -1268,6 +1288,14 @@ ai_gemini_client_chat_stream_async(
                                 "Content-Type", "application/json");
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Accept", "text/event-stream");
+
+    /*
+     * The streaming path builds its own SoupMessage rather than going
+     * through AiClient's, so it has to ask for the auth header itself --
+     * which is why moving the key out of the query string had to touch
+     * this function too.
+     */
+    klass->add_auth_headers(AI_CLIENT(self), msg);
 
     {
         g_autoptr(GBytes) body_bytes =
