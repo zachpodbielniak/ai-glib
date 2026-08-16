@@ -215,6 +215,9 @@ ai_cli_client_format_exit_error(
     const gchar *stdout_data
 );
 
+gchar *
+ai_cli_client_events_to_delta(GPtrArray *events);
+
 GSubprocess *
 ai_cli_client_spawn(
     AiCliClient          *self,

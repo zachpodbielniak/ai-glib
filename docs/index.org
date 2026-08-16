@@ -49,6 +49,10 @@ see their provider pages.
 - [[file:tool-executor.org][Tool Executor]] - Built-in tools and the multi-turn tool-use loop
 - [[file:web-search.org][Web Search]] - The web_search tool and its providers
 
+*** Observing a turn
+- [[file:events.org][The event stream]] - Watch a turn happen: text, reasoning, tool calls, usage
+- [[file:agents.org][Agents & Brigades]] - Orchestrating multiple agent runs
+
 *** API Reference
 - [[file:api-reference/index.org][API Reference Index]] - Complete API documentation
 - [[file:api-reference/ai-simple.org][AiSimple]] - Simple convenience API (start here)

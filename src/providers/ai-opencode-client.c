@@ -12,8 +12,10 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-opencode-client-internal.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-tool-result.h"
 
 /*
  * Private structure for AiOpenCodeClient.
@@ -627,7 +629,8 @@ ai_opencode_client_parse_json_output(
         }
 
         root = json_parser_get_root(parser);
-        if (!JSON_NODE_HOLDS_OBJECT(root))
+        /* NULL root: a bare `null` line. See the streaming parser. */
+        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
         {
             continue;
         }
@@ -855,27 +858,168 @@ ai_opencode_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Type-checked JSON accessors, for the same reason grok-build has them:
+ * json-glib's *_member_with_default() emit a critical on a type mismatch,
+ * and subprocess stdout is untrusted input that must not be able to abort a
+ * fatal-warnings run.
+ */
+static const gchar *
+oc_get_string(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_STRING)
+        return NULL;
+
+    return json_node_get_string(node);
+}
+
+static JsonObject *
+oc_get_object(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
+        return NULL;
+
+    return json_node_get_object(node);
+}
+
+static gint64
+oc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return json_node_get_int(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return (gint64)json_node_get_double(node);
+
+    return fallback;
+}
+
+/*
+ * Turn one opencode tool_use part into events.
  *
- * Streaming events:
- * {"type":"text","part":{"text":"..."}} -> emit delta
- * {"type":"step_finish","part":{"tokens":{"input":N,"output":N}}} -> final usage
+ * opencode reports a tool as a single part whose state advances -- pending,
+ * running, completed, error -- rather than as separate start and stop
+ * events. A part that arrives already "completed" is the common case, so it
+ * yields both a TOOL_STARTED and a TOOL_FINISHED: the consumer's state
+ * machine then looks the same for opencode as for the providers that really
+ * do announce a call before answering it.
+ *
+ * This information used to be assembled into a markdown string and thrown
+ * away the moment any text arrived, which is why a tool-heavy opencode run
+ * showed nothing of what it did.
+ */
+static void
+oc_emit_tool_part(
+    JsonObject *part,
+    GPtrArray  *out_events
+){
+    JsonObject *state;
+    const gchar *tool;
+    const gchar *status;
+    const gchar *id;
+    JsonNode *input;
+    g_autoptr(AiToolUse) tool_use = NULL;
+
+    if (part == NULL)
+        return;
+
+    tool = oc_get_string(part, "tool");
+
+    if (tool == NULL || tool[0] == '\0')
+        tool = "tool";
+
+    /* opencode has spelled this both ways across versions. */
+    id = oc_get_string(part, "id");
+    if (id == NULL)
+        id = oc_get_string(part, "callID");
+    if (id == NULL)
+        id = "";
+
+    state = oc_get_object(part, "state");
+    status = state != NULL ? oc_get_string(state, "status") : NULL;
+
+    input = state != NULL && json_object_has_member(state, "input")
+        ? json_object_get_member(state, "input")
+        : NULL;
+
+    tool_use = ai_tool_use_new(id, tool,
+                               input != NULL ? json_node_copy(input) : NULL);
+
+    g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+
+    if (g_strcmp0(status, "completed") == 0)
+    {
+        const gchar *output = state != NULL ? oc_get_string(state, "output") : NULL;
+        g_autoptr(AiToolResult) result =
+            ai_tool_result_new_with_name(id, tool,
+                                         output != NULL ? output : "", FALSE);
+
+        g_ptr_array_add(out_events,
+                        ai_event_new_tool_finished(tool_use, result));
+    }
+    else if (g_strcmp0(status, "error") == 0)
+    {
+        const gchar *err = state != NULL ? oc_get_string(state, "error") : NULL;
+        g_autoptr(AiToolResult) result =
+            ai_tool_result_new_with_name(id, tool,
+                                         err != NULL ? err : "unknown error",
+                                         TRUE);
+
+        g_ptr_array_add(out_events,
+                        ai_event_new_tool_finished(tool_use, result));
+    }
+}
+
+/*
+ * Parse a single NDJSON line from opencode into events.
+ *
+ * opencode wraps everything in {"type": ..., "part": {...}}:
+ *   {"type":"text","part":{"text":"..."}}                     -> TEXT_DELTA
+ *   {"type":"tool_use","part":{"tool":..,"state":{...}}}       -> tool events
+ *   {"type":"step_finish","part":{"tokens":{"input":N,...}}}   -> USAGE
+ *
+ * Note that --format json is the only format opencode has; there is no
+ * stream-json. The lines still arrive as the run progresses, so reading them
+ * incrementally is what makes it feel live.
  */
 static gboolean
-ai_opencode_client_parse_stream_line(
+ai_opencode_client_parse_stream_events(
     AiCliClient  *client,
     const gchar  *line,
     AiResponse   *response,
-    gchar       **delta_text,
+    GPtrArray    *out_events,
     GError      **error
 ){
     g_autoptr(JsonParser) parser = NULL;
     JsonNode *root;
     JsonObject *obj;
+    JsonObject *part;
     const gchar *type;
-
-    (void)client;
-    *delta_text = NULL;
+    const gchar *session_id;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -885,62 +1029,93 @@ ai_opencode_client_parse_stream_line(
     parser = json_parser_new();
     if (!json_parser_load_from_data(parser, line, -1, error))
     {
-        /* Non-JSON lines can be ignored */
         g_clear_error(error);
         return TRUE;
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
 
     obj = json_node_get_object(root);
-    type = json_object_get_string_member_with_default(obj, "type", "");
+    type = oc_get_string(obj, "type");
+    part = oc_get_object(obj, "part");
+
+    /* opencode spells this camelCase, unlike the rest of its payload. */
+    session_id = oc_get_string(obj, "sessionID");
+    if (session_id == NULL && part != NULL)
+        session_id = oc_get_string(part, "sessionID");
+
+    if (session_id != NULL && session_id[0] != '\0' &&
+        ai_cli_client_get_session_persistence(client))
+    {
+        ai_cli_client_set_session_id(client, session_id);
+    }
 
     if (g_strcmp0(type, "text") == 0)
     {
-        /* Text delta - extract from part.text */
-        if (json_object_has_member(obj, "part"))
-        {
-            JsonObject *part = json_object_get_object_member(obj, "part");
-            if (part != NULL && json_object_has_member(part, "text"))
-            {
-                const gchar *text = json_object_get_string_member_with_default(
-                    part, "text", "");
-                if (text[0] != '\0')
-                {
-                    *delta_text = g_strdup(text);
-                }
-            }
-        }
+        const gchar *text = part != NULL ? oc_get_string(part, "text") : NULL;
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+    }
+    else if (g_strcmp0(type, "tool_use") == 0)
+    {
+        oc_emit_tool_part(part, out_events);
     }
     else if (g_strcmp0(type, "step_finish") == 0)
     {
-        /* Final result with usage info - extract from part.tokens */
-        if (json_object_has_member(obj, "part"))
+        JsonObject *tokens = part != NULL ? oc_get_object(part, "tokens") : NULL;
+
+        if (tokens != NULL)
         {
-            JsonObject *part = json_object_get_object_member(obj, "part");
-            if (part != NULL && json_object_has_member(part, "tokens"))
-            {
-                JsonObject *tokens = json_object_get_object_member(part, "tokens");
-                if (tokens != NULL)
-                {
-                    gint input_tokens = json_object_get_int_member_with_default(
-                        tokens, "input", 0);
-                    gint output_tokens = json_object_get_int_member_with_default(
-                        tokens, "output", 0);
-                    g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
+            gint input_tokens = (gint)oc_get_int(tokens, "input", 0);
+            gint output_tokens = (gint)oc_get_int(tokens, "output", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
-                    ai_response_set_usage(response, usage);
-                }
-            }
+            ai_response_set_usage(response, usage);
+
+            /* opencode reports no cost at all, hence -1 rather than 0. */
+            g_ptr_array_add(out_events, ai_event_new_usage(usage, -1));
         }
-
-        ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
     }
 
+    return TRUE;
+}
+
+/*
+ * The pre-event contract, kept because callers and tests still use it.
+ * A projection of parse_stream_events rather than a second implementation.
+ */
+static gboolean
+ai_opencode_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_opencode_client_parse_stream_events(client, line, response,
+                                                events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
     return TRUE;
 }
 
@@ -978,6 +1153,7 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;
     cli_class->parse_stream_line = ai_opencode_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_opencode_client_parse_stream_events;
 
     /*
      * opencode is the one wrapper that needs more than a working directory

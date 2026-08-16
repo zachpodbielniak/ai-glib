@@ -12,6 +12,8 @@
 #include "providers/ai-ollama-client.h"
 #include "providers/ai-openai-shared.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 
@@ -708,7 +710,14 @@ ollama_process_stream_chunk(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` payload parses fine and yields a NULL root, which
+     * JSON_NODE_HOLDS_OBJECT() would dereference -- a critical, and fatal
+     * under G_DEBUG=fatal-warnings. Server output is untrusted, so the NULL
+     * check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return;
     }
@@ -724,6 +733,10 @@ ollama_process_stream_chunk(
         data->stream_started = TRUE;
 
         g_signal_emit_by_name(data->client, "stream-start");
+        {
+            g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_START);
+            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+        }
     }
 
     /* Parse message content delta */
@@ -737,6 +750,10 @@ ollama_process_stream_chunk(
         {
             g_string_append(data->current_text, content);
             g_signal_emit_by_name(data->client, "delta", content);
+            {
+                g_autoptr(AiEvent) event = ai_event_new_text_delta(content);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+            }
         }
     }
 
@@ -843,6 +860,21 @@ ollama_process_stream_chunk(
             }
         }
 
+        {
+            AiUsage *final_usage = ai_response_get_usage(data->response);
+        
+            if (final_usage != NULL)
+            {
+                g_autoptr(AiEvent) event = ai_event_new_usage(final_usage, -1);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+            }
+        }
+        
+        {
+            g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_END);
+            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+        }
+        
         g_signal_emit_by_name(data->client, "stream-end", data->response);
     }
 }

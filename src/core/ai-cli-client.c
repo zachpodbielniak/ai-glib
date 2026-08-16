@@ -1197,6 +1197,75 @@ ai_cli_client_real_spawn(
 }
 
 /**
+ * ai_cli_client_events_to_delta:
+ * @events: (nullable) (element-type AiEvent): events from one parsed line
+ *
+ * Concatenates the text of every %AI_EVENT_TEXT_DELTA in @events.
+ *
+ * This is the inverse of the default @parse_stream_events, and it is what
+ * lets a subclass implement the richer vfunc as its single source of truth
+ * while still answering the older @parse_stream_line contract:
+ *
+ * |[<!-- language="C" -->
+ * static gboolean
+ * my_parse_stream_line (AiCliClient *c, const gchar *line, AiResponse *r,
+ *                       gchar **delta_text, GError **error)
+ * {
+ *     g_autoptr(GPtrArray) events =
+ *         g_ptr_array_new_with_free_func ((GDestroyNotify) ai_event_unref);
+ *
+ *     if (!my_parse_stream_events (c, line, r, events, error))
+ *         return FALSE;
+ *
+ *     *delta_text = ai_cli_client_events_to_delta (events);
+ *     return TRUE;
+ * }
+ * ]|
+ *
+ * Reasoning is deliberately excluded: the old contract's caller treats what
+ * it gets back as the answer.
+ *
+ * Returns: (transfer full) (nullable): the concatenated text, or %NULL when
+ *   there was none
+ */
+gchar *
+ai_cli_client_events_to_delta(GPtrArray *events)
+{
+    GString *acc;
+    guint i;
+
+    if (events == NULL || events->len == 0)
+    {
+        return NULL;
+    }
+
+    acc = g_string_new(NULL);
+
+    for (i = 0; i < events->len; i++)
+    {
+        AiEvent *event = g_ptr_array_index(events, i);
+
+        if (ai_event_get_kind(event) == AI_EVENT_TEXT_DELTA)
+        {
+            const gchar *text = ai_event_get_text(event);
+
+            if (text != NULL)
+            {
+                g_string_append(acc, text);
+            }
+        }
+    }
+
+    if (acc->len == 0)
+    {
+        g_string_free(acc, TRUE);
+        return NULL;
+    }
+
+    return g_string_free(acc, FALSE);
+}
+
+/**
  * ai_cli_client_spawn:
  * @self: an #AiCliClient
  * @argv: (array zero-terminated=1): the command line, argv[0] already resolved

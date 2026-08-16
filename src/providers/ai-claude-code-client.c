@@ -15,8 +15,10 @@
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-launch.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-tool-result.h"
 
 /*
  * Private structure for AiClaudeCodeClient.
@@ -893,7 +895,9 @@ ai_claude_code_client_parse_json_output(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /* NULL root: see the note in the streaming parser. */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         g_set_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
                     "Expected JSON object in CLI output");
@@ -975,18 +979,283 @@ ai_claude_code_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Type-checked JSON accessors.
  *
- * Streaming events:
- * {"type": "assistant", "message": {"type": "text", "text": "..."}} -> emit delta
- * {"type": "result", ...} -> final usage/session info
+ * json-glib's *_member_with_default() emit a critical when the member is
+ * present but of another type, and subprocess stdout is untrusted input --
+ * a CLI that changed a field from a number to a string could abort a
+ * fatal-warnings run rather than being ignored. Same reasoning as the
+ * grok_get_* helpers; keep new fields on these.
+ */
+static const gchar *
+cc_get_string(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_STRING)
+        return NULL;
+
+    return json_node_get_string(node);
+}
+
+static JsonObject *
+cc_get_object(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
+        return NULL;
+
+    return json_node_get_object(node);
+}
+
+static JsonArray *
+cc_get_array(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_ARRAY(node))
+        return NULL;
+
+    return json_node_get_array(node);
+}
+
+static gint64
+cc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return json_node_get_int(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return (gint64)json_node_get_double(node);
+
+    return fallback;
+}
+
+static gdouble
+cc_get_double(JsonObject *obj, const gchar *member, gdouble fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return json_node_get_double(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return (gdouble)json_node_get_int(node);
+
+    return fallback;
+}
+
+static gboolean
+cc_get_boolean(JsonObject *obj, const gchar *member, gboolean fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_BOOLEAN)
+        return fallback;
+
+    return json_node_get_boolean(node);
+}
+
+/*
+ * Emit one Anthropic content block as events.
+ *
+ * The three kinds are kept apart deliberately. Text is the answer; thinking
+ * is not, and used to be dropped here on exactly that reasoning -- it is now
+ * reported under its own kind so a frontend can show what a caller
+ * assembling the answer must still exclude. tool_use was dropped too, under
+ * a comment saying the caller handled it, and no caller did.
+ */
+static void
+cc_emit_content_block(
+    JsonObject *block,
+    GPtrArray  *out_events
+){
+    const gchar *block_type;
+
+    if (block == NULL)
+        return;
+
+    block_type = cc_get_string(block, "type");
+
+    if (g_strcmp0(block_type, "text") == 0)
+    {
+        const gchar *text = cc_get_string(block, "text");
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+    }
+    else if (g_strcmp0(block_type, "thinking") == 0)
+    {
+        const gchar *text = cc_get_string(block, "thinking");
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_thinking_delta(text));
+    }
+    else if (g_strcmp0(block_type, "tool_use") == 0)
+    {
+        const gchar *id = cc_get_string(block, "id");
+        const gchar *name = cc_get_string(block, "name");
+        JsonNode *input;
+        g_autoptr(AiToolUse) tool_use = NULL;
+
+        if (name == NULL || name[0] == '\0')
+            return;
+
+        input = json_object_has_member(block, "input")
+            ? json_object_get_member(block, "input")
+            : NULL;
+
+        tool_use = ai_tool_use_new(id != NULL ? id : "", name,
+                                   input != NULL ? json_node_copy(input) : NULL);
+
+        g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+    }
+    else if (g_strcmp0(block_type, "tool_result") == 0)
+    {
+        /*
+         * The CLI reports results on a "user" line, because that is how the
+         * transcript models a tool answering the model. Its content is
+         * either a plain string or an array of blocks.
+         */
+        const gchar *id = cc_get_string(block, "tool_use_id");
+        gboolean is_error = cc_get_boolean(block, "is_error", FALSE);
+        g_autoptr(GString) text = g_string_new(NULL);
+        g_autoptr(AiToolResult) result = NULL;
+        JsonNode *content;
+
+        content = json_object_has_member(block, "content")
+            ? json_object_get_member(block, "content")
+            : NULL;
+
+        if (content != NULL && JSON_NODE_HOLDS_VALUE(content) &&
+            json_node_get_value_type(content) == G_TYPE_STRING)
+        {
+            g_string_append(text, json_node_get_string(content));
+        }
+        else if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+        {
+            JsonArray *parts = json_node_get_array(content);
+            guint n = json_array_get_length(parts);
+            guint i;
+
+            for (i = 0; i < n; i++)
+            {
+                JsonNode *pn = json_array_get_element(parts, i);
+                const gchar *part_text;
+
+                if (pn == NULL || !JSON_NODE_HOLDS_OBJECT(pn))
+                    continue;
+
+                part_text = cc_get_string(json_node_get_object(pn), "text");
+
+                if (part_text != NULL)
+                    g_string_append(text, part_text);
+            }
+        }
+
+        result = ai_tool_result_new(id != NULL ? id : "", text->str, is_error);
+        g_ptr_array_add(out_events, ai_event_new_tool_finished(NULL, result));
+    }
+}
+
+/*
+ * Walk the content array of an Anthropic message, emitting each block.
+ */
+static void
+cc_emit_message_content(
+    JsonObject *message,
+    GPtrArray  *out_events
+){
+    JsonArray *blocks;
+    guint n;
+    guint i;
+
+    blocks = cc_get_array(message, "content");
+
+    if (blocks == NULL)
+        return;
+
+    n = json_array_get_length(blocks);
+
+    for (i = 0; i < n; i++)
+    {
+        JsonNode *bn = json_array_get_element(blocks, i);
+
+        if (bn != NULL && JSON_NODE_HOLDS_OBJECT(bn))
+            cc_emit_content_block(json_node_get_object(bn), out_events);
+    }
+}
+
+/*
+ * Parse a single NDJSON line from `claude --print --output-format stream-json`
+ * into events.
+ *
+ * The lines that matter:
+ *   {"type":"system","subtype":"init",...}  -> STATUS
+ *   {"type":"assistant","message":{...}}    -> text / thinking / tool_use
+ *   {"type":"user","message":{...}}         -> tool_result
+ *   {"type":"stream_event","event":{...}}   -> token-level deltas, only with
+ *                                              --include-partial-messages
+ *   {"type":"result",...}                   -> session, usage, cost
+ *
+ * Reading msg_obj->text instead of walking message.content once found
+ * nothing on every event, so a streamed reply arrived empty while the run
+ * itself reported success. The content array is the shape the CLI actually
+ * emits.
+ *
+ * When --include-partial-messages is on, both stream_event and the
+ * whole-message assistant line describe the same text. Only the deltas are
+ * taken as text; the whole message is still walked for its tool_use blocks,
+ * which appear nowhere else, and TOOL_STARTED may therefore be emitted twice
+ * for one id -- consumers key on the id and update.
  */
 static gboolean
-ai_claude_code_client_parse_stream_line(
+ai_claude_code_client_parse_stream_events(
     AiCliClient  *client,
     const gchar  *line,
     AiResponse   *response,
-    gchar       **delta_text,
+    GPtrArray    *out_events,
     GError      **error
 ){
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
@@ -994,8 +1263,6 @@ ai_claude_code_client_parse_stream_line(
     JsonNode *root;
     JsonObject *obj;
     const gchar *type;
-
-    *delta_text = NULL;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -1011,116 +1278,206 @@ ai_claude_code_client_parse_stream_line(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
 
     obj = json_node_get_object(root);
-    type = json_object_get_string_member_with_default(obj, "type", "");
+    type = cc_get_string(obj, "type");
 
-    if (g_strcmp0(type, "assistant") == 0)
+    if (g_strcmp0(type, "system") == 0)
     {
-        /* Text delta */
-        if (json_object_has_member(obj, "message"))
+        const gchar *subtype = cc_get_string(obj, "subtype");
+        const gchar *session_id = cc_get_string(obj, "session_id");
+
+        /*
+         * The init line is the first thing a run says, and carries the
+         * session id well before the result line does. Capturing it here
+         * means a run interrupted mid-turn can still be resumed.
+         */
+        if (session_id != NULL && session_id[0] != '\0' &&
+            ai_cli_client_get_session_persistence(client))
         {
-            JsonObject *msg_obj = json_object_get_object_member(obj, "message");
-            const gchar *msg_type = json_object_get_string_member_with_default(msg_obj, "type", "");
+            ai_cli_client_set_session_id(client, session_id);
+        }
 
-            if (g_strcmp0(msg_type, "text") == 0)
+        if (subtype != NULL && subtype[0] != '\0')
+        {
+            g_autofree gchar *text = g_strdup_printf("claude: %s", subtype);
+            g_ptr_array_add(out_events, ai_event_new_status(text));
+        }
+    }
+    else if (g_strcmp0(type, "assistant") == 0)
+    {
+        JsonObject *msg_obj = cc_get_object(obj, "message");
+        const gchar *msg_type;
+
+        if (msg_obj == NULL)
+            return TRUE;
+
+        msg_type = cc_get_string(msg_obj, "type");
+
+        if (g_strcmp0(msg_type, "text") == 0)
+        {
+            /* Flat shape: {"message": {"type": "text", "text": ...}} */
+            const gchar *text = cc_get_string(msg_obj, "text");
+
+            if (text != NULL && text[0] != '\0')
+                g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+        }
+        else
+        {
+            cc_emit_message_content(msg_obj, out_events);
+        }
+    }
+    else if (g_strcmp0(type, "user") == 0)
+    {
+        /* Tool results come back as a user message full of tool_result. */
+        JsonObject *msg_obj = cc_get_object(obj, "message");
+
+        if (msg_obj != NULL)
+            cc_emit_message_content(msg_obj, out_events);
+    }
+    else if (g_strcmp0(type, "stream_event") == 0)
+    {
+        JsonObject *event = cc_get_object(obj, "event");
+        const gchar *event_type;
+
+        if (event == NULL)
+            return TRUE;
+
+        event_type = cc_get_string(event, "type");
+
+        if (g_strcmp0(event_type, "content_block_start") == 0)
+        {
+            JsonObject *block = cc_get_object(event, "content_block");
+
+            if (block != NULL &&
+                g_strcmp0(cc_get_string(block, "type"), "tool_use") == 0)
+                cc_emit_content_block(block, out_events);
+        }
+        else if (g_strcmp0(event_type, "content_block_delta") == 0)
+        {
+            JsonObject *delta = cc_get_object(event, "delta");
+            const gchar *delta_type;
+
+            if (delta == NULL)
+                return TRUE;
+
+            delta_type = cc_get_string(delta, "type");
+
+            if (g_strcmp0(delta_type, "text_delta") == 0)
             {
-                /* Flat shape: {"message": {"type": "text", "text": ...}} */
-                const gchar *text = json_object_get_string_member_with_default(msg_obj, "text", "");
-                *delta_text = g_strdup(text);
+                const gchar *text = cc_get_string(delta, "text");
+
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events, ai_event_new_text_delta(text));
             }
-            else if (json_object_has_member(msg_obj, "content"))
+            else if (g_strcmp0(delta_type, "thinking_delta") == 0)
             {
-                /*
-                 * What the CLI actually emits: an Anthropic message whose
-                 * "type" is "message" and whose text lives in a "content"
-                 * array of blocks.  Reading msg_obj->text instead found
-                 * nothing on every event, so a streamed reply arrived
-                 * empty while the run itself reported success.
-                 *
-                 * Only "text" blocks are emitted as deltas.  A "thinking"
-                 * block is not the answer, and "tool_use" is handled by
-                 * the caller.
-                 */
-                JsonNode *content = json_object_get_member(msg_obj, "content");
+                const gchar *text = cc_get_string(delta, "thinking");
 
-                if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
-                {
-                    JsonArray *blocks = json_node_get_array(content);
-                    guint n = json_array_get_length(blocks);
-                    GString *acc = g_string_new(NULL);
-                    guint i;
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events,
+                                    ai_event_new_thinking_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "input_json_delta") == 0)
+            {
+                const gchar *fragment = cc_get_string(delta, "partial_json");
 
-                    for (i = 0; i < n; i++)
-                    {
-                        JsonNode *bn = json_array_get_element(blocks, i);
-                        JsonObject *b;
-                        const gchar *bt;
-
-                        if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn)) continue;
-                        b = json_node_get_object(bn);
-                        bt = json_object_get_string_member_with_default(b, "type", "");
-                        if (g_strcmp0(bt, "text") == 0)
-                        {
-                            g_string_append(
-                                acc,
-                                json_object_get_string_member_with_default(
-                                    b, "text", ""));
-                        }
-                    }
-
-                    if (acc->len > 0)
-                        *delta_text = g_string_free(acc, FALSE);
-                    else
-                        g_string_free(acc, TRUE);
-                }
+                if (fragment != NULL && fragment[0] != '\0')
+                    g_ptr_array_add(
+                        out_events,
+                        ai_event_new_tool_input_delta(NULL, fragment));
             }
         }
     }
     else if (g_strcmp0(type, "result") == 0)
     {
-        /* Final result with usage info */
-        const gchar *result_text = json_object_get_string_member_with_default(obj, "result", "");
-        const gchar *session_id = json_object_get_string_member_with_default(obj, "session_id", "");
+        const gchar *result_text = cc_get_string(obj, "result");
+        const gchar *session_id = cc_get_string(obj, "session_id");
+        JsonObject *usage_obj;
+        gdouble cost;
 
         /* Store session ID - ONLY if persistence is enabled */
-        if (session_id[0] != '\0' && ai_cli_client_get_session_persistence(client))
+        if (session_id != NULL && session_id[0] != '\0' &&
+            ai_cli_client_get_session_persistence(client))
         {
             ai_cli_client_set_session_id(client, session_id);
         }
 
         /* Add final text content to response if not already added via deltas */
-        if (result_text[0] != '\0' && ai_response_get_content_blocks(response) == NULL)
+        if (result_text != NULL && result_text[0] != '\0' &&
+            ai_response_get_content_blocks(response) == NULL)
         {
             g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
-            ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
+            ai_response_add_content_block(response,
+                (AiContentBlock *)g_steal_pointer(&content));
         }
 
         /* Update usage and check for context compaction */
-        if (json_object_has_member(obj, "usage"))
+        usage_obj = cc_get_object(obj, "usage");
+        cost = cc_get_double(obj, "total_cost_usd", -1.0);
+
+        if (usage_obj != NULL)
         {
-            JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
-            gint input_tokens = json_object_get_int_member_with_default(usage_obj, "input_tokens", 0);
-            gint output_tokens = json_object_get_int_member_with_default(usage_obj, "output_tokens", 0);
+            gint input_tokens = (gint)cc_get_int(usage_obj, "input_tokens", 0);
+            gint output_tokens = (gint)cc_get_int(usage_obj, "output_tokens", 0);
             g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
             ai_response_set_usage(response, usage);
             check_and_emit_compaction(self, input_tokens);
+
+            g_ptr_array_add(out_events,
+                ai_event_new_usage(usage,
+                    cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
         }
 
         /* Store total cost */
-        if (json_object_has_member(obj, "total_cost_usd"))
+        if (cost >= 0.0)
         {
-            self->total_cost = json_object_get_double_member(obj, "total_cost_usd");
+            self->total_cost = cost;
         }
 
         ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
     }
 
+    return TRUE;
+}
+
+/*
+ * The pre-event contract, kept because callers and tests still use it.
+ * A projection of parse_stream_events rather than a second implementation,
+ * so the two can never disagree about what a line meant.
+ */
+static gboolean
+ai_claude_code_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_claude_code_client_parse_stream_events(client, line, response,
+                                                   events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
     return TRUE;
 }
 
@@ -1172,6 +1529,7 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;
     cli_class->parse_stream_line = ai_claude_code_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_claude_code_client_parse_stream_events;
 
     /**
      * AiClaudeCodeClient:total-cost:

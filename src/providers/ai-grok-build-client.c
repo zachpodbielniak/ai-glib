@@ -19,7 +19,9 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
+#include "model/ai-tool-use.h"
 
 /*
  * The prompt source handed to grok. grok accepts any readable path here --
@@ -966,17 +968,11 @@ ai_grok_build_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Turn one Anthropic tool_use block into an AI_EVENT_TOOL_STARTED.
  *
- * With --include-partial-messages grok emits Anthropic-shaped events:
- *   {"type":"stream_event","event":{"type":"content_block_delta",
- *    "delta":{"type":"text_delta","text":"..."}}}   -> emit delta
- *   {"type":"assistant","message":{...}}            -> ignored, see below
- *   {"type":"result",...}                           -> usage/session/cost
- *
- * The whole-message "assistant" line repeats text already delivered as
- * deltas, so acting on it would double every streamed reply. The "result"
- * line still back-fills the text when no delta ever arrived.
+ * Shared by the content_block_start path, where the input is still empty,
+ * and the whole-message path, where it is complete. Both emit for the same
+ * id on purpose; consumers key on the id and update.
  */
 static gboolean
 ai_grok_build_client_parse_stream_line(
@@ -985,14 +981,73 @@ ai_grok_build_client_parse_stream_line(
     AiResponse   *response,
     gchar       **delta_text,
     GError      **error
+);
+
+static void
+grok_emit_tool_use_block(
+    JsonObject *block,
+    GPtrArray  *out_events
+){
+    const gchar *id;
+    const gchar *name;
+    JsonNode *input;
+    g_autoptr(AiToolUse) tool_use = NULL;
+
+    id = grok_get_string(block, "id");
+    name = grok_get_string(block, "name");
+
+    if (name == NULL || name[0] == '\0')
+    {
+        return;
+    }
+
+    input = json_object_has_member(block, "input")
+        ? json_object_get_member(block, "input")
+        : NULL;
+
+    tool_use = ai_tool_use_new(id != NULL ? id : "",
+                               name,
+                               input != NULL ? json_node_copy(input) : NULL);
+
+    g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+}
+
+/*
+ * Parse a single NDJSON line from streaming output into events.
+ *
+ * With --include-partial-messages grok emits Anthropic-shaped events:
+ *   {"type":"stream_event","event":{"type":"content_block_start",
+ *    "content_block":{"type":"tool_use","id":..,"name":..}}} -> TOOL_STARTED
+ *   {"type":"stream_event","event":{"type":"content_block_delta",
+ *    "delta":{"type":"text_delta","text":"..."}}}            -> TEXT_DELTA
+ *    "delta":{"type":"thinking_delta","thinking":"..."}      -> THINKING_DELTA
+ *    "delta":{"type":"input_json_delta","partial_json":".."} -> TOOL_INPUT_DELTA
+ *   {"type":"assistant","message":{...}}                     -> tool_use only
+ *   {"type":"result",...}                                    -> USAGE, session
+ *
+ * The whole-message "assistant" line repeats text already delivered as
+ * deltas, so its text is still ignored -- acting on it would double every
+ * streamed reply. Its tool_use blocks are not ignored: they are the only
+ * place the *complete* arguments appear, since content_block_start carries
+ * the name with an empty input and the rest arrives as input_json_delta
+ * fragments that are not individually valid JSON. Emitting TOOL_STARTED
+ * twice for one id is deliberate and documented -- consumers key on the id
+ * and update, so the second one simply fills in what the first could not
+ * know yet.
+ */
+static gboolean
+ai_grok_build_client_parse_stream_events(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    GPtrArray    *out_events,
+    GError      **error
 ){
     AiGrokBuildClient *self = AI_GROK_BUILD_CLIENT(client);
     g_autoptr(JsonParser) parser = NULL;
     JsonNode *root;
     JsonObject *obj;
     const gchar *type;
-
-    *delta_text = NULL;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -1008,7 +1063,14 @@ ai_grok_build_client_parse_stream_line(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
@@ -1034,22 +1096,92 @@ ai_grok_build_client_parse_stream_line(
 
         event_type = grok_get_string(event, "type");
 
-        /*
-         * Only content_block_delta carries text. thinking_delta rides the
-         * same event shape and is deliberately dropped: reasoning is not
-         * the answer.
-         */
-        if (g_strcmp0(event_type, "content_block_delta") == 0)
+        if (g_strcmp0(event_type, "content_block_start") == 0)
+        {
+            /*
+             * A tool call announcing itself. The input is normally an empty
+             * object here; the arguments follow as input_json_delta.
+             */
+            JsonObject *block = grok_get_object(event, "content_block");
+
+            if (block != NULL &&
+                g_strcmp0(grok_get_string(block, "type"), "tool_use") == 0)
+            {
+                grok_emit_tool_use_block(block, out_events);
+            }
+        }
+        else if (g_strcmp0(event_type, "content_block_delta") == 0)
         {
             JsonObject *delta = grok_get_object(event, "delta");
+            const gchar *delta_type;
 
-            if (delta != NULL &&
-                g_strcmp0(grok_get_string(delta, "type"), "text_delta") == 0)
+            if (delta == NULL)
+                return TRUE;
+
+            delta_type = grok_get_string(delta, "type");
+
+            if (g_strcmp0(delta_type, "text_delta") == 0)
             {
                 const gchar *text = grok_get_string(delta, "text");
 
                 if (text != NULL && text[0] != '\0')
-                    *delta_text = g_strdup(text);
+                    g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "thinking_delta") == 0)
+            {
+                /*
+                 * Reasoning used to be dropped here on the grounds that it
+                 * is not the answer. That is still true, and is now
+                 * expressed by giving it its own kind rather than by
+                 * discarding it -- a frontend can collapse what a caller
+                 * assembling the answer must exclude.
+                 */
+                const gchar *text = grok_get_string(delta, "thinking");
+
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events,
+                                    ai_event_new_thinking_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "input_json_delta") == 0)
+            {
+                const gchar *fragment = grok_get_string(delta, "partial_json");
+
+                if (fragment != NULL && fragment[0] != '\0')
+                    g_ptr_array_add(
+                        out_events,
+                        ai_event_new_tool_input_delta(NULL, fragment));
+            }
+        }
+    }
+    else if (g_strcmp0(type, "assistant") == 0)
+    {
+        /*
+         * Text here would double the deltas, but the tool_use blocks carry
+         * the assembled arguments and appear nowhere else.
+         */
+        JsonObject *message = grok_get_object(obj, "message");
+        JsonNode *content = message != NULL
+            ? json_object_get_member(message, "content")
+            : NULL;
+
+        if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+        {
+            JsonArray *blocks = json_node_get_array(content);
+            guint n = json_array_get_length(blocks);
+            guint i;
+
+            for (i = 0; i < n; i++)
+            {
+                JsonNode *bn = json_array_get_element(blocks, i);
+                JsonObject *b;
+
+                if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn))
+                    continue;
+
+                b = json_node_get_object(bn);
+
+                if (g_strcmp0(grok_get_string(b, "type"), "tool_use") == 0)
+                    grok_emit_tool_use_block(b, out_events);
             }
         }
     }
@@ -1095,6 +1227,19 @@ ai_grok_build_client_parse_stream_line(
         /* Total cost */
         self->total_cost = grok_get_double(obj, "total_cost_usd",
                                            self->total_cost);
+
+        /*
+         * Report the counts as an event too. -1 rather than 0 when grok
+         * says nothing about cost: zero would read as "this turn was free".
+         */
+        {
+            AiUsage *usage = ai_response_get_usage(response);
+            gdouble cost = grok_get_double(obj, "total_cost_usd", -1.0);
+
+            g_ptr_array_add(out_events,
+                ai_event_new_usage(usage,
+                                   cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
+        }
 
         /*
          * Prefer the reported stop reason; a truncated turn is not an
@@ -1150,6 +1295,7 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;
     cli_class->parse_stream_line   = ai_grok_build_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_grok_build_client_parse_stream_events;
 
     /**
      * AiGrokBuildClient:total-cost:
@@ -1336,6 +1482,34 @@ ai_grok_build_client_init(AiGrokBuildClient *self)
 
     /* Set default model */
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_GROK_BUILD_DEFAULT_MODEL);
+}
+
+/*
+ * The pre-event contract, kept because callers and tests still use it.
+ * It is a projection of parse_stream_events, not a second implementation:
+ * one parser means the two can never disagree about what a line meant.
+ */
+static gboolean
+ai_grok_build_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_grok_build_client_parse_stream_events(client, line, response,
+                                                  events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
+    return TRUE;
 }
 
 /*
