@@ -509,6 +509,46 @@ Three things to know before touching the send path:
    `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
 7. Document it in `docs/providers/<name>.org` with a capability matrix.
 
+## Testing against a loopback server
+
+`tests/test-server.h` is a header-only `TServer`: a `SoupServer` on its own
+thread with its own `GMainContext`, canned responses, configurable failure
+status, an optional reply delay, and the last request captured (path, body,
+query, headers). Point a provider at it with
+
+```c
+ai_config_set_base_url(config, AI_PROVIDER_OPENAI, ts->base_url);
+```
+
+and its real request goes over a real socket, so a test asserts on the bytes
+that go on the wire rather than on an intermediate builder.
+
+The separate thread is not incidental: `ai_image_generator_generate_image()`
+drives a nested loop on a *private* context, so a server attached to the
+default context would never be dispatched while a synchronous request was in
+flight.
+
+Two test files use it — `test-image-generator.c` and `test-http-chat.c`. It
+is `static inline` throughout so a file using half the API does not trip
+`-Wunused-function`, and `TEST_HEADERS` makes every test binary depend on it
+so editing it rebuilds them.
+
+**`tests/test-http-chat.c` exists for ASAN coverage.** Nothing drove the
+HTTP providers' async chat and streaming paths, which is exactly why every
+one of them leaked a `GTask` — and through it the client, its `AiConfig` and
+their strings — until somebody happened to look. Those paths now execute
+inside a leak-checked binary on every `make test ASAN=1`.
+
+Its assertions are deliberately modest; the coverage is the product. When
+adding a provider or touching a send path, add a case here rather than
+relying on a unit test of the builder, and run:
+
+```bash
+make clean && make test ASAN=1
+```
+
+The clean is required: `ASAN=1` shares `build/release/` with a normal build.
+
 ## Common Patterns
 
 ### Basic Chat Request

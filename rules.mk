@@ -25,7 +25,10 @@ $(OBJ_DIRS): | $(OBJDIR)
 	mkdir -p $@
 
 # Test compilation rule
-$(OUTDIR)/tests/%: $(TESTDIR)/%.c $(LIB_SHARED) | $(OUTDIR)/tests
+# $(TEST_HEADERS) is a prerequisite of every test so that editing the shared
+# loopback-server harness rebuilds the tests that include it.  Without it a
+# change to test-server.h silently leaves stale binaries behind.
+$(OUTDIR)/tests/%: $(TESTDIR)/%.c $(TEST_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
 	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(OUTDIR)
 
 $(OUTDIR)/tests: | $(OUTDIR)

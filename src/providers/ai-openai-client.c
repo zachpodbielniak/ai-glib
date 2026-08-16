@@ -139,7 +139,13 @@ ai_openai_client_parse_response(
 
     (void)client;
 
-    if (!JSON_NODE_HOLDS_OBJECT(json))
+    /*
+     * NULL is reachable: json_parser_get_root() answers it for an empty
+     * document, which a 200 with no body produces.  JSON_NODE_HOLDS_OBJECT()
+     * would dereference it -- a critical, and fatal under
+     * G_DEBUG=fatal-warnings -- so the NULL check comes first.
+     */
+    if (json == NULL || !JSON_NODE_HOLDS_OBJECT(json))
     {
         g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                     "Expected JSON object in response");
@@ -406,6 +412,19 @@ on_openai_chat_response(
     }
 
     response_data = g_bytes_get_data(response_bytes, &response_len);
+
+    /*
+     * A 200 with an empty body: g_bytes_get_data() answers NULL for
+     * zero-length bytes, and json_parser_load_from_data() asserts on a NULL
+     * pointer -- a critical, and fatal under G_DEBUG=fatal-warnings.  An
+     * empty document is a normal parse failure, so hand it one and let the
+     * existing error path report it.
+     */
+    if (response_data == NULL)
+    {
+        response_data = "";
+        response_len = 0;
+    }
     parser = json_parser_new();
 
     if (!json_parser_load_from_data(parser, response_data, response_len, &error))
@@ -575,6 +594,19 @@ on_openai_list_models_response(
     }
 
     response_data = g_bytes_get_data(response_bytes, &response_len);
+
+    /*
+     * A 200 with an empty body: g_bytes_get_data() answers NULL for
+     * zero-length bytes, and json_parser_load_from_data() asserts on a NULL
+     * pointer -- a critical, and fatal under G_DEBUG=fatal-warnings.  An
+     * empty document is a normal parse failure, so hand it one and let the
+     * existing error path report it.
+     */
+    if (response_data == NULL)
+    {
+        response_data = "";
+        response_len = 0;
+    }
     parser = json_parser_new();
 
     if (!json_parser_load_from_data(parser, response_data, response_len, &error))
@@ -1356,6 +1388,19 @@ on_openai_image_response(
     }
 
     response_data = g_bytes_get_data(response_bytes, &response_len);
+
+    /*
+     * A 200 with an empty body: g_bytes_get_data() answers NULL for
+     * zero-length bytes, and json_parser_load_from_data() asserts on a NULL
+     * pointer -- a critical, and fatal under G_DEBUG=fatal-warnings.  An
+     * empty document is a normal parse failure, so hand it one and let the
+     * existing error path report it.
+     */
+    if (response_data == NULL)
+    {
+        response_data = "";
+        response_len = 0;
+    }
     parser = json_parser_new();
 
     if (!json_parser_load_from_data(parser, response_data, response_len, &error))

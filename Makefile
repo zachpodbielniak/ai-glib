@@ -152,6 +152,7 @@ LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
 
 # Test files
 TEST_SOURCES = $(wildcard $(TESTDIR)/test-*.c)
+TEST_HEADERS = $(wildcard $(TESTDIR)/*.h)
 TEST_BINARIES = $(patsubst $(TESTDIR)/%.c,$(OUTDIR)/tests/%,$(TEST_SOURCES))
 
 # Example files

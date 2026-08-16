@@ -575,6 +575,19 @@ ai_client_chat_sync(
 
     /* Parse response */
     response_data = g_bytes_get_data(response_bytes, &response_len);
+
+    /*
+     * A 200 with an empty body: g_bytes_get_data() answers NULL for
+     * zero-length bytes, and json_parser_load_from_data() asserts on a NULL
+     * pointer -- a critical, and fatal under G_DEBUG=fatal-warnings.  An
+     * empty document is a normal parse failure, so hand it one and let the
+     * existing error path report it.
+     */
+    if (response_data == NULL)
+    {
+        response_data = "";
+        response_len = 0;
+    }
     parser = json_parser_new();
 
     if (!json_parser_load_from_data(parser, response_data, response_len, error))
