@@ -1748,8 +1748,6 @@ chat_async_data_free(ChatAsyncData *data)
      *
      * Safe against the retry hand-off, which sets data->task to NULL before
      * freeing precisely so the task survives into the second attempt.
-     *
-     * Every other provider in this library already does this.
      */
     g_clear_object(&data->task);
     g_clear_object(&data->client);

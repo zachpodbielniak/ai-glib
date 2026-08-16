@@ -85,9 +85,9 @@ test_executor_web_fetch_params (void)
     g_autoptr(AiToolExecutor) exec = NULL;
     GList            *tools;
     GList            *iter;
-    AiTool           *web_fetch = NULL;
-    JsonNode         *params;
-    g_autofree gchar *json = NULL;
+    AiTool             *web_fetch = NULL;
+    g_autoptr(JsonNode) params = NULL;
+    g_autofree gchar   *json = NULL;
 
     exec  = ai_tool_executor_new ();
     tools = ai_tool_executor_get_tools (exec);

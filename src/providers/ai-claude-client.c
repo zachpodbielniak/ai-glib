@@ -404,6 +404,19 @@ typedef struct
 static void
 chat_async_data_free(ChatAsyncData *data)
 {
+    /*
+     * g_task_return_*() does NOT consume the reference the async function
+     * took from g_task_new(); it owns that until the operation is finished
+     * with.  The early-error paths unref directly, so only the completion
+     * paths -- the ones that hand the task to `data` -- reach here, and
+     * every one of them leaked a GTask and everything it referenced: the
+     * task holds the source object, so a leaked task leaked the client, its
+     * config, and their strings.
+     *
+     * Safe against the retry hand-off, which sets data->task to NULL before
+     * freeing precisely so the task survives into the second attempt.
+     */
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->msg);
     g_slice_free(ChatAsyncData, data);
@@ -539,8 +552,14 @@ ai_claude_client_chat_async(
 
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
-    soup_message_set_request_body_from_bytes(msg, "application/json",
-        g_bytes_new_take(g_steal_pointer(&request_body), strlen(request_body)));
+    {
+        gsize body_len = strlen(request_body);
+        g_autoptr(GBytes) body_bytes =
+            g_bytes_new_take(g_steal_pointer(&request_body), body_len);
+
+        soup_message_set_request_body_from_bytes(msg, "application/json",
+                                                 body_bytes);
+    }
 
     /* Set up callback data */
     data = g_slice_new0(ChatAsyncData);
@@ -771,6 +790,7 @@ typedef struct
 static void
 stream_async_data_free(StreamAsyncData *data)
 {
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->msg);
     g_clear_object(&data->input_stream);
@@ -1282,8 +1302,13 @@ ai_claude_client_chat_stream_async(
 
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
-    soup_message_set_request_body_from_bytes(msg, "application/json",
-        g_bytes_new_take(g_steal_pointer(&request_body), request_len));
+    {
+        g_autoptr(GBytes) body_bytes =
+            g_bytes_new_take(g_steal_pointer(&request_body), request_len);
+
+        soup_message_set_request_body_from_bytes(msg, "application/json",
+                                                 body_bytes);
+    }
 
     /* Set up callback data */
     data = g_slice_new0(StreamAsyncData);

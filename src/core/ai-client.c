@@ -529,8 +529,13 @@ ai_client_chat_sync(
     }
 
     /* Set request body */
-    soup_message_set_request_body_from_bytes(msg, "application/json",
-        g_bytes_new(request_body, strlen(request_body)));
+    {
+        g_autoptr(GBytes) body_bytes =
+            g_bytes_new(request_body, strlen(request_body));
+
+        soup_message_set_request_body_from_bytes(msg, "application/json",
+                                                 body_bytes);
+    }
 
     /* Send request */
     response_bytes = soup_session_send_and_read(priv->session, msg, cancellable, error);

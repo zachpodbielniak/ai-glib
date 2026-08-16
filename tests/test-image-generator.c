@@ -321,7 +321,7 @@ static const gchar *openai_ok_body =
 static AiGeminiClient *
 make_gemini(TServer *ts)
 {
-	AiConfig *config = ai_config_new();
+	g_autoptr(AiConfig) config = ai_config_new();
 
 	ai_config_set_base_url(config, AI_PROVIDER_GEMINI, ts->base_url);
 	ai_config_set_api_key(config, AI_PROVIDER_GEMINI, "test-key");
@@ -333,7 +333,7 @@ make_gemini(TServer *ts)
 static AiOpenAIClient *
 make_openai(TServer *ts)
 {
-	AiConfig *config = ai_config_new();
+	g_autoptr(AiConfig) config = ai_config_new();
 
 	ai_config_set_base_url(config, AI_PROVIDER_OPENAI, ts->base_url);
 	ai_config_set_api_key(config, AI_PROVIDER_OPENAI, "test-key");
@@ -588,7 +588,7 @@ test_retry_then_success(void)
 	g_autoptr(AiImageResponse) response = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(AiGeminiClient) client = NULL;
-	AiConfig *config;
+	g_autoptr(AiConfig) config = NULL;
 
 	tserver_set_response(ts, SOUP_STATUS_OK, gemini_ok_body);
 	tserver_set_failures(ts, 2, 503);
@@ -618,7 +618,7 @@ test_no_retry_on_client_error(void)
 	g_autoptr(AiImageRequest) request = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(AiGeminiClient) client = NULL;
-	AiConfig *config;
+	g_autoptr(AiConfig) config = NULL;
 	AiImageResponse *response;
 
 	/* A 400 will fail identically next time, so it must not be retried. */

@@ -1216,6 +1216,19 @@ typedef struct
 static void
 chat_async_data_free(ChatAsyncData *data)
 {
+    /*
+     * g_task_return_*() does NOT consume the reference the async function
+     * took from g_task_new(); it owns that until the operation is finished
+     * with.  The early-error paths unref directly, so only the completion
+     * paths -- the ones that hand the task to `data` -- reach here, and
+     * every one of them leaked a GTask and everything it referenced: the
+     * task holds the source object, so a leaked task leaked the client, its
+     * config, and their strings.
+     *
+     * Safe against the retry hand-off, which sets data->task to NULL before
+     * freeing precisely so the task survives into the second attempt.
+     */
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_slice_free(ChatAsyncData, data);
@@ -1237,6 +1250,7 @@ typedef struct
 static void
 retry_async_data_free(RetryAsyncData *data)
 {
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_free(data->tool_summary);
@@ -1647,6 +1661,7 @@ typedef struct
 static void
 stream_async_data_free(StreamAsyncData *data)
 {
+    g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_clear_object(&data->data_stream);
