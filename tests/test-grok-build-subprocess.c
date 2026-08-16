@@ -356,6 +356,67 @@ test_sync_nonzero_exit(void)
 	stub_free(stub);
 }
 
+/*
+ * A failing CLI usually explains itself in its own format before exiting.
+ * The parsed message must win over the exit status, or the caller reads
+ * raw JSON -- or an empty stderr -- where a sentence belongs.
+ */
+static void
+test_sync_error_payload_with_nonzero_exit(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiGrokBuildClient) client = client_for(stub);
+	g_autoptr(AiMessage) msg = NULL;
+	GList *messages = one_message(&msg);
+	AiResponse *resp;
+	g_autoptr(GError) error = NULL;
+
+	stub_set(stub, "stdout",
+	         "{\"type\":\"error\",\"message\":\"rate limit exceeded\"}\n");
+	stub_set(stub, "exit", "1\n");
+
+	resp = ai_cli_client_chat_sync(AI_CLI_CLIENT(client), messages,
+	                               NULL, &error);
+
+	g_assert_null(resp);
+	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	g_assert_nonnull(strstr(error->message, "rate limit exceeded"));
+	/* Not the raw payload, and not a bare status line. */
+	g_assert_null(strstr(error->message, "\"type\""));
+	g_assert_null(strstr(error->message, "exited with status"));
+
+	g_list_free(messages);
+	stub_free(stub);
+}
+
+/*
+ * Output that fails to parse for some other reason must not mask the exit
+ * status: the status is all we know, so it is what gets reported.
+ */
+static void
+test_sync_unparseable_output_with_nonzero_exit(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiGrokBuildClient) client = client_for(stub);
+	g_autoptr(AiMessage) msg = NULL;
+	GList *messages = one_message(&msg);
+	AiResponse *resp;
+	g_autoptr(GError) error = NULL;
+
+	stub_set(stub, "stdout", "Segmentation fault\n");
+	stub_set(stub, "exit", "139\n");
+
+	resp = ai_cli_client_chat_sync(AI_CLI_CLIENT(client), messages,
+	                               NULL, &error);
+
+	g_assert_null(resp);
+	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	g_assert_nonnull(strstr(error->message, "139"));
+
+	g_list_free(messages);
+	stub_free(stub);
+}
+
 /* Success with an empty stdout is a parse error, not an empty answer. */
 static void
 test_sync_no_output(void)
@@ -866,6 +927,10 @@ main(
 	                test_sync_error_payload_with_zero_exit);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/nonzero-exit",
 	                test_sync_nonzero_exit);
+	g_test_add_func("/ai-glib/grok-build-subprocess/sync/error-nonzero-exit",
+	                test_sync_error_payload_with_nonzero_exit);
+	g_test_add_func("/ai-glib/grok-build-subprocess/sync/unparseable-nonzero-exit",
+	                test_sync_unparseable_output_with_nonzero_exit);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/no-output",
 	                test_sync_no_output);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/timeout",

@@ -1090,6 +1090,35 @@ ai_cli_client_chat_sync(
         gint              exit_status;
         g_autofree gchar *msg = NULL;
 
+        /*
+         * A failing CLI usually explains itself in its own output format
+         * before it exits -- opencode prints a structured error event on
+         * stdout with stderr empty, and grok does much the same. Give the
+         * subclass's parser first refusal at turning that into a sentence;
+         * reporting the exit status over the top of it hands the caller
+         * raw JSON, or an empty string, where a message belongs.
+         *
+         * Only the parser's *error* is taken. A non-zero exit means the
+         * run failed, whatever it managed to print.
+         */
+        if (stdout_data != NULL && stdout_data[0] != '\0' &&
+            klass->parse_json_output != NULL)
+        {
+            g_autoptr(GError) parse_error = NULL;
+            g_autoptr(AiResponse) parsed = NULL;
+
+            parsed = klass->parse_json_output(self, stdout_data,
+                                              &parse_error);
+
+            if (parsed == NULL && parse_error != NULL &&
+                parse_error->domain == AI_ERROR &&
+                parse_error->code == AI_ERROR_CLI_EXECUTION)
+            {
+                g_propagate_error(error, g_steal_pointer(&parse_error));
+                return NULL;
+            }
+        }
+
         exit_status = g_subprocess_get_exit_status(subprocess);
         msg = ai_cli_client_format_exit_error(exit_status,
                                               stderr_data,
