@@ -66,46 +66,56 @@ parse --- a run that quietly ignored the bound you asked for is worse than
 one that refuses to start.
 
 ** Keys
-| Key              | Does                                              |
-|------------------+---------------------------------------------------|
-| =Enter=          | New line --- or take the completion, if one is open |
-| =C-d=            | Send. On an empty line, quit                      |
-| =Alt-Enter=      | Send                                              |
-| =C-g=            | Edit the prompt in =$EDITOR=                      |
-| =C-c=            | Stop the turn in flight --- never the program     |
-| =Up= / =Down=    | Walk the input history, or the completion menu     |
-| =Left= / =Right= | Move the cursor                                   |
-| =C-a= / =C-e=    | Start / end of line                               |
-| =C-u=            | Clear the input                                   |
-| =PgUp= / =PgDn=  | Scroll the transcript, or page the completion menu |
-| =Tab=            | Take a completion, or step to the next            |
-| =Escape=         | Dismiss the completion menu                       |
-| =C-n=            | Select the next tool or reasoning block           |
-| =C-b=            | Expand or collapse the selected block             |
+| Key                        | Does                                              |
+|----------------------------+---------------------------------------------------|
+| =Enter=                    | Send --- or take the completion, if one is open   |
+| =Alt-Enter= / =Shift-Enter= | New line                                          |
+| =C-g=                      | Edit the prompt in =$EDITOR=                      |
+| =C-c=                      | Stop the turn, then clear the line, then quit     |
+| =C-d=                      | Quit, on an empty line                            |
+| =Up= / =Down=              | Walk the input history, or the completion menu     |
+| =Left= / =Right=           | Move the cursor                                   |
+| =C-a= / =C-e=              | Start / end of line                               |
+| =C-u=                      | Clear the input                                   |
+| =PgUp= / =PgDn=            | Scroll the transcript, or page the completion menu |
+| =Tab=                      | Take a completion, or step to the next            |
+| =Escape=                   | Dismiss the completion menu                       |
+| =C-n=                      | Select the next tool or reasoning block           |
+| =C-b=                      | Expand or collapse the selected block             |
 
-=C-c= cancels the turn rather than killing the process, because in a harness
-"stop what you are doing" is what you almost always mean. Quitting is =C-d=
-on an empty line, or =/quit=.
-
-*** Why =Enter= is not send
-A prompt worth writing is usually more than one line, and a chat box that
-sends on =Enter= makes writing one an exercise in not pressing the wrong
-key.
-
-The obvious alternative --- =Enter= sends, =Shift-Enter= inserts --- is not
-available: a terminal sends one carriage return for both, and the
-harnesses that bind them differently ship a terminal-configuration step
-to make the two distinguishable. Rather than require that, the common key
-does the common thing and sending is =C-d=, which has meant "that is all
-my input" in every shell there has ever been. =Alt-Enter= sends too, for
-the muscle memory.
-
-While the input has anything in it, the status bar says so.
+*** Writing more than one line
+=Alt-Enter= inserts a newline and works everywhere. =Shift-Enter= does the
+same *where the terminal encodes it distinctly* --- a plain terminal sends
+the same carriage return for =Shift-Enter= as for =Enter=, which is why
+every harness that binds the two differently ships a terminal-setup step.
+ai-tui does not require one: it registers the two sequences a configured
+terminal produces (the kitty keyboard protocol's =CSI 13;2u= and xterm's
+=modifyOtherKeys= =CSI 27;2;13~=), so =Shift-Enter= works if your terminal
+sends either and costs nothing if it does not.
 
 The input grows as you type, up to ten rows, and continuation rows carry
 a =│= marker so a wrapped prompt reads as one thing. Past ten rows it
 scrolls rather than eating the screen --- at which point =C-g= is the
 better tool.
+
+*** =C-c= takes one thing at a time
+In order: stop the turn, close the completion menu, throw away the
+half-written line, and only then --- pressed twice inside a second and a
+half, with nothing left to interrupt --- leave.
+
+Every step short of the last is recoverable, which is the point. The key
+somebody reaches for to stop a runaway answer should not also be the key
+that ends the session and loses the conversation with it. While a =C-c=
+is armed the status bar says =^C again to quit=; let it lapse and the
+next one starts over rather than quitting.
+
+=C-d= on an empty line quits outright, as it does in a shell, and =/quit=
+always works.
+
+Note that =C-c= reaches ai-tui as =SIGINT= rather than as a keystroke:
+=cbreak()= leaves =ISIG= on, so the terminal driver signals before
+ncurses sees the byte. Handling it as a signal is what keeps =C-z= and
+flow control working, which =raw()= would take away.
 
 *** =C-g=: write it in your editor
 Writes the current prompt to a temporary =.md= file, hands the terminal

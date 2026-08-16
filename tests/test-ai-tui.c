@@ -269,6 +269,57 @@ tmux_capture(const gchar *session)
 }
 
 /*
+ * Is the session still there?
+ *
+ * tmux ends a session when the command in it exits, so this is how
+ * "ai-tui quit" is observed --- and, more to the point, how "ai-tui did
+ * not quit" is.
+ */
+static gboolean
+tmux_alive(const gchar *session)
+{
+	const gchar *args[] = { "list-sessions", "-F", "#{session_name}", NULL };
+	g_autofree gchar *out = tmux_run(args);
+	g_auto(GStrv)     names = NULL;
+	gsize             i;
+
+	if (out == NULL)
+	{
+		return FALSE;
+	}
+
+	names = g_strsplit(out, "\n", -1);
+
+	for (i = 0; names[i] != NULL; i++)
+	{
+		if (g_strcmp0(names[i], session) == 0)
+		{
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static gboolean
+tmux_wait_for_exit(const gchar *session)
+{
+	gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+	while (g_get_monotonic_time() < deadline)
+	{
+		if (!tmux_alive(session))
+		{
+			return TRUE;
+		}
+
+		g_usleep(100 * 1000);
+	}
+
+	return FALSE;
+}
+
+/*
  * Wait for @needle to appear on the pane.
  *
  * Polling rather than sleeping: a fixed sleep is either too short on a
@@ -931,7 +982,7 @@ test_no_expand_leaves_a_command_alone(void)
 	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
 
 static void
-test_enter_inserts_a_newline(void)
+test_alt_enter_inserts_a_newline(void)
 {
 	g_autofree gchar  *pane = NULL;
 	Stub              *stub;
@@ -949,11 +1000,11 @@ test_enter_inserts_a_newline(void)
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 
 	tmux_send(TUI_SESSION, "alpha");
-	tmux_send(TUI_SESSION, "Enter");
+	tmux_send(TUI_SESSION, "M-Enter");
 	tmux_send(TUI_SESSION, "beta");
 
 	/*
-	 * Both halves on screen at once is the whole claim: Enter did not
+	 * Both halves on screen at once is the whole claim: Alt-Enter did not
 	 * send the first line away, it opened a second.
 	 */
 	g_assert_true(tmux_wait_for(TUI_SESSION, "beta"));
@@ -976,7 +1027,7 @@ test_enter_inserts_a_newline(void)
 }
 
 static void
-test_ctrl_d_sends_the_prompt(void)
+test_enter_sends_the_prompt(void)
 {
 	Stub  *stub;
 	gchar *box;
@@ -995,10 +1046,131 @@ test_ctrl_d_sends_the_prompt(void)
 	tmux_send(TUI_SESSION, "ask something");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "ask something"));
 
-	tmux_send(TUI_SESSION, "C-d");
+	tmux_send(TUI_SESSION, "Enter");
 
 	/* The stub's answer arriving proves the turn actually went. */
 	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
+ * One ^C throws the line away and stays.
+ *
+ * ^C had never reached the key handler at all: cbreak() leaves ISIG on,
+ * so the terminal raised SIGINT and the program died --- which is what
+ * this asserts against. The session still being there afterwards is the
+ * whole point.
+ */
+static void
+test_one_interrupt_clears_and_stays(void)
+{
+	g_autofree gchar  *pane = NULL;
+	Stub              *stub;
+	gchar             *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "a half written thought");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "half written"));
+
+	tmux_send(TUI_SESSION, "C-c");
+
+	/* The armed hint appearing proves the line went and the program did
+	 * not. */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "again to quit"));
+
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "half written"));
+
+	g_assert_true(tmux_alive(TUI_SESSION));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
+ * Two, close together, leave.
+ *
+ * The gap has to be well inside INTERRUPT_WINDOW_MS or the first press
+ * disarms itself and the second merely re-arms --- which is the
+ * behaviour being bought, and also the way this test goes wrong if the
+ * machine is loaded.
+ */
+static void
+test_two_interrupts_quit(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "C-c");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "again to quit"));
+
+	tmux_send(TUI_SESSION, "C-c");
+
+	g_assert_true(tmux_wait_for_exit(TUI_SESSION));
+
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
+ * And a lone one, left to expire, does not.
+ *
+ * Without the timer the flag would simply stay set, so a ^C now and
+ * another one ten minutes later would quit --- which is the accident the
+ * whole arrangement exists to prevent.
+ */
+static void
+test_an_expired_interrupt_does_not_quit(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "C-c");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "again to quit"));
+
+	/* Comfortably past the window. */
+	g_usleep(2500 * 1000);
+
+	tmux_send(TUI_SESSION, "C-c");
+	g_usleep(500 * 1000);
+
+	g_assert_true(tmux_alive(TUI_SESSION));
 
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
@@ -1219,10 +1391,16 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/no-expand",
 	                test_no_expand_leaves_a_command_alone);
 
-	g_test_add_func("/ai-glib/ai-tui/keys/enter-is-a-newline",
-	                test_enter_inserts_a_newline);
-	g_test_add_func("/ai-glib/ai-tui/keys/ctrl-d-sends",
-	                test_ctrl_d_sends_the_prompt);
+	g_test_add_func("/ai-glib/ai-tui/keys/enter-sends",
+	                test_enter_sends_the_prompt);
+	g_test_add_func("/ai-glib/ai-tui/keys/alt-enter-is-a-newline",
+	                test_alt_enter_inserts_a_newline);
+	g_test_add_func("/ai-glib/ai-tui/keys/one-interrupt-stays",
+	                test_one_interrupt_clears_and_stays);
+	g_test_add_func("/ai-glib/ai-tui/keys/two-interrupts-quit",
+	                test_two_interrupts_quit);
+	g_test_add_func("/ai-glib/ai-tui/keys/expired-interrupt",
+	                test_an_expired_interrupt_does_not_quit);
 	g_test_add_func("/ai-glib/ai-tui/keys/escape-still-dismisses",
 	                test_escape_still_dismisses_the_menu);
 	g_test_add_func("/ai-glib/ai-tui/keys/editor-round-trip",

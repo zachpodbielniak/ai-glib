@@ -229,6 +229,24 @@ attr_for_tag(AiStyleTag tag)
 #define AGENT_MAX_CONCURRENT (4)
 
 /*
+ * A keycode of our own, for a key ncurses has no name for.
+ *
+ * Above KEY_MAX so it cannot collide with anything ncurses returns; the
+ * sequences that produce it are registered with define_key() at startup.
+ */
+#define KEY_SHIFT_ENTER (KEY_MAX + 1)
+
+/*
+ * How long a first ^C stays armed, in milliseconds.
+ *
+ * Long enough to be a deliberate second press, short enough that a ^C
+ * pressed a minute ago cannot combine with one now to quit. Quitting a
+ * session by accident costs the conversation, so the bar is two presses
+ * that clearly belong together.
+ */
+#define INTERRUPT_WINDOW_MS (1500)
+
+/*
  * The frames. Braille cells, because they animate in place without the
  * line reflowing --- every one is a single column wide.
  *
@@ -287,6 +305,11 @@ typedef struct
     /* One-shot re-read, so a lone Escape is not stuck behind the next
      * keystroke. See on_key_settle(). */
     guint                settle_id;
+
+    /* A ^C is waiting to see whether a second one follows. Disarmed by a
+     * timer rather than by the next keystroke, so it is a window of time
+     * and not a mode somebody can be left stuck in. */
+    guint                interrupt_id;
 
     /* The spinner: a repeating timer that lives only while a turn does. */
     guint                spinner_id;
@@ -556,20 +579,18 @@ draw_status(App *app)
     else
     {
         /*
-         * Say how to send while there is something to send.
+         * While a ^C is armed, say what a second one does.
          *
-         * Enter inserting a newline is the right default for a prompt
-         * worth writing, and a surprise for the first ten seconds of
-         * anybody who has used a chat box. The line already exists and is
-         * already being read; the reminder costs nothing and appears
-         * exactly when it is wanted.
+         * The window is a second and a half; a prompt that only appeared
+         * in the transcript would arrive after it had closed. The status
+         * line is already on screen and already being read.
          */
         line = g_strdup_printf(" %s%s%s   %s%s",
                                ai_provider_get_name(AI_PROVIDER(provider)),
                                model != NULL ? " / " : "",
                                model != NULL ? model : "",
-                               app->input->len > 0
-                                   ? "^D or Alt-Enter to send · ^G to edit"
+                               app->interrupt_id != 0
+                                   ? "^C again to quit"
                                    : "ready",
                                app->follow ? "" : "   [scrolled]");
     }
@@ -1232,15 +1253,17 @@ show_help(App *app)
 
     g_string_append(out,
                     "\nKeys\n"
-                    "  Enter      a new line; the prompt keeps growing\n"
-                    "  ^D         send it (or quit, on an empty line)\n"
-                    "  Alt-Enter  send it\n"
-                    "  ^G         edit the prompt in $EDITOR\n"
-                    "  Tab        complete /command or @path\n"
-                    "  ^N         cycle tool and thinking blocks\n"
-                    "  ^B         expand or collapse the selected block\n"
-                    "  ^C         stop the current turn\n"
-                    "  ^U         clear the line\n");
+                    "  Enter        send\n"
+                    "  Alt-Enter    a new line (Shift-Enter too, where the\n"
+                    "               terminal encodes it distinctly)\n"
+                    "  ^G           edit the prompt in $EDITOR\n"
+                    "  ^C           stop the turn, then clear the line,\n"
+                    "               then quit on a second press\n"
+                    "  ^D           quit, on an empty line\n"
+                    "  Tab          complete /command or @path\n"
+                    "  ^N           cycle tool and thinking blocks\n"
+                    "  ^B           expand or collapse the selected block\n"
+                    "  ^U           clear the line\n");
 
     say(app, "%s", out->str);
 
@@ -1818,6 +1841,103 @@ edit_in_editor(App *app)
     app_schedule_redraw(app);
 }
 
+/* The window has passed; a further ^C starts again rather than quits. */
+static gboolean
+on_interrupt_expired(gpointer user_data)
+{
+    App *app = user_data;
+
+    app->interrupt_id = 0;
+    app_schedule_redraw(app);
+
+    return G_SOURCE_REMOVE;
+}
+
+static void
+interrupt_disarm(App *app)
+{
+    if (app->interrupt_id != 0)
+    {
+        g_source_remove(app->interrupt_id);
+        app->interrupt_id = 0;
+    }
+}
+
+static void
+interrupt_arm(App *app)
+{
+    interrupt_disarm(app);
+    app->interrupt_id = g_timeout_add(INTERRUPT_WINDOW_MS,
+                                      on_interrupt_expired, app);
+}
+
+/*
+ * ^C, which does whatever there is to interrupt.
+ *
+ * In order: stop a turn, throw away a half-written prompt, and only then
+ * --- pressed twice, close together, with nothing left to interrupt ---
+ * leave. Every step short of the last is recoverable, which is the point:
+ * the key somebody reaches for to stop a runaway answer should not also
+ * be the key that ends the session and loses the conversation with it.
+ *
+ * Returns %TRUE when the program should stop.
+ */
+static gboolean
+handle_interrupt(App *app)
+{
+    if (ai_conversation_get_busy(app->conversation))
+    {
+        ai_conversation_cancel(app->conversation);
+        interrupt_disarm(app);
+        return FALSE;
+    }
+
+    if (app->candidates != NULL)
+    {
+        completion_close(app);
+        interrupt_disarm(app);
+        return FALSE;
+    }
+
+    if (app->input->len > 0)
+    {
+        g_string_truncate(app->input, 0);
+        app->cursor = 0;
+        app->history_pos = -1;
+
+        /* Armed, so a second press leaves --- which is what "^C ^C to
+         * quit" means to anybody who has used a shell. */
+        interrupt_arm(app);
+        return FALSE;
+    }
+
+    if (app->interrupt_id != 0)
+    {
+        interrupt_disarm(app);
+        return TRUE;
+    }
+
+    interrupt_arm(app);
+    return FALSE;
+}
+
+static gboolean
+on_sigint(gpointer user_data)
+{
+    App *app = user_data;
+
+    if (handle_interrupt(app))
+    {
+        app->running = FALSE;
+        g_main_loop_quit(app->loop);
+        return G_SOURCE_REMOVE;
+    }
+
+    app_schedule_redraw(app);
+
+    return G_SOURCE_CONTINUE;
+}
+
 static gboolean
 drain_keys(App *app)
 {
@@ -1837,17 +1957,18 @@ drain_keys(App *app)
                     break;
                 }
 
+                app_send(app);
+                break;
+
+            case KEY_SHIFT_ENTER:
                 /*
-                 * Enter is a newline, not a send.
+                 * A newline, for a prompt worth more than one line.
                  *
-                 * A terminal cannot tell Shift+Enter from Enter --- both
-                 * are one carriage return on the wire, which is why
-                 * harnesses that bind the two differently ship a
-                 * terminal-configuration step. Rather than require one,
-                 * the common key does the common thing and sending is
-                 * ^D, which already means "that is all my input" in
-                 * every shell there has ever been. Alt+Enter sends too,
-                 * for the muscle memory.
+                 * Only reachable where the terminal has been configured
+                 * to encode Shift+Enter distinctly --- a plain one sends
+                 * the same carriage return as Enter and lands in the
+                 * case above. Alt+Enter is the binding that always
+                 * works, and does the same thing.
                  */
                 input_insert(app, "\n");
                 app->completion_dismissed = FALSE;
@@ -1952,8 +2073,9 @@ drain_keys(App *app)
 
                 if (next == '\r' || next == '\n' || next == KEY_ENTER)
                 {
-                    completion_close(app);
-                    app_send(app);
+                    input_insert(app, "\n");
+                    app->completion_dismissed = FALSE;
+                    completion_refresh(app);
                     break;
                 }
 
@@ -1973,20 +2095,22 @@ drain_keys(App *app)
                 toggle_selected(app);
                 break;
 
-            case 3:   /* ^C: stop the turn, never the program */
-                ai_conversation_cancel(app->conversation);
+            case 3:   /* ^C: stop the turn, clear the line, then quit */
+                if (handle_interrupt(app))
+                {
+                    app->running = FALSE;
+                    g_main_loop_quit(app->loop);
+                    return G_SOURCE_REMOVE;
+                }
                 break;
 
-            case 4:   /* ^D: send, or quit on an empty line */
+            case 4:   /* ^D: quit, on an empty line */
                 if (app->input->len == 0)
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
                     return G_SOURCE_REMOVE;
                 }
-
-                completion_close(app);
-                app_send(app);
                 break;
 
             case 7:   /* ^G: hand the prompt to $EDITOR */
@@ -3120,6 +3244,24 @@ main(int argc, char *argv[])
     keypad(app.input_win, TRUE);
     nodelay(app.input_win, TRUE);
 
+    /*
+     * Teach ncurses the sequences a terminal sends for Shift+Enter.
+     *
+     * There is no standard one. A plain terminal sends a carriage return
+     * for Shift+Enter exactly as it does for Enter --- which is why every
+     * harness that binds the two differently ships a configuration step.
+     * These are the two encodings a terminal produces once it has been
+     * configured to distinguish them: the kitty keyboard protocol's, and
+     * xterm's modifyOtherKeys. Defining both costs nothing where the
+     * terminal sends neither, and means no setup at all where it sends
+     * one.
+     *
+     * Alt+Enter needs none of this and works everywhere, which is why it
+     * is the binding the documentation leads with.
+     */
+    define_key("\033[13;2u", KEY_SHIFT_ENTER);
+    define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
+
     app.running = TRUE;
     app.loop = g_main_loop_new(NULL, FALSE);
 
@@ -3144,6 +3286,21 @@ main(int argc, char *argv[])
      */
     g_unix_fd_add(STDIN_FILENO, G_IO_IN, on_key, &app);
     g_unix_signal_add(SIGWINCH, on_resize, &app);
+
+    /*
+     * ^C arrives as a signal, not as a keystroke.
+     *
+     * cbreak() turns off line buffering but leaves ISIG on, so the
+     * terminal driver raises SIGINT before ncurses ever sees the byte ---
+     * which meant the `case 3:` in drain_keys() had never once run, and
+     * ^C killed the program outright despite everything claiming it
+     * cancelled the turn.
+     *
+     * Handled here rather than by switching to raw(), which would also
+     * take away ^Z and flow control. g_unix_signal_add() dispatches on
+     * the main loop, so this is ordinary code and not a signal handler.
+     */
+    g_unix_signal_add(SIGINT, on_sigint, &app);
 
     app_redraw(&app);
     g_main_loop_run(app.loop);
