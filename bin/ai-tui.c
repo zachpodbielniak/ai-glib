@@ -103,9 +103,52 @@ pair_for_tag(AiStyleTag tag)
     return (short)(tag + 1);
 }
 
+/*
+ * One colour per style tag, in enum order.
+ *
+ * The assertion below is the point. This used to be a list of init_pair()
+ * calls, and a tag added to the library without one got an *uninitialised*
+ * pair --- which ncurses renders as black on black, so the text was not
+ * merely unstyled, it was invisible. Five tags were added at once and
+ * every one of them disappeared: a typed /command, an @mention, and all
+ * three states of the todo block.
+ *
+ * Indexed by tag, sized by AI_STYLE_N_TAGS: adding a tag now breaks this
+ * build until somebody picks a colour, which is the loud failure the
+ * silent one deserved.
+ */
+static const short TAG_COLOURS[] = {
+    -1,             /* default       */
+    COLOR_WHITE,    /* user-prompt   */
+    COLOR_WHITE,    /* heading       */
+    COLOR_BLUE,     /* dim           */
+    COLOR_MAGENTA,  /* tool-name     */
+    COLOR_CYAN,     /* tool-target   */
+    COLOR_YELLOW,   /* tool-pending  */
+    COLOR_GREEN,    /* tool-ok       */
+    COLOR_RED,      /* tool-failed   */
+    COLOR_GREEN,    /* added         */
+    COLOR_RED,      /* removed       */
+    COLOR_CYAN,     /* code          */
+    COLOR_BLUE,     /* thinking      */
+    COLOR_RED,      /* error         */
+    COLOR_YELLOW,   /* status        */
+    COLOR_BLUE,     /* link          */
+    COLOR_BLUE,     /* marker        */
+    COLOR_CYAN,     /* mention       */
+    COLOR_MAGENTA,  /* command       */
+    -1,             /* todo-pending  */
+    COLOR_YELLOW,   /* todo-active   */
+    COLOR_GREEN     /* todo-done     */
+};
+
+G_STATIC_ASSERT(G_N_ELEMENTS(TAG_COLOURS) == AI_STYLE_N_TAGS);
+
 static void
 init_colours(void)
 {
+    guint i;
+
     if (!has_colors())
     {
         return;
@@ -114,23 +157,10 @@ init_colours(void)
     start_color();
     use_default_colors();
 
-    init_pair(pair_for_tag(AI_STYLE_DEFAULT),      -1,            -1);
-    init_pair(pair_for_tag(AI_STYLE_USER_PROMPT),  COLOR_WHITE,   -1);
-    init_pair(pair_for_tag(AI_STYLE_HEADING),      COLOR_WHITE,   -1);
-    init_pair(pair_for_tag(AI_STYLE_DIM),          COLOR_BLUE,    -1);
-    init_pair(pair_for_tag(AI_STYLE_TOOL_NAME),    COLOR_MAGENTA, -1);
-    init_pair(pair_for_tag(AI_STYLE_TOOL_TARGET),  COLOR_CYAN,    -1);
-    init_pair(pair_for_tag(AI_STYLE_TOOL_PENDING), COLOR_YELLOW,  -1);
-    init_pair(pair_for_tag(AI_STYLE_TOOL_OK),      COLOR_GREEN,   -1);
-    init_pair(pair_for_tag(AI_STYLE_TOOL_FAILED),  COLOR_RED,     -1);
-    init_pair(pair_for_tag(AI_STYLE_ADDED),        COLOR_GREEN,   -1);
-    init_pair(pair_for_tag(AI_STYLE_REMOVED),      COLOR_RED,     -1);
-    init_pair(pair_for_tag(AI_STYLE_CODE),         COLOR_CYAN,    -1);
-    init_pair(pair_for_tag(AI_STYLE_THINKING),     COLOR_BLUE,    -1);
-    init_pair(pair_for_tag(AI_STYLE_ERROR),        COLOR_RED,     -1);
-    init_pair(pair_for_tag(AI_STYLE_STATUS),       COLOR_YELLOW,  -1);
-    init_pair(pair_for_tag(AI_STYLE_LINK),         COLOR_BLUE,    -1);
-    init_pair(pair_for_tag(AI_STYLE_MARKER),       COLOR_BLUE,    -1);
+    for (i = 0; i < AI_STYLE_N_TAGS; i++)
+    {
+        init_pair(pair_for_tag((AiStyleTag)i), TAG_COLOURS[i], -1);
+    }
 }
 
 static attr_t
@@ -143,12 +173,18 @@ attr_for_tag(AiStyleTag tag)
         case AI_STYLE_USER_PROMPT:
         case AI_STYLE_HEADING:
         case AI_STYLE_TOOL_NAME:
+        case AI_STYLE_COMMAND:
+        case AI_STYLE_TODO_ACTIVE:
             attr |= A_BOLD;
             break;
         case AI_STYLE_DIM:
         case AI_STYLE_THINKING:
         case AI_STYLE_MARKER:
+        case AI_STYLE_TODO_DONE:
             attr |= A_DIM;
+            break;
+        case AI_STYLE_MENTION:
+            attr |= A_UNDERLINE;
             break;
         case AI_STYLE_ERROR:
             attr |= A_BOLD;
@@ -159,6 +195,14 @@ attr_for_tag(AiStyleTag tag)
 
     return attr;
 }
+
+/*
+ * How long after a key burst to read once more, in milliseconds.
+ *
+ * Long enough that a real arrow-key sequence has arrived whole, short
+ * enough that Escape feels immediate.
+ */
+#define ESCAPE_SETTLE_MS (30)
 
 /* ================================================================
  * The application
@@ -196,6 +240,14 @@ typedef struct
     AiCompletionResult  *candidates;
     guint                candidate_index;
 
+    /* Set by Escape, cleared by the next edit. Without it the menu would
+     * reappear on the very next keystroke and Escape would do nothing. */
+    gboolean             completion_dismissed;
+
+    /* One-shot re-read, so a lone Escape is not stuck behind the next
+     * keystroke. See on_key_settle(). */
+    guint                settle_id;
+
     /* Set only by --dump, and quit by whichever callback finishes the
      * turn. Polling the busy flag is not enough: a line that resolves to
      * a built-in never sets it at all. */
@@ -215,6 +267,7 @@ typedef struct
 static void app_schedule_redraw(App *app);
 static void draw_completion(App *app);
 static void completion_advance(App *app);
+static void completion_refresh(App *app);
 static void completion_accept(App *app);
 static void completion_close(App *app);
 static void on_input_sent(GObject *source, GAsyncResult *result,
@@ -1108,13 +1161,9 @@ handle_builtin(App *app, AiCommandResult *result)
 }
 
 static gboolean
-on_key(gint fd, GIOCondition condition, gpointer user_data)
+drain_keys(App *app)
 {
-    App *app = user_data;
     gint ch;
-
-    (void)fd;
-    (void)condition;
 
     while ((ch = wgetch(app->input_win)) != ERR)
     {
@@ -1136,16 +1185,19 @@ on_key(gint fd, GIOCondition condition, gpointer user_data)
             case KEY_BACKSPACE:
             case 127:
             case 8:
-                completion_close(app);
                 input_backspace(app);
+                app->completion_dismissed = FALSE;
+                completion_refresh(app);
                 break;
 
             case KEY_LEFT:
                 input_move(app, -1);
+                completion_refresh(app);
                 break;
 
             case KEY_RIGHT:
                 input_move(app, 1);
+                completion_refresh(app);
                 break;
 
             case KEY_HOME:
@@ -1161,14 +1213,17 @@ on_key(gint fd, GIOCondition condition, gpointer user_data)
             case 21:  /* ^U */
                 g_string_truncate(app->input, 0);
                 app->cursor = 0;
+                completion_close(app);
                 break;
 
             case KEY_UP:
                 input_recall(app, -1);
+                completion_close(app);
                 break;
 
             case KEY_DOWN:
                 input_recall(app, 1);
+                completion_close(app);
                 break;
 
             case KEY_PPAGE:
@@ -1190,7 +1245,8 @@ on_key(gint fd, GIOCondition condition, gpointer user_data)
                 select_next_tool_block(app);
                 break;
 
-            case 27:  /* Escape: dismiss the popup */
+            case 27:  /* Escape: dismiss until the line changes */
+                app->completion_dismissed = TRUE;
                 completion_close(app);
                 break;
 
@@ -1217,14 +1273,59 @@ on_key(gint fd, GIOCondition condition, gpointer user_data)
                 {
                     gchar text[2] = { (gchar)ch, '\0' };
 
-                    /* The query is stale the moment the buffer changes. */
-                    completion_close(app);
                     input_insert(app, text);
+
+                    /* The menu follows the line: typing "/" opens it and
+                     * every character after narrows it. */
+                    app->completion_dismissed = FALSE;
+                    completion_refresh(app);
                 }
                 break;
         }
 
         app_schedule_redraw(app);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+/*
+ * Read again, shortly.
+ *
+ * ncurses in nodelay mode cannot tell a lone Escape from the start of an
+ * arrow key: it returns ERR and keeps the byte, waiting for a follow-up
+ * that only another read will produce. Since keys reach us through the
+ * main loop rather than a blocking read, nothing would ever come back for
+ * it --- so pressing Escape did nothing at all until the *next*
+ * keystroke, which then arrived behind it.
+ *
+ * One short timer after each burst flushes it. Imperceptible, and it is
+ * the difference between Escape working and Escape being a mystery.
+ */
+static gboolean
+on_key_settle(gpointer user_data)
+{
+    App *app = user_data;
+
+    app->settle_id = 0;
+    drain_keys(app);
+
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+on_key(gint fd, GIOCondition condition, gpointer user_data)
+{
+    App *app = user_data;
+
+    (void)fd;
+    (void)condition;
+
+    drain_keys(app);
+
+    if (app->settle_id == 0)
+    {
+        app->settle_id = g_timeout_add(ESCAPE_SETTLE_MS, on_key_settle, app);
     }
 
     return G_SOURCE_CONTINUE;
@@ -1325,48 +1426,73 @@ completion_close(App *app)
 }
 
 /*
- * Open the popup, or step through it if it is already open.
+ * Recompute the menu for whatever is under the cursor.
  *
- * All of the thinking is in ai_completion_context_query(): this decides nothing
- * about what completes where, which is why the same behaviour will come
- * out of an Emacs frontend calling the same function.
+ * Called after every input change, and purely passive --- it never
+ * inserts anything. That split is what lets the menu appear the moment
+ * you type "/" without the act of showing it also editing your line.
+ */
+static void
+completion_refresh(App *app)
+{
+    if (app->completion == NULL || app->completion_dismissed)
+    {
+        return;
+    }
+
+    g_clear_object(&app->candidates);
+    app->candidate_index = 0;
+
+    if (app->input->len == 0)
+    {
+        return;
+    }
+
+    app->candidates = ai_completion_context_query(app->completion,
+                                                  app->input->str,
+                                                  app->cursor);
+
+    /* Nothing to offer is the same as no menu. */
+    if (ai_completion_result_get_n_items(app->candidates) == 0)
+    {
+        g_clear_object(&app->candidates);
+    }
+}
+
+/*
+ * Tab: take what is on offer.
+ *
+ * One candidate is inserted outright. Several get their common prefix
+ * inserted the first time, if that adds anything, and step the highlight
+ * afterwards --- so the first Tab makes progress and the second is a
+ * choice rather than a repetition.
  */
 static void
 completion_advance(App *app)
 {
+    guint n;
+
     if (app->completion == NULL)
     {
         return;
     }
 
-    if (app->candidates != NULL)
+    /* Escape then Tab means "actually, show me". */
+    app->completion_dismissed = FALSE;
+
+    if (app->candidates == NULL)
     {
-        guint n = ai_completion_result_get_n_items(app->candidates);
+        completion_refresh(app);
+    }
 
-        if (n > 0)
-        {
-            app->candidate_index = (app->candidate_index + 1) % n;
-        }
-
+    if (app->candidates == NULL)
+    {
         return;
     }
 
-    app->candidates = ai_completion_context_query(app->completion, app->input->str,
-                                          app->cursor);
-    app->candidate_index = 0;
+    n = ai_completion_result_get_n_items(app->candidates);
 
-    if (ai_completion_result_get_n_items(app->candidates) == 0)
-    {
-        completion_close(app);
-        return;
-    }
-
-    /*
-     * One candidate needs no menu. Several that agree on a prefix get the
-     * prefix inserted first, so a second Tab is a choice rather than a
-     * repetition.
-     */
-    if (ai_completion_result_get_n_items(app->candidates) == 1)
+    if (n == 1)
     {
         completion_accept(app);
         return;
@@ -1375,23 +1501,24 @@ completion_advance(App *app)
     {
         g_autofree gchar *prefix =
             ai_completion_result_get_common_prefix(app->candidates);
-        guint             start =
+        guint             begin =
             ai_completion_result_get_start(app->candidates);
-        guint             end = ai_completion_result_get_end(app->candidates);
+        guint             finish =
+            ai_completion_result_get_end(app->candidates);
 
-        if (prefix != NULL && strlen(prefix) > (gsize)(end - start))
+        if (prefix != NULL && strlen(prefix) > (gsize)(finish - begin))
         {
-            g_string_erase(app->input, (gssize)start, (gssize)(end - start));
-            g_string_insert(app->input, (gssize)start, prefix);
-            app->cursor = start + (guint)strlen(prefix);
+            g_string_erase(app->input, (gssize)begin,
+                           (gssize)(finish - begin));
+            g_string_insert(app->input, (gssize)begin, prefix);
+            app->cursor = begin + (guint)strlen(prefix);
 
-            g_clear_object(&app->candidates);
-            app->candidates = ai_completion_context_query(app->completion,
-                                                  app->input->str,
-                                                  app->cursor);
-            app->candidate_index = 0;
+            completion_refresh(app);
+            return;
         }
     }
+
+    app->candidate_index = (app->candidate_index + 1) % n;
 }
 
 /* Replace the queried range with the highlighted candidate. */
@@ -2038,6 +2165,7 @@ main(int argc, char *argv[])
     /* ---- Terminal ---- */
 
     initscr();
+    set_escdelay(ESCAPE_SETTLE_MS);
     init_colours();
     cbreak();
     noecho();
@@ -2081,6 +2209,12 @@ main(int argc, char *argv[])
     g_main_loop_run(app.loop);
 
     endwin();
+
+    if (app.settle_id != 0)
+    {
+        g_source_remove(app.settle_id);
+        app.settle_id = 0;
+    }
 
     completion_close(&app);
     g_clear_object(&app.completion);

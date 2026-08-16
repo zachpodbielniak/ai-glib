@@ -75,7 +75,7 @@ one that refuses to start.
 | =C-a= / =C-e=    | Start / end of line                               |
 | =C-u=            | Clear the input                                   |
 | =PgUp= / =PgDn=  | Scroll the transcript                             |
-| =Tab=            | Complete a =/command= or an =@path=               |
+| =Tab=            | Take a completion, or step to the next            |
 | =Escape=         | Dismiss the completion menu                       |
 | =C-n=            | Select the next tool or reasoning block           |
 | =C-b=            | Expand or collapse the selected block             |
@@ -89,13 +89,21 @@ status bar says =[scrolled]= while that is so. Sending, or scrolling back
 down, resumes following.
 
 ** Completion
-=Tab= completes what is under the cursor. A =/= at the start of the line
-completes commands, skills and agents; an =@= anywhere completes paths.
+The menu opens as you type. A =/= at the start of the line lists every
+command, skill and agent, and each character after it narrows the list;
+an =@= anywhere lists paths.
 
-One candidate inserts itself. Several insert their common prefix and open
-a menu, so a second =Tab= is a choice rather than a repetition; =Enter=
-takes the highlighted one and =Escape= dismisses the menu. Directories
-carry a trailing slash, so one more =Tab= walks into them.
+| Key       | Does                                                     |
+|-----------+----------------------------------------------------------|
+| =Tab=     | Take what is on offer, or step to the next candidate     |
+| =Enter=   | Accept the highlighted candidate (it does not send)      |
+| =Escape=  | Dismiss, until the line changes again                    |
+
+=Tab= inserts a single candidate outright. With several it inserts their
+common prefix if that adds anything, and steps the highlight otherwise
+--- so the first =Tab= makes progress and the second is a choice rather
+than a repetition. Directories carry a trailing slash, so one more =Tab=
+walks into them.
 
 Mentions and command names are highlighted as you type, using the same
 scanner the pipeline uses. A mention that will not resolve still lights
