@@ -95,4 +95,8 @@
 #include "agent/ai-brigade.h"
 #include "agent/ai-mock-provider.h"
 
+/* Harness layer - commands, skills and agents on disk */
+#include "harness/ai-resource.h"
+#include "harness/ai-resource-registry.h"
+
 #undef AI_GLIB_INSIDE
