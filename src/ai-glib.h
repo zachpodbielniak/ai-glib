@@ -98,5 +98,8 @@
 /* Harness layer - commands, skills and agents on disk */
 #include "harness/ai-resource.h"
 #include "harness/ai-resource-registry.h"
+#include "harness/ai-mention.h"
+#include "harness/ai-command.h"
+#include "harness/ai-completion.h"
 
 #undef AI_GLIB_INSIDE

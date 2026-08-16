@@ -100,7 +100,10 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/agent/ai-brigade.h \
 	$(SRCDIR)/agent/ai-mock-provider.h \
 	$(SRCDIR)/harness/ai-resource.h \
-	$(SRCDIR)/harness/ai-resource-registry.h
+	$(SRCDIR)/harness/ai-resource-registry.h \
+	$(SRCDIR)/harness/ai-mention.h \
+	$(SRCDIR)/harness/ai-command.h \
+	$(SRCDIR)/harness/ai-completion.h
 
 # Library source files
 LIB_SOURCES = \
@@ -171,7 +174,10 @@ LIB_SOURCES = \
 	$(SRCDIR)/agent/ai-brigade.c \
 	$(SRCDIR)/agent/ai-mock-provider.c \
 	$(SRCDIR)/harness/ai-resource.c \
-	$(SRCDIR)/harness/ai-resource-registry.c
+	$(SRCDIR)/harness/ai-resource-registry.c \
+	$(SRCDIR)/harness/ai-mention.c \
+	$(SRCDIR)/harness/ai-command.c \
+	$(SRCDIR)/harness/ai-completion.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
