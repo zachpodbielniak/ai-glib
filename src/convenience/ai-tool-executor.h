@@ -73,12 +73,45 @@ typedef enum
     AI_TOOL_APPROVAL_DENY_ALL
 } AiToolApproval;
 
+/**
+ * AiToolFeatures:
+ * @AI_TOOL_FEATURE_NONE: neither
+ * @AI_TOOL_FEATURE_SUBAGENTS: the `task` and `skill` tools
+ * @AI_TOOL_FEATURE_BACKGROUND: the `agent_spawn`, `agent_status`,
+ *   `agent_result`, `agent_wait` and `agent_cancel` tools
+ * @AI_TOOL_FEATURE_ALL: both
+ *
+ * Which optional groups of tools an executor is willing to offer.
+ *
+ * Both bits are set by default, but a bit only decides whether a group
+ * *may* appear --- each group still needs the thing it runs on, a
+ * resource registry for subagents and an #AiBrigade for background
+ * agents, and neither is created implicitly. So an application that sets
+ * up neither is unaffected by any of this, one that wants background
+ * agents asks for them by handing over a brigade, and one that wants a
+ * brigade for its own purposes while denying the model access to it
+ * clears the bit.
+ *
+ * This is a group switch, not the grant. The grant is the tool list:
+ * ai_tool_executor_unregister() takes a single tool away for good, and
+ * that is how an agent file's `tools:` allowlist is enforced.
+ */
+typedef enum
+{
+    AI_TOOL_FEATURE_NONE       = 0,
+    AI_TOOL_FEATURE_SUBAGENTS  = 1 << 0,
+    AI_TOOL_FEATURE_BACKGROUND = 1 << 1,
+    AI_TOOL_FEATURE_ALL        = (1 << 0) | (1 << 1)
+} AiToolFeatures;
+
 #define AI_TYPE_TOOL_EXECUTOR (ai_tool_executor_get_type())
 
 G_DECLARE_FINAL_TYPE(AiToolExecutor, ai_tool_executor, AI, TOOL_EXECUTOR, GObject)
 
-/* Forward decl needed by AiToolCallback below. */
+/* Forward decls. AiBrigade cannot be included here: ai-brigade.h reaches
+ * back to this header through ai-agent.h. */
 typedef struct _AiTool AiTool;
+typedef struct _AiBrigade AiBrigade;
 
 /**
  * AiToolCallback:
@@ -166,6 +199,35 @@ ai_tool_executor_set_resource_registry (
 
 AiResourceRegistry *
 ai_tool_executor_get_resource_registry (AiToolExecutor *self);
+
+void
+ai_tool_executor_set_features (
+    AiToolExecutor *self,
+    AiToolFeatures  features
+);
+
+AiToolFeatures
+ai_tool_executor_get_features (AiToolExecutor *self);
+
+void
+ai_tool_executor_set_brigade (
+    AiToolExecutor *self,
+    AiBrigade      *brigade
+);
+
+AiBrigade *
+ai_tool_executor_get_brigade (AiToolExecutor *self);
+
+/**
+ * AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS:
+ *
+ * The longest `agent_wait` will block for, whatever it is asked for.
+ *
+ * A tool that waits forever is a hung program with extra steps: the main
+ * loop keeps turning, but the conversation the model is holding never
+ * gets another turn and the person in front of it has no way to know why.
+ */
+#define AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS (600)
 
 guint
 ai_tool_executor_get_n_todos (AiToolExecutor *self);

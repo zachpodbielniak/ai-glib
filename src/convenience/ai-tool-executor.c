@@ -109,6 +109,13 @@ struct _AiToolExecutor
      * that spawns a subagent that spawns a subagent is a runaway, not a
      * plan. */
     guint             task_depth;
+
+    /* Where background agents live. NULL means the agent_* tools are not
+     * offered at all, exactly as a NULL registry means `task` is not. */
+    AiBrigade        *brigade;
+
+    /* Which optional tool groups this executor is willing to offer. */
+    AiToolFeatures    features;
 };
 
 static void
@@ -131,6 +138,8 @@ enum
     PROP_STREAM,
     PROP_WORKING_DIRECTORY,
     PROP_RESOURCE_REGISTRY,
+    PROP_BRIGADE,
+    PROP_FEATURES,
     N_PROPS
 };
 
@@ -252,6 +261,12 @@ static void ai_tool_executor_set_property (GObject *object, guint prop_id,
                                            const GValue *value,
                                            GParamSpec *pspec);
 static void on_run_response_common (RunContext *ctx, AiResponse *response);
+static gboolean executor_offers_tool (AiToolExecutor *self, const gchar *name);
+static AiProvider *executor_resolve_agent_provider (AiToolExecutor *self,
+                                                    const gchar *provider_name,
+                                                    const gchar *model,
+                                                    GError **error);
+static gchar *executor_first_line (const gchar *text, glong max_chars);
 
 /* Forward declaration */
 static void run_context_send (RunContext *ctx);
@@ -284,6 +299,75 @@ run_context_finish (RunContext *ctx)
     g_free (ctx->result);
     g_clear_error (&ctx->error);
     g_free (ctx);
+}
+
+/*
+ * Tell the model about background agents that finished while it worked.
+ *
+ * This is the whole notification mechanism, and it is deliberately a
+ * message rather than anything cleverer: the model is only ever awake
+ * between turns, so a turn boundary is the one moment it can be told
+ * anything at all. The brigade holds each finish until it is collected
+ * here, so news that arrives mid-turn is not lost and is not repeated.
+ *
+ * What it is told is that an agent finished, not what the agent said.
+ * Pasting a subagent's whole answer into a conversation that did not ask
+ * for it yet is how a delegated task ends up costing more context than
+ * doing the work inline would have; `agent_result` fetches it when the
+ * model decides it wants it.
+ *
+ * Returns: %TRUE when something was appended.
+ */
+static gboolean
+run_context_report_agents (RunContext *ctx)
+{
+    AiBrigade          *brigade = ctx->executor->brigade;
+    g_autoptr(GString)  notice  = NULL;
+    gchar              *id;
+
+    if (brigade == NULL)
+        return FALSE;
+
+    while ((id = ai_brigade_take_finished (brigade)) != NULL)
+    {
+        g_autofree gchar *owned = id;
+        AiAgent          *agent = ai_brigade_get (brigade, owned);
+
+        /* Reaped already -- by agent_result, or by agent_wait, which
+         * both collect and forget.  The model has the answer; telling it
+         * again would be noise. */
+        if (agent == NULL)
+            continue;
+
+        if (notice == NULL)
+            notice = g_string_new (NULL);
+
+        g_string_append_printf (notice, "Background agent '%s' %s", owned,
+                                ai_agent_state_to_string (
+                                    ai_agent_get_state (agent)));
+
+        if (ai_agent_get_description (agent) != NULL)
+        {
+            g_autofree gchar *what =
+                executor_first_line (ai_agent_get_description (agent), 60);
+
+            g_string_append_printf (notice, ": %s", what);
+        }
+
+        g_string_append_c (notice, '\n');
+    }
+
+    if (notice == NULL)
+        return FALSE;
+
+    g_string_append (notice,
+                     "\nCollect an answer with agent_result, or carry on if "
+                     "it is no longer relevant.");
+
+    ctx->messages = g_list_append (ctx->messages,
+                                   ai_message_new_user (notice->str));
+
+    return TRUE;
 }
 
 static void
@@ -342,6 +426,21 @@ on_run_response_common (
             AiMessage *final_msg = ai_message_new_assistant (ctx->result);
             ctx->messages = g_list_append (ctx->messages, final_msg);
         }
+
+        /*
+         * A background agent finished while the model was composing this.
+         * It has not seen that yet, so this is not the end of the turn --
+         * give it the news and let it decide. Bounded by the turn limit
+         * like everything else, and each finish is reported once, so this
+         * cannot cycle.
+         */
+        if (ctx->turn_count < ctx->max_turns && run_context_report_agents (ctx))
+        {
+            g_clear_pointer (&ctx->result, g_free);
+            run_context_send (ctx);
+            return;
+        }
+
         run_context_finish (ctx);
         return;
     }
@@ -488,6 +587,11 @@ on_run_response_common (
         run_context_finish (ctx);
         return;
     }
+
+    /* Anything that finished while those tools ran is reported before the
+     * next turn, so the model reads it alongside the results it asked
+     * for rather than a turn late. */
+    run_context_report_agents (ctx);
 
     /* Continue conversation */
     run_context_send (ctx);
@@ -2158,6 +2262,75 @@ executor_list_resource_names (
     return g_strjoinv (", ", (gchar **)names->pdata);
 }
 
+/* The ids the brigade knows, for the same reason. */
+static gchar *
+executor_list_agent_ids (AiToolExecutor *self)
+{
+    g_autoptr(GPtrArray) ids = g_ptr_array_new_with_free_func (g_free);
+    g_autoptr(GList)     agents = NULL;
+    GList               *iter;
+
+    if (self->brigade == NULL)
+        return NULL;
+
+    agents = ai_brigade_list (self->brigade);
+
+    for (iter = agents; iter != NULL; iter = iter->next)
+    {
+        const gchar *id = ai_agent_get_id (iter->data);
+
+        if (id != NULL)
+            g_ptr_array_add (ids, g_strdup (id));
+    }
+
+    if (ids->len == 0)
+        return NULL;
+
+    g_ptr_array_add (ids, NULL);
+
+    return g_strjoinv (", ", (gchar **)ids->pdata);
+}
+
+/*
+ * The first line of TEXT, at most MAX_CHARS of it.
+ *
+ * For status listings, where one agent gets one line. Truncation is
+ * marked, because a description silently cut mid-word reads as a
+ * description that was written that way.
+ *
+ * MAX_CHARS counts characters, not bytes: cutting a UTF-8 sequence in
+ * half would produce a string nothing downstream can render.
+ */
+static gchar *
+executor_first_line (
+    const gchar *text,
+    glong        max_chars
+){
+    const gchar *newline;
+    g_autofree gchar *line = NULL;
+
+    if (text == NULL)
+        return NULL;
+
+    newline = strchr (text, '\n');
+    line = newline != NULL ? g_strndup (text, (gsize)(newline - text))
+                           : g_strdup (text);
+    g_strstrip (line);
+
+    if (!g_utf8_validate (line, -1, NULL))
+        return g_strdup ("(not valid UTF-8)");
+
+    if (g_utf8_strlen (line, -1) <= max_chars)
+        return g_steal_pointer (&line);
+
+    {
+        const gchar      *end = g_utf8_offset_to_pointer (line, max_chars);
+        g_autofree gchar *cut = g_strndup (line, (gsize)(end - line));
+
+        return g_strconcat (cut, "\342\200\246", NULL);   /* … */
+    }
+}
+
 /* ================================================================
  * todo_write
  * ================================================================ */
@@ -2637,7 +2810,10 @@ tool_task (
 ){
     const gchar               *agent_name;
     const gchar               *prompt;
+    const gchar               *provider_name;
+    const gchar               *model;
     AiResource                *agent;
+    g_autoptr(AiProvider)      provider = NULL;
     g_autoptr(AiToolExecutor)  child = NULL;
     g_autoptr(AiMessage)       message = NULL;
     GList                     *messages = NULL;
@@ -2646,6 +2822,8 @@ tool_task (
 
     agent_name = ai_tool_use_get_input_string (tool_use, "agent");
     prompt = ai_tool_use_get_input_string (tool_use, "prompt");
+    provider_name = ai_tool_use_get_input_string (tool_use, "provider");
+    model = ai_tool_use_get_input_string (tool_use, "model");
 
     if (agent_name == NULL || prompt == NULL)
     {
@@ -2697,12 +2875,11 @@ tool_task (
      * "no provider" is one it can do nothing about, and reporting that
      * first would bury the useful message.
      */
-    if (self->active_provider == NULL)
-    {
-        g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
-                             "task: no provider is available to run an agent");
+    provider = executor_resolve_agent_provider (self, provider_name, model,
+                                                error);
+
+    if (provider == NULL)
         return NULL;
-    }
 
     child = build_agent_executor (self, agent);
 
@@ -2714,7 +2891,7 @@ tool_task (
     message = ai_message_new_user (prompt);
     messages = g_list_append (NULL, message);
 
-    result = ai_tool_executor_run (child, self->active_provider, messages,
+    result = ai_tool_executor_run (child, provider, messages,
                                    ai_resource_get_body (agent),
                                    AI_TOOL_EXECUTOR_AGENT_MAX_TOKENS,
                                    cancellable, error);
@@ -2726,6 +2903,612 @@ tool_task (
         return NULL;
 
     return result;
+}
+
+/* ================================================================
+ * Background agents
+ * ================================================================ */
+
+/*
+ * The provider one background agent will run on.
+ *
+ * Named provider wins; otherwise the agent inherits whatever this
+ * conversation is using. That inheritance is a borrowed reference to a
+ * client somebody else owns, so it is reffed like any other -- and a
+ * named one is built fresh, because two agents sharing one HTTP client
+ * would share its per-request state.
+ *
+ * A named provider is constructed from the environment through the same
+ * factory `ai` and `ai-tui` use, which is what makes "run this on
+ * claude-code while I am talking to Grok" a matter of naming it.
+ */
+static AiProvider *
+executor_resolve_agent_provider (
+    AiToolExecutor  *self,
+    const gchar     *provider_name,
+    const gchar     *model,
+    GError         **error
+){
+    g_autoptr(GObject) built = NULL;
+
+    if (provider_name == NULL || provider_name[0] == '\0')
+    {
+        if (self->active_provider == NULL)
+        {
+            g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                                 "no provider is available to run an agent");
+            return NULL;
+        }
+
+        if (model != NULL)
+        {
+            g_set_error_literal (
+                error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                "naming a model needs a provider too: say which provider "
+                "that model belongs to");
+            return NULL;
+        }
+
+        return g_object_ref (self->active_provider);
+    }
+
+    built = ai_provider_factory_new_from_string (provider_name, NULL, error);
+
+    if (built == NULL)
+        return NULL;
+
+    if (!AI_IS_PROVIDER (built))
+    {
+        g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                     "provider '%s' cannot hold a conversation", provider_name);
+        return NULL;
+    }
+
+    /*
+     * The two client base classes share no ancestor beyond GObject, so
+     * setting the model means asking which one this is -- the same test
+     * ai_provider_factory_new() documents.
+     */
+    if (model != NULL && model[0] != '\0')
+    {
+        if (AI_IS_CLIENT (built))
+            ai_client_set_model (AI_CLIENT (built), model);
+        else if (AI_IS_CLI_CLIENT (built))
+            ai_cli_client_set_model (AI_CLI_CLIENT (built), model);
+        else
+            g_set_error (error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+                         "provider '%s' has no model to set", provider_name);
+    }
+
+    if (error != NULL && *error != NULL)
+        return NULL;
+
+    return AI_PROVIDER (g_steal_pointer (&built));
+}
+
+static gchar *
+tool_agent_spawn (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar             *prompt;
+    const gchar             *description;
+    const gchar             *agent_name;
+    const gchar             *provider_name;
+    const gchar             *model;
+    AiResource              *definition = NULL;
+    g_autoptr(AiProvider)    provider   = NULL;
+    g_autoptr(AiAgent)       agent      = NULL;
+    g_autoptr(AiToolExecutor) child     = NULL;
+    g_autofree gchar        *id         = NULL;
+
+    (void)cancellable;
+
+    prompt        = ai_tool_use_get_input_string (tool_use, "prompt");
+    description   = ai_tool_use_get_input_string (tool_use, "description");
+    agent_name    = ai_tool_use_get_input_string (tool_use, "agent");
+    provider_name = ai_tool_use_get_input_string (tool_use, "provider");
+    model         = ai_tool_use_get_input_string (tool_use, "model");
+
+    if (prompt == NULL || prompt[0] == '\0')
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                             "agent_spawn: missing required parameter: prompt");
+        return NULL;
+    }
+
+    /*
+     * Everything the model could have got wrong is checked before
+     * anything about the environment, so "no agent named 'reviewr'"
+     * reaches it instead of being buried under a configuration problem
+     * it can do nothing about. Same ordering as `task`.
+     */
+    if (agent_name != NULL && agent_name[0] != '\0')
+    {
+        if (self->registry == NULL)
+        {
+            g_set_error_literal (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                                 "agent_spawn: no agent definitions are "
+                                 "available; omit 'agent' for a "
+                                 "general-purpose one");
+            return NULL;
+        }
+
+        definition = ai_resource_registry_lookup (self->registry,
+                                                  AI_RESOURCE_AGENT,
+                                                  agent_name);
+
+        if (definition == NULL)
+        {
+            g_autofree gchar *available =
+                executor_list_resource_names (self, AI_RESOURCE_AGENT);
+
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "agent_spawn: no agent named '%s'. Available: %s",
+                         agent_name,
+                         available != NULL ? available : "(none)");
+            return NULL;
+        }
+    }
+
+    provider = executor_resolve_agent_provider (self, provider_name, model,
+                                                error);
+
+    if (provider == NULL)
+        return NULL;
+
+    id = ai_brigade_generate_id (self->brigade,
+                                 agent_name != NULL ? agent_name : "agent");
+
+    agent = ai_agent_new (id, provider);
+    ai_agent_set_description (agent, description != NULL ? description
+                                                         : prompt);
+    ai_agent_set_max_tokens (agent, AI_TOOL_EXECUTOR_AGENT_MAX_TOKENS);
+
+    /*
+     * A background agent gets the same executor a foreground `task` would
+     * -- the agent file's tool allowlist applied structurally -- with one
+     * subtraction: it may not start further background agents. One level
+     * of fan-out is delegation; agents spawning agents unattended is a
+     * fork bomb that bills.
+     */
+    if (definition != NULL)
+    {
+        child = build_agent_executor (self, definition);
+        ai_agent_set_system_prompt (agent, ai_resource_get_body (definition));
+    }
+    else
+    {
+        child = ai_tool_executor_new ();
+        ai_tool_executor_set_working_directory (child,
+                                                self->working_directory);
+        ai_tool_executor_set_resource_registry (child, self->registry);
+        ai_tool_executor_set_approval_policy (child, self->approval_policy);
+
+        if (self->search_provider != NULL)
+            ai_tool_executor_set_search_provider (child,
+                                                  self->search_provider);
+    }
+
+    ai_tool_executor_set_features (
+        child, ai_tool_executor_get_features (child) &
+                   ~(AiToolFeatures) AI_TOOL_FEATURE_BACKGROUND);
+    ai_agent_set_executor (agent, child);
+
+    if (!ai_brigade_start (self->brigade, agent, prompt, error))
+        return NULL;
+
+    return g_strdup_printf (
+        "Started agent '%s' (%s). It is running in the background; you will "
+        "be told when it finishes. Use agent_status to check on it, "
+        "agent_result to collect its answer.",
+        id, ai_agent_state_to_string (ai_agent_get_state (agent)));
+}
+
+/* One agent's line in a status listing. */
+static void
+executor_append_agent_status (
+    AiToolExecutor *self,
+    GString        *out,
+    AiAgent        *agent
+){
+    AiBudget         *budget  = ai_agent_get_budget (agent);
+    gint64            ms      = ai_agent_get_elapsed_ms (agent);
+    const gchar      *desc    = ai_agent_get_description (agent);
+    g_autofree gchar *peek    = NULL;
+
+    (void)self;
+
+    g_string_append_printf (out, "%s  %s  %" G_GINT64_FORMAT "s",
+                            ai_agent_get_id (agent),
+                            ai_agent_state_to_string (ai_agent_get_state (agent)),
+                            ms / 1000);
+
+    if (budget != NULL && ai_budget_get_turns (budget) > 0)
+        g_string_append_printf (out, "  %u turns, %" G_GUINT64_FORMAT " in / "
+                                "%" G_GUINT64_FORMAT " out",
+                                ai_budget_get_turns (budget),
+                                ai_budget_get_input_tokens (budget),
+                                ai_budget_get_output_tokens (budget));
+
+    if (desc != NULL && desc[0] != '\0')
+    {
+        g_autofree gchar *one_line = executor_first_line (desc, 60);
+
+        g_string_append_printf (out, "  %s", one_line);
+    }
+
+    g_string_append_c (out, '\n');
+
+    /*
+     * A peek at the work so far, not the whole thing. The point of
+     * asking for status is to decide whether to keep waiting, and a
+     * running agent's half-written answer pasted in full would crowd out
+     * every other agent on the list.
+     */
+    if (self->brigade != NULL && ai_brigade_get_worker (self->brigade) != NULL)
+    {
+        peek = ai_agent_worker_read_output (
+            ai_brigade_get_worker (self->brigade), agent, NULL);
+    }
+
+    if (peek != NULL && peek[0] != '\0')
+    {
+        g_autofree gchar *snippet = executor_first_line (peek, 100);
+
+        g_string_append_printf (out, "    so far: %s\n", snippet);
+    }
+
+    if (ai_agent_get_error (agent) != NULL)
+        g_string_append_printf (out, "    error: %s\n",
+                                ai_agent_get_error (agent)->message);
+}
+
+static gchar *
+tool_agent_status (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar        *wanted;
+    g_autoptr(GString)  out = g_string_new (NULL);
+
+    (void)cancellable;
+
+    wanted = ai_tool_use_get_input_string (tool_use, "agent_id");
+
+    if (wanted != NULL && wanted[0] != '\0')
+    {
+        AiAgent *agent = ai_brigade_get (self->brigade, wanted);
+
+        if (agent == NULL)
+        {
+            g_autofree gchar *known = executor_list_agent_ids (self);
+
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "agent_status: no agent named '%s'. Known: %s",
+                         wanted, known != NULL ? known : "(none)");
+            return NULL;
+        }
+
+        executor_append_agent_status (self, out, agent);
+        return g_string_free (g_steal_pointer (&out), FALSE);
+    }
+
+    {
+        g_autoptr(GList) agents = ai_brigade_list (self->brigade);
+        GList           *iter;
+
+        if (agents == NULL)
+            return g_strdup ("No background agents.");
+
+        for (iter = agents; iter != NULL; iter = iter->next)
+            executor_append_agent_status (self, out, iter->data);
+    }
+
+    return g_string_free (g_steal_pointer (&out), FALSE);
+}
+
+static gchar *
+tool_agent_result (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar *wanted;
+
+    (void)cancellable;
+
+    wanted = ai_tool_use_get_input_string (tool_use, "agent_id");
+
+    if (wanted == NULL || wanted[0] == '\0')
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                             "agent_result: missing required parameter: "
+                             "agent_id");
+        return NULL;
+    }
+
+    if (ai_brigade_get (self->brigade, wanted) == NULL)
+    {
+        g_autofree gchar *known = executor_list_agent_ids (self);
+
+        g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                     "agent_result: no agent named '%s'. Known: %s", wanted,
+                     known != NULL ? known : "(none)");
+        return NULL;
+    }
+
+    /* Reaps on success: collecting the answer is what finishes an agent's
+     * life, and leaving the record behind would make every later status
+     * listing longer for no reason. */
+    return ai_brigade_reap (self->brigade, wanted, error);
+}
+
+/* What a waiting tool call is waiting for. */
+typedef struct
+{
+    AiBrigade  *brigade;
+    gchar      *wanted;      /* NULL means "whichever finishes first" */
+    gchar      *finished;    /* the id that satisfied the wait */
+    GMainLoop  *loop;
+    guint       timeout_id;
+    gboolean    timed_out;
+} AgentWait;
+
+static void
+on_wait_agent_finished (
+    AiBrigade   *brigade,
+    const gchar *agent_id,
+    gint         state,
+    gpointer     user_data
+){
+    AgentWait *wait = user_data;
+
+    (void)brigade;
+    (void)state;
+
+    if (wait->wanted != NULL && g_strcmp0 (wait->wanted, agent_id) != 0)
+        return;
+
+    wait->finished = g_strdup (agent_id);
+    g_main_loop_quit (wait->loop);
+}
+
+static gboolean
+on_wait_timeout (gpointer user_data)
+{
+    AgentWait *wait = user_data;
+
+    wait->timed_out = TRUE;
+    wait->timeout_id = 0;
+    g_main_loop_quit (wait->loop);
+
+    return G_SOURCE_REMOVE;
+}
+
+static void
+on_wait_cancelled (GCancellable *cancellable, gpointer user_data)
+{
+    AgentWait *wait = user_data;
+
+    (void)cancellable;
+
+    g_main_loop_quit (wait->loop);
+}
+
+static gchar *
+tool_agent_wait (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar      *wanted;
+    gint64            seconds;
+    AgentWait         wait = { 0 };
+    gulong            finished_id;
+    gulong            cancel_id = 0;
+    g_autoptr(GMainContext) context = NULL;
+
+    wanted  = ai_tool_use_get_input_string (tool_use, "agent_id");
+    seconds = ai_tool_use_get_input_int (tool_use, "timeout_seconds", 0);
+
+    if (seconds <= 0)
+        seconds = AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS;
+    if (seconds > AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS)
+        seconds = AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS;
+
+    if (wanted != NULL && wanted[0] != '\0')
+    {
+        AiAgent *agent = ai_brigade_get (self->brigade, wanted);
+
+        if (agent == NULL)
+        {
+            g_autofree gchar *known = executor_list_agent_ids (self);
+
+            g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                         "agent_wait: no agent named '%s'. Known: %s", wanted,
+                         known != NULL ? known : "(none)");
+            return NULL;
+        }
+
+        /* Already done: answer without spinning a loop at all. */
+        if (!ai_agent_state_is_live (ai_agent_get_state (agent)))
+            return ai_brigade_reap (self->brigade, wanted, error);
+    }
+    else
+    {
+        g_autoptr(GList) agents = ai_brigade_list (self->brigade);
+        GList           *iter;
+
+        wanted = NULL;
+
+        /*
+         * "Whichever finishes first" includes one that already has.
+         *
+         * Without this the wait is for a *future* ::agent-finished, and
+         * an agent that completed while the model was composing its
+         * request is one the signal has already been emitted for --- so
+         * the wait would run to its timeout with the answer sitting
+         * right there.
+         */
+        for (iter = agents; iter != NULL; iter = iter->next)
+        {
+            AiAgent *candidate = iter->data;
+
+            if (!ai_agent_state_is_live (ai_agent_get_state (candidate)))
+            {
+                g_autofree gchar *id =
+                    g_strdup (ai_agent_get_id (candidate));
+                g_autofree gchar *text =
+                    ai_brigade_reap (self->brigade, id, error);
+
+                if (text == NULL)
+                    return NULL;
+
+                return g_strdup_printf ("Agent '%s' finished.\n\n%s", id,
+                                        text);
+            }
+        }
+
+        /* Nothing running and nothing to collect: say so rather than
+         * waiting ten minutes for an agent that does not exist. */
+        if (agents == NULL)
+        {
+            g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                 "agent_wait: there are no background agents");
+            return NULL;
+        }
+    }
+
+    /*
+     * The nested loop runs on the *thread-default* context, not the
+     * global default. A synchronous caller may already be driving a
+     * private context -- ai_tool_executor_run() does exactly that -- and
+     * a loop attached to the global default would never dispatch the
+     * sources this is waiting on.
+     */
+    context = g_main_context_ref_thread_default ();
+
+    wait.brigade = self->brigade;
+    wait.wanted  = g_strdup (wanted);
+    wait.loop    = g_main_loop_new (context, FALSE);
+
+    finished_id = g_signal_connect (self->brigade, "agent-finished",
+                                    G_CALLBACK (on_wait_agent_finished),
+                                    &wait);
+
+    {
+        GSource *source = g_timeout_source_new_seconds ((guint) seconds);
+
+        g_source_set_callback (source, on_wait_timeout, &wait, NULL);
+        wait.timeout_id = g_source_attach (source, context);
+        g_source_unref (source);
+    }
+
+    if (cancellable != NULL)
+        cancel_id = g_cancellable_connect (cancellable,
+                                           G_CALLBACK (on_wait_cancelled),
+                                           &wait, NULL);
+
+    g_main_loop_run (wait.loop);
+
+    if (cancel_id != 0)
+        g_cancellable_disconnect (cancellable, cancel_id);
+
+    g_signal_handler_disconnect (self->brigade, finished_id);
+
+    if (wait.timeout_id != 0)
+    {
+        GSource *source = g_main_context_find_source_by_id (context,
+                                                            wait.timeout_id);
+
+        if (source != NULL)
+            g_source_destroy (source);
+    }
+
+    g_main_loop_unref (wait.loop);
+    g_free (wait.wanted);
+
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+        g_free (wait.finished);
+        return NULL;
+    }
+
+    if (wait.finished != NULL)
+    {
+        g_autofree gchar *id = g_steal_pointer (&wait.finished);
+        g_autofree gchar *text = ai_brigade_reap (self->brigade, id, error);
+
+        if (text == NULL)
+            return NULL;
+
+        return g_strdup_printf ("Agent '%s' finished.\n\n%s", id, text);
+    }
+
+    /* A timeout is not a failure: the agent is still working, and saying
+     * so is more useful than an error the model has to interpret. */
+    return g_strdup_printf (
+        "Still running after %" G_GINT64_FORMAT "s. The agent has not been "
+        "stopped; check agent_status or wait again.", seconds);
+}
+
+static gchar *
+tool_agent_cancel (
+    AiToolExecutor  *self,
+    AiToolUse       *tool_use,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    const gchar *wanted;
+    AiAgent     *agent;
+
+    (void)cancellable;
+
+    wanted = ai_tool_use_get_input_string (tool_use, "agent_id");
+
+    if (wanted == NULL || wanted[0] == '\0')
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                             "agent_cancel: missing required parameter: "
+                             "agent_id");
+        return NULL;
+    }
+
+    if (g_strcmp0 (wanted, "all") == 0)
+    {
+        guint n = ai_brigade_cancel_all (self->brigade);
+
+        return g_strdup_printf ("Stopped %u agent%s.", n, n == 1 ? "" : "s");
+    }
+
+    agent = ai_brigade_get (self->brigade, wanted);
+
+    if (agent == NULL)
+    {
+        g_autofree gchar *known = executor_list_agent_ids (self);
+
+        g_set_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                     "agent_cancel: no agent named '%s'. Known: %s", wanted,
+                     known != NULL ? known : "(none)");
+        return NULL;
+    }
+
+    if (!ai_agent_state_is_live (ai_agent_get_state (agent)))
+        return g_strdup_printf ("Agent '%s' had already %s.", wanted,
+                                ai_agent_state_to_string (
+                                    ai_agent_get_state (agent)));
+
+    ai_agent_cancel (agent);
+
+    return g_strdup_printf ("Stopped agent '%s'. Its output so far is still "
+                            "available through agent_result.", wanted);
 }
 
 /* ================================================================
@@ -2755,6 +3538,11 @@ static const ToolEntry BUILTIN_TOOLS[] = {
     { "multi_edit", tool_multi_edit },
     { "task",       tool_task       },
     { "skill",      tool_skill      },
+    { "agent_spawn",  tool_agent_spawn  },
+    { "agent_status", tool_agent_status },
+    { "agent_result", tool_agent_result },
+    { "agent_wait",   tool_agent_wait   },
+    { "agent_cancel", tool_agent_cancel },
     { NULL, NULL }
 };
 
@@ -2775,6 +3563,7 @@ ai_tool_executor_finalize (GObject *object)
     g_clear_pointer (&self->always_allowed, g_hash_table_unref);
     g_clear_pointer (&self->todos, g_ptr_array_unref);
     g_clear_object (&self->registry);
+    g_clear_object (&self->brigade);
     executor_unwatch_provider (self);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
@@ -2856,6 +3645,42 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
                              AI_TYPE_RESOURCE_REGISTRY,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiToolExecutor:brigade:
+     *
+     * Where background agents run, and the record of the ones that have.
+     *
+     * %NULL by default, and while it is %NULL the `agent_*` tools are not
+     * offered --- the same arrangement as #AiToolExecutor:resource-registry
+     * and `task`. Handing over an #AiBrigade is how an application says
+     * the model may start work that outlives the turn it was asked in.
+     *
+     * The brigade needs a worker to be able to run anything; see
+     * ai_local_worker_new().
+     */
+    properties[PROP_BRIGADE] =
+        g_param_spec_object ("brigade", NULL, NULL,
+                             AI_TYPE_BRIGADE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiToolExecutor:features:
+     *
+     * Which optional tool groups this executor is willing to offer, as
+     * #AiToolFeatures.
+     *
+     * Defaults to %AI_TOOL_FEATURE_ALL. Clearing a bit removes that
+     * group's tools immediately, and setting it back adds them again if
+     * the thing they run on is present.
+     */
+    properties[PROP_FEATURES] =
+        g_param_spec_uint ("features",
+                           "Features",
+                           "Optional tool groups this executor may offer",
+                           AI_TOOL_FEATURE_NONE, AI_TOOL_FEATURE_ALL,
+                           AI_TOOL_FEATURE_ALL,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties (object_class, N_PROPS, properties);
 
     /**
@@ -2933,6 +3758,12 @@ ai_tool_executor_get_property (
         case PROP_RESOURCE_REGISTRY:
             g_value_set_object (value, self->registry);
             break;
+        case PROP_BRIGADE:
+            g_value_set_object (value, self->brigade);
+            break;
+        case PROP_FEATURES:
+            g_value_set_uint (value, (guint) self->features);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
             break;
@@ -2963,6 +3794,13 @@ ai_tool_executor_set_property (
         case PROP_RESOURCE_REGISTRY:
             ai_tool_executor_set_resource_registry (self,
                                                     g_value_get_object (value));
+            break;
+        case PROP_BRIGADE:
+            ai_tool_executor_set_brigade (self, g_value_get_object (value));
+            break;
+        case PROP_FEATURES:
+            ai_tool_executor_set_features (
+                self, (AiToolFeatures) g_value_get_uint (value));
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -3053,6 +3891,8 @@ ai_tool_executor_init (AiToolExecutor *self)
     self->always_allowed  = NULL;
     self->denied_all      = FALSE;
     self->registry        = NULL;
+    self->brigade         = NULL;
+    self->features        = AI_TOOL_FEATURE_ALL;
     self->task_depth      = 0;
     self->todos           = g_ptr_array_new_with_free_func (
                                 (GDestroyNotify)ai_todo_free);
@@ -3223,6 +4063,174 @@ ai_tool_executor_new (void)
     return self;
 }
 
+/*
+ * Add or remove the `task` and `skill` tools to match the current state.
+ *
+ * Two things decide whether they are offered -- a registry to find what
+ * they run, and the feature bit -- and either can change at any time, so
+ * both paths converge here rather than each trying to work out what the
+ * other left behind.
+ */
+static void
+executor_sync_subagent_tools (AiToolExecutor *self)
+{
+    gboolean wanted = (self->registry != NULL) &&
+                      (self->features & AI_TOOL_FEATURE_SUBAGENTS) != 0;
+    gboolean present = executor_offers_tool (self, "task");
+
+    if (wanted == present)
+        return;
+
+    if (!wanted)
+    {
+        ai_tool_executor_unregister (self, "task");
+        ai_tool_executor_unregister (self, "skill");
+        return;
+    }
+
+    {
+        AiTool *tool;
+
+        tool = ai_tool_new ("task",
+                            "Delegate a self-contained piece of work to a "
+                            "subagent, which runs with its own tools and "
+                            "returns only its final answer. Use it when the "
+                            "work is separable and would otherwise fill this "
+                            "conversation with detail you do not need.");
+        ai_tool_add_parameter (tool, "agent", "string",
+                               "The agent to run. Use the skill tool or ask "
+                               "for a listing if you are unsure which exist.",
+                               TRUE);
+        ai_tool_add_parameter (tool, "prompt", "string",
+                               "What the agent should do. It sees nothing of "
+                               "this conversation, so say everything it needs.",
+                               TRUE);
+        ai_tool_add_parameter (tool, "provider", "string",
+                               "Which provider to run it on -- claude, openai, "
+                               "gemini, grok, ollama, claude-code, opencode, "
+                               "grok-build. Omit to use this conversation's.",
+                               FALSE);
+        ai_tool_add_parameter (tool, "model", "string",
+                               "Which model, as that provider names it. Omit "
+                               "for the provider's default.",
+                               FALSE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("skill",
+                            "Load a skill's instructions into the "
+                            "conversation. A skill is a written procedure for "
+                            "a kind of task; read one before doing work it "
+                            "covers.");
+        ai_tool_add_parameter (tool, "name", "string",
+                               "The skill to load.", TRUE);
+        self->tools = g_list_append (self->tools, tool);
+    }
+}
+
+/*
+ * Add or remove the `agent_*` tools to match the current state.
+ *
+ * The counterpart of executor_sync_subagent_tools(), and gated the same
+ * way: a brigade to run agents in, and the feature bit.
+ */
+static void
+executor_sync_background_tools (AiToolExecutor *self)
+{
+    gboolean wanted = (self->brigade != NULL) &&
+                      (self->features & AI_TOOL_FEATURE_BACKGROUND) != 0;
+    gboolean present = executor_offers_tool (self, "agent_spawn");
+
+    if (wanted == present)
+        return;
+
+    if (!wanted)
+    {
+        ai_tool_executor_unregister (self, "agent_spawn");
+        ai_tool_executor_unregister (self, "agent_status");
+        ai_tool_executor_unregister (self, "agent_result");
+        ai_tool_executor_unregister (self, "agent_wait");
+        ai_tool_executor_unregister (self, "agent_cancel");
+        return;
+    }
+
+    {
+        AiTool *tool;
+
+        tool = ai_tool_new ("agent_spawn",
+                            "Start an agent working in the background and "
+                            "return immediately with its id. Use it for work "
+                            "that can proceed while you carry on -- a long "
+                            "search, a second opinion, a build. You are told "
+                            "when it finishes; check on it with agent_status "
+                            "and collect its answer with agent_result.");
+        ai_tool_add_parameter (tool, "prompt", "string",
+                               "What the agent should do. It sees nothing of "
+                               "this conversation, so say everything it needs.",
+                               TRUE);
+        ai_tool_add_parameter (tool, "description", "string",
+                               "Three or four words naming the work, for the "
+                               "status listing. E.g. 'audit the search code'.",
+                               FALSE);
+        ai_tool_add_parameter (tool, "agent", "string",
+                               "An agent definition to run it as, which sets "
+                               "its instructions and limits its tools. Omit "
+                               "for a general-purpose agent.",
+                               FALSE);
+        ai_tool_add_parameter (tool, "provider", "string",
+                               "Which provider to run it on -- claude, openai, "
+                               "gemini, grok, ollama, claude-code, opencode, "
+                               "grok-build. Omit to use this conversation's.",
+                               FALSE);
+        ai_tool_add_parameter (tool, "model", "string",
+                               "Which model, as that provider names it. Omit "
+                               "for the provider's default.",
+                               FALSE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("agent_status",
+                            "Report what background agents are doing: their "
+                            "state, how long they have been at it, what they "
+                            "have spent, and a peek at what they have produced "
+                            "so far.");
+        ai_tool_add_parameter (tool, "agent_id", "string",
+                               "One agent to report on. Omit for all of them.",
+                               FALSE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("agent_result",
+                            "Collect a finished agent's answer and forget the "
+                            "agent. Fails if it is still running -- use "
+                            "agent_wait for that.");
+        ai_tool_add_parameter (tool, "agent_id", "string",
+                               "The agent to collect.", TRUE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("agent_wait",
+                            "Wait until a background agent finishes, then "
+                            "return its answer. Use it when you have nothing "
+                            "useful to do until the work is done; otherwise "
+                            "carry on and you will be told when it finishes.");
+        ai_tool_add_parameter (tool, "agent_id", "string",
+                               "The agent to wait for. Omit to wait for "
+                               "whichever finishes first.",
+                               FALSE);
+        ai_tool_add_parameter (tool, "timeout_seconds", "integer",
+                               "How long to wait before giving up and "
+                               "returning. The agent keeps running.",
+                               FALSE);
+        self->tools = g_list_append (self->tools, tool);
+
+        tool = ai_tool_new ("agent_cancel",
+                            "Stop a background agent. Anything it had already "
+                            "done stands; anything in flight is abandoned.");
+        ai_tool_add_parameter (tool, "agent_id", "string",
+                               "The agent to stop, or \"all\" for every one "
+                               "that is running.",
+                               TRUE);
+        self->tools = g_list_append (self->tools, tool);
+    }
+}
+
 /**
  * ai_tool_executor_set_resource_registry:
  * @self: an #AiToolExecutor
@@ -3241,52 +4249,103 @@ ai_tool_executor_set_resource_registry (
     AiToolExecutor     *self,
     AiResourceRegistry *registry
 ){
-    gboolean had_one;
-
     g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
-
-    had_one = (self->registry != NULL);
 
     if (!g_set_object (&self->registry, registry))
         return;
 
-    if (registry != NULL && !had_one)
-    {
-        AiTool *tool;
-
-        tool = ai_tool_new ("task",
-                            "Delegate a self-contained piece of work to a "
-                            "subagent, which runs with its own tools and "
-                            "returns only its final answer. Use it when the "
-                            "work is separable and would otherwise fill this "
-                            "conversation with detail you do not need.");
-        ai_tool_add_parameter (tool, "agent", "string",
-                               "The agent to run. Use the skill tool or ask "
-                               "for a listing if you are unsure which exist.",
-                               TRUE);
-        ai_tool_add_parameter (tool, "prompt", "string",
-                               "What the agent should do. It sees nothing of "
-                               "this conversation, so say everything it needs.",
-                               TRUE);
-        self->tools = g_list_append (self->tools, tool);
-
-        tool = ai_tool_new ("skill",
-                            "Load a skill's instructions into the "
-                            "conversation. A skill is a written procedure for "
-                            "a kind of task; read one before doing work it "
-                            "covers.");
-        ai_tool_add_parameter (tool, "name", "string",
-                               "The skill to load.", TRUE);
-        self->tools = g_list_append (self->tools, tool);
-    }
-    else if (registry == NULL && had_one)
-    {
-        ai_tool_executor_unregister (self, "task");
-        ai_tool_executor_unregister (self, "skill");
-    }
+    executor_sync_subagent_tools (self);
 
     g_object_notify_by_pspec (G_OBJECT (self),
                               properties[PROP_RESOURCE_REGISTRY]);
+}
+
+/**
+ * ai_tool_executor_set_brigade:
+ * @self: an #AiToolExecutor
+ * @brigade: (nullable) (transfer none): where background agents run
+ *
+ * Lets the model start work that outlives the turn it was asked in.
+ *
+ * Setting a brigade registers the `agent_*` tools; clearing it removes
+ * them. Same arrangement as ai_tool_executor_set_resource_registry(),
+ * and for the same reason --- an application that does not hand one over
+ * is entirely unaffected.
+ *
+ * The brigade must have a worker to run anything. ai_local_worker_new()
+ * is the one that runs agents in this process.
+ */
+void
+ai_tool_executor_set_brigade (
+    AiToolExecutor *self,
+    AiBrigade      *brigade
+){
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+    g_return_if_fail (brigade == NULL || AI_IS_BRIGADE (brigade));
+
+    if (!g_set_object (&self->brigade, brigade))
+        return;
+
+    executor_sync_background_tools (self);
+
+    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_BRIGADE]);
+}
+
+/**
+ * ai_tool_executor_get_brigade:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: (transfer none) (nullable): the brigade, or %NULL
+ */
+AiBrigade *
+ai_tool_executor_get_brigade (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+    return self->brigade;
+}
+
+/**
+ * ai_tool_executor_set_features:
+ * @self: an #AiToolExecutor
+ * @features: which optional tool groups to offer
+ *
+ * Turns the optional tool groups on or off.
+ *
+ * Takes effect immediately: clearing %AI_TOOL_FEATURE_BACKGROUND during a
+ * run removes the `agent_*` tools before the next turn advertises them.
+ * Agents already running are left alone --- withdrawing permission to
+ * start work is not the same as killing work in progress, and stopping
+ * something is ai_brigade_cancel_all().
+ */
+void
+ai_tool_executor_set_features (
+    AiToolExecutor *self,
+    AiToolFeatures  features
+){
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    if (self->features == features)
+        return;
+
+    self->features = features;
+
+    executor_sync_subagent_tools (self);
+    executor_sync_background_tools (self);
+
+    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_FEATURES]);
+}
+
+/**
+ * ai_tool_executor_get_features:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: which optional tool groups this executor may offer
+ */
+AiToolFeatures
+ai_tool_executor_get_features (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), AI_TOOL_FEATURE_NONE);
+    return self->features;
 }
 
 /**

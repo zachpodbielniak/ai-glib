@@ -701,6 +701,63 @@ test_registry_adds_exactly_two_tools (void)
                       ==, before);
 }
 
+/*
+ * The same guarantee for background agents.
+ *
+ * An executor that was not handed an #AiBrigade offers exactly the tools
+ * it always has --- the model cannot start work that outlives the turn
+ * unless the application deliberately arranged for it to be able to.
+ */
+static void
+test_brigade_adds_exactly_five_tools (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(AiBrigade)      brigade = ai_brigade_new ();
+    guint                     before;
+    guint                     after;
+
+    before = g_list_length (ai_tool_executor_get_tools (executor));
+
+    g_assert_null (ai_tool_executor_get_brigade (executor));
+    g_assert_false (tool_list_contains (executor, "agent_spawn"));
+
+    ai_tool_executor_set_brigade (executor, brigade);
+    after = g_list_length (ai_tool_executor_get_tools (executor));
+
+    g_assert_cmpuint (after, ==, before + 5);
+    g_assert_true (tool_list_contains (executor, "agent_spawn"));
+    g_assert_true (tool_list_contains (executor, "agent_status"));
+    g_assert_true (tool_list_contains (executor, "agent_result"));
+    g_assert_true (tool_list_contains (executor, "agent_wait"));
+    g_assert_true (tool_list_contains (executor, "agent_cancel"));
+    g_assert_true (ai_tool_executor_get_brigade (executor) == brigade);
+
+    ai_tool_executor_set_brigade (executor, NULL);
+    g_assert_cmpuint (g_list_length (ai_tool_executor_get_tools (executor)),
+                      ==, before);
+}
+
+/*
+ * Neither dependency set: the tool list is untouched by any of this.
+ *
+ * Stated separately from the two above because it is the claim an
+ * existing embedder cares about, and it should fail by name if either
+ * group ever starts registering itself by default.
+ */
+static void
+test_a_plain_executor_gains_nothing (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+
+    g_assert_false (tool_list_contains (executor, "task"));
+    g_assert_false (tool_list_contains (executor, "skill"));
+    g_assert_false (tool_list_contains (executor, "agent_spawn"));
+    g_assert_false (tool_list_contains (executor, "agent_status"));
+    g_assert_false (tool_list_contains (executor, "agent_result"));
+    g_assert_false (tool_list_contains (executor, "agent_wait"));
+    g_assert_false (tool_list_contains (executor, "agent_cancel"));
+}
+
 static gchar *
 stub_callback (AiToolUse    *tool_use,
                GCancellable *cancellable,
@@ -767,6 +824,10 @@ main (
                      test_unadvertised_builtin_does_not_run);
     g_test_add_func ("/ai-glib/tool-executor/registry-adds-tools",
                      test_registry_adds_exactly_two_tools);
+    g_test_add_func ("/ai-glib/tool-executor/brigade-adds-five",
+                     test_brigade_adds_exactly_five_tools);
+    g_test_add_func ("/ai-glib/tool-executor/plain-gains-nothing",
+                     test_a_plain_executor_gains_nothing);
     g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
                      test_executor_run_full_returns_new_messages);
     g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
