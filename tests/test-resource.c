@@ -260,7 +260,29 @@ test_quoted_description_with_escapes(void)
 
 	g_assert_cmpstr(ai_resource_get_name(r), ==, "auditor");
 	g_assert_nonnull(strstr(ai_resource_get_description(r), "Examples:"));
-	g_assert_nonnull(strchr(ai_resource_get_description(r), '\n'));
+
+	/*
+	 * And it is one line. A description ends up in a completion menu and
+	 * a /help listing, both of which have room for exactly one --- so the
+	 * flattening happens once, here, rather than in each of them.
+	 */
+	g_assert_null(strchr(ai_resource_get_description(r), '\n'));
+	g_assert_cmpstr(ai_resource_get_description(r), ==,
+	                "Reviews code. Examples: - one");
+}
+
+static void
+test_description_is_always_one_line(void)
+{
+	g_autoptr(AiResource) folded = parse(
+		"---\ndescription: >\n  first line\n  second line\n---\n");
+	g_autoptr(AiResource) literal = parse(
+		"---\ndescription: |\n  first line\n  second line\n---\n");
+
+	g_assert_cmpstr(ai_resource_get_description(folded), ==,
+	                "first line second line");
+	g_assert_cmpstr(ai_resource_get_description(literal), ==,
+	                "first line second line");
 }
 
 static void
@@ -811,6 +833,8 @@ main(int argc, char *argv[])
 	                test_literal_block_description);
 	g_test_add_func("/ai-glib/resource/quoted-escapes",
 	                test_quoted_description_with_escapes);
+	g_test_add_func("/ai-glib/resource/description-one-line",
+	                test_description_is_always_one_line);
 	g_test_add_func("/ai-glib/resource/colon-and-hash",
 	                test_value_containing_colon_and_hash);
 	g_test_add_func("/ai-glib/resource/single-quoted",

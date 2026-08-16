@@ -83,6 +83,82 @@ run_tui(const gchar * const *args, const gchar *env_key, const gchar *env_value)
 	return run;
 }
 
+/*
+ * Spawn ai-tui inside a sandbox.
+ *
+ * @dir becomes both the working directory and HOME, so the harness layer
+ * sees only files this test wrote. Without that, the suite would read the
+ * developer's own ~/.claude -- sixteen command files on this machine --
+ * and a listing test would pass or fail depending on whose laptop it ran
+ * on.
+ */
+static Run *
+run_tui_in(const gchar *dir, const gchar * const *args)
+{
+	Run *run = g_new0(Run, 1);
+	g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(GError) error = NULL;
+	g_auto(GStrv) envp = NULL;
+	g_autofree gchar *config = g_build_filename(dir, ".config", NULL);
+	gsize i;
+
+	g_ptr_array_add(argv, g_strdup(tui_binary));
+
+	for (i = 0; args[i] != NULL; i++)
+	{
+		g_ptr_array_add(argv, g_strdup(args[i]));
+	}
+
+	g_ptr_array_add(argv, NULL);
+
+	envp = g_get_environ();
+	envp = g_environ_setenv(envp, "HOME", dir, TRUE);
+	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_unsetenv(envp, "ANTHROPIC_API_KEY");
+	envp = g_environ_unsetenv(envp, "OPENAI_API_KEY");
+
+	g_spawn_sync(dir, (gchar **)argv->pdata, envp,
+	             G_SPAWN_DEFAULT, NULL, NULL,
+	             &run->stdout_data, &run->stderr_data, &run->status, &error);
+
+	g_assert_no_error(error);
+
+	return run;
+}
+
+/* Write @contents to @relative under @dir, creating directories. */
+static void
+sandbox_write(const gchar *dir, const gchar *relative, const gchar *contents)
+{
+	g_autofree gchar *path = g_build_filename(dir, relative, NULL);
+	g_autofree gchar *parent = g_path_get_dirname(path);
+	g_autoptr(GError) error = NULL;
+
+	g_assert_cmpint(g_mkdir_with_parents(parent, 0755), ==, 0);
+	g_file_set_contents(path, contents, -1, &error);
+	g_assert_no_error(error);
+}
+
+static gchar *
+sandbox_new(void)
+{
+	g_autoptr(GError) error = NULL;
+	gchar            *dir = g_dir_make_tmp("ai-glib-tui-box-XXXXXX", &error);
+
+	g_assert_no_error(error);
+
+	return dir;
+}
+
+static void
+sandbox_free(gchar *dir)
+{
+	g_autofree gchar *cmd = g_strdup_printf("rm -rf '%s'", dir);
+
+	g_assert_cmpint(system(cmd), ==, 0);
+	g_free(dir);
+}
+
 /* A stub `grok` that replays a canned NDJSON session. */
 typedef struct
 {
@@ -488,12 +564,224 @@ find_tui_binary(const gchar *argv0)
 	return NULL;
 }
 
+/* ----------------------------------------------------------------
+ * The harness layer, through the binary
+ * ---------------------------------------------------------------- */
+
+static void
+test_help_lists_commands_from_disk(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/help", "-p", "grok-build", NULL };
+	Run *run;
+
+	sandbox_write(box, ".claude/commands/deploy.md",
+	              "---\ndescription: Ship it\nargument-hint: <env>\n---\n"
+	              "Deploy.\n");
+
+	run = run_tui_in(box, args);
+
+	g_assert_cmpint(run->status, ==, 0);
+
+	/* The file, with its hint, its description and where it came from. */
+	g_assert_nonnull(strstr(run->stdout_data, "/deploy <env>"));
+	g_assert_nonnull(strstr(run->stdout_data, "Ship it"));
+	g_assert_nonnull(strstr(run->stdout_data, "[claude]"));
+
+	/* And the built-ins, which exist before any file is read. */
+	g_assert_nonnull(strstr(run->stdout_data, "/quit"));
+	g_assert_nonnull(strstr(run->stdout_data, "/clear"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+static void
+test_commands_listing_names_the_search_paths(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/commands", "-p", "grok-build", NULL };
+	Run *run = run_tui_in(box, args);
+
+	/*
+	 * An empty listing is exactly when somebody asks "why isn't my file
+	 * showing up", so the answer has to be on screen rather than in the
+	 * documentation.
+	 */
+	g_assert_nonnull(strstr(run->stdout_data, "none found"));
+	g_assert_nonnull(strstr(run->stdout_data, ".claude/commands"));
+	g_assert_nonnull(strstr(run->stdout_data, ".opencode/command"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+static void
+test_expand_shows_a_resolved_command(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/expand /greet Zach", "-p",
+	                        "grok-build", NULL };
+	Run *run;
+
+	sandbox_write(box, ".claude/commands/greet.md",
+	              "---\nname: greet\n---\nGreet $1 warmly.\n");
+
+	run = run_tui_in(box, args);
+
+	/* Resolution and substitution, end to end through the binary, with
+	 * nothing sent anywhere. */
+	g_assert_nonnull(strstr(run->stdout_data, "Greet Zach warmly."));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+static void
+test_expand_inlines_a_mention(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/expand explain @hello.c", "-p",
+	                        "grok-build", NULL };
+	Run *run;
+
+	sandbox_write(box, "hello.c", "int main(void) { return 0; }\n");
+
+	run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "Referenced files"));
+	g_assert_nonnull(strstr(run->stdout_data, "int main(void)"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+static void
+test_expand_reports_an_unknown_command(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *http[] = { "--dump", "/expand /nosuchthing", "-p", "claude",
+	                        NULL };
+	const gchar *cli[] = { "--dump", "/expand /nosuchthing", "-p",
+	                       "grok-build", NULL };
+	Run *run;
+
+	/* For an HTTP provider there is nothing downstream that could make
+	 * sense of it, so it is an error and the message names near misses. */
+	run = run_tui_in(box, http);
+	g_assert_nonnull(strstr(run->stdout_data, "unknown command"));
+	run_free(run);
+
+	/*
+	 * For a CLI provider the same line is not ours to refuse: /compact
+	 * and its friends mean something to the wrapped tool. It passes
+	 * through untouched.
+	 */
+	run = run_tui_in(box, cli);
+	g_assert_null(strstr(run->stdout_data, "unknown command"));
+	g_assert_nonnull(strstr(run->stdout_data, "/nosuchthing"));
+	run_free(run);
+
+	sandbox_free(box);
+}
+
+static void
+test_unknown_builtin_free_line_reaches_the_child(void)
+{
+	gchar *box = sandbox_new();
+	Stub  *stub = stub_new("{\"type\":\"result\",\"text\":\"ok\","
+	                       "\"stopReason\":\"end_turn\"}\n");
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *sent = NULL;
+	const gchar *args[] = { "--dump", "explain @hello.c", "-p", "grok-build",
+	                        NULL };
+	g_autoptr(GPtrArray) argv = NULL;
+	Run *run;
+	g_auto(GStrv) envp = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *config = g_build_filename(box, ".config", NULL);
+	gsize i;
+
+	sandbox_write(box, "hello.c", "SHOULD_NOT_BE_INLINED\n");
+
+	/* Spawned by hand so the sandbox and GROK_PATH apply together. */
+	run = g_new0(Run, 1);
+	argv = g_ptr_array_new_with_free_func(g_free);
+	g_ptr_array_add(argv, g_strdup(tui_binary));
+
+	for (i = 0; args[i] != NULL; i++)
+	{
+		g_ptr_array_add(argv, g_strdup(args[i]));
+	}
+
+	g_ptr_array_add(argv, NULL);
+
+	envp = g_get_environ();
+	envp = g_environ_setenv(envp, "HOME", box, TRUE);
+	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "GROK_PATH", stub->stub, TRUE);
+
+	g_spawn_sync(box, (gchar **)argv->pdata, envp, G_SPAWN_DEFAULT, NULL,
+	             NULL, &run->stdout_data, &run->stderr_data, &run->status,
+	             &error);
+	g_assert_no_error(error);
+
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_file_get_contents(stdin_path, &sent, NULL, NULL);
+
+	/*
+	 * A CLI provider receives the line as typed. grok resolves @ itself,
+	 * and inlining the file first would hand it the same content twice
+	 * under two different names.
+	 */
+	g_assert_nonnull(sent);
+	g_assert_nonnull(strstr(sent, "@hello.c"));
+	g_assert_null(strstr(sent, "SHOULD_NOT_BE_INLINED"));
+
+	run_free(run);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+static void
+test_no_expand_leaves_a_command_alone(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--no-expand", "--dump", "/help", "-p",
+	                        "claude", NULL };
+	Run *run = run_tui_in(box, args);
+
+	/*
+	 * With --no-expand the line is a prompt, not a command, so /help is
+	 * never listed -- it is sent, and fails for want of an API key. The
+	 * point is that it did not become a listing.
+	 */
+	g_assert_null(strstr(run->stdout_data, "Empty the transcript"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
 int
 main(int argc, char *argv[])
 {
 	g_test_init(&argc, &argv, NULL);
 
 	tui_binary = find_tui_binary(argv[0]);
+
+	/*
+	 * Absolute, because the sandboxed runs below spawn the binary from a
+	 * different working directory and a relative path would resolve
+	 * against theirs.
+	 */
+	if (tui_binary != NULL && !g_path_is_absolute(tui_binary))
+	{
+		g_autofree gchar *cwd = g_get_current_dir();
+		gchar            *absolute = g_canonicalize_filename(tui_binary, cwd);
+
+		g_free(tui_binary);
+		tui_binary = absolute;
+	}
 
 	if (tui_binary == NULL)
 	{
@@ -532,6 +820,21 @@ main(int argc, char *argv[])
 	                test_interactive_without_a_tty_errors_cleanly);
 	g_test_add_func("/ai-glib/ai-tui/local-tools-declined",
 	                test_local_tools_declined_for_cli_provider);
+
+	g_test_add_func("/ai-glib/ai-tui/help-lists-files",
+	                test_help_lists_commands_from_disk);
+	g_test_add_func("/ai-glib/ai-tui/commands-search-paths",
+	                test_commands_listing_names_the_search_paths);
+	g_test_add_func("/ai-glib/ai-tui/expand-command",
+	                test_expand_shows_a_resolved_command);
+	g_test_add_func("/ai-glib/ai-tui/expand-mention",
+	                test_expand_inlines_a_mention);
+	g_test_add_func("/ai-glib/ai-tui/expand-unknown",
+	                test_expand_reports_an_unknown_command);
+	g_test_add_func("/ai-glib/ai-tui/passthrough",
+	                test_unknown_builtin_free_line_reaches_the_child);
+	g_test_add_func("/ai-glib/ai-tui/no-expand",
+	                test_no_expand_leaves_a_command_alone);
 
 	return g_test_run();
 }

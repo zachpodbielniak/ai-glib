@@ -502,6 +502,50 @@ parse_frontmatter(
 }
 
 /*
+ * Flatten a description to one line.
+ *
+ * A folded YAML scalar arrives with its newlines intact and a literal
+ * block keeps every one of them, but every consumer -- a completion menu,
+ * a /help listing, a status line -- has room for exactly one line. Doing
+ * it once here beats each of them inventing its own rule.
+ */
+static gchar *
+flatten_description(const gchar *text)
+{
+    g_autoptr(GString) out = NULL;
+    gboolean           in_space = FALSE;
+    gsize              i;
+
+    if (text == NULL)
+    {
+        return NULL;
+    }
+
+    out = g_string_new(NULL);
+
+    for (i = 0; text[i] != '\0'; i++)
+    {
+        gchar c = text[i];
+
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ')
+        {
+            in_space = TRUE;
+            continue;
+        }
+
+        if (in_space && out->len > 0)
+        {
+            g_string_append_c(out, ' ');
+        }
+
+        in_space = FALSE;
+        g_string_append_c(out, c);
+    }
+
+    return g_strdup(out->str);
+}
+
+/*
  * A description for a file that did not declare one.
  *
  * The first line that is neither blank, nor a markdown heading, nor a
@@ -669,7 +713,7 @@ ai_resource_new_from_data(
 
     if (declared != NULL && declared[0] != '\0')
     {
-        self->description = g_strdup(declared);
+        self->description = flatten_description(declared);
     }
     else
     {

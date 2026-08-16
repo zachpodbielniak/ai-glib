@@ -55,6 +55,7 @@ static gboolean  opt_skip_perms      = FALSE;
 static gboolean  opt_dry_run         = FALSE;
 static gboolean  opt_list_providers  = FALSE;
 static gboolean  opt_interactive     = FALSE;
+static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
 static gchar   **opt_set             = NULL;
@@ -124,6 +125,8 @@ static const GOptionEntry option_entries[] = {
 	  "Print the command that would be spawned, do not run it", NULL },
 	{ "list-providers", 0, 0, G_OPTION_ARG_NONE, &opt_list_providers,
 	  "List known provider names and exit", NULL },
+	{ "no-expand", 0, 0, G_OPTION_ARG_NONE, &opt_no_expand,
+	  "Send the prompt verbatim: no @ mentions, no / commands", NULL },
 	{ "interactive", 'i', 0, G_OPTION_ARG_NONE, &opt_interactive,
 	  "Interactive multi-turn REPL (keeps history)", NULL },
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
@@ -1422,6 +1425,62 @@ main(int argc, char *argv[])
 			           "pipe it on stdin, or use --interactive)\n");
 			g_object_unref(provider);
 			return 2;
+		}
+	}
+
+	/*
+	 * Run the prompt through the harness pipeline: a /command resolves
+	 * against the same files ai-tui reads, and @path mentions inline
+	 * their files.
+	 *
+	 * Skipped for a CLI provider, which resolves both itself -- and for
+	 * --dry-run, where the point is to see the command line, not to read
+	 * the filesystem. --no-expand turns it off outright.
+	 */
+	if (!opt_no_expand && !opt_dry_run && !AI_IS_CLI_CLIENT(provider))
+	{
+		g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new();
+		g_autoptr(AiCommandSet)       commands = NULL;
+		g_autoptr(AiCommandResult)    resolved = NULL;
+		g_autoptr(GError)             resolve_error = NULL;
+		g_autofree gchar             *cwd = g_get_current_dir();
+		const gchar                  *source = prompt;
+
+		ai_resource_registry_scan(registry);
+		commands = ai_command_set_new(registry);
+
+		if (ai_command_set_is_command_line(prompt))
+		{
+			resolved = ai_command_set_resolve(commands, prompt, cwd, NULL,
+			                                  &resolve_error);
+
+			if (resolved == NULL)
+			{
+				g_printerr("ai: %s\n", resolve_error->message);
+				g_object_unref(provider);
+				return 2;
+			}
+
+			if (ai_command_result_get_outcome(resolved) ==
+			    AI_COMMAND_OUTCOME_BUILTIN)
+			{
+				/* Built-ins act on a session; a one-shot run has none. */
+				g_printerr("ai: /%s only means something interactively; "
+				           "try ai-tui\n",
+				           ai_command_result_get_name(resolved));
+				g_object_unref(provider);
+				return 2;
+			}
+
+			source = ai_command_result_get_prompt(resolved);
+		}
+
+		{
+			gchar *expanded = ai_mention_expand(source != NULL ? source : "",
+			                                    cwd, 0, NULL);
+
+			g_free(prompt);
+			prompt = expanded;
 		}
 	}
 

@@ -845,6 +845,165 @@ find_ai_binary(const gchar *argv0)
 	return NULL;
 }
 
+/* ----------------------------------------------------------------
+ * The harness layer
+ * ---------------------------------------------------------------- */
+
+/*
+ * Run `ai` inside a sandbox: @dir becomes both the working directory and
+ * HOME, so the harness layer sees only what the test wrote. Without it
+ * these would read the developer's own ~/.claude and pass or fail
+ * depending on whose machine ran them.
+ */
+static void
+run_ai_in(const gchar *dir, const gchar * const *args, Run *out)
+{
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	g_autofree gchar *config = g_build_filename(dir, ".config", NULL);
+	gsize i;
+
+	g_ptr_array_add(argv, ai_bin);
+	for (i = 0; args[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer) args[i]);
+	g_ptr_array_add(argv, NULL);
+
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	g_subprocess_launcher_set_cwd(launcher, dir);
+	g_subprocess_launcher_setenv(launcher, "HOME", dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", config, TRUE);
+	g_subprocess_launcher_unsetenv(launcher, "ANTHROPIC_API_KEY");
+	g_subprocess_launcher_unsetenv(launcher, "CLAUDE_API_KEY");
+
+	proc = g_subprocess_launcher_spawnv(launcher,
+	                                    (const gchar * const *) argv->pdata,
+	                                    &error);
+	g_assert_no_error(error);
+
+	g_subprocess_communicate_utf8(proc, NULL, NULL,
+	                              &out->stdout_data, &out->stderr_data,
+	                              &error);
+	g_assert_no_error(error);
+
+	out->exit_status = g_subprocess_get_exit_status(proc);
+}
+
+static gchar *
+harness_sandbox_new(void)
+{
+	g_autoptr(GError) error = NULL;
+	gchar            *dir = g_dir_make_tmp("ai-glib-cli-box-XXXXXX", &error);
+
+	g_assert_no_error(error);
+
+	return dir;
+}
+
+static void
+harness_sandbox_free(gchar *dir)
+{
+	g_autofree gchar *cmd = g_strdup_printf("rm -rf '%s'", dir);
+
+	g_assert_cmpint(system(cmd), ==, 0);
+	g_free(dir);
+}
+
+static void
+harness_write(const gchar *dir, const gchar *relative, const gchar *contents)
+{
+	g_autofree gchar *path = g_build_filename(dir, relative, NULL);
+	g_autofree gchar *parent = g_path_get_dirname(path);
+	g_autoptr(GError) error = NULL;
+
+	g_assert_cmpint(g_mkdir_with_parents(parent, 0755), ==, 0);
+	g_file_set_contents(path, contents, -1, &error);
+	g_assert_no_error(error);
+}
+
+static void
+test_cli_unknown_command_is_refused(void)
+{
+	gchar *box = harness_sandbox_new();
+	const gchar *args[] = { "-p", "claude", "/definitely-not-a-command",
+	                        NULL };
+	Run run = { 0 };
+
+	run_ai_in(box, args, &run);
+
+	/* A one-shot run has no session for a built-in to act on, and an
+	 * unknown name is not a prompt somebody meant to type. */
+	g_assert_cmpint(run.exit_status, ==, 2);
+	g_assert_nonnull(strstr(run.stderr_data, "unknown command"));
+
+	run_clear(&run);
+	harness_sandbox_free(box);
+}
+
+static void
+test_cli_builtin_says_to_use_the_tui(void)
+{
+	gchar *box = harness_sandbox_new();
+	const gchar *args[] = { "-p", "claude", "/clear", NULL };
+	Run run = { 0 };
+
+	run_ai_in(box, args, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 2);
+	g_assert_nonnull(strstr(run.stderr_data, "ai-tui"));
+
+	run_clear(&run);
+	harness_sandbox_free(box);
+}
+
+static void
+test_cli_no_expand_sends_a_slash_verbatim(void)
+{
+	gchar *box = harness_sandbox_new();
+	const gchar *args[] = { "--no-expand", "-p", "claude",
+	                        "/definitely-not-a-command", NULL };
+	Run run = { 0 };
+
+	run_ai_in(box, args, &run);
+
+	/*
+	 * With --no-expand the line is a prompt. It fails for want of an API
+	 * key, which is a different failure -- and the point is that it never
+	 * reached the command resolver.
+	 */
+	g_assert_null(strstr(run.stderr_data, "unknown command"));
+
+	run_clear(&run);
+	harness_sandbox_free(box);
+}
+
+static void
+test_cli_dry_run_skips_expansion(void)
+{
+	gchar *box = harness_sandbox_new();
+	g_autofree gchar *stub = NULL;
+	g_autofree gchar *stub_dir = NULL;
+	const gchar *args[] = { "-p", "grok-build", "--dry-run",
+	                        "explain @notes.txt", NULL };
+	Run run = { 0 };
+
+	harness_write(box, "notes.txt", "SHOULD_NOT_BE_INLINED\n");
+
+	stub_dir = stub_dir_new("{\"type\":\"result\",\"text\":\"x\"}\n", &stub);
+
+	run_ai_in(box, args, &run);
+
+	/* --dry-run is about the command line, not about reading the
+	 * filesystem; expanding first would put a file into the argv dump. */
+	g_assert_null(strstr(run.stdout_data, "SHOULD_NOT_BE_INLINED"));
+
+	run_clear(&run);
+	stub_dir_free(g_steal_pointer(&stub_dir), g_steal_pointer(&stub));
+	harness_sandbox_free(box);
+}
+
 int
 main(
 	int   argc,
@@ -928,6 +1087,15 @@ main(
 	                test_cli_run_prompt_from_stdin);
 	g_test_add_func("/ai-glib/ai-cli/run/missing-binary",
 	                test_cli_run_missing_binary);
+
+	g_test_add_func("/ai-glib/ai-cli/harness/unknown-command",
+	                test_cli_unknown_command_is_refused);
+	g_test_add_func("/ai-glib/ai-cli/harness/builtin",
+	                test_cli_builtin_says_to_use_the_tui);
+	g_test_add_func("/ai-glib/ai-cli/harness/no-expand",
+	                test_cli_no_expand_sends_a_slash_verbatim);
+	g_test_add_func("/ai-glib/ai-cli/harness/dry-run",
+	                test_cli_dry_run_skips_expansion);
 
 	status = g_test_run();
 

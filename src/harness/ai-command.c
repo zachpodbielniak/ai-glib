@@ -1051,9 +1051,9 @@ compare_commands(gconstpointer a, gconstpointer b)
  *
  * Every command, built-in and file-backed, sorted by name.
  *
- * A file shadowed by a built-in of the same name is omitted, because
- * this list answers "what can I type", and typing it would reach the
- * built-in.
+ * One entry per name. A file shadowed by a built-in is omitted, and so
+ * is a skill whose name a command already took --- this list answers
+ * "what can I type", and typing it reaches exactly one of them.
  *
  * Returns: (transfer full) (element-type AiCommand): the commands
  */
@@ -1077,8 +1077,16 @@ ai_command_set_list(AiCommandSet *self)
     {
         AiResourceKind kinds[] = { AI_RESOURCE_COMMAND, AI_RESOURCE_SKILL,
                                    AI_RESOURCE_AGENT };
+        g_autoptr(GHashTable) taken =
+            g_hash_table_new(g_str_hash, g_str_equal);
         gsize          k;
 
+        /*
+         * Kinds are walked in the same order ai_command_set_lookup()
+         * searches them, so the entry that appears is the one that would
+         * run. Listing a skill and a command with the same name would
+         * promise a choice the user does not have.
+         */
         for (k = 0; k < G_N_ELEMENTS(kinds); k++)
         {
             GList *resources = ai_resource_registry_list(self->registry,
@@ -1090,11 +1098,13 @@ ai_command_set_list(AiCommandSet *self)
                 const gchar *name = ai_resource_get_name(iter_r->data);
 
                 if (name == NULL ||
-                    g_hash_table_contains(self->builtins, name))
+                    g_hash_table_contains(self->builtins, name) ||
+                    g_hash_table_contains(taken, name))
                 {
                     continue;
                 }
 
+                g_hash_table_add(taken, (gpointer)name);
                 out = g_list_prepend(out,
                                      ai_command_new_for_resource(iter_r->data));
             }
