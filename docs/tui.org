@@ -184,6 +184,27 @@ and a path that does not exist is left exactly as written --- which is
 what makes an email address or a Python decorator harmless. Use =/expand=
 to see the result before sending it.
 
+** While a turn is running
+The status bar shows what the turn is doing, with a spinner and the time
+so far:
+
+#+begin_example
+  Grok Build / grok-4.6   ⠹ Running make test… (5s · ^C to stop)
+#+end_example
+
+The phrase tracks the turn --- =Waiting for the model=, =Thinking=,
+=Reading ai-event.c=, =Running make test=, =Responding= --- so a long
+tool call is visibly a long tool call rather than a program that might
+have hung. The elapsed time is what separates a slow turn from a stalled
+one.
+
+The words come from =AiConversation:activity=; only the animation lives
+here. See [[file:transcript.org::*Showing progress][Showing progress]].
+
+A provider that emits no events (claude-tmux reads a finished transcript
+rather than a stream) shows =Waiting for the model= throughout, which is
+honest, and is the case where the indicator earns its keep.
+
 ** Tool approval
 With =--local-tools= against an HTTP provider, tools run in this process and
 each call is offered for approval:

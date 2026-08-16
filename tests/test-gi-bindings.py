@@ -239,6 +239,11 @@ def main():
     conversation.set_system_prompt("be brief")
     assert conversation.get_system_prompt() == "be brief"
 
+    # Idle: no activity, no elapsed. An Emacs frontend draws its own
+    # spinner and takes the words from here.
+    assert conversation.get_activity() is None
+    assert conversation.get_activity_elapsed() == 0
+
     # local-tools is refused for a CLI wrapper, which runs its own.
     conversation.set_local_tools(True)
     assert conversation.get_local_tools() is False

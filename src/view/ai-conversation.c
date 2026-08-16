@@ -22,6 +22,7 @@
 #include "harness/ai-mention.h"
 #include "view/ai-view-blocks.h"
 #include "view/ai-view-tool-block.h"
+#include "view/ai-tool-style.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-client.h"
 #include "core/ai-error.h"
@@ -71,6 +72,15 @@ struct _AiConversation
     gboolean        passthrough_set;      /* has the caller decided? */
     gboolean        passthrough;
 
+    /*
+     * What the turn is doing right now, in words --- "Thinking",
+     * "Running bash". NULL when idle. This is model state, not
+     * decoration: a frontend spins its own glyph, but neither ncurses nor
+     * Emacs should have to work out what the events mean.
+     */
+    gchar          *activity;
+    gint64          activity_started_us;
+
     gulong          event_id;
     gulong          todos_id;
 };
@@ -89,6 +99,7 @@ enum
     PROP_COMMAND_SET,
     PROP_WORKING_DIRECTORY,
     PROP_PASSTHROUGH_COMMANDS,
+    PROP_ACTIVITY,
     N_PROPS
 };
 
@@ -242,6 +253,71 @@ find_call_for_result(
     return NULL;
 }
 
+/*
+ * Say what the turn is doing now.
+ *
+ * Idempotent: the same phrase twice is one notification, because the
+ * events arrive far faster than anything wants to redraw --- a streamed
+ * answer is one TEXT_DELTA per token, and every one of them would
+ * otherwise wake the frontend to say "still responding".
+ */
+static void
+set_activity(
+    AiConversation *self,
+    const gchar    *activity
+){
+    if (g_strcmp0(self->activity, activity) == 0)
+    {
+        return;
+    }
+
+    g_free(self->activity);
+    self->activity = g_strdup(activity);
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_ACTIVITY]);
+}
+
+/*
+ * "Running bash", "Reading ai-event.c".
+ *
+ * The target when there is one, because "Reading" alone is less useful
+ * than the file name and a tool call almost always has one.
+ */
+static gchar *
+describe_tool_call(AiToolUse *tool_use)
+{
+    const AiToolStyle *style;
+    const gchar       *name;
+    g_autoptr(AiToolCall) call = NULL;
+    const gchar       *target;
+
+    name = (tool_use != NULL) ? ai_tool_use_get_name(tool_use) : NULL;
+
+    if (name == NULL)
+    {
+        return g_strdup("Working");
+    }
+
+    style = ai_tool_style_lookup(name);
+    call = ai_tool_call_new(tool_use);
+    target = ai_tool_call_get_target(call);
+
+    if (target == NULL || target[0] == '\0')
+    {
+        return g_strdup_printf("%s %s",
+                               ai_tool_category_gerund(
+                                   style != NULL ? style->category
+                                                 : AI_TOOL_CATEGORY_OTHER),
+                               name);
+    }
+
+    return g_strdup_printf("%s %s",
+                           ai_tool_category_gerund(
+                               style != NULL ? style->category
+                                             : AI_TOOL_CATEGORY_OTHER),
+                           target);
+}
+
 static void
 fold_event(
     AiConversation *self,
@@ -255,6 +331,7 @@ fold_event(
 
             ai_view_text_block_append(AI_VIEW_TEXT_BLOCK(block),
                                       ai_event_get_text(event));
+            set_activity(self, "Responding");
             break;
         }
 
@@ -264,14 +341,18 @@ fold_event(
 
             ai_view_thinking_block_append(AI_VIEW_THINKING_BLOCK(block),
                                           ai_event_get_text(event));
+            set_activity(self, "Thinking");
             break;
         }
 
         case AI_EVENT_TOOL_STARTED:
         {
-            AiViewToolBlock *block = ensure_tool_block(self);
+            AiViewToolBlock  *block = ensure_tool_block(self);
+            g_autofree gchar *doing =
+                describe_tool_call(ai_event_get_tool_use(event));
 
             ai_view_tool_block_add_call(block, ai_event_get_tool_use(event));
+            set_activity(self, doing);
             break;
         }
 
@@ -300,6 +381,9 @@ fold_event(
                 ai_view_tool_block_call_changed(
                     AI_VIEW_TOOL_BLOCK(self->open_tools));
             }
+
+            /* Back to the model, which is where the wait now is. */
+            set_activity(self, "Waiting for the model");
             break;
         }
 
@@ -324,6 +408,10 @@ fold_event(
             break;
         }
 
+        case AI_EVENT_STREAM_START:
+            set_activity(self, "Waiting for the model");
+            break;
+
         case AI_EVENT_ERROR:
         {
             g_autoptr(AiViewBlock) block = ai_view_status_block_new(
@@ -340,7 +428,6 @@ fold_event(
             self->open_tools = NULL;
             break;
 
-        case AI_EVENT_STREAM_START:
         case AI_EVENT_TOOL_INPUT_DELTA:
         default:
             /*
@@ -438,6 +525,8 @@ conversation_finish_turn(
         self->busy = FALSE;
         g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BUSY]);
     }
+
+    set_activity(self, NULL);
 
     if (task == NULL)
     {
@@ -566,6 +655,50 @@ on_provider_done(
 }
 
 /**
+ * ai_conversation_get_activity:
+ * @self: an #AiConversation
+ *
+ * What the turn in flight is doing, in words, or %NULL when idle.
+ *
+ * Pair it with a spinner of your own; see
+ * #AiConversation:activity for why the words are here and the animation
+ * is not.
+ *
+ * Returns: (transfer none) (nullable): the phrase, or %NULL
+ */
+const gchar *
+ai_conversation_get_activity(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    return self->activity;
+}
+
+/**
+ * ai_conversation_get_activity_elapsed:
+ * @self: an #AiConversation
+ *
+ * How long the turn in flight has been running, in microseconds.
+ *
+ * Measured monotonically from the moment it was sent, so it is unaffected
+ * by the clock being set. Zero when idle.
+ *
+ * Returns: microseconds since the turn started
+ */
+gint64
+ai_conversation_get_activity_elapsed(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), 0);
+
+    if (!self->busy || self->activity_started_us == 0)
+    {
+        return 0;
+    }
+
+    return g_get_monotonic_time() - self->activity_started_us;
+}
+
+/**
  * ai_conversation_send_full_async:
  * @self: an #AiConversation
  * @display_text: (nullable): what to show in the transcript, or %NULL to
@@ -636,6 +769,8 @@ ai_conversation_send_full_async(
         : g_cancellable_new();
 
     self->busy = TRUE;
+    self->activity_started_us = g_get_monotonic_time();
+    set_activity(self, "Waiting for the model");
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BUSY]);
 
     if (self->local_tools)
@@ -886,6 +1021,7 @@ ai_conversation_finalize(GObject *object)
     g_clear_object(&self->command_set);
     g_clear_pointer(&self->system_prompt, g_free);
     g_clear_pointer(&self->working_directory, g_free);
+    g_clear_pointer(&self->activity, g_free);
     g_list_free_full(self->messages, g_object_unref);
 
     G_OBJECT_CLASS(ai_conversation_parent_class)->finalize(object);
@@ -929,6 +1065,9 @@ ai_conversation_get_property(
         case PROP_PASSTHROUGH_COMMANDS:
             g_value_set_boolean(value,
                                 ai_conversation_get_passthrough_commands(self));
+            break;
+        case PROP_ACTIVITY:
+            g_value_set_string(value, self->activity);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -1093,6 +1232,26 @@ ai_conversation_class_init(AiConversationClass *klass)
     properties[PROP_PASSTHROUGH_COMMANDS] =
         g_param_spec_boolean("passthrough-commands", NULL, NULL, FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConversation:activity:
+     *
+     * What the turn in flight is doing, in words --- "Thinking",
+     * "Running bash", "Waiting for the model" --- or %NULL when idle.
+     *
+     * Folded out of the event stream alongside the transcript, so a
+     * frontend showing progress does not have to interpret events a
+     * second time. The animation is the frontend's: this says what to put
+     * next to the spinner, not how to spin it.
+     *
+     * A provider that emits no events (claude-tmux reads a finished
+     * transcript rather than a stream) reports "Waiting for the model"
+     * for the whole turn, which is honest and is also the case where a
+     * progress indicator matters most.
+     */
+    properties[PROP_ACTIVITY] =
+        g_param_spec_string("activity", NULL, NULL, NULL,
+                            G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
 

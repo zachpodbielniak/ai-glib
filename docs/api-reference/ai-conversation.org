@@ -110,3 +110,19 @@ its finished =AiResponse= is folded into blocks instead. That is the
 - [[file:ai-transcript.org][AiTranscript]] --- the buffer
 - [[file:../events.org][The event stream]] --- what fills it
 - [[file:../tui.org][ai-tui]] --- a frontend built on this
+
+* Progress
+#+begin_src C
+/* What the turn in flight is doing, or NULL when idle. */
+const gchar *ai_conversation_get_activity (AiConversation *self);
+
+/* Microseconds since the turn was sent, monotonic. 0 when idle. */
+gint64 ai_conversation_get_activity_elapsed (AiConversation *self);
+#+end_src
+
+=notify::activity= fires when the phrase changes, not per event --- a
+streamed answer is one delta per token and would otherwise notify fifty
+times to say the same thing.
+
+The animation belongs to the frontend; this is the state behind it. See
+[[file:../transcript.org::*Showing progress][Showing progress]].

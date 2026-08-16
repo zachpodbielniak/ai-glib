@@ -73,6 +73,9 @@ ai_tool_category_noun(
     gboolean       plural
 );
 
+const gchar *
+ai_tool_category_gerund(AiToolCategory category);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(AiToolStyle, ai_tool_style_free)
 
 G_END_DECLS

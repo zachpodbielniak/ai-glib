@@ -259,3 +259,46 @@ ai_tool_category_noun(
         ? CATEGORY_FALLBACKS[category].noun_plural
         : CATEGORY_FALLBACKS[category].noun_singular;
 }
+
+/**
+ * ai_tool_category_gerund:
+ * @category: an #AiToolCategory
+ *
+ * What a call in @category reads as while it is still running.
+ *
+ * The verbs in #AiToolStyle are past tense, because a transcript
+ * summarises work that is finished. A progress indicator is the other
+ * case --- "Edited" is wrong for something still happening --- and the
+ * present participle belongs next to the past tense rather than in
+ * whichever frontend needed it first.
+ *
+ * Returns: (transfer none): the verb, never %NULL
+ */
+const gchar *
+ai_tool_category_gerund(AiToolCategory category)
+{
+    switch (category)
+    {
+        case AI_TOOL_CATEGORY_FILE_READ:
+            return "Reading";
+
+        case AI_TOOL_CATEGORY_FILE_WRITE:
+            return "Editing";
+
+        case AI_TOOL_CATEGORY_COMMAND:
+            return "Running";
+
+        case AI_TOOL_CATEGORY_SEARCH:
+            return "Searching";
+
+        case AI_TOOL_CATEGORY_NETWORK:
+            return "Fetching";
+
+        case AI_TOOL_CATEGORY_TASK:
+            return "Working on";
+
+        case AI_TOOL_CATEGORY_OTHER:
+        default:
+            return "Using";
+    }
+}

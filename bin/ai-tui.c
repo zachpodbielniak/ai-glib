@@ -207,6 +207,25 @@ attr_for_tag(AiStyleTag tag)
 /* How many candidates the menu shows at once. */
 #define MENU_MAX_ROWS (10)
 
+/*
+ * How often the spinner advances, in milliseconds.
+ *
+ * Fast enough to read as motion, slow enough that a turn spent waiting on
+ * a slow model is not also spending a core on redrawing one glyph.
+ */
+#define SPINNER_INTERVAL_MS (110)
+
+/*
+ * The frames. Braille cells, because they animate in place without the
+ * line reflowing --- every one is a single column wide.
+ *
+ * ai-tui already requires ncursesw and draws with box characters and
+ * ballot boxes, so this adds no assumption the transcript did not.
+ */
+static const gchar *SPINNER_FRAMES[] = {
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
+};
+
 /* ================================================================
  * The application
  * ================================================================ */
@@ -255,6 +274,10 @@ typedef struct
     /* One-shot re-read, so a lone Escape is not stuck behind the next
      * keystroke. See on_key_settle(). */
     guint                settle_id;
+
+    /* The spinner: a repeating timer that lives only while a turn does. */
+    guint                spinner_id;
+    guint                spinner_frame;
 
     /* Set only by --dump, and quit by whichever callback finishes the
      * turn. Polling the busy flag is not enough: a line that resolves to
@@ -402,6 +425,82 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
     wattrset(win, A_NORMAL);
 }
 
+/*
+ * Advance one frame and redraw.
+ *
+ * Only the status bar changes, but a redraw is already coalesced onto an
+ * idle and costs a hundred lines of text; a partial-update path here
+ * would be a second way to draw the screen, for no gain anybody can see.
+ */
+static gboolean
+on_spinner_tick(gpointer user_data)
+{
+    App *app = user_data;
+
+    app->spinner_frame =
+        (app->spinner_frame + 1) % G_N_ELEMENTS(SPINNER_FRAMES);
+
+    app_schedule_redraw(app);
+
+    return G_SOURCE_CONTINUE;
+}
+
+/*
+ * Run the spinner exactly while a turn does.
+ *
+ * Driven from ::busy rather than started and stopped at each call site:
+ * a turn can end through the callback, through cancellation, or through
+ * an error, and a timer left running after one of those would be a
+ * terminal animating forever with nothing behind it.
+ */
+static void
+sync_spinner(App *app)
+{
+    gboolean busy = ai_conversation_get_busy(app->conversation);
+
+    if (busy && app->spinner_id == 0)
+    {
+        app->spinner_frame = 0;
+        app->spinner_id = g_timeout_add(SPINNER_INTERVAL_MS, on_spinner_tick,
+                                        app);
+    }
+    else if (!busy && app->spinner_id != 0)
+    {
+        g_source_remove(app->spinner_id);
+        app->spinner_id = 0;
+    }
+}
+
+static void
+on_busy_changed(
+    GObject    *object,
+    GParamSpec *pspec,
+    gpointer    user_data
+){
+    App *app = user_data;
+
+    (void)object;
+    (void)pspec;
+
+    sync_spinner(app);
+    app_schedule_redraw(app);
+}
+
+/* "12s", "1m04s" --- the shape that stays the same width as it grows. */
+static gchar *
+format_elapsed(gint64 microseconds)
+{
+    gint64 seconds = microseconds / G_USEC_PER_SEC;
+
+    if (seconds < 60)
+    {
+        return g_strdup_printf("%" G_GINT64_FORMAT "s", seconds);
+    }
+
+    return g_strdup_printf("%" G_GINT64_FORMAT "m%02" G_GINT64_FORMAT "s",
+                           seconds / 60, seconds % 60);
+}
+
 static void
 draw_status(App *app)
 {
@@ -419,14 +518,36 @@ draw_status(App *app)
         model = ai_cli_client_get_model(AI_CLI_CLIENT(provider));
     }
 
-    line = g_strdup_printf(" %s%s%s   %s%s",
-                           ai_provider_get_name(AI_PROVIDER(provider)),
-                           model != NULL ? " / " : "",
-                           model != NULL ? model : "",
-                           ai_conversation_get_busy(app->conversation)
-                               ? "working... (^C to stop)"
-                               : "ready",
-                           app->follow ? "" : "   [scrolled]");
+    if (ai_conversation_get_busy(app->conversation))
+    {
+        const gchar      *activity =
+            ai_conversation_get_activity(app->conversation);
+        g_autofree gchar *elapsed = format_elapsed(
+            ai_conversation_get_activity_elapsed(app->conversation));
+
+        /*
+         * The glyph animates, the words come from the conversation, and
+         * the elapsed time is what tells a stalled turn from a slow one.
+         * "^C to stop" is there because the moment somebody wants it is
+         * the moment they are watching this line.
+         */
+        line = g_strdup_printf(" %s%s%s   %s %s… (%s · ^C to stop)%s",
+                               ai_provider_get_name(AI_PROVIDER(provider)),
+                               model != NULL ? " / " : "",
+                               model != NULL ? model : "",
+                               SPINNER_FRAMES[app->spinner_frame],
+                               activity != NULL ? activity : "Working",
+                               elapsed,
+                               app->follow ? "" : "   [scrolled]");
+    }
+    else
+    {
+        line = g_strdup_printf(" %s%s%s   ready%s",
+                               ai_provider_get_name(AI_PROVIDER(provider)),
+                               model != NULL ? " / " : "",
+                               model != NULL ? model : "",
+                               app->follow ? "" : "   [scrolled]");
+    }
 
     werase(app->status_win);
     wattrset(app->status_win, A_REVERSE);
@@ -2417,6 +2538,12 @@ main(int argc, char *argv[])
     g_signal_connect(app.conversation, "approval-requested",
                      G_CALLBACK(on_approval_requested), &app);
 
+    /* The spinner follows ::busy, and the words follow ::activity. */
+    g_signal_connect(app.conversation, "notify::busy",
+                     G_CALLBACK(on_busy_changed), &app);
+    g_signal_connect_swapped(app.conversation, "notify::activity",
+                             G_CALLBACK(app_schedule_redraw), &app);
+
     /*
      * Keys come through the main loop rather than a blocking read, so the
      * provider's asynchronous I/O runs while the user types.
@@ -2433,6 +2560,12 @@ main(int argc, char *argv[])
     {
         g_source_remove(app.settle_id);
         app.settle_id = 0;
+    }
+
+    if (app.spinner_id != 0)
+    {
+        g_source_remove(app.spinner_id);
+        app.spinner_id = 0;
     }
 
     completion_close(&app);

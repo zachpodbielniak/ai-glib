@@ -341,3 +341,47 @@ a frontend colours them without parsing the glyphs back out of the text.
 The first two are for an input line rather than a transcript:
 =ai_mention_scan()= is pure and cheap enough to run on every keystroke,
 which is what lets a frontend highlight what the pipeline will act on.
+
+* Showing progress
+A turn can spend a minute in a tool call, and a frontend that says
+nothing during it is indistinguishable from one that has hung.
+=AiConversation= folds the same events it folds into blocks into a
+one-line description of what is happening:
+
+#+begin_src C
+const gchar *doing = ai_conversation_get_activity (conversation);
+gint64 elapsed = ai_conversation_get_activity_elapsed (conversation);
+#+end_src
+
+| Event                | Activity becomes            |
+|----------------------+-----------------------------|
+| the turn is sent     | =Waiting for the model=     |
+| =THINKING_DELTA=     | =Thinking=                  |
+| =TOOL_STARTED=       | =Reading ai-event.c=        |
+| =TOOL_FINISHED=      | =Waiting for the model=     |
+| =TEXT_DELTA=         | =Responding=                |
+| the turn ends        | %NULL                       |
+
+The verb for a tool call comes from =ai_tool_category_gerund()=, next to
+the past-tense verb the transcript summary uses --- "Edited" is right for
+work that is finished and wrong for work that is happening, and both
+belong in the same table.
+
+Watch =notify::activity=. It is emitted when the phrase *changes*, not
+per event: a streamed answer is one =TEXT_DELTA= per token, and waking a
+frontend fifty times to say "still responding" would cost more than the
+turn.
+
+The animation is yours. The library says what is happening; whether that
+is a braille spinner, a progress bar or a mode-line string is a decision
+only the frontend can make. =ai-tui= draws
+
+#+begin_example
+  Grok Build / grok-4.6   ⠹ Running make test… (5s · ^C to stop)
+#+end_example
+
+with a 110 ms timer that runs only while =busy= is true --- driven from
+=notify::busy= rather than started at each call site, because a turn can
+end through its callback, through cancellation or through an error, and a
+timer that outlived one of those would animate forever with nothing
+behind it.

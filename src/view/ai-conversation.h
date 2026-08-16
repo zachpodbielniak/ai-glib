@@ -80,6 +80,12 @@ ai_conversation_set_local_tools(
 gboolean
 ai_conversation_get_busy(AiConversation *self);
 
+const gchar *
+ai_conversation_get_activity(AiConversation *self);
+
+gint64
+ai_conversation_get_activity_elapsed(AiConversation *self);
+
 void
 ai_conversation_send_async(
     AiConversation      *self,

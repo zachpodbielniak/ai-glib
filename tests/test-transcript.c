@@ -836,6 +836,213 @@ test_multi_turn_history(void)
 	send_run_free(b);
 }
 
+/* ----------------------------------------------------------------
+ * Activity: what the turn is doing, in words
+ * ---------------------------------------------------------------- */
+
+/*
+ * The frontend spins its own glyph, but the phrase next to it is folded
+ * out of the same events as the transcript --- so ncurses and Emacs say
+ * the same thing without either interpreting the stream a second time.
+ */
+static void
+test_activity_follows_the_events(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+
+	/* Idle until something happens. */
+	g_assert_null(ai_conversation_get_activity(c));
+
+	{
+		g_autoptr(AiEvent) e = ai_event_new(AI_EVENT_STREAM_START);
+
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==,
+		                "Waiting for the model");
+	}
+
+	{
+		g_autoptr(AiEvent) e = ai_event_new_thinking_delta("hm");
+
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==, "Thinking");
+	}
+
+	{
+		g_autoptr(AiEvent) e = ai_event_new_text_delta("Here");
+
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==, "Responding");
+	}
+}
+
+static void
+test_activity_names_the_tool_and_its_target(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+
+	{
+		g_autoptr(AiToolUse) tu = ai_tool_use_new_from_json_string(
+			"t1", "read", "{\"path\": \"src/core/ai-event.c\"}");
+		g_autoptr(AiEvent) e = ai_event_new_tool_started(tu);
+
+		/*
+		 * The target, not just the verb: "Reading" alone says less than
+		 * the file name, and a tool call almost always has one. The verb
+		 * is the present participle from the tool-style table, because
+		 * the past tense the transcript uses is wrong for something still
+		 * happening.
+		 */
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==,
+		                "Reading ai-event.c");
+	}
+
+	{
+		g_autoptr(AiToolUse) tu = ai_tool_use_new_from_json_string(
+			"t2", "bash", "{\"command\": \"make test\"}");
+		g_autoptr(AiEvent) e = ai_event_new_tool_started(tu);
+
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==,
+		                "Running make test");
+	}
+
+	/* When the tool finishes, the wait is back with the model. */
+	{
+		g_autoptr(AiToolUse) tu = ai_tool_use_new_from_json_string(
+			"t2", "bash", "{\"command\": \"make test\"}");
+		g_autoptr(AiToolResult) tr =
+			ai_tool_result_new("t2", "ok", FALSE);
+		g_autoptr(AiEvent) e = ai_event_new_tool_finished(tu, tr);
+
+		emit(mock, e);
+		g_assert_cmpstr(ai_conversation_get_activity(c), ==,
+		                "Waiting for the model");
+	}
+}
+
+static void
+test_activity_of_an_unknown_tool(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	g_autoptr(AiToolUse) tu = ai_tool_use_new_from_json_string(
+		"t1", "some_new_tool", "{}");
+	g_autoptr(AiEvent) e = ai_event_new_tool_started(tu);
+
+	/* A tool with no style entry still reads as something, for the same
+	 * reason the transcript gives it a generic verb rather than omitting
+	 * it. */
+	emit(mock, e);
+	g_assert_cmpstr(ai_conversation_get_activity(c), ==,
+	                "Using some_new_tool");
+}
+
+typedef struct
+{
+	guint notifications;
+} ActivityWatch;
+
+static void
+on_activity_notify(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+	ActivityWatch *w = user_data;
+
+	(void)object;
+	(void)pspec;
+
+	w->notifications++;
+}
+
+static void
+test_activity_does_not_notify_per_token(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	ActivityWatch             w = { 0 };
+	guint                     i;
+
+	g_signal_connect(c, "notify::activity",
+	                 G_CALLBACK(on_activity_notify), &w);
+
+	/*
+	 * A streamed answer is one event per token. If every one of them
+	 * woke the frontend to say "still responding", the spinner would cost
+	 * more than the turn.
+	 */
+	for (i = 0; i < 50; i++)
+	{
+		g_autoptr(AiEvent) e = ai_event_new_text_delta("x");
+
+		emit(mock, e);
+	}
+
+	g_assert_cmpuint(w.notifications, ==, 1);
+}
+
+static void
+test_activity_elapsed_is_zero_when_idle(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+
+	g_assert_cmpint(ai_conversation_get_activity_elapsed(c), ==, 0);
+}
+
+static void
+test_activity_clears_when_the_turn_ends(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	g_autoptr(GMainLoop)      loop = g_main_loop_new(NULL, FALSE);
+
+	ai_mock_provider_push_text(mock, "done");
+
+	ai_conversation_send_async(c, "go", NULL, NULL, NULL);
+
+	while (ai_conversation_get_busy(c))
+	{
+		g_main_context_iteration(NULL, TRUE);
+	}
+
+	/*
+	 * A turn can end through its callback, through cancellation or
+	 * through an error. Clearing this in the one place all three pass
+	 * through is what stops a frontend animating forever with nothing
+	 * behind it.
+	 */
+	g_assert_null(ai_conversation_get_activity(c));
+	g_assert_cmpint(ai_conversation_get_activity_elapsed(c), ==, 0);
+
+	(void)loop;
+}
+
+static void
+test_gerunds_cover_every_category(void)
+{
+	AiToolCategory categories[] = {
+		AI_TOOL_CATEGORY_OTHER, AI_TOOL_CATEGORY_FILE_READ,
+		AI_TOOL_CATEGORY_FILE_WRITE, AI_TOOL_CATEGORY_COMMAND,
+		AI_TOOL_CATEGORY_SEARCH, AI_TOOL_CATEGORY_NETWORK,
+		AI_TOOL_CATEGORY_TASK
+	};
+	gsize i;
+
+	for (i = 0; i < G_N_ELEMENTS(categories); i++)
+	{
+		const gchar *gerund = ai_tool_category_gerund(categories[i]);
+
+		g_assert_nonnull(gerund);
+		g_assert_cmpstr(gerund, !=, "");
+	}
+
+	/* Out of range must not read past the switch. */
+	g_assert_nonnull(ai_tool_category_gerund((AiToolCategory)99));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -885,6 +1092,21 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/conversation/non-streaming",
 	                test_non_streaming_provider_folds_the_response);
 	g_test_add_func("/ai-glib/conversation/multi-turn", test_multi_turn_history);
+
+	g_test_add_func("/ai-glib/activity/follows-events",
+	                test_activity_follows_the_events);
+	g_test_add_func("/ai-glib/activity/tool-target",
+	                test_activity_names_the_tool_and_its_target);
+	g_test_add_func("/ai-glib/activity/unknown-tool",
+	                test_activity_of_an_unknown_tool);
+	g_test_add_func("/ai-glib/activity/notify-coalesced",
+	                test_activity_does_not_notify_per_token);
+	g_test_add_func("/ai-glib/activity/elapsed-idle",
+	                test_activity_elapsed_is_zero_when_idle);
+	g_test_add_func("/ai-glib/activity/clears",
+	                test_activity_clears_when_the_turn_ends);
+	g_test_add_func("/ai-glib/activity/gerunds",
+	                test_gerunds_cover_every_category);
 
 	return g_test_run();
 }
