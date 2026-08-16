@@ -591,6 +591,91 @@ test_cli_set_claude_code_properties(void)
 	run_clear(&run);
 }
 
+/*
+ * -c/--continue is one flag across every CLI provider, each spelling it
+ * its own way. It is applied by property lookup rather than a branch per
+ * provider, so a provider that gains the property gains the flag.
+ */
+static void
+test_cli_continue_flag(void)
+{
+	struct { const gchar *provider; const gchar *expect; } cases[] = {
+		{ "grok-build",  "--continue" },
+		{ "claude-code", "--continue" },
+		{ "opencode",    "--continue" },
+	};
+	gsize i;
+
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		const gchar *off[] = {
+			"-p", cases[i].provider, "--dry-run", "hi", NULL
+		};
+		const gchar *on[] = {
+			"-p", cases[i].provider, "-c", "--dry-run", "hi", NULL
+		};
+		Run run = { NULL, NULL, 0 };
+
+		run_ai(off, NULL, &run);
+		assert_dry_run_lacks(run.stdout_data, cases[i].expect);
+		run_clear(&run);
+
+		run_ai(on, NULL, &run);
+		g_assert_cmpint(run.exit_status, ==, 0);
+		assert_dry_run_contains(run.stdout_data, cases[i].expect);
+		run_clear(&run);
+	}
+}
+
+/* The long spelling works too. */
+static void
+test_cli_continue_long_flag(void)
+{
+	const gchar *args[] = {
+		"-p", "grok-build", "--continue", "--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--continue");
+
+	run_clear(&run);
+}
+
+/*
+ * An HTTP provider has no sessions to continue. Saying so beats accepting
+ * the flag and ignoring it, which is what --skip-permissions used to do
+ * for opencode.
+ */
+static void
+test_cli_continue_http_provider(void)
+{
+	const gchar *args[] = { "-p", "claude", "-c", "--dry-run", "hi", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_nonnull(strstr(run.stderr_data, "no sessions to continue"));
+
+	run_clear(&run);
+}
+
+/* --continue is documented where a user will look for it. */
+static void
+test_cli_continue_in_help(void)
+{
+	const gchar *args[] = { "--help", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_nonnull(strstr(run.stdout_data, "--continue"));
+
+	run_clear(&run);
+}
+
 /* The property list in the error is the provider's own, not a fixed one. */
 static void
 test_cli_set_unknown_property_lists_provider(void)
@@ -822,6 +907,14 @@ main(
 	                test_cli_set_opencode_properties);
 	g_test_add_func("/ai-glib/ai-cli/set/claude-code-properties",
 	                test_cli_set_claude_code_properties);
+	g_test_add_func("/ai-glib/ai-cli/continue/flag",
+	                test_cli_continue_flag);
+	g_test_add_func("/ai-glib/ai-cli/continue/long-flag",
+	                test_cli_continue_long_flag);
+	g_test_add_func("/ai-glib/ai-cli/continue/http-provider",
+	                test_cli_continue_http_provider);
+	g_test_add_func("/ai-glib/ai-cli/continue/in-help",
+	                test_cli_continue_in_help);
 	g_test_add_func("/ai-glib/ai-cli/set/unknown-lists-provider",
 	                test_cli_set_unknown_property_lists_provider);
 

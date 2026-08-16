@@ -58,6 +58,7 @@ static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
 static gchar   **opt_set             = NULL;
+static gboolean  opt_continue        = FALSE;
 
 /* Image mode.  Negative / NULL means "not given", so an untouched flag
  * leaves the corresponding request parameter unset. */
@@ -111,6 +112,9 @@ static const GOptionEntry option_entries[] = {
 	  "Stream the response as it arrives (when supported)", NULL },
 	{ "skip-permissions", 0, 0, G_OPTION_ARG_NONE, &opt_skip_perms,
 	  "Bypass tool-use approval (claude-code/claude-tmux/grok-build)", NULL },
+	{ "continue", 'c', 0, G_OPTION_ARG_NONE, &opt_continue,
+	  "Continue this directory's most recent session (CLI providers)",
+	  NULL },
 	{ "set", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_set,
 	  "Set any provider property, e.g. --set sandbox=workspace. "
 	  "Repeatable. A bare --set NAME sets a boolean property to true. "
@@ -522,6 +526,26 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_OPENCODE_CLIENT(provider))
 		ai_opencode_client_set_skip_permissions(
 			AI_OPENCODE_CLIENT(provider), opt_skip_perms);
+
+	/*
+	 * --continue. Every CLI provider spells this the same way as a
+	 * property, so one lookup covers all of them; an HTTP provider has no
+	 * sessions to continue and says so rather than ignoring the flag.
+	 */
+	if (opt_continue)
+	{
+		if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider),
+		                                 "continue-session") != NULL)
+		{
+			g_object_set(provider, "continue-session", TRUE, NULL);
+		}
+		else
+		{
+			g_printerr("note: provider '%s' has no sessions to continue; "
+			           "ignoring --continue\n",
+			           ai_provider_type_to_string(ptype));
+		}
+	}
 
 	return provider;
 }
