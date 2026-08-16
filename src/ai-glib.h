@@ -94,6 +94,7 @@
 #include "agent/ai-agent-isolation.h"
 #include "agent/ai-agent.h"
 #include "agent/ai-brigade.h"
+#include "agent/ai-local-worker.h"
 #include "agent/ai-mock-provider.h"
 
 /* Harness layer - commands, skills and agents on disk */

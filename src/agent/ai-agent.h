@@ -30,7 +30,8 @@ G_DECLARE_FINAL_TYPE (AiAgent, ai_agent, AI, AGENT, GObject)
 /**
  * ai_agent_new:
  * @id: a stable identifier, unique within its brigade
- * @provider: (transfer none): where turns are sent
+ * @provider: (transfer none) (nullable): where turns are sent, or %NULL to
+ *   set one later with ai_agent_set_provider()
  *
  * Creates an agent.
  *
@@ -51,6 +52,62 @@ AiToolExecutor  *ai_agent_get_executor (AiAgent *self);
 AiAgentState     ai_agent_get_state    (AiAgent *self);
 AiBudget        *ai_agent_get_budget   (AiAgent *self);
 GCancellable    *ai_agent_get_cancellable (AiAgent *self);
+
+/**
+ * ai_agent_set_provider:
+ * @self: an #AiAgent
+ * @provider: (transfer none) (nullable): where turns are sent
+ *
+ * Replaces the provider.
+ *
+ * This is what lets one agent run on a model the conversation that
+ * spawned it is not using: a turn held with Grok over HTTP can delegate
+ * to a Claude Code subprocess, because nothing about an agent is tied to
+ * the provider of whoever asked for it.
+ */
+void ai_agent_set_provider (AiAgent *self, AiProvider *provider);
+
+/**
+ * ai_agent_set_executor:
+ * @self: an #AiAgent
+ * @executor: (transfer none): the executor this agent runs inside
+ *
+ * Replaces the executor built by ai_agent_new().
+ *
+ * The allowlist is applied by handing an agent an executor built from
+ * what it may call, so a caller that has assembled one -- from an agent
+ * file's `tools:` list, say -- installs it here rather than trying to
+ * subtract from the default afterwards.
+ */
+void ai_agent_set_executor (AiAgent *self, AiToolExecutor *executor);
+
+/**
+ * ai_agent_set_description:
+ * @self: an #AiAgent
+ * @description: (nullable): a short phrase naming the work
+ *
+ * What this agent was asked to do, in a few words.
+ *
+ * Exists because an id is not an answer to "what is that one doing?".
+ * A status listing of `a1 running 0:42` tells nobody anything; `a1
+ * running 0:42  audit the search backends` does.
+ */
+void         ai_agent_set_description (AiAgent *self, const gchar *description);
+const gchar *ai_agent_get_description (AiAgent *self);
+
+/**
+ * ai_agent_get_elapsed_ms:
+ * @self: an #AiAgent
+ *
+ * How long the run has been going, or how long it took.
+ *
+ * Measured from the move to %AI_AGENT_STATE_RUNNING and frozen on
+ * entering a terminal state, so a finished agent keeps reporting what it
+ * cost rather than counting up forever after nobody is watching.
+ *
+ * Returns: milliseconds, or 0 if the agent never started.
+ */
+gint64 ai_agent_get_elapsed_ms (AiAgent *self);
 
 void         ai_agent_set_system_prompt (AiAgent *self, const gchar *prompt);
 const gchar *ai_agent_get_system_prompt (AiAgent *self);

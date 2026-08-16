@@ -21,11 +21,18 @@ struct _AiAgent
 
     gchar          *system_prompt;
     gchar          *model;
+    gchar          *description;
     gint            max_tokens;
 
     AiAgentState    state;
     gchar          *result;
     GError         *error;
+
+    /* Wall clock for the run.  Frozen on the way into a terminal state:
+     * a finished agent should keep reporting what it took, not go on
+     * counting for as long as the record is kept. */
+    gint64          started_us;
+    gint64          finished_us;
 };
 
 G_DEFINE_TYPE (AiAgent, ai_agent, G_TYPE_OBJECT)
@@ -49,6 +56,7 @@ ai_agent_finalize (GObject *object)
     g_clear_pointer(&self->id, g_free);
     g_clear_pointer(&self->system_prompt, g_free);
     g_clear_pointer(&self->model, g_free);
+    g_clear_pointer(&self->description, g_free);
     g_clear_pointer(&self->result, g_free);
     g_clear_pointer(&self->budget, ai_budget_free);
     g_clear_error(&self->error);
@@ -169,6 +177,64 @@ ai_agent_get_executor (AiAgent *self)
     return self->executor;
 }
 
+void
+ai_agent_set_provider (AiAgent *self, AiProvider *provider)
+{
+    g_return_if_fail(AI_IS_AGENT(self));
+    g_return_if_fail(provider == NULL || AI_IS_PROVIDER(provider));
+
+    if (self->provider == provider) return;
+
+    g_clear_object(&self->provider);
+    if (provider != NULL) self->provider = g_object_ref(provider);
+}
+
+void
+ai_agent_set_executor (AiAgent *self, AiToolExecutor *executor)
+{
+    g_return_if_fail(AI_IS_AGENT(self));
+    g_return_if_fail(AI_IS_TOOL_EXECUTOR(executor));
+
+    if (self->executor == executor) return;
+
+    g_clear_object(&self->executor);
+    self->executor = g_object_ref(executor);
+}
+
+void
+ai_agent_set_description (AiAgent *self, const gchar *description)
+{
+    g_return_if_fail(AI_IS_AGENT(self));
+    g_free(self->description);
+    self->description = g_strdup(description);
+}
+
+/**
+ * ai_agent_get_description:
+ * @self: an #AiAgent
+ *
+ * Returns: (transfer none) (nullable): what this agent was asked to do.
+ */
+const gchar *
+ai_agent_get_description (AiAgent *self)
+{
+    g_return_val_if_fail(AI_IS_AGENT(self), NULL);
+    return self->description;
+}
+
+gint64
+ai_agent_get_elapsed_ms (AiAgent *self)
+{
+    gint64 end;
+
+    g_return_val_if_fail(AI_IS_AGENT(self), 0);
+
+    if (self->started_us == 0) return 0;
+
+    end = self->finished_us != 0 ? self->finished_us : g_get_monotonic_time();
+    return (end - self->started_us) / 1000;
+}
+
 AiAgentState
 ai_agent_get_state (AiAgent *self)
 {
@@ -258,7 +324,13 @@ ai_agent_set_state (AiAgent *self, AiAgentState state)
     self->state = state;
 
     if (state == AI_AGENT_STATE_RUNNING && old != AI_AGENT_STATE_RUNNING)
+    {
         ai_budget_start(self->budget);
+        self->started_us = g_get_monotonic_time();
+    }
+
+    if (ai_agent_state_is_terminal(state) && self->finished_us == 0)
+        self->finished_us = g_get_monotonic_time();
 
     g_signal_emit(self, signals[SIGNAL_STATE_CHANGED], 0, (gint)old,
                   (gint)state);

@@ -99,6 +99,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/agent/ai-agent-isolation.h \
 	$(SRCDIR)/agent/ai-agent.h \
 	$(SRCDIR)/agent/ai-brigade.h \
+	$(SRCDIR)/agent/ai-local-worker.h \
 	$(SRCDIR)/agent/ai-mock-provider.h \
 	$(SRCDIR)/harness/ai-resource.h \
 	$(SRCDIR)/harness/ai-resource-registry.h \
@@ -174,6 +175,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/agent/ai-agent-isolation.c \
 	$(SRCDIR)/agent/ai-agent.c \
 	$(SRCDIR)/agent/ai-brigade.c \
+	$(SRCDIR)/agent/ai-local-worker.c \
 	$(SRCDIR)/agent/ai-mock-provider.c \
 	$(SRCDIR)/harness/ai-resource.c \
 	$(SRCDIR)/harness/ai-resource-registry.c \

@@ -64,6 +64,13 @@ gboolean ai_brigade_add (AiBrigade *self, AiAgent *agent);
 AiAgent  *ai_brigade_get    (AiBrigade *self, const gchar *id);
 gboolean  ai_brigade_remove (AiBrigade *self, const gchar *id);
 
+gboolean  ai_brigade_start          (AiBrigade *self, AiAgent *agent,
+                                     const gchar *prompt, GError **error);
+gchar    *ai_brigade_take_finished  (AiBrigade *self);
+gchar    *ai_brigade_reap           (AiBrigade *self, const gchar *id,
+                                     GError **error);
+gchar    *ai_brigade_generate_id    (AiBrigade *self, const gchar *prefix);
+
 GList *ai_brigade_list (AiBrigade *self);
 
 guint ai_brigade_count_live (AiBrigade *self);
