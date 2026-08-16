@@ -114,6 +114,47 @@ def main():
     assert state["calls"] == 1
     assert state["last_query"] == "weather"
 
+    # ----- CLI providers: AiGrokBuildClient -----
+    # Every knob on this one is a real GObject property specifically so
+    # bindings get native syntax, so exercise that path rather than the
+    # C accessors.
+    grok = AiGlib.GrokBuildClient.new()
+    assert isinstance(grok, AiGlib.GrokBuildClient)
+    assert isinstance(grok, AiGlib.CliClient)  # inheritance visible
+    assert grok.props.model == "grok-4.6"
+
+    grok.props.model = "grok-4.5"
+    grok.props.effort_level = "xhigh"
+    grok.props.skip_permissions = True
+    grok.props.allowed_tools = "read_file,list_dir"
+    grok.props.max_turns = 5
+    grok.props.sandbox = "workspace"
+    assert grok.props.model == "grok-4.5"
+    assert grok.props.effort_level == "xhigh"
+    assert grok.props.skip_permissions is True
+    assert grok.props.allowed_tools == "read_file,list_dir"
+    assert grok.props.max_turns == 5
+    assert grok.props.sandbox == "workspace"
+
+    # verbatim defaults on; total-cost is read-only and starts at zero
+    assert grok.props.verbatim is True
+    assert grok.props.total_cost == 0.0
+
+    # The interfaces the provider claims are visible to introspection
+    assert isinstance(grok, AiGlib.Provider)
+    assert isinstance(grok, AiGlib.Streamable)
+    assert grok.get_provider_type() == AiGlib.ProviderType.GROK_BUILD
+    assert grok.get_name() == "Grok Build"
+    assert grok.get_default_model() == "grok-4.6"
+
+    # Provider name round-trip, including the one that must not collide
+    # with the HTTP "grok" provider
+    assert AiGlib.provider_type_from_string("grok-build") == \
+        AiGlib.ProviderType.GROK_BUILD
+    assert AiGlib.provider_type_from_string("grok") == AiGlib.ProviderType.GROK
+    assert AiGlib.provider_type_to_string(
+        AiGlib.ProviderType.GROK_BUILD) == "grok-build"
+
     # ----- Boxed type roundtrip -----
     usage = AiGlib.Usage.new(100, 50)
     assert usage.get_input_tokens() == 100

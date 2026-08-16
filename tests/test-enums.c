@@ -27,6 +27,10 @@ test_provider_type_to_string(void)
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_GEMINI), ==, "gemini");
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_GROK), ==, "grok");
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_OLLAMA), ==, "ollama");
+	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_CLAUDE_CODE), ==, "claude-code");
+	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_OPENCODE), ==, "opencode");
+	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_CLAUDE_TMUX), ==, "claude-tmux");
+	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_GROK_BUILD), ==, "grok-build");
 }
 
 static void
@@ -41,6 +45,13 @@ test_provider_type_from_string(void)
 	g_assert_cmpint(ai_provider_type_from_string("grok"), ==, AI_PROVIDER_GROK);
 	g_assert_cmpint(ai_provider_type_from_string("xai"), ==, AI_PROVIDER_GROK);
 	g_assert_cmpint(ai_provider_type_from_string("ollama"), ==, AI_PROVIDER_OLLAMA);
+	g_assert_cmpint(ai_provider_type_from_string("claude-code"), ==, AI_PROVIDER_CLAUDE_CODE);
+	g_assert_cmpint(ai_provider_type_from_string("opencode"), ==, AI_PROVIDER_OPENCODE);
+	g_assert_cmpint(ai_provider_type_from_string("claude-tmux"), ==, AI_PROVIDER_CLAUDE_TMUX);
+	/* "grok-build" must not be swallowed by the "grok" HTTP provider. */
+	g_assert_cmpint(ai_provider_type_from_string("grok-build"), ==, AI_PROVIDER_GROK_BUILD);
+	g_assert_cmpint(ai_provider_type_from_string("grok_build"), ==, AI_PROVIDER_GROK_BUILD);
+	g_assert_cmpint(ai_provider_type_from_string("GROK-BUILD"), ==, AI_PROVIDER_GROK_BUILD);
 	g_assert_cmpint(ai_provider_type_from_string(NULL), ==, AI_PROVIDER_CLAUDE);
 }
 
