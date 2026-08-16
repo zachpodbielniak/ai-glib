@@ -40,6 +40,37 @@
 
 G_BEGIN_DECLS
 
+/**
+ * AiToolApproval:
+ * @AI_TOOL_APPROVAL_DEFAULT: no opinion; defer to #AiToolExecutor:approval-policy
+ * @AI_TOOL_APPROVAL_ALLOW: run this call
+ * @AI_TOOL_APPROVAL_DENY: refuse this call, but let the run continue
+ * @AI_TOOL_APPROVAL_ALLOW_ALWAYS: run it, and stop asking about this tool
+ *   for the rest of the run
+ * @AI_TOOL_APPROVAL_DENY_ALL: refuse and abort the whole run
+ *
+ * What a #AiToolExecutor::approval-requested handler decided.
+ *
+ * %AI_TOOL_APPROVAL_DEFAULT is zero on purpose. A signal with no handlers
+ * accumulates to zero, which resolves through the policy to
+ * %AI_TOOL_APPROVAL_ALLOW --- so an executor nobody is watching behaves
+ * exactly as it did before approval existed, by construction rather than by
+ * a compatibility branch.
+ *
+ * %AI_TOOL_APPROVAL_DENY continues the run because a refused tool is
+ * information the model can act on: it will usually apologise and try
+ * something else, which is more useful than an aborted turn. Only
+ * %AI_TOOL_APPROVAL_DENY_ALL stops everything.
+ */
+typedef enum
+{
+    AI_TOOL_APPROVAL_DEFAULT = 0,
+    AI_TOOL_APPROVAL_ALLOW,
+    AI_TOOL_APPROVAL_DENY,
+    AI_TOOL_APPROVAL_ALLOW_ALWAYS,
+    AI_TOOL_APPROVAL_DENY_ALL
+} AiToolApproval;
+
 #define AI_TYPE_TOOL_EXECUTOR (ai_tool_executor_get_type())
 
 G_DECLARE_FINAL_TYPE(AiToolExecutor, ai_tool_executor, AI, TOOL_EXECUTOR, GObject)
@@ -275,6 +306,24 @@ ai_tool_executor_run_finish (
     AiToolExecutor  *self,
     GAsyncResult    *result,
     GError         **error
+);
+
+AiToolApproval
+ai_tool_executor_get_approval_policy (AiToolExecutor *self);
+
+void
+ai_tool_executor_set_approval_policy (
+    AiToolExecutor *self,
+    AiToolApproval  policy
+);
+
+gboolean
+ai_tool_executor_get_stream (AiToolExecutor *self);
+
+void
+ai_tool_executor_set_stream (
+    AiToolExecutor *self,
+    gboolean        stream
 );
 
 G_END_DECLS

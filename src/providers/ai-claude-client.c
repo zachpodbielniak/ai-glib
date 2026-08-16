@@ -11,6 +11,8 @@
 
 #include "providers/ai-claude-client.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 
@@ -876,7 +878,14 @@ process_stream_event(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` payload parses fine and yields a NULL root, which
+     * JSON_NODE_HOLDS_OBJECT() would dereference -- a critical, and fatal
+     * under G_DEBUG=fatal-warnings. Server output is untrusted, so the NULL
+     * check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return;
     }
@@ -909,8 +918,11 @@ process_stream_event(
         /* Emit stream-start signal */
         if (!data->stream_started)
         {
+            g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_START);
+
             data->stream_started = TRUE;
             g_signal_emit_by_name(data->client, "stream-start");
+            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
         }
     }
     else if (g_strcmp0(event_type, "content_block_start") == 0)
@@ -928,12 +940,27 @@ process_stream_event(
             }
             else if (g_strcmp0(type, "tool_use") == 0)
             {
+                g_autoptr(AiToolUse) starting = NULL;
+                g_autoptr(AiEvent) event = NULL;
+
                 data->in_tool_block = TRUE;
                 data->current_tool_id = g_strdup(
                     json_object_get_string_member_with_default(block_obj, "id", ""));
                 data->current_tool_name = g_strdup(
                     json_object_get_string_member_with_default(block_obj, "name", ""));
                 data->current_tool_input = g_string_new("");
+
+                /*
+                 * Announce the call now, with an empty input: the arguments
+                 * arrive as input_json_delta fragments and a frontend should
+                 * not have to wait for the last one to say what is running.
+                 * A second TOOL_STARTED follows at content_block_stop with
+                 * the assembled input; consumers key on the id and update.
+                 */
+                starting = ai_tool_use_new(data->current_tool_id,
+                                           data->current_tool_name, NULL);
+                event = ai_event_new_tool_started(starting);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
             }
         }
     }
@@ -956,6 +983,29 @@ process_stream_event(
 
                 /* Emit delta signal */
                 g_signal_emit_by_name(data->client, "delta", text);
+
+                {
+                    g_autoptr(AiEvent) event = ai_event_new_text_delta(text);
+                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+                }
+            }
+            else if (g_strcmp0(type, "thinking_delta") == 0)
+            {
+                /*
+                 * Extended thinking was previously not decoded at all, so a
+                 * reasoning model appeared to stall between tool calls. It
+                 * is reported under its own kind: not part of the answer,
+                 * but worth showing.
+                 */
+                const gchar *thinking = json_object_get_string_member_with_default(
+                    delta_obj, "thinking", "");
+
+                if (thinking[0] != '\0')
+                {
+                    g_autoptr(AiEvent) event =
+                        ai_event_new_thinking_delta(thinking);
+                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+                }
             }
             else if (g_strcmp0(type, "input_json_delta") == 0)
             {
@@ -964,6 +1014,13 @@ process_stream_event(
                 if (data->current_tool_input != NULL)
                 {
                     g_string_append(data->current_tool_input, partial);
+                }
+
+                if (partial[0] != '\0')
+                {
+                    g_autoptr(AiEvent) event = ai_event_new_tool_input_delta(
+                        data->current_tool_id, partial);
+                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
                 }
             }
         }
@@ -986,10 +1043,18 @@ process_stream_event(
                 data->current_tool_id,
                 data->current_tool_name,
                 data->current_tool_input->str);
-            ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&tool_use));
+            /*
+             * Emit before stealing, which is what the note left here for a
+             * long time said would be needed and never did.
+             */
+            {
+                g_autoptr(AiEvent) event = ai_event_new_tool_started(tool_use);
 
-            /* Emit tool-use signal */
-            /* Note: we'd need the tool_use object again for the signal, so we emit before stealing */
+                g_signal_emit_by_name(data->client, "tool-use", tool_use);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+            }
+
+            ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&tool_use));
 
             g_string_free(data->current_tool_input, TRUE);
             data->current_tool_input = NULL;
@@ -1034,6 +1099,21 @@ process_stream_event(
     else if (g_strcmp0(event_type, "message_stop") == 0)
     {
         /* End of message - emit stream-end signal */
+        {
+            AiUsage *usage = ai_response_get_usage(data->response);
+
+            if (usage != NULL)
+            {
+                g_autoptr(AiEvent) event = ai_event_new_usage(usage, -1);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+            }
+        }
+
+        {
+            g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_END);
+            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+        }
+
         g_signal_emit_by_name(data->client, "stream-end", data->response);
     }
 }

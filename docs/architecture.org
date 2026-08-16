@@ -210,3 +210,40 @@ if (error != NULL)
     return;
 }
 #+end_src
+
+* The view layer
+Everything above produces an =AiResponse=. That is enough to print an
+answer, and not enough to show a session happening --- which is what a
+harness needs.
+
+Two layers sit on top, and the line between them is the design decision
+worth knowing about.
+
+#+begin_example
+  providers ──emit AiEvent──▶ AiConversation ──folds into──▶ AiTranscript
+  (AiEventSource)             (the driver)                   (GListModel<AiViewBlock>)
+                                                                     │
+                                               ai_view_block_render(block, width)
+                                                                     │
+                                                     AiRenderedText { text, spans }
+                                                         ╱                    ╲
+                                             ncurses attr_t          Emacs text properties
+#+end_example
+
+*Events* (=src/core/ai-event*.{h,c}=) normalise nine wire formats into one
+vocabulary. A provider translates its own output once; nothing downstream
+learns what Anthropic SSE or opencode's =={type,part}== envelope looks like.
+
+*The view layer* (=src/view/=) turns that stream into blocks, and each block
+into text plus styled spans. It decides that five tool calls read as
+=Edited 3 files, ran 2 commands  +21-6=. It does not decide what colour that
+is.
+
+A frontend supplies exactly two things: a map from style role to appearance,
+and a way to put characters somewhere. =bin/ai-tui.c= does it with ncurses
+in about six hundred lines; =examples/transcript-render.c= does it with ANSI
+escapes in a hundred. An Emacs frontend replaces that one file and shares
+the rest.
+
+See [[file:events.org][The event stream]] and
+[[file:transcript.org][The transcript]].

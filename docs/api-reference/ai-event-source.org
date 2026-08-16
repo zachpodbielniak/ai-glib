@@ -1,0 +1,104 @@
+* AiEventSource
+=AiEventSource= is the GInterface implemented by anything that can narrate a
+turn: every HTTP client (via =AiClient=), every CLI wrapper (via
+=AiCliClient=), and =AiToolExecutor=. It has *no virtual methods*. It exists
+for its one signal and for the type check --- a frontend asks
+=AI_IS_EVENT_SOURCE(obj)= and connects, without caring whether the answer
+arrives over libsoup or off a subprocess's stdout.
+
+** Interface
+#+begin_src C
+struct _AiEventSourceInterface
+{
+    GTypeInterface parent_iface;
+
+    gpointer _reserved[8];
+};
+#+end_src
+
+Because there is nothing to implement, adding it to a class is one line:
+
+#+begin_src C
+G_DEFINE_TYPE_WITH_CODE (AiCliClient, ai_cli_client, G_TYPE_OBJECT,
+                         G_ADD_PRIVATE (AiCliClient)
+                         G_IMPLEMENT_INTERFACE (AI_TYPE_EVENT_SOURCE, NULL))
+#+end_src
+
+** Signal
+| Signal   | Arguments           | When                                |
+|----------+---------------------+-------------------------------------|
+| =event=  | =AiEvent *event=    | for each thing that happens         |
+
+Events arrive in the order they occurred, and always on the thread driving the
+source --- for the async paths, whichever thread owns the =GMainContext= the
+request was started on. A handler may keep the event by taking a reference;
+the emitter does not reuse it.
+
+*** Why the signal is declared only on the interface
+This is the one thing to preserve if you touch this file.
+
+=delta=, =stream-start=, =stream-end= and =tool-use= are each declared *twice*
+in ai-glib --- once on the =AiStreamable= interface and again on the
+=AiCliClient= class. GLib's signal lookup searches class ancestry before
+interfaces, so on a CLI provider those names resolve to the *class* signal,
+and a handler connected through the interface's signal id never fires. The
+two ids are genuinely different numbers:
+
+#+begin_src C
+g_signal_lookup ("delta", AI_TYPE_STREAMABLE)   /* one id  */
+g_signal_lookup ("delta", AI_TYPE_CLI_CLIENT)   /* another */
+#+end_src
+
+=event= is declared in exactly one place, so:
+
+#+begin_src C
+g_signal_lookup ("event", AI_TYPE_EVENT_SOURCE) == g_signal_lookup ("event", G_OBJECT_TYPE (any_provider))
+#+end_src
+
+That equality is what lets a frontend subscribe to any provider uniformly, and
+=tests/test-event-source.c= asserts both halves of it --- the hazard for
+=delta= and its absence for =event= --- so a future redeclaration fails the
+build rather than silently breaking every consumer.
+
+** Functions
+#+begin_src C
+/* Publish one event to every subscriber. Stamps the source label from
+ * G_OBJECT_TYPE_NAME(self) when the event does not already carry one. */
+void ai_event_source_emit (AiEventSource *self, AiEvent *event);
+
+/* Publish a whole array, in order. NULL and empty are both fine. */
+void ai_event_source_emit_all (AiEventSource *self, GPtrArray *events);
+#+end_src
+
+=ai_event_source_emit_all()= exists because the stream parsers hand back a
+whole line's worth of events at once --- a single NDJSON line can carry text,
+a tool call and a token count together --- and it saves each of them writing
+the same loop. A =NULL= or empty array is not an error; most lines produce
+nothing at all.
+
+** The source label
+=ai_event_source_emit()= stamps =ai_event_get_source()= with the emitting
+object's type name (=AiGrokBuildClient=, =AiToolExecutor=, ...) unless the
+event already carries one. An emitter that is forwarding somebody else's
+events --- =AiToolExecutor= republishing a provider's stream --- labels them
+before emitting, and that label is preserved. A transcript merging several
+sources needs this to tell them apart.
+
+** Example
+#+begin_src C
+g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new ();
+
+if (AI_IS_EVENT_SOURCE (client))
+{
+    g_signal_connect (client, "event", G_CALLBACK (on_event), self);
+}
+#+end_src
+
+The type check is worth keeping even though every shipped provider implements
+the interface: it is the graceful path for a provider that has not been
+migrated, and it costs nothing.
+
+** See also
+- [[file:ai-event.org][AiEvent]] --- what the signal carries
+- [[file:../events.org][The event stream]] --- per-provider coverage
+- [[file:ai-cli-client.org][AiCliClient]] --- how a CLI wrapper translates its wire format into events

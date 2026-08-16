@@ -14,12 +14,33 @@ Complete API documentation for ai-glib.
 | [[file:ai-error.org][AiError]]   | Error codes and handling            |
 
 ** Interfaces
-| Interface                                        | Description                  |
-|--------------------------------------------------+------------------------------|
-| [[file:ai-provider.org][AiProvider]]              | Core provider interface      |
-| AiStreamable                                     | Streaming response interface |
-| [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface   |
-| [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface         |
+| Interface                                        | Description                            |
+|--------------------------------------------------+----------------------------------------|
+| [[file:ai-provider.org][AiProvider]]              | Core provider interface                |
+| AiStreamable                                     | Streaming response interface           |
+| [[file:ai-event-source.org][AiEventSource]]       | Structured turn events, any provider   |
+| [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface             |
+| [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface                   |
+
+** Events
+| Class                              | Description                                  |
+|------------------------------------+----------------------------------------------|
+| [[file:ai-event.org][AiEvent]]      | One thing that happened in a turn (boxed)    |
+
+** View Layer
+A UI-agnostic model of a conversation: what an ncurses harness and an Emacs
+buffer both render. See [[file:../transcript.org][The transcript]] for the
+layer as a whole.
+
+| Class                                          | Description                                 |
+|------------------------------------------------+---------------------------------------------|
+| [[file:ai-transcript.org][AiTranscript]]        | The buffer --- a GListModel of blocks        |
+| [[file:ai-view-block.org][AiViewBlock]]         | A renderable unit, and the render contract   |
+| [[file:ai-tool-call.org][AiToolCall]]           | One tool call, and how a tool name reads     |
+| [[file:ai-conversation.org][AiConversation]]    | Drives a provider, folds events into blocks  |
+
+See [[file:../events.org][The event stream]] for per-provider coverage and
+ordering guarantees.
 
 ** Image Generation
 | Class                                                    | Description                            |

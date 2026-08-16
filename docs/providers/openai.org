@@ -372,3 +372,6 @@ int main(void)
 ** Links
 - [[https://platform.openai.com/docs/][OpenAI API Documentation]]
 - [[https://platform.openai.com/docs/models][OpenAI Models]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text and usage.

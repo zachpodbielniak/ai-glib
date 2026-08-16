@@ -350,3 +350,6 @@ Gemini uses aspect ratios instead of pixel dimensions:
 - [[https://aistudio.google.com/][Google AI Studio]]
 - [[https://ai.google.dev/docs][Gemini API Documentation]]
 - [[https://ai.google.dev/models/gemini][Gemini Models]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text and usage.

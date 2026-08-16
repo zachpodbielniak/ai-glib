@@ -26,11 +26,23 @@
 #include "core/ai-config.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
 #include "core/ai-image-capabilities.h"
 #include "core/ai-image-generator.h"
 #include "core/ai-client.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-prompt-scorer.h"
+
+/* View layer: a UI-agnostic model of a conversation */
+#include "view/ai-style.h"
+#include "view/ai-tool-call.h"
+#include "view/ai-tool-style.h"
+#include "view/ai-view-block.h"
+#include "view/ai-view-blocks.h"
+#include "view/ai-view-tool-block.h"
+#include "view/ai-transcript.h"
+#include "view/ai-conversation.h"
 
 /* Model classes */
 #include "model/ai-usage.h"
@@ -69,6 +81,7 @@
 #include "convenience/ai-brave-search.h"
 #include "convenience/ai-duckduckgo-search.h"
 #include "convenience/ai-tool-executor.h"
+#include "convenience/ai-provider-factory.h"
 
 /* Agent orchestration */
 #include "agent/ai-agent-enums.h"

@@ -460,3 +460,6 @@ interface surface from PyGObject.
 - [[file:opencode.org][AiOpenCodeClient]] - The equivalent wrapper for OpenCode
 - [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers
 - [[../cli.org][The =ai= CLI]] - =ai -p grok-build=
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text, thinking, tool start, tool arguments, usage and cost.

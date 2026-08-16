@@ -1,0 +1,162 @@
+* The event stream
+Every ai-glib provider can narrate a turn as it happens: prose arriving,
+reasoning, a tool starting, its arguments, its result, token counts, and
+failure. That narration is a stream of [[file:api-reference/ai-event.org][AiEvent]] values published through
+[[file:api-reference/ai-event-source.org][AiEventSource]], and it is the same stream whatever is behind it --- an HTTPS
+connection to Anthropic, or a =grok= subprocess writing NDJSON to a pipe.
+
+This document is about the stream as a whole: what each provider can report,
+what order things arrive in, and which guarantees you may rely on. For the
+types themselves see the two API pages above.
+
+** Subscribing
+#+begin_src C
+static void
+on_event (AiEventSource *source, AiEvent *event, gpointer user_data)
+{
+    if (ai_event_get_kind (event) == AI_EVENT_TEXT_DELTA)
+        g_print ("%s", ai_event_get_text (event));
+}
+
+g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new ();
+
+g_signal_connect (client, "event", G_CALLBACK (on_event), NULL);
+ai_streamable_chat_stream_async (AI_STREAMABLE (client), messages, NULL,
+                                 4096, NULL, NULL, on_done, loop);
+#+end_src
+
+That is the whole integration. Swap =ai_claude_code_client_new()= for
+=ai_grok_client_new()= and nothing else changes.
+
+** What each provider reports
+| Provider        | text | thinking | tool start | tool args | tool result | usage | cost |
+|-----------------+------+----------+------------+-----------+-------------+-------+------|
+| =claude=        | yes  | yes      | yes        | yes       | ---         | yes   | ---  |
+| =openai=        | yes  | ---      | ---        | ---       | ---         | yes   | ---  |
+| =gemini=        | yes  | ---      | ---        | ---       | ---         | yes   | ---  |
+| =grok=          | yes  | ---      | ---        | ---       | ---         | yes   | ---  |
+| =ollama=        | yes  | ---      | ---        | ---       | ---         | yes   | ---  |
+| =claude-code=   | yes  | yes      | yes        | yes       | yes         | yes   | yes  |
+| =opencode=      | yes  | ---      | yes        | ---       | yes         | yes   | ---  |
+| =grok-build=    | yes  | yes      | yes        | yes       | ---         | yes   | yes  |
+| =claude-tmux=   | ---  | ---      | ---        | ---       | ---         | ---   | ---  |
+
+Three things that table is really saying:
+
+- *Tool results only come from providers that run their own tools.* The HTTP
+  providers ask for a tool and stop; whoever is driving the loop --- usually
+  [[file:tool-executor.org][AiToolExecutor]] --- runs it and reports the result, and it publishes on the
+  same stream. So an HTTP provider plus an executor gives you the full
+  picture; the provider alone gives you half of it by design.
+- *Cost is rare.* Only the two CLI wrappers that report =total_cost_usd= can
+  answer it. Everywhere else =ai_event_get_cost_micros()= is *-1*, meaning
+  "unknown" --- not zero, which would read as free.
+- *=claude-tmux= reports nothing yet.* It drives =claude= through a tmux
+  session and reads the finished JSONL transcript rather than a stream, so
+  there is no line-by-line output to translate. It still works everywhere an
+  #AiProvider works; it simply produces its answer in one piece. The
+  transcript it reads does contain every tool call, and the wait loop already
+  polls that file, so this is a gap rather than an impossibility.
+
+** Ordering and guarantees
+- Events arrive *in the order they occurred*, and always on the thread
+  driving the source --- for the async paths, whichever thread owns the
+  =GMainContext= the request was started on.
+- =AI_EVENT_STREAM_START= precedes any content; =AI_EVENT_STREAM_END= follows
+  all of it. A turn that fails may end with =AI_EVENT_ERROR= and no
+  =STREAM_END=.
+- An event is immutable once published and is shared between subscribers.
+  Keep one past the emission by taking a reference.
+- *=AI_EVENT_TOOL_STARTED= may be emitted more than once for the same
+  =tool_use_id=.* Consumers key on the id and update rather than append.
+
+That last one is not a wart, it is the shape of the wire formats. A streamed
+tool call announces its name before its arguments exist:
+
+#+begin_example
+content_block_start   {"type":"tool_use","id":"t1","name":"Edit"}   <- name known
+content_block_delta   {"type":"input_json_delta","partial_json":"{\"pa"}
+content_block_delta   {"type":"input_json_delta","partial_json":"th\":1}"}
+#+end_example
+
+The fragments are not individually valid JSON --- only the concatenation
+parses. So the first =TOOL_STARTED= carries the name with an empty input, so
+a frontend can render "Edit…" immediately, and a second one carries the
+assembled arguments once the whole message arrives. Emitting only the second
+would leave the interface blank for the duration of the call; emitting only
+the first would never say which file.
+
+=AI_EVENT_TOOL_INPUT_DELTA= carries the fragments in between for anyone who
+wants them. Its =tool_use_id= is =NULL= for the providers whose wire format
+does not repeat the id in each fragment (it is keyed by content-block index
+instead); attribute those to the most recently started call. A consumer that
+only wants whole calls can ignore this kind entirely and lose nothing.
+
+** Turning it back into text
+=AiCliClient= keeps the older =delta= / =stream-start= / =stream-end= /
+=tool-use= signals, and they fire alongside the events, so nothing written
+against them needed changing. Going the other way:
+
+#+begin_src C
+g_autofree gchar *text = ai_cli_client_events_to_delta (events);
+#+end_src
+
+concatenates the =AI_EVENT_TEXT_DELTA= text and nothing else. Reasoning is
+excluded deliberately --- a caller assembling the answer must not include it.
+
+** Adding a provider to the stream
+For a CLI wrapper, implement one vfunc:
+
+#+begin_src C
+static gboolean
+my_client_parse_stream_events (AiCliClient  *client,
+                               const gchar  *line,
+                               AiResponse   *response,
+                               GPtrArray    *out_events,
+                               GError      **error)
+{
+    /* ... parse one line, g_ptr_array_add() zero or more AiEvents ... */
+    return TRUE;   /* FALSE + error only when the CLI reported a failure */
+}
+#+end_src
+
+and register it in =class_init= as =cli_class->parse_stream_events=. The
+shared reader in =AiCliClient= does the spawning, the line reading, the
+signal emission, the deadline and the response assembly. A subclass that
+leaves the vfunc unset still works --- the default wraps the older
+=parse_stream_line= --- but will only ever report text.
+
+Two rules the existing parsers all follow:
+
+1. *Read every member through a type-checked accessor.* json-glib's
+   =*_member_with_default()= emit a critical when a member is present but of
+   another type, and a critical is fatal under =G_DEBUG=fatal-warnings=.
+   Subprocess stdout and server responses are untrusted input; a CLI that
+   changes a field from a number to a string must be ignored, not able to
+   abort the process. Each provider has a small set of =*_get_string= /
+   =_object= / =_int= helpers for this; keep new fields on them. The same
+   applies to =json_parser_get_root()=, which returns =NULL= for a bare
+   =null= document --- check for that before =JSON_NODE_HOLDS_OBJECT()=.
+2. *Return =FALSE= only for a real failure.* A line you do not recognise is
+   not an error; return =TRUE= having added nothing. Returning =FALSE= fails
+   the whole turn, which is right for =grok='s ={"type":"error"}= line
+   (printed on stdout with exit status *0*, so the parser is the only thing
+   that can notice) and wrong for anything else.
+
+For an HTTP provider there is no vfunc --- call =ai_event_source_emit()= from
+the SSE decoder where you already emit =delta=.
+
+** Testing
+- =tests/test-cli-events.c= --- recorded lines in, asserted event sequence
+  out, per provider. Includes a shared table of malformed lines run against
+  every parser, which is what keeps rule 1 above honest.
+- =tests/test-cli-stream-reader.c= --- the shared read loop, against a shell
+  stub: EOF, long lines, cancellation, the deadline, parse failure.
+- =tests/test-event-source.c= --- the interface, and the signal-id invariant
+  that makes one subscription work across every provider.
+
+** See also
+- [[file:api-reference/ai-event.org][AiEvent]] --- the event type
+- [[file:api-reference/ai-event-source.org][AiEventSource]] --- the interface
+- [[file:api-reference/ai-cli-client.org][AiCliClient]] --- the shared spawn and read pipeline
+- [[file:tool-executor.org][AiToolExecutor]] --- where tool results come from for HTTP providers

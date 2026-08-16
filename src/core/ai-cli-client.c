@@ -11,6 +11,7 @@
 
 #include "core/ai-cli-client.h"
 #include "core/ai-error.h"
+#include "core/ai-event-source.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
 
@@ -31,7 +32,14 @@ typedef struct
     gboolean  session_persistence;
 } AiCliClientPrivate;
 
-G_DEFINE_TYPE_WITH_PRIVATE(AiCliClient, ai_cli_client, G_TYPE_OBJECT)
+/*
+ * The event-source interface is implemented on the base rather than on each
+ * wrapper, so a subclass gets the ::event signal for free and only has to
+ * translate its own wire format.  There are no vfuncs to fill in.
+ */
+G_DEFINE_TYPE_WITH_CODE(AiCliClient, ai_cli_client, G_TYPE_OBJECT,
+                        G_ADD_PRIVATE(AiCliClient)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
 
 /*
  * Property IDs.
@@ -67,6 +75,23 @@ enum
 };
 
 static guint signals[N_SIGNALS];
+
+static gboolean
+ai_cli_client_real_parse_stream_events(
+    AiCliClient  *self,
+    const gchar  *line,
+    AiResponse   *response,
+    GPtrArray    *out_events,
+    GError      **error
+);
+
+static GSubprocess *
+ai_cli_client_real_spawn(
+    AiCliClient          *self,
+    const gchar * const  *argv,
+    GSubprocessFlags      flags,
+    GError              **error
+);
 
 static void
 ai_cli_client_finalize(GObject *object)
@@ -220,6 +245,14 @@ ai_cli_client_class_init(AiCliClientClass *klass)
     klass->parse_stream_line = NULL;
     klass->build_stdin = NULL;
     klass->chat_sync = NULL;
+
+    /*
+     * These two do have defaults. parse_stream_events falls back to
+     * parse_stream_line so an unmigrated subclass keeps working, and spawn
+     * handles the working directory every wrapper needs.
+     */
+    klass->parse_stream_events = ai_cli_client_real_parse_stream_events;
+    klass->spawn = ai_cli_client_real_spawn;
 
     /**
      * AiCliClient:config:
@@ -1045,21 +1078,13 @@ ai_cli_client_chat_sync(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    /* Use GSubprocessLauncher when a working directory is set */
-    if (priv->working_directory != NULL)
-    {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_set_cwd(launcher, priv->working_directory);
-        subprocess = g_subprocess_launcher_spawnv(
-            launcher, (const gchar * const *)argv, error);
-    }
-    else
-    {
-        subprocess = g_subprocess_newv((const gchar * const *)argv,
-                                       flags, error);
-    }
+    /*
+     * Through the vfunc, so a subclass that needs more than a working
+     * directory -- opencode wants OPENCODE_PERMISSION in the environment --
+     * gets it on the synchronous path too, not only when streaming.
+     */
+    subprocess = ai_cli_client_spawn(self, (const gchar * const *)argv,
+                                     flags, error);
 
     if (subprocess == NULL)
     {
@@ -1137,4 +1162,704 @@ ai_cli_client_chat_sync(
 
     response = klass->parse_json_output(self, stdout_data, error);
     return response;
+}
+
+/*
+ * Default spawn: honour "working-directory" and nothing else.
+ *
+ * A subclass overrides this only to add something to the launcher --- see
+ * AiOpenCodeClient, which sets OPENCODE_PERMISSION alongside --auto. Before
+ * this vfunc existed each wrapper carried its own near-identical copy, and
+ * the base's own chat_sync carried a fourth.
+ */
+static GSubprocess *
+ai_cli_client_real_spawn(
+    AiCliClient          *self,
+    const gchar * const  *argv,
+    GSubprocessFlags      flags,
+    GError              **error
+){
+    const gchar *cwd;
+
+    cwd = ai_cli_client_get_working_directory(self);
+
+    if (cwd != NULL && cwd[0] != '\0')
+    {
+        g_autoptr(GSubprocessLauncher) launcher = NULL;
+
+        launcher = g_subprocess_launcher_new(flags);
+        g_subprocess_launcher_set_cwd(launcher, cwd);
+
+        return g_subprocess_launcher_spawnv(launcher, argv, error);
+    }
+
+    return g_subprocess_newv(argv, flags, error);
+}
+
+/**
+ * ai_cli_client_events_to_delta:
+ * @events: (nullable) (element-type AiEvent): events from one parsed line
+ *
+ * Concatenates the text of every %AI_EVENT_TEXT_DELTA in @events.
+ *
+ * This is the inverse of the default @parse_stream_events, and it is what
+ * lets a subclass implement the richer vfunc as its single source of truth
+ * while still answering the older @parse_stream_line contract:
+ *
+ * |[<!-- language="C" -->
+ * static gboolean
+ * my_parse_stream_line (AiCliClient *c, const gchar *line, AiResponse *r,
+ *                       gchar **delta_text, GError **error)
+ * {
+ *     g_autoptr(GPtrArray) events =
+ *         g_ptr_array_new_with_free_func ((GDestroyNotify) ai_event_unref);
+ *
+ *     if (!my_parse_stream_events (c, line, r, events, error))
+ *         return FALSE;
+ *
+ *     *delta_text = ai_cli_client_events_to_delta (events);
+ *     return TRUE;
+ * }
+ * ]|
+ *
+ * Reasoning is deliberately excluded: the old contract's caller treats what
+ * it gets back as the answer.
+ *
+ * Returns: (transfer full) (nullable): the concatenated text, or %NULL when
+ *   there was none
+ */
+gchar *
+ai_cli_client_events_to_delta(GPtrArray *events)
+{
+    GString *acc;
+    guint i;
+
+    if (events == NULL || events->len == 0)
+    {
+        return NULL;
+    }
+
+    acc = g_string_new(NULL);
+
+    for (i = 0; i < events->len; i++)
+    {
+        AiEvent *event = g_ptr_array_index(events, i);
+
+        if (ai_event_get_kind(event) == AI_EVENT_TEXT_DELTA)
+        {
+            const gchar *text = ai_event_get_text(event);
+
+            if (text != NULL)
+            {
+                g_string_append(acc, text);
+            }
+        }
+    }
+
+    if (acc->len == 0)
+    {
+        g_string_free(acc, TRUE);
+        return NULL;
+    }
+
+    return g_string_free(acc, FALSE);
+}
+
+/**
+ * ai_cli_client_spawn:
+ * @self: an #AiCliClient
+ * @argv: (array zero-terminated=1): the command line, argv[0] already resolved
+ * @flags: subprocess flags
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Launches the CLI through the @spawn vfunc.
+ *
+ * Returns: (transfer full) (nullable): the child, or %NULL on error
+ */
+GSubprocess *
+ai_cli_client_spawn(
+    AiCliClient          *self,
+    const gchar * const  *argv,
+    GSubprocessFlags      flags,
+    GError              **error
+){
+    AiCliClientClass *klass;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+    g_return_val_if_fail(argv != NULL, NULL);
+
+    klass = AI_CLI_CLIENT_GET_CLASS(self);
+    g_return_val_if_fail(klass->spawn != NULL, NULL);
+
+    return klass->spawn(self, argv, flags, error);
+}
+
+/*
+ * Default parse_stream_events: delegate to the older parse_stream_line and
+ * wrap whatever delta it produced in a text event.
+ *
+ * This is what keeps a subclass that has not been migrated working. It can
+ * only ever report text, which is exactly how every CLI wrapper behaved
+ * before events existed, so the fallback is a faithful one.
+ */
+static gboolean
+ai_cli_client_real_parse_stream_events(
+    AiCliClient  *self,
+    const gchar  *line,
+    AiResponse   *response,
+    GPtrArray    *out_events,
+    GError      **error
+){
+    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
+    g_autofree gchar *delta_text = NULL;
+
+    if (klass->parse_stream_line == NULL)
+    {
+        return TRUE;
+    }
+
+    if (!klass->parse_stream_line(self, line, response, &delta_text, error))
+    {
+        return FALSE;
+    }
+
+    if (delta_text != NULL && delta_text[0] != '\0')
+    {
+        g_ptr_array_add(out_events, ai_event_new_text_delta(delta_text));
+    }
+
+    return TRUE;
+}
+
+/*
+ * State for one streaming run.
+ *
+ * This used to be duplicated, near-verbatim, in the claude-code, opencode
+ * and grok-build clients. They had already drifted: only grok-build failed
+ * the task on a mid-stream parse error, and none of the three enforced
+ * "process-timeout-ms" the way the synchronous path does. Both behaviours
+ * are now uniform because there is only one copy left.
+ */
+typedef struct
+{
+    AiCliClient      *client;
+    GTask            *task;
+    GSubprocess      *subprocess;
+    GDataInputStream *data_stream;
+    GCancellable     *cancellable;
+    AiResponse       *response;
+    GString          *accumulated_text;
+    gboolean          stream_started;
+    gboolean          finished;
+
+    /*
+     * Whether a read_line_async is outstanding, which decides who frees
+     * this. The deadline can complete the task while a read is still in
+     * flight; freeing here would leave that read's callback holding a
+     * dangling pointer, so it is left to the callback instead.
+     */
+    gboolean          read_pending;
+
+    gchar            *stdin_data;
+    guint             timeout_id;
+} StreamRun;
+
+static void stream_run_read_next(StreamRun *run);
+
+static void
+stream_run_free(StreamRun *run)
+{
+    if (run->timeout_id != 0)
+    {
+        g_source_remove(run->timeout_id);
+        run->timeout_id = 0;
+    }
+
+    g_clear_object(&run->task);
+    g_clear_object(&run->client);
+    g_clear_object(&run->subprocess);
+    g_clear_object(&run->data_stream);
+    g_clear_object(&run->cancellable);
+    g_clear_object(&run->response);
+    g_clear_pointer(&run->stdin_data, g_free);
+
+    if (run->accumulated_text != NULL)
+    {
+        g_string_free(run->accumulated_text, TRUE);
+    }
+
+    g_slice_free(StreamRun, run);
+}
+
+/*
+ * Complete the task exactly once.
+ *
+ * The deadline, a read error and EOF can all reach for the task, and racing
+ * them would return it twice. Taking @error means the caller can hand over a
+ * failure without also having to remember to free it.
+ *
+ * Freeing is conditional on there being no outstanding read. The deadline
+ * fires while one is always in flight -- that is what it is waiting on --
+ * and force-exiting the child makes that read complete with EOF moments
+ * later. Freeing here would hand that callback a dangling pointer, so the
+ * callback frees instead, having seen @finished already set.
+ */
+static void
+stream_run_finish_once(
+    StreamRun  *run,
+    AiResponse *response,
+    GError     *error
+){
+    if (run->finished)
+    {
+        g_clear_error(&error);
+        g_clear_object(&response);
+        return;
+    }
+
+    run->finished = TRUE;
+
+    if (error != NULL)
+    {
+        g_task_return_error(run->task, error);
+        g_clear_object(&response);
+    }
+    else
+    {
+        g_task_return_pointer(run->task, response, g_object_unref);
+    }
+
+    if (!run->read_pending)
+    {
+        stream_run_free(run);
+    }
+}
+
+/*
+ * The wall-clock deadline for one streaming run.
+ *
+ * The synchronous path has always enforced "process-timeout-ms"; the three
+ * streaming readers never did, so a CLI blocked on a half-open connection
+ * would hold the stream open indefinitely. The child is killed so it cannot
+ * outlive the task that was waiting on it.
+ */
+static gboolean
+on_stream_timeout(gpointer user_data)
+{
+    StreamRun *run = user_data;
+    GError *error;
+
+    run->timeout_id = 0;
+
+    error = g_error_new(AI_ERROR, AI_ERROR_TIMEOUT,
+                        "CLI process exceeded its %d ms deadline",
+                        ai_cli_client_get_process_timeout_ms(run->client));
+
+    g_subprocess_force_exit(run->subprocess);
+    stream_run_finish_once(run, NULL, error);
+
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * Turn one parsed event into the side effects a subscriber expects.
+ *
+ * Every event goes out on ::event. Text, tool use and the stream boundaries
+ * additionally fire the older signals, so code written against "delta"
+ * keeps working -- and "tool-use", which was declared on both AiCliClient
+ * and AiStreamable but emitted by nothing, finally fires.
+ */
+static void
+stream_run_dispatch_event(
+    StreamRun *run,
+    AiEvent   *event
+){
+    AiEventKind kind = ai_event_get_kind(event);
+    const gchar *text;
+
+    if (!run->stream_started &&
+        (kind == AI_EVENT_TEXT_DELTA || kind == AI_EVENT_STREAM_START))
+    {
+        run->stream_started = TRUE;
+        g_signal_emit(run->client, signals[SIGNAL_STREAM_START], 0);
+    }
+
+    ai_event_source_emit(AI_EVENT_SOURCE(run->client), event);
+
+    switch (kind)
+    {
+        case AI_EVENT_TEXT_DELTA:
+            text = ai_event_get_text(event);
+
+            if (text != NULL && text[0] != '\0')
+            {
+                g_string_append(run->accumulated_text, text);
+                g_signal_emit(run->client, signals[SIGNAL_DELTA], 0, text);
+            }
+            break;
+
+        case AI_EVENT_TOOL_STARTED:
+            if (ai_event_get_tool_use(event) != NULL)
+            {
+                g_signal_emit(run->client, signals[SIGNAL_TOOL_USE], 0,
+                              ai_event_get_tool_use(event));
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/*
+ * EOF: the child closed stdout, so the turn is over.
+ *
+ * The accumulated text becomes a content block only when the parser did not
+ * already add one. A parser that assembled the response itself -- from a
+ * "result" envelope, say -- must not have the deltas appended a second time.
+ */
+static void
+stream_run_complete(StreamRun *run)
+{
+    g_autoptr(AiEvent) end_event = NULL;
+
+    if (run->response == NULL)
+    {
+        stream_run_finish_once(run, NULL,
+            g_error_new_literal(AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Stream ended without a valid response"));
+        return;
+    }
+
+    if (run->accumulated_text->len > 0 &&
+        ai_response_get_content_blocks(run->response) == NULL)
+    {
+        g_autoptr(AiTextContent) content =
+            ai_text_content_new(run->accumulated_text->str);
+
+        ai_response_add_content_block(run->response,
+            (AiContentBlock *)g_steal_pointer(&content));
+    }
+
+    end_event = ai_event_new(AI_EVENT_STREAM_END);
+    ai_event_source_emit(AI_EVENT_SOURCE(run->client), end_event);
+
+    g_signal_emit(run->client, signals[SIGNAL_STREAM_END], 0, run->response);
+
+    stream_run_finish_once(run, g_object_ref(run->response), NULL);
+}
+
+static void
+on_stream_line_read(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    StreamRun *run = user_data;
+    g_autoptr(GPtrArray) events = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *line = NULL;
+    AiCliClientClass *klass;
+    gboolean (*parse) (AiCliClient *, const gchar *, AiResponse *,
+                       GPtrArray *, GError **);
+    gsize length;
+    guint i;
+
+    (void)source;
+
+    run->read_pending = FALSE;
+
+    /*
+     * The task was already completed -- by the deadline, which then killed
+     * the child, producing the EOF or error being reported now. This
+     * callback is the last thing holding the run, so it does the freeing.
+     */
+    if (run->finished)
+    {
+        stream_run_free(run);
+        return;
+    }
+
+    line = g_data_input_stream_read_line_finish(run->data_stream, result,
+                                                &length, &error);
+
+    if (error != NULL)
+    {
+        stream_run_finish_once(run, NULL, g_steal_pointer(&error));
+        return;
+    }
+
+    if (line == NULL)
+    {
+        stream_run_complete(run);
+        return;
+    }
+
+    events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+    klass = AI_CLI_CLIENT_GET_CLASS(run->client);
+
+    /*
+     * NULL is a documented value for this vfunc, so honour it rather than
+     * trusting that class_init's default survived: a subclass may clear the
+     * slot deliberately to opt back into the text-only contract.
+     */
+    parse = klass->parse_stream_events != NULL
+        ? klass->parse_stream_events
+        : ai_cli_client_real_parse_stream_events;
+
+    if (!parse(run->client, line, run->response, events, &error))
+    {
+        /*
+         * The CLI reported an error mid-stream. Fail rather than reading on
+         * to EOF and returning the empty response that would produce.
+         */
+        if (error == NULL)
+        {
+            error = g_error_new_literal(AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+                                        "Failed to parse CLI stream output");
+        }
+
+        stream_run_finish_once(run, NULL, g_steal_pointer(&error));
+        return;
+    }
+
+    for (i = 0; i < events->len; i++)
+    {
+        stream_run_dispatch_event(run, (AiEvent *)g_ptr_array_index(events, i));
+    }
+
+    stream_run_read_next(run);
+}
+
+static void
+stream_run_read_next(StreamRun *run)
+{
+    run->read_pending = TRUE;
+
+    g_data_input_stream_read_line_async(
+        run->data_stream,
+        G_PRIORITY_DEFAULT,
+        run->cancellable,
+        on_stream_line_read,
+        run);
+}
+
+/*
+ * Write the prompt into the child and start reading its stdout.
+ *
+ * The stdin pipe is closed straight after writing: a CLI reading the prompt
+ * back through --prompt-file /dev/stdin needs the EOF to know it is
+ * complete, and would otherwise wait forever for more.
+ */
+static void
+stream_run_start(StreamRun *run)
+{
+    g_autoptr(GError) error = NULL;
+    GInputStream *stdout_stream;
+    GOutputStream *stdin_stream;
+    gint timeout_ms;
+
+    if (run->stdin_data != NULL)
+    {
+        stdin_stream = g_subprocess_get_stdin_pipe(run->subprocess);
+
+        if (stdin_stream != NULL)
+        {
+            g_output_stream_write_all(stdin_stream,
+                                      run->stdin_data,
+                                      strlen(run->stdin_data),
+                                      NULL, NULL, &error);
+            g_output_stream_close(stdin_stream, NULL, NULL);
+        }
+
+        if (error != NULL)
+        {
+            stream_run_finish_once(run, NULL, g_steal_pointer(&error));
+            return;
+        }
+    }
+
+    stdout_stream = g_subprocess_get_stdout_pipe(run->subprocess);
+
+    if (stdout_stream == NULL)
+    {
+        stream_run_finish_once(run, NULL,
+            g_error_new_literal(AI_ERROR, AI_ERROR_CLI_EXECUTION,
+                                "Failed to get subprocess stdout"));
+        return;
+    }
+
+    run->data_stream = g_data_input_stream_new(stdout_stream);
+    g_data_input_stream_set_newline_type(run->data_stream,
+                                         G_DATA_STREAM_NEWLINE_TYPE_ANY);
+
+    /*
+     * No line-length cap is needed: g_data_input_stream_read_line() doubles
+     * its buffer until it finds the newline, and a single assistant message
+     * carrying a large content array routinely exceeds the 4 KiB default.
+     */
+
+    run->response = ai_response_new("", ai_cli_client_get_model(run->client));
+    run->accumulated_text = g_string_new("");
+
+    timeout_ms = ai_cli_client_get_process_timeout_ms(run->client);
+
+    if (timeout_ms > 0)
+    {
+        /*
+         * Attached to the thread-default context, not the global default
+         * g_timeout_add() would use: a caller driving this from a nested
+         * loop on a private context would never see a global-default timer.
+         */
+        GSource *source = g_timeout_source_new(timeout_ms);
+
+        g_source_set_callback(source, on_stream_timeout, run, NULL);
+        run->timeout_id = g_source_attach(source,
+                                          g_main_context_get_thread_default());
+        g_source_unref(source);
+    }
+
+    stream_run_read_next(run);
+}
+
+/**
+ * ai_cli_client_stream_run_async:
+ * @self: an #AiCliClient
+ * @messages: (element-type AiMessage): the conversation messages
+ * @system_prompt: (nullable): system prompt to use
+ * @max_tokens: maximum tokens to generate
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): called when the stream ends
+ * @user_data: user data for @callback
+ *
+ * Spawns the CLI in streaming mode and reads its NDJSON output line by line,
+ * translating each line through the @parse_stream_events vfunc and
+ * publishing the results.
+ *
+ * This is the whole streaming implementation for a CLI provider. A subclass
+ * implements #AiStreamable by forwarding to it:
+ *
+ * |[<!-- language="C" -->
+ * static void
+ * my_client_chat_stream_async (AiStreamable *streamable, GList *messages,
+ *                              const gchar *system_prompt, gint max_tokens,
+ *                              GList *tools, GCancellable *cancellable,
+ *                              GAsyncReadyCallback callback, gpointer user_data)
+ * {
+ *     ai_cli_client_stream_run_async (AI_CLI_CLIENT (streamable), messages,
+ *                                     system_prompt, max_tokens,
+ *                                     cancellable, callback, user_data);
+ * }
+ * ]|
+ *
+ * Along the way it emits #AiEventSource::event for every event, and the
+ * older #AiCliClient::delta, ::stream-start, ::stream-end and ::tool-use
+ * signals for the ones those cover.
+ */
+void
+ai_cli_client_stream_run_async(
+    AiCliClient         *self,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    AiCliClientClass *klass;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *executable = NULL;
+    g_auto(GStrv) argv = NULL;
+    g_autoptr(GSubprocess) subprocess = NULL;
+    gchar *stdin_data = NULL;
+    StreamRun *run;
+    GTask *task;
+    GSubprocessFlags flags;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    klass = AI_CLI_CLIENT_GET_CLASS(self);
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    executable = ai_cli_client_resolve_executable(self, &error);
+    if (executable == NULL)
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        g_object_unref(task);
+        return;
+    }
+
+    if (klass->build_argv == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "%s does not implement build_argv",
+                                G_OBJECT_TYPE_NAME(self));
+        g_object_unref(task);
+        return;
+    }
+
+    argv = klass->build_argv(self, messages, system_prompt, max_tokens, TRUE);
+    if (argv == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Failed to build command line arguments");
+        g_object_unref(task);
+        return;
+    }
+
+    if (klass->build_stdin != NULL)
+    {
+        stdin_data = klass->build_stdin(self, messages);
+    }
+
+    /* build_argv leaves a placeholder in argv[0]; the resolved path wins. */
+    g_free(argv[0]);
+    argv[0] = g_steal_pointer(&executable);
+
+    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
+    if (stdin_data != NULL)
+    {
+        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
+    }
+
+    subprocess = ai_cli_client_spawn(self, (const gchar * const *)argv,
+                                     flags, &error);
+    if (subprocess == NULL)
+    {
+        g_free(stdin_data);
+        g_task_return_error(task, g_steal_pointer(&error));
+        g_object_unref(task);
+        return;
+    }
+
+    run = g_slice_new0(StreamRun);
+    run->client = g_object_ref(self);
+    run->task = task;
+    run->subprocess = g_object_ref(subprocess);
+    run->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
+    run->stdin_data = stdin_data;   /* ownership transferred */
+
+    stream_run_start(run);
+}
+
+/**
+ * ai_cli_client_stream_run_finish:
+ * @self: an #AiCliClient
+ * @result: the #GAsyncResult
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Finishes an ai_cli_client_stream_run_async() call.
+ *
+ * Returns: (transfer full) (nullable): the assembled #AiResponse, or %NULL
+ */
+AiResponse *
+ai_cli_client_stream_run_finish(
+    AiCliClient   *self,
+    GAsyncResult  *result,
+    GError       **error
+){
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+    g_return_val_if_fail(g_task_is_valid(result, self), NULL);
+
+    return g_task_propagate_pointer(G_TASK(result), error);
 }

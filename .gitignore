@@ -66,3 +66,6 @@ ai-glib-*.pc
 *.gcda
 *.gcno
 coverage/
+
+# Worktrees for feature and bugfix work.
+trees/

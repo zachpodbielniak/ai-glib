@@ -15,8 +15,10 @@
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-launch.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-tool-result.h"
 
 /*
  * Private structure for AiClaudeCodeClient.
@@ -608,39 +610,6 @@ emit_session_args(AiClaudeCodeClient *self, GPtrArray *args)
 }
 
 /*
- * Spawn with the client's working directory applied.
- *
- * AiCliClient already does this (ai-cli-client.c), but this client builds and
- * spawns its own argv, and for a long time it did so with a bare
- * g_subprocess_newv() -- so working-directory was accepted, stored, and had
- * no effect. Callers that named a directory to bound what the CLI could
- * reach got the directory the parent process happened to be started in.
- */
-static GSubprocess *
-claude_code_spawn(
-    AiClaudeCodeClient   *self,
-    const gchar * const  *argv,
-    GSubprocessFlags      flags,
-    GError              **error
-){
-    const gchar *cwd;
-
-    cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
-
-    if (cwd != NULL && cwd[0] != '\0')
-    {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_set_cwd(launcher, cwd);
-
-        return g_subprocess_launcher_spawnv(launcher, argv, error);
-    }
-
-    return g_subprocess_newv(argv, flags, error);
-}
-
-/*
  * Get the executable path for the claude CLI.
  *
  * For a normal model this is the CLAUDE_CODE_PATH env override, else
@@ -926,7 +895,9 @@ ai_claude_code_client_parse_json_output(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /* NULL root: see the note in the streaming parser. */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         g_set_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
                     "Expected JSON object in CLI output");
@@ -1008,18 +979,283 @@ ai_claude_code_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Type-checked JSON accessors.
  *
- * Streaming events:
- * {"type": "assistant", "message": {"type": "text", "text": "..."}} -> emit delta
- * {"type": "result", ...} -> final usage/session info
+ * json-glib's *_member_with_default() emit a critical when the member is
+ * present but of another type, and subprocess stdout is untrusted input --
+ * a CLI that changed a field from a number to a string could abort a
+ * fatal-warnings run rather than being ignored. Same reasoning as the
+ * grok_get_* helpers; keep new fields on these.
+ */
+static const gchar *
+cc_get_string(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_STRING)
+        return NULL;
+
+    return json_node_get_string(node);
+}
+
+static JsonObject *
+cc_get_object(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
+        return NULL;
+
+    return json_node_get_object(node);
+}
+
+static JsonArray *
+cc_get_array(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_ARRAY(node))
+        return NULL;
+
+    return json_node_get_array(node);
+}
+
+static gint64
+cc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return json_node_get_int(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return (gint64)json_node_get_double(node);
+
+    return fallback;
+}
+
+static gdouble
+cc_get_double(JsonObject *obj, const gchar *member, gdouble fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return json_node_get_double(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return (gdouble)json_node_get_int(node);
+
+    return fallback;
+}
+
+static gboolean
+cc_get_boolean(JsonObject *obj, const gchar *member, gboolean fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_BOOLEAN)
+        return fallback;
+
+    return json_node_get_boolean(node);
+}
+
+/*
+ * Emit one Anthropic content block as events.
+ *
+ * The three kinds are kept apart deliberately. Text is the answer; thinking
+ * is not, and used to be dropped here on exactly that reasoning -- it is now
+ * reported under its own kind so a frontend can show what a caller
+ * assembling the answer must still exclude. tool_use was dropped too, under
+ * a comment saying the caller handled it, and no caller did.
+ */
+static void
+cc_emit_content_block(
+    JsonObject *block,
+    GPtrArray  *out_events
+){
+    const gchar *block_type;
+
+    if (block == NULL)
+        return;
+
+    block_type = cc_get_string(block, "type");
+
+    if (g_strcmp0(block_type, "text") == 0)
+    {
+        const gchar *text = cc_get_string(block, "text");
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+    }
+    else if (g_strcmp0(block_type, "thinking") == 0)
+    {
+        const gchar *text = cc_get_string(block, "thinking");
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_thinking_delta(text));
+    }
+    else if (g_strcmp0(block_type, "tool_use") == 0)
+    {
+        const gchar *id = cc_get_string(block, "id");
+        const gchar *name = cc_get_string(block, "name");
+        JsonNode *input;
+        g_autoptr(AiToolUse) tool_use = NULL;
+
+        if (name == NULL || name[0] == '\0')
+            return;
+
+        input = json_object_has_member(block, "input")
+            ? json_object_get_member(block, "input")
+            : NULL;
+
+        tool_use = ai_tool_use_new(id != NULL ? id : "", name,
+                                   input);
+
+        g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+    }
+    else if (g_strcmp0(block_type, "tool_result") == 0)
+    {
+        /*
+         * The CLI reports results on a "user" line, because that is how the
+         * transcript models a tool answering the model. Its content is
+         * either a plain string or an array of blocks.
+         */
+        const gchar *id = cc_get_string(block, "tool_use_id");
+        gboolean is_error = cc_get_boolean(block, "is_error", FALSE);
+        g_autoptr(GString) text = g_string_new(NULL);
+        g_autoptr(AiToolResult) result = NULL;
+        JsonNode *content;
+
+        content = json_object_has_member(block, "content")
+            ? json_object_get_member(block, "content")
+            : NULL;
+
+        if (content != NULL && JSON_NODE_HOLDS_VALUE(content) &&
+            json_node_get_value_type(content) == G_TYPE_STRING)
+        {
+            g_string_append(text, json_node_get_string(content));
+        }
+        else if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+        {
+            JsonArray *parts = json_node_get_array(content);
+            guint n = json_array_get_length(parts);
+            guint i;
+
+            for (i = 0; i < n; i++)
+            {
+                JsonNode *pn = json_array_get_element(parts, i);
+                const gchar *part_text;
+
+                if (pn == NULL || !JSON_NODE_HOLDS_OBJECT(pn))
+                    continue;
+
+                part_text = cc_get_string(json_node_get_object(pn), "text");
+
+                if (part_text != NULL)
+                    g_string_append(text, part_text);
+            }
+        }
+
+        result = ai_tool_result_new(id != NULL ? id : "", text->str, is_error);
+        g_ptr_array_add(out_events, ai_event_new_tool_finished(NULL, result));
+    }
+}
+
+/*
+ * Walk the content array of an Anthropic message, emitting each block.
+ */
+static void
+cc_emit_message_content(
+    JsonObject *message,
+    GPtrArray  *out_events
+){
+    JsonArray *blocks;
+    guint n;
+    guint i;
+
+    blocks = cc_get_array(message, "content");
+
+    if (blocks == NULL)
+        return;
+
+    n = json_array_get_length(blocks);
+
+    for (i = 0; i < n; i++)
+    {
+        JsonNode *bn = json_array_get_element(blocks, i);
+
+        if (bn != NULL && JSON_NODE_HOLDS_OBJECT(bn))
+            cc_emit_content_block(json_node_get_object(bn), out_events);
+    }
+}
+
+/*
+ * Parse a single NDJSON line from `claude --print --output-format stream-json`
+ * into events.
+ *
+ * The lines that matter:
+ *   {"type":"system","subtype":"init",...}  -> STATUS
+ *   {"type":"assistant","message":{...}}    -> text / thinking / tool_use
+ *   {"type":"user","message":{...}}         -> tool_result
+ *   {"type":"stream_event","event":{...}}   -> token-level deltas, only with
+ *                                              --include-partial-messages
+ *   {"type":"result",...}                   -> session, usage, cost
+ *
+ * Reading msg_obj->text instead of walking message.content once found
+ * nothing on every event, so a streamed reply arrived empty while the run
+ * itself reported success. The content array is the shape the CLI actually
+ * emits.
+ *
+ * When --include-partial-messages is on, both stream_event and the
+ * whole-message assistant line describe the same text. Only the deltas are
+ * taken as text; the whole message is still walked for its tool_use blocks,
+ * which appear nowhere else, and TOOL_STARTED may therefore be emitted twice
+ * for one id -- consumers key on the id and update.
  */
 static gboolean
-ai_claude_code_client_parse_stream_line(
+ai_claude_code_client_parse_stream_events(
     AiCliClient  *client,
     const gchar  *line,
     AiResponse   *response,
-    gchar       **delta_text,
+    GPtrArray    *out_events,
     GError      **error
 ){
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
@@ -1027,8 +1263,6 @@ ai_claude_code_client_parse_stream_line(
     JsonNode *root;
     JsonObject *obj;
     const gchar *type;
-
-    *delta_text = NULL;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -1044,116 +1278,206 @@ ai_claude_code_client_parse_stream_line(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
 
     obj = json_node_get_object(root);
-    type = json_object_get_string_member_with_default(obj, "type", "");
+    type = cc_get_string(obj, "type");
 
-    if (g_strcmp0(type, "assistant") == 0)
+    if (g_strcmp0(type, "system") == 0)
     {
-        /* Text delta */
-        if (json_object_has_member(obj, "message"))
+        const gchar *subtype = cc_get_string(obj, "subtype");
+        const gchar *session_id = cc_get_string(obj, "session_id");
+
+        /*
+         * The init line is the first thing a run says, and carries the
+         * session id well before the result line does. Capturing it here
+         * means a run interrupted mid-turn can still be resumed.
+         */
+        if (session_id != NULL && session_id[0] != '\0' &&
+            ai_cli_client_get_session_persistence(client))
         {
-            JsonObject *msg_obj = json_object_get_object_member(obj, "message");
-            const gchar *msg_type = json_object_get_string_member_with_default(msg_obj, "type", "");
+            ai_cli_client_set_session_id(client, session_id);
+        }
 
-            if (g_strcmp0(msg_type, "text") == 0)
+        if (subtype != NULL && subtype[0] != '\0')
+        {
+            g_autofree gchar *text = g_strdup_printf("claude: %s", subtype);
+            g_ptr_array_add(out_events, ai_event_new_status(text));
+        }
+    }
+    else if (g_strcmp0(type, "assistant") == 0)
+    {
+        JsonObject *msg_obj = cc_get_object(obj, "message");
+        const gchar *msg_type;
+
+        if (msg_obj == NULL)
+            return TRUE;
+
+        msg_type = cc_get_string(msg_obj, "type");
+
+        if (g_strcmp0(msg_type, "text") == 0)
+        {
+            /* Flat shape: {"message": {"type": "text", "text": ...}} */
+            const gchar *text = cc_get_string(msg_obj, "text");
+
+            if (text != NULL && text[0] != '\0')
+                g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+        }
+        else
+        {
+            cc_emit_message_content(msg_obj, out_events);
+        }
+    }
+    else if (g_strcmp0(type, "user") == 0)
+    {
+        /* Tool results come back as a user message full of tool_result. */
+        JsonObject *msg_obj = cc_get_object(obj, "message");
+
+        if (msg_obj != NULL)
+            cc_emit_message_content(msg_obj, out_events);
+    }
+    else if (g_strcmp0(type, "stream_event") == 0)
+    {
+        JsonObject *event = cc_get_object(obj, "event");
+        const gchar *event_type;
+
+        if (event == NULL)
+            return TRUE;
+
+        event_type = cc_get_string(event, "type");
+
+        if (g_strcmp0(event_type, "content_block_start") == 0)
+        {
+            JsonObject *block = cc_get_object(event, "content_block");
+
+            if (block != NULL &&
+                g_strcmp0(cc_get_string(block, "type"), "tool_use") == 0)
+                cc_emit_content_block(block, out_events);
+        }
+        else if (g_strcmp0(event_type, "content_block_delta") == 0)
+        {
+            JsonObject *delta = cc_get_object(event, "delta");
+            const gchar *delta_type;
+
+            if (delta == NULL)
+                return TRUE;
+
+            delta_type = cc_get_string(delta, "type");
+
+            if (g_strcmp0(delta_type, "text_delta") == 0)
             {
-                /* Flat shape: {"message": {"type": "text", "text": ...}} */
-                const gchar *text = json_object_get_string_member_with_default(msg_obj, "text", "");
-                *delta_text = g_strdup(text);
+                const gchar *text = cc_get_string(delta, "text");
+
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events, ai_event_new_text_delta(text));
             }
-            else if (json_object_has_member(msg_obj, "content"))
+            else if (g_strcmp0(delta_type, "thinking_delta") == 0)
             {
-                /*
-                 * What the CLI actually emits: an Anthropic message whose
-                 * "type" is "message" and whose text lives in a "content"
-                 * array of blocks.  Reading msg_obj->text instead found
-                 * nothing on every event, so a streamed reply arrived
-                 * empty while the run itself reported success.
-                 *
-                 * Only "text" blocks are emitted as deltas.  A "thinking"
-                 * block is not the answer, and "tool_use" is handled by
-                 * the caller.
-                 */
-                JsonNode *content = json_object_get_member(msg_obj, "content");
+                const gchar *text = cc_get_string(delta, "thinking");
 
-                if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
-                {
-                    JsonArray *blocks = json_node_get_array(content);
-                    guint n = json_array_get_length(blocks);
-                    GString *acc = g_string_new(NULL);
-                    guint i;
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events,
+                                    ai_event_new_thinking_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "input_json_delta") == 0)
+            {
+                const gchar *fragment = cc_get_string(delta, "partial_json");
 
-                    for (i = 0; i < n; i++)
-                    {
-                        JsonNode *bn = json_array_get_element(blocks, i);
-                        JsonObject *b;
-                        const gchar *bt;
-
-                        if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn)) continue;
-                        b = json_node_get_object(bn);
-                        bt = json_object_get_string_member_with_default(b, "type", "");
-                        if (g_strcmp0(bt, "text") == 0)
-                        {
-                            g_string_append(
-                                acc,
-                                json_object_get_string_member_with_default(
-                                    b, "text", ""));
-                        }
-                    }
-
-                    if (acc->len > 0)
-                        *delta_text = g_string_free(acc, FALSE);
-                    else
-                        g_string_free(acc, TRUE);
-                }
+                if (fragment != NULL && fragment[0] != '\0')
+                    g_ptr_array_add(
+                        out_events,
+                        ai_event_new_tool_input_delta(NULL, fragment));
             }
         }
     }
     else if (g_strcmp0(type, "result") == 0)
     {
-        /* Final result with usage info */
-        const gchar *result_text = json_object_get_string_member_with_default(obj, "result", "");
-        const gchar *session_id = json_object_get_string_member_with_default(obj, "session_id", "");
+        const gchar *result_text = cc_get_string(obj, "result");
+        const gchar *session_id = cc_get_string(obj, "session_id");
+        JsonObject *usage_obj;
+        gdouble cost;
 
         /* Store session ID - ONLY if persistence is enabled */
-        if (session_id[0] != '\0' && ai_cli_client_get_session_persistence(client))
+        if (session_id != NULL && session_id[0] != '\0' &&
+            ai_cli_client_get_session_persistence(client))
         {
             ai_cli_client_set_session_id(client, session_id);
         }
 
         /* Add final text content to response if not already added via deltas */
-        if (result_text[0] != '\0' && ai_response_get_content_blocks(response) == NULL)
+        if (result_text != NULL && result_text[0] != '\0' &&
+            ai_response_get_content_blocks(response) == NULL)
         {
             g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
-            ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
+            ai_response_add_content_block(response,
+                (AiContentBlock *)g_steal_pointer(&content));
         }
 
         /* Update usage and check for context compaction */
-        if (json_object_has_member(obj, "usage"))
+        usage_obj = cc_get_object(obj, "usage");
+        cost = cc_get_double(obj, "total_cost_usd", -1.0);
+
+        if (usage_obj != NULL)
         {
-            JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
-            gint input_tokens = json_object_get_int_member_with_default(usage_obj, "input_tokens", 0);
-            gint output_tokens = json_object_get_int_member_with_default(usage_obj, "output_tokens", 0);
+            gint input_tokens = (gint)cc_get_int(usage_obj, "input_tokens", 0);
+            gint output_tokens = (gint)cc_get_int(usage_obj, "output_tokens", 0);
             g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
             ai_response_set_usage(response, usage);
             check_and_emit_compaction(self, input_tokens);
+
+            g_ptr_array_add(out_events,
+                ai_event_new_usage(usage,
+                    cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
         }
 
         /* Store total cost */
-        if (json_object_has_member(obj, "total_cost_usd"))
+        if (cost >= 0.0)
         {
-            self->total_cost = json_object_get_double_member(obj, "total_cost_usd");
+            self->total_cost = cost;
         }
 
         ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
     }
 
+    return TRUE;
+}
+
+/*
+ * The pre-event contract, kept because callers and tests still use it.
+ * A projection of parse_stream_events rather than a second implementation,
+ * so the two can never disagree about what a line meant.
+ */
+static gboolean
+ai_claude_code_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_claude_code_client_parse_stream_events(client, line, response,
+                                                   events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
     return TRUE;
 }
 
@@ -1205,6 +1529,7 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;
     cli_class->parse_stream_line = ai_claude_code_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_claude_code_client_parse_stream_events;
 
     /**
      * AiClaudeCodeClient:total-cost:
@@ -1896,8 +2221,8 @@ attempt_text_retry(
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);
 
-    rproc = claude_code_spawn(
-        client,
+    rproc = ai_cli_client_spawn(
+        AI_CLI_CLIENT(client),
         (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
@@ -2084,7 +2409,8 @@ ai_claude_code_client_chat_async(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = claude_code_spawn(self, (const gchar * const *)argv,
+    subprocess = ai_cli_client_spawn(AI_CLI_CLIENT(self),
+                                     (const gchar * const *)argv,
                                    flags, &error);
     if (subprocess == NULL)
     {
@@ -2168,191 +2494,12 @@ ai_claude_code_client_provider_init(AiProviderInterface *iface)
 
 /*
  * AiStreamable interface implementation
+ *
+ * The read loop lives in AiCliClient. All this client contributes is the
+ * translation from its wire format into events -- the parse_stream_events
+ * vfunc above. Spawning, line reading, signal emission, the deadline and
+ * the response assembly are shared with every other CLI wrapper.
  */
-
-typedef struct
-{
-    AiClaudeCodeClient *client;
-    GTask              *task;
-    GSubprocess        *subprocess;
-    GDataInputStream   *data_stream;
-    GCancellable       *cancellable;
-    AiResponse         *response;
-    GString            *accumulated_text;
-    gboolean            stream_started;
-    gchar              *stdin_data;
-} StreamAsyncData;
-
-static void
-stream_async_data_free(StreamAsyncData *data)
-{
-    g_clear_object(&data->task);
-    g_clear_object(&data->client);
-    g_clear_object(&data->subprocess);
-    g_clear_object(&data->data_stream);
-    g_clear_object(&data->cancellable);
-    g_clear_object(&data->response);
-    g_clear_pointer(&data->stdin_data, g_free);
-
-    if (data->accumulated_text != NULL)
-    {
-        g_string_free(data->accumulated_text, TRUE);
-    }
-
-    g_slice_free(StreamAsyncData, data);
-}
-
-static void read_next_stream_line(StreamAsyncData *data);
-
-static void
-on_stream_line_read(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = NULL;
-    g_autofree gchar *delta_text = NULL;
-    AiCliClientClass *klass;
-    gsize length;
-
-    (void)source;
-
-    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
-
-    if (error != NULL)
-    {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-        }
-        return;
-    }
-
-    if (line == NULL)
-    {
-        /* EOF - stream is complete */
-        if (data->response != NULL)
-        {
-            /* Add accumulated text as content block if not already done */
-            if (data->accumulated_text != NULL && data->accumulated_text->len > 0 &&
-                ai_response_get_content_blocks(data->response) == NULL)
-            {
-                g_autoptr(AiTextContent) content = ai_text_content_new(data->accumulated_text->str);
-                ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
-            }
-
-            g_signal_emit_by_name(data->client, "stream-end", data->response);
-            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                                    "Stream ended without a valid response");
-        }
-
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Parse the line */
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    if (klass->parse_stream_line(AI_CLI_CLIENT(data->client), line, data->response,
-                                  &delta_text, &error))
-    {
-        if (delta_text != NULL && delta_text[0] != '\0')
-        {
-            /* Emit stream-start on first delta */
-            if (!data->stream_started)
-            {
-                data->stream_started = TRUE;
-                g_signal_emit_by_name(data->client, "stream-start");
-            }
-
-            /* Accumulate text */
-            g_string_append(data->accumulated_text, delta_text);
-
-            /* Emit delta signal */
-            g_signal_emit_by_name(data->client, "delta", delta_text);
-        }
-    }
-
-    /* Read next line */
-    read_next_stream_line(data);
-}
-
-static void
-read_next_stream_line(StreamAsyncData *data)
-{
-    g_data_input_stream_read_line_async(
-        data->data_stream,
-        G_PRIORITY_DEFAULT,
-        data->cancellable,
-        on_stream_line_read,
-        data);
-}
-
-static void
-on_stream_subprocess_started(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    GInputStream *stdout_stream;
-    GOutputStream *stdin_stream;
-
-    (void)source;
-    (void)result;
-
-    /*
-     * Write stdin data to the subprocess if provided, then close
-     * the stdin pipe so the CLI knows input is complete.
-     */
-    if (data->stdin_data != NULL)
-    {
-        stdin_stream = g_subprocess_get_stdin_pipe(data->subprocess);
-        if (stdin_stream != NULL)
-        {
-            g_output_stream_write_all(stdin_stream,
-                                       data->stdin_data,
-                                       strlen(data->stdin_data),
-                                       NULL, NULL, &error);
-            g_output_stream_close(stdin_stream, NULL, NULL);
-        }
-
-        if (error != NULL)
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-            return;
-        }
-    }
-
-    /* Get stdout pipe */
-    stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
-    if (stdout_stream == NULL)
-    {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "Failed to get subprocess stdout");
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Wrap in data input stream for line-by-line reading */
-    data->data_stream = g_data_input_stream_new(stdout_stream);
-    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
-
-    /* Create response object */
-    data->response = ai_response_new("", ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
-    data->accumulated_text = g_string_new("");
-
-    /* Start reading lines */
-    read_next_stream_line(data);
-}
 
 static void
 ai_claude_code_client_chat_stream_async(
@@ -2365,79 +2512,11 @@ ai_claude_code_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(streamable);
-    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *executable = NULL;
-    g_auto(GStrv) argv = NULL;
-    gchar *stdin_data = NULL;
-    g_autoptr(GSubprocess) subprocess = NULL;
-    StreamAsyncData *data;
-    GTask *task;
-    GSubprocessFlags flags;
-
     (void)tools;  /* Tools not yet supported via CLI */
 
-    task = g_task_new(self, cancellable, callback, user_data);
-
-    /* Resolve executable path */
-    executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
-    if (executable == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build command line arguments for streaming */
-    argv = klass->build_argv(AI_CLI_CLIENT(self), messages, system_prompt,
-                             max_tokens, TRUE);
-    if (argv == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build command line arguments");
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build stdin data if subclass provides it */
-    if (klass->build_stdin != NULL)
-    {
-        stdin_data = klass->build_stdin(AI_CLI_CLIENT(self), messages);
-    }
-
-    /* Replace first element with resolved executable path */
-    g_free(argv[0]);
-    argv[0] = g_steal_pointer(&executable);
-
-    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
-    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
-    if (stdin_data != NULL)
-    {
-        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
-    }
-
-    subprocess = claude_code_spawn(self, (const gchar * const *)argv,
-                                   flags, &error);
-    if (subprocess == NULL)
-    {
-        g_free(stdin_data);
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Set up callback data */
-    data = g_slice_new0(StreamAsyncData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->subprocess = g_object_ref(subprocess);
-    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
-    data->stream_started = FALSE;
-    data->stdin_data = stdin_data;  /* ownership transferred */
-
-    /* Write stdin and start reading stdout */
-    on_stream_subprocess_started(NULL, NULL, data);
+    ai_cli_client_stream_run_async(AI_CLI_CLIENT(streamable), messages,
+                                   system_prompt, max_tokens,
+                                   cancellable, callback, user_data);
 }
 
 static AiResponse *
@@ -2446,8 +2525,8 @@ ai_claude_code_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)streamable;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    return ai_cli_client_stream_run_finish(AI_CLI_CLIENT(streamable),
+                                           result, error);
 }
 
 static void

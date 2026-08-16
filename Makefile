@@ -43,11 +43,21 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-config.h \
 	$(SRCDIR)/core/ai-provider.h \
 	$(SRCDIR)/core/ai-streamable.h \
+	$(SRCDIR)/core/ai-event.h \
+	$(SRCDIR)/core/ai-event-source.h \
 	$(SRCDIR)/core/ai-image-capabilities.h \
 	$(SRCDIR)/core/ai-image-generator.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
+	$(SRCDIR)/view/ai-style.h \
+	$(SRCDIR)/view/ai-tool-call.h \
+	$(SRCDIR)/view/ai-tool-style.h \
+	$(SRCDIR)/view/ai-view-block.h \
+	$(SRCDIR)/view/ai-view-blocks.h \
+	$(SRCDIR)/view/ai-view-tool-block.h \
+	$(SRCDIR)/view/ai-transcript.h \
+	$(SRCDIR)/view/ai-conversation.h \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
@@ -78,6 +88,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/convenience/ai-brave-search.h \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.h \
 	$(SRCDIR)/convenience/ai-tool-executor.h \
+	$(SRCDIR)/convenience/ai-provider-factory.h \
 	$(SRCDIR)/agent/ai-agent-enums.h \
 	$(SRCDIR)/agent/ai-budget.h \
 	$(SRCDIR)/agent/ai-price-table.h \
@@ -96,12 +107,22 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \
 	$(SRCDIR)/core/ai-streamable.c \
+	$(SRCDIR)/core/ai-event.c \
+	$(SRCDIR)/core/ai-event-source.c \
 	$(SRCDIR)/core/ai-image-capabilities.c \
 	$(SRCDIR)/core/ai-image-generator.c \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
+	$(SRCDIR)/view/ai-style.c \
+	$(SRCDIR)/view/ai-tool-call.c \
+	$(SRCDIR)/view/ai-tool-style.c \
+	$(SRCDIR)/view/ai-view-block.c \
+	$(SRCDIR)/view/ai-view-blocks.c \
+	$(SRCDIR)/view/ai-view-tool-block.c \
+	$(SRCDIR)/view/ai-transcript.c \
+	$(SRCDIR)/view/ai-conversation.c \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
@@ -136,6 +157,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/convenience/ai-brave-search.c \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.c \
 	$(SRCDIR)/convenience/ai-tool-executor.c \
+	$(SRCDIR)/convenience/ai-provider-factory.c \
 	$(SRCDIR)/agent/ai-agent-enums.c \
 	$(SRCDIR)/agent/ai-budget.c \
 	$(SRCDIR)/agent/ai-price-table.c \
@@ -161,7 +183,19 @@ EXAMPLE_BINARIES = $(patsubst $(EXAMPLEDIR)/%.c,$(OUTDIR)/examples/%,$(EXAMPLE_S
 
 # Installable CLI binaries (e.g. the `ai` front-end)
 BIN_SOURCES = $(wildcard $(BINDIR)/*.c)
+
+# ai-tui needs ncursesw; without it, drop it rather than fail the build.
+ifneq ($(HAVE_NCURSES),1)
+BIN_SOURCES := $(filter-out $(BINDIR)/ai-tui.c,$(BIN_SOURCES))
+$(info Note: ncursesw not found, skipping ai-tui. Install ncurses-devel to build it.)
+endif
+
 BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
+
+# Target-specific, so only the one binary that needs a terminal library
+# links against one.
+$(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
+$(OUTDIR)/bin/ai-tui: LDFLAGS += $(NCURSES_LIBS)
 
 # Include common rules
 include rules.mk

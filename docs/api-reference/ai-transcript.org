@@ -1,0 +1,80 @@
+* AiTranscript
+=AiTranscript= is the buffer: an ordered, observable list of
+[[file:ai-view-block.org][AiViewBlock]]. It implements =GListModel=, which is
+what a frontend watches to keep a display in step with a conversation.
+
+It is the first =GListModel= in ai-glib, deliberately. =::items-changed=
+gives insertion and removal notification in the form every GLib consumer
+already knows, and a stable integer position is exactly what a frontend
+mapping blocks onto its own addressing --- regions of an Emacs buffer, rows
+of an ncurses pad --- needs to key on.
+
+** Functions
+#+begin_src C
+AiTranscript *ai_transcript_new (void);
+
+/* Takes a reference on @block and subscribes to its ::changed. */
+void ai_transcript_append (AiTranscript *self, AiViewBlock *block);
+
+/* Like g_list_model_get_item() but borrowed, for a look-and-forget. */
+AiViewBlock *ai_transcript_get_block (AiTranscript *self, guint position);
+
+/* The most recent block, or NULL. What the folding rules key on. */
+AiViewBlock *ai_transcript_get_last (AiTranscript *self);
+
+guint    ai_transcript_get_n_blocks (AiTranscript *self);
+gboolean ai_transcript_find_block   (AiTranscript *self, AiViewBlock *block,
+                                     guint *out_position);
+void     ai_transcript_clear        (AiTranscript *self);
+
+/* The whole thing as plain text, one blank line between blocks. */
+gchar   *ai_transcript_to_text      (AiTranscript *self, guint width);
+#+end_src
+
+** Signals
+| Signal            | Arguments                            | When                              |
+|-------------------+--------------------------------------+-----------------------------------|
+| =items-changed=   | =position=, =removed=, =added=       | a block was added or removed      |
+| =block-changed=   | =position=, =AiViewBlock *block=     | a block's content changed in place |
+
+*Both are necessary.* A block being streamed into is neither an insertion
+nor a removal --- prose grows a delta at a time and a tool group's calls
+change state, all without the list changing shape. A frontend watching only
+=items-changed= would show the first delta of each reply and nothing after
+it.
+
+#+begin_src C
+g_signal_connect (transcript, "items-changed", G_CALLBACK (on_added), self);
+g_signal_connect (transcript, "block-changed", G_CALLBACK (on_changed), self);
+#+end_src
+
+Coalesce the redraws: =block-changed= fires per token during a streamed
+reply, and redrawing on each would spend the whole turn in refresh.
+=ai-tui= schedules one redraw per main-loop iteration with =g_idle_add()=.
+
+** Positions move; ids do not
+The position in =::block-changed= is current as of the emission. Act on it
+before returning, or look the block up again --- =ai_view_block_get_id()= is
+stable for the life of the process and is what a long-lived map should be
+keyed on.
+
+** Ownership
+The transcript holds a reference to every block, and disconnects from a
+block when it is removed. A caller holding its own reference may keep
+mutating a removed block; it simply no longer reports those changes to a
+transcript it is not part of.
+
+** ai_transcript_to_text()
+#+begin_src C
+g_autofree gchar *text = ai_transcript_to_text (transcript, 72);
+#+end_src
+
+Renders everything at @width (0 for no wrapping) with a blank line between
+blocks. This is what =ai-tui --dump= prints, what
+=tests/test-ai-tui.c= asserts against, and the cheapest way to check what a
+session produced without driving a display.
+
+** See also
+- [[file:../transcript.org][The transcript]] --- the layer, and the Emacs recipe
+- [[file:ai-view-block.org][AiViewBlock]] --- what a transcript holds
+- [[file:ai-conversation.org][AiConversation]] --- what fills one

@@ -12,8 +12,15 @@ A GLib/GObject-based C library for interacting with AI providers.
   conditioning (up to 14 references on Nano Banana Pro), editing, masks and
   variations; unsupported options are reconciled per model rather than sent and
   rejected (see [[file:docs/examples/image-generation.org][docs/examples/image-generation.org]])
+- *Event stream*: watch a turn happen --- prose, reasoning, tool calls,
+  token counts --- through one normalized signal on every provider (see
+  [[file:docs/events.org][docs/events.org]])
+- *Renderable transcript*: a UI-agnostic model of a conversation that groups
+  and summarises tool calls once, for any frontend to draw (see
+  [[file:docs/transcript.org][docs/transcript.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
 - *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
+- *TUI*: =ai-tui=, a terminal agent harness over any provider (see [[file:docs/tui.org][docs/tui.org]])
 - *Environment Variables*: Standard env var configuration
 - *AGPLv3 Licensed*: Free and open source
 
@@ -28,12 +35,12 @@ A GLib/GObject-based C library for interacting with AI providers.
 *** Fedora
 #+begin_src sh
 dnf install glib2-devel libsoup3-devel json-glib-devel \
-            gobject-introspection-devel
+            gobject-introspection-devel ncurses-devel
 #+end_src
 
 *** Ubuntu/Debian
 #+begin_src sh
-apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
+apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libncursesw5-dev \
             gobject-introspection
 #+end_src
 

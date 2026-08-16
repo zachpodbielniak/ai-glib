@@ -194,3 +194,6 @@ Claude API has rate limits based on your plan tier. The library will return =AI_
 ** Links
 - [[https://docs.anthropic.com/][Anthropic API Documentation]]
 - [[https://docs.anthropic.com/en/docs/about-claude/models][Claude Models]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text, thinking, tool start, tool arguments, usage.

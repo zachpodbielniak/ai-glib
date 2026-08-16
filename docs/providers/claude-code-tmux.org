@@ -315,3 +315,6 @@ All four map to =AI_PROVIDER_CLAUDE_TMUX=.
 ** See Also
 - [[file:claude-code.org][Claude Code provider]] --- the Agent-SDK / =--print= sibling.
 - [[file:index.org][Providers overview]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports nothing yet --- it reads a finished JSONL transcript rather than a stream, so there is no line-by-line output to translate. It still works everywhere an #AiProvider works, and AiConversation folds its finished response into blocks.

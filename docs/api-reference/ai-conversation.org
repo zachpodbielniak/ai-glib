@@ -1,0 +1,112 @@
+* AiConversation
+=AiConversation= drives a provider and folds what happens into an
+[[file:ai-transcript.org][AiTranscript]]. It is the one object a frontend
+needs: send text, watch the transcript, answer approval requests.
+
+** Constructing
+#+begin_src C
+AiConversation *ai_conversation_new (GObject *provider);
+#+end_src
+
+Takes a =GObject= rather than an =AiProvider= because the two client base
+classes --- =AiClient= for HTTP, =AiCliClient= for the CLI wrappers --- share
+no ancestor beyond =GObject=, and a caller should not have to know which one
+it is holding.
+
+#+begin_src C
+g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new ();
+g_autoptr(AiConversation) conversation = ai_conversation_new (G_OBJECT (client));
+#+end_src
+
+** Properties
+| Property         | Type      | Default | Means                                    |
+|------------------+-----------+---------+------------------------------------------|
+| =system-prompt=  | string    | =NULL=  | sent with every turn                     |
+| =max-tokens=     | int       | 4096    | cap per response                         |
+| =stream=         | boolean   | =TRUE=  | stream when the provider supports it     |
+| =local-tools=    | boolean   | =FALSE= | run tools in this process                |
+| =busy=           | boolean   | ---     | read-only; a turn is in flight           |
+| =transcript=     | object    | ---     | read-only; the blocks produced           |
+
+=local-tools= is *refused for the CLI wrapper providers*. They ignore the
+tools argument and run their own inside their own process, so an executor
+pointed at one would advertise tools the model never sees --- the setter
+leaves it %FALSE and logs why, rather than accepting a knob that does
+nothing.
+
+** Sending
+#+begin_src C
+void     ai_conversation_send_async  (AiConversation *self, const gchar *text,
+                                      GCancellable *cancellable,
+                                      GAsyncReadyCallback callback,
+                                      gpointer user_data);
+gboolean ai_conversation_send_finish (AiConversation *self, GAsyncResult *result,
+                                      GError **error);
+
+void ai_conversation_cancel (AiConversation *self);
+void ai_conversation_clear  (AiConversation *self);
+#+end_src
+
+One turn at a time. Sending while =busy= fails rather than interleaving two
+turns into one transcript, which would produce a transcript describing
+neither.
+
+Whatever the turn produced is already in the transcript, including a status
+block describing any failure --- =send_finish()= reports the outcome for a
+caller that wants to branch on it, not for one that needs to display the
+error.
+
+=ai_conversation_cancel()= is always allowed: a user who wants to stop must
+never be refused. Blocks produced so far stay, because what already happened
+did happen.
+
+=ai_conversation_clear()= empties the *local* view. A provider holding a
+session of its own is not affected; set its =session-id= to %NULL for that.
+
+** Accessors
+#+begin_src C
+AiTranscript   *ai_conversation_get_transcript (AiConversation *self);
+AiToolExecutor *ai_conversation_get_executor   (AiConversation *self);
+GObject        *ai_conversation_get_provider   (AiConversation *self);
+GList          *ai_conversation_get_messages   (AiConversation *self);
+#+end_src
+
+The executor is exposed so a host can restrict what the model may call ---
+=ai_tool_executor_unregister()=, or a fresh
+=ai_tool_executor_new_empty()= plus its own registrations.
+
+** Signals
+| Signal                 | Arguments             | Returns          |
+|------------------------+-----------------------+------------------|
+| =approval-requested=   | =AiToolUse *tool_use= | =AiToolApproval= |
+
+Forwarded from the conversation's executor so a frontend connects to one
+object rather than reaching inside for another. See
+[[file:../tool-executor.org][the tool executor]] for what the values mean,
+and for the rule a handler that asks a human must follow: spin a nested
+=GMainLoop= on the *thread-default* context, never the global default.
+
+** The folding rules
+Three rules produce the whole rhythm of a session:
+
+- =AI_EVENT_TEXT_DELTA= appends to the open prose block, opening one if
+  there is none.
+- =AI_EVENT_TOOL_STARTED= joins the open tool group, opening one if there is
+  none. *That is the grouping.*
+- Anything else closes what is open, so the next delta after a tool group
+  starts a new paragraph.
+
+A tool result whose call sits in a group that prose has already closed is
+still found, by searching backwards. A result for a call nobody announced
+opens a group of its own rather than being dropped --- real work must not
+become invisible.
+
+A provider that is not an =AiStreamable= reports nothing along the way, so
+its finished =AiResponse= is folded into blocks instead. That is the
+=claude-tmux= path, and it means every provider works here from the start.
+
+** See also
+- [[file:../transcript.org][The transcript]] --- the layer, and the Emacs recipe
+- [[file:ai-transcript.org][AiTranscript]] --- the buffer
+- [[file:../events.org][The event stream]] --- what fills it
+- [[file:../tui.org][ai-tui]] --- a frontend built on this

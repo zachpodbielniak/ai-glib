@@ -279,3 +279,110 @@ Parameters: =url= (required), =prompt= (optional).
 - =web_fetch= returns at most *100 KB* of converted text (truncated on a
   valid UTF-8 boundary, with a =[truncated at 100 KB]= marker).
 - Tools run on the calling thread; =bash= commands block until completion.
+
+* Watching the loop
+=AiToolExecutor= implements [[file:api-reference/ai-event-source.org][AiEventSource]], so a
+frontend can see the loop happen rather than only its result. It brackets
+each call with =AI_EVENT_TOOL_STARTED= and =AI_EVENT_TOOL_FINISHED=, and
+republishes the provider's own events on the same stream --- so one
+subscription shows the whole turn, the model's prose and the tool activity
+together, in the order they happened.
+
+#+begin_src C
+g_signal_connect (executor, "event", G_CALLBACK (on_event), self);
+#+end_src
+
+Started is emitted *before* the call runs. A tool that takes thirty seconds
+should show as running for thirty seconds, not appear retroactively when it
+finishes.
+
+The =source= label on each event distinguishes the two --- ="AiToolExecutor"=
+for a locally run tool, the provider's type name for everything it
+forwarded.
+
+* Streaming
+| Property  | Type    | Default |
+|-----------+---------+---------|
+| =stream=  | boolean | =FALSE= |
+
+The loop has always used =ai_provider_chat_async()=, so a caller got live
+tokens *or* tool execution and never both. With this set and an
+=AiStreamable= provider, each turn goes through
+=ai_streamable_chat_stream_async()= instead.
+
+It defaults to =FALSE= so every existing caller takes the path it always
+did. [[file:api-reference/ai-conversation.org][AiConversation]] sets it from
+its own =stream= property.
+
+* Tool approval
+| Property            | Type             | Default                   |
+|---------------------+------------------+---------------------------|
+| =approval-policy=   | =AiToolApproval= | =AI_TOOL_APPROVAL_ALLOW=  |
+
+| Signal                 | Arguments             | Returns          |
+|------------------------+-----------------------+------------------|
+| =approval-requested=   | =AiToolUse *tool_use= | =AiToolApproval= |
+
+#+begin_src C
+typedef enum
+{
+    AI_TOOL_APPROVAL_DEFAULT = 0,   /* no opinion; defer to approval-policy */
+    AI_TOOL_APPROVAL_ALLOW,
+    AI_TOOL_APPROVAL_DENY,          /* refuse this call, continue the run   */
+    AI_TOOL_APPROVAL_ALLOW_ALWAYS,  /* and stop asking about this tool      */
+    AI_TOOL_APPROVAL_DENY_ALL       /* refuse and abort the run             */
+} AiToolApproval;
+#+end_src
+
+** Why DEFAULT is zero
+A signal with no handlers accumulates to zero. Zero is =DEFAULT=, which
+resolves through =approval-policy= to =ALLOW= --- so an executor nobody is
+watching behaves exactly as it did before approval existed. That is a
+property of the design rather than a compatibility branch, and
+=tests/test-tool-executor-approval.c= asserts it first.
+
+Set =approval-policy= to =AI_TOOL_APPROVAL_DENY= for an unattended agent:
+nobody is there to say yes, so an unanswered call should be a refusal rather
+than a silent grant.
+
+** The accumulator
+Not =g_signal_accumulator_first_wins=, which halts after the first handler
+*whatever it returns* --- so a handler answering =DEFAULT= would silently
+veto every handler behind it, which is the opposite of what "no opinion"
+should mean. The accumulator here keeps asking while the answer is =DEFAULT=
+and stops at the first real decision.
+
+** DENY continues the run
+A refusal is reported to the model as the tool's result. It will usually
+acknowledge it and try something else, which is more useful than a turn that
+simply stops. Only =DENY_ALL= aborts.
+
+=ALLOW_ALWAYS= is remembered for one run, not for the executor: an answer
+given about one task is not consent for the next.
+
+** The nested-loop rule
+A handler that asks a human must spin a nested =GMainLoop= on
+=g_main_context_get_thread_default()= --- *not* the global default, which a
+caller driving the run from a private context would never dispatch. The
+call is synchronous at that point by design: the tool has not run, and
+nothing else about the turn may proceed until the answer arrives.
+
+#+begin_src C
+static gint
+on_approval (AiToolExecutor *exec, AiToolUse *tool_use, gpointer data)
+{
+    /* ... draw a prompt, read a key, iterating
+       g_main_context_get_thread_default() while waiting ... */
+    return AI_TOOL_APPROVAL_ALLOW;
+}
+#+end_src
+
+=bin/ai-tui.c= is a worked example.
+
+** This never fires for the CLI wrappers
+claude-code, opencode and grok-build run their own tools inside their own
+processes; ai-glib never sees those calls, so it cannot offer them for
+approval. Their equivalent is =--skip-permissions= and the per-provider
+=permission-mode= and =allowed-tools= properties. That is also why
+[[file:api-reference/ai-conversation.org][AiConversation]] refuses
+=local-tools= for them.

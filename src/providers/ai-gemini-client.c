@@ -14,6 +14,8 @@
 #include "providers/ai-gemini-client.h"
 #include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
 #include "core/ai-image-generator.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
@@ -888,10 +890,20 @@ ai_gemini_client_list_models_async(
 
     task = g_task_new(provider, cancellable, callback, user_data);
 
-    url = g_strdup_printf("%s/v1beta/models?pageSize=200&key=%s",
-                          ai_config_get_base_url(config, AI_PROVIDER_GEMINI),
-                          api_key != NULL ? api_key : "");
+    url = g_strdup_printf("%s/v1beta/models?pageSize=200",
+                          ai_config_get_base_url(config, AI_PROVIDER_GEMINI));
     msg = soup_message_new("GET", url);
+
+    /*
+     * The key rides in the header here too.  This path builds its own
+     * SoupMessage rather than going through AiClient's, so it has to ask
+     * for the header itself -- the same reason the streaming path does.
+     */
+    if (api_key != NULL)
+    {
+        soup_message_headers_append(soup_message_get_request_headers(msg),
+                                    "x-goog-api-key", api_key);
+    }
 
     data = g_slice_new0(GeminiListModelsData);
     data->client = g_object_ref(self);
@@ -992,7 +1004,14 @@ gemini_process_stream_chunk(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` payload parses fine and yields a NULL root, which
+     * JSON_NODE_HOLDS_OBJECT() would dereference -- a critical, and fatal
+     * under G_DEBUG=fatal-warnings. Server output is untrusted, so the NULL
+     * check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return;
     }
@@ -1006,6 +1025,10 @@ gemini_process_stream_chunk(
         data->stream_started = TRUE;
 
         g_signal_emit_by_name(data->client, "stream-start");
+        {
+            g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_START);
+            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+        }
     }
 
     /* Parse candidates */
@@ -1049,6 +1072,10 @@ gemini_process_stream_chunk(
                             {
                                 g_string_append(data->current_text, text);
                                 g_signal_emit_by_name(data->client, "delta", text);
+                                {
+                                    g_autoptr(AiEvent) event = ai_event_new_text_delta(text);
+                                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+                                }
                             }
                         }
                         else if (json_object_has_member(part, "functionCall"))
@@ -1137,6 +1164,21 @@ on_gemini_line_read(
                 ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
             }
 
+            {
+                AiUsage *final_usage = ai_response_get_usage(data->response);
+            
+                if (final_usage != NULL)
+                {
+                    g_autoptr(AiEvent) event = ai_event_new_usage(final_usage, -1);
+                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+                }
+            }
+            
+            {
+                g_autoptr(AiEvent) event = ai_event_new(AI_EVENT_STREAM_END);
+                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
+            }
+            
             g_signal_emit_by_name(data->client, "stream-end", data->response);
             g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
         }

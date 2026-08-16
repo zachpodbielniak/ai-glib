@@ -19,7 +19,9 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
+#include "model/ai-tool-use.h"
 
 /*
  * The prompt source handed to grok. grok accepts any readable path here --
@@ -381,39 +383,6 @@ emit_execution_args(AiGrokBuildClient *self, GPtrArray *args)
     {
         g_ptr_array_add(args, g_strdup("--verbatim"));
     }
-}
-
-/*
- * Spawn with the client's working directory applied.
- *
- * This client builds and spawns its own argv on the async and streaming
- * paths, so it must honour working-directory itself; the inherited
- * ai_cli_client_chat_sync() does the same for the synchronous path. Every
- * spawn in this file goes through here so the directory that bounds what
- * the CLI can reach is never quietly dropped.
- */
-static GSubprocess *
-grok_build_spawn(
-    AiGrokBuildClient   *self,
-    const gchar * const *argv,
-    GSubprocessFlags     flags,
-    GError             **error
-){
-    const gchar *cwd;
-
-    cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
-
-    if (cwd != NULL && cwd[0] != '\0')
-    {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_set_cwd(launcher, cwd);
-
-        return g_subprocess_launcher_spawnv(launcher, argv, error);
-    }
-
-    return g_subprocess_newv(argv, flags, error);
 }
 
 /*
@@ -999,17 +968,11 @@ ai_grok_build_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Turn one Anthropic tool_use block into an AI_EVENT_TOOL_STARTED.
  *
- * With --include-partial-messages grok emits Anthropic-shaped events:
- *   {"type":"stream_event","event":{"type":"content_block_delta",
- *    "delta":{"type":"text_delta","text":"..."}}}   -> emit delta
- *   {"type":"assistant","message":{...}}            -> ignored, see below
- *   {"type":"result",...}                           -> usage/session/cost
- *
- * The whole-message "assistant" line repeats text already delivered as
- * deltas, so acting on it would double every streamed reply. The "result"
- * line still back-fills the text when no delta ever arrived.
+ * Shared by the content_block_start path, where the input is still empty,
+ * and the whole-message path, where it is complete. Both emit for the same
+ * id on purpose; consumers key on the id and update.
  */
 static gboolean
 ai_grok_build_client_parse_stream_line(
@@ -1018,14 +981,73 @@ ai_grok_build_client_parse_stream_line(
     AiResponse   *response,
     gchar       **delta_text,
     GError      **error
+);
+
+static void
+grok_emit_tool_use_block(
+    JsonObject *block,
+    GPtrArray  *out_events
+){
+    const gchar *id;
+    const gchar *name;
+    JsonNode *input;
+    g_autoptr(AiToolUse) tool_use = NULL;
+
+    id = grok_get_string(block, "id");
+    name = grok_get_string(block, "name");
+
+    if (name == NULL || name[0] == '\0')
+    {
+        return;
+    }
+
+    input = json_object_has_member(block, "input")
+        ? json_object_get_member(block, "input")
+        : NULL;
+
+    tool_use = ai_tool_use_new(id != NULL ? id : "",
+                               name,
+                               input);
+
+    g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+}
+
+/*
+ * Parse a single NDJSON line from streaming output into events.
+ *
+ * With --include-partial-messages grok emits Anthropic-shaped events:
+ *   {"type":"stream_event","event":{"type":"content_block_start",
+ *    "content_block":{"type":"tool_use","id":..,"name":..}}} -> TOOL_STARTED
+ *   {"type":"stream_event","event":{"type":"content_block_delta",
+ *    "delta":{"type":"text_delta","text":"..."}}}            -> TEXT_DELTA
+ *    "delta":{"type":"thinking_delta","thinking":"..."}      -> THINKING_DELTA
+ *    "delta":{"type":"input_json_delta","partial_json":".."} -> TOOL_INPUT_DELTA
+ *   {"type":"assistant","message":{...}}                     -> tool_use only
+ *   {"type":"result",...}                                    -> USAGE, session
+ *
+ * The whole-message "assistant" line repeats text already delivered as
+ * deltas, so its text is still ignored -- acting on it would double every
+ * streamed reply. Its tool_use blocks are not ignored: they are the only
+ * place the *complete* arguments appear, since content_block_start carries
+ * the name with an empty input and the rest arrives as input_json_delta
+ * fragments that are not individually valid JSON. Emitting TOOL_STARTED
+ * twice for one id is deliberate and documented -- consumers key on the id
+ * and update, so the second one simply fills in what the first could not
+ * know yet.
+ */
+static gboolean
+ai_grok_build_client_parse_stream_events(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    GPtrArray    *out_events,
+    GError      **error
 ){
     AiGrokBuildClient *self = AI_GROK_BUILD_CLIENT(client);
     g_autoptr(JsonParser) parser = NULL;
     JsonNode *root;
     JsonObject *obj;
     const gchar *type;
-
-    *delta_text = NULL;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -1041,7 +1063,14 @@ ai_grok_build_client_parse_stream_line(
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
@@ -1067,22 +1096,92 @@ ai_grok_build_client_parse_stream_line(
 
         event_type = grok_get_string(event, "type");
 
-        /*
-         * Only content_block_delta carries text. thinking_delta rides the
-         * same event shape and is deliberately dropped: reasoning is not
-         * the answer.
-         */
-        if (g_strcmp0(event_type, "content_block_delta") == 0)
+        if (g_strcmp0(event_type, "content_block_start") == 0)
+        {
+            /*
+             * A tool call announcing itself. The input is normally an empty
+             * object here; the arguments follow as input_json_delta.
+             */
+            JsonObject *block = grok_get_object(event, "content_block");
+
+            if (block != NULL &&
+                g_strcmp0(grok_get_string(block, "type"), "tool_use") == 0)
+            {
+                grok_emit_tool_use_block(block, out_events);
+            }
+        }
+        else if (g_strcmp0(event_type, "content_block_delta") == 0)
         {
             JsonObject *delta = grok_get_object(event, "delta");
+            const gchar *delta_type;
 
-            if (delta != NULL &&
-                g_strcmp0(grok_get_string(delta, "type"), "text_delta") == 0)
+            if (delta == NULL)
+                return TRUE;
+
+            delta_type = grok_get_string(delta, "type");
+
+            if (g_strcmp0(delta_type, "text_delta") == 0)
             {
                 const gchar *text = grok_get_string(delta, "text");
 
                 if (text != NULL && text[0] != '\0')
-                    *delta_text = g_strdup(text);
+                    g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "thinking_delta") == 0)
+            {
+                /*
+                 * Reasoning used to be dropped here on the grounds that it
+                 * is not the answer. That is still true, and is now
+                 * expressed by giving it its own kind rather than by
+                 * discarding it -- a frontend can collapse what a caller
+                 * assembling the answer must exclude.
+                 */
+                const gchar *text = grok_get_string(delta, "thinking");
+
+                if (text != NULL && text[0] != '\0')
+                    g_ptr_array_add(out_events,
+                                    ai_event_new_thinking_delta(text));
+            }
+            else if (g_strcmp0(delta_type, "input_json_delta") == 0)
+            {
+                const gchar *fragment = grok_get_string(delta, "partial_json");
+
+                if (fragment != NULL && fragment[0] != '\0')
+                    g_ptr_array_add(
+                        out_events,
+                        ai_event_new_tool_input_delta(NULL, fragment));
+            }
+        }
+    }
+    else if (g_strcmp0(type, "assistant") == 0)
+    {
+        /*
+         * Text here would double the deltas, but the tool_use blocks carry
+         * the assembled arguments and appear nowhere else.
+         */
+        JsonObject *message = grok_get_object(obj, "message");
+        JsonNode *content = message != NULL
+            ? json_object_get_member(message, "content")
+            : NULL;
+
+        if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+        {
+            JsonArray *blocks = json_node_get_array(content);
+            guint n = json_array_get_length(blocks);
+            guint i;
+
+            for (i = 0; i < n; i++)
+            {
+                JsonNode *bn = json_array_get_element(blocks, i);
+                JsonObject *b;
+
+                if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn))
+                    continue;
+
+                b = json_node_get_object(bn);
+
+                if (g_strcmp0(grok_get_string(b, "type"), "tool_use") == 0)
+                    grok_emit_tool_use_block(b, out_events);
             }
         }
     }
@@ -1128,6 +1227,19 @@ ai_grok_build_client_parse_stream_line(
         /* Total cost */
         self->total_cost = grok_get_double(obj, "total_cost_usd",
                                            self->total_cost);
+
+        /*
+         * Report the counts as an event too. -1 rather than 0 when grok
+         * says nothing about cost: zero would read as "this turn was free".
+         */
+        {
+            AiUsage *usage = ai_response_get_usage(response);
+            gdouble cost = grok_get_double(obj, "total_cost_usd", -1.0);
+
+            g_ptr_array_add(out_events,
+                ai_event_new_usage(usage,
+                                   cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
+        }
 
         /*
          * Prefer the reported stop reason; a truncated turn is not an
@@ -1183,6 +1295,7 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;
     cli_class->parse_stream_line   = ai_grok_build_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_grok_build_client_parse_stream_events;
 
     /**
      * AiGrokBuildClient:total-cost:
@@ -1372,6 +1485,34 @@ ai_grok_build_client_init(AiGrokBuildClient *self)
 }
 
 /*
+ * The pre-event contract, kept because callers and tests still use it.
+ * It is a projection of parse_stream_events, not a second implementation:
+ * one parser means the two can never disagree about what a line meant.
+ */
+static gboolean
+ai_grok_build_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_grok_build_client_parse_stream_events(client, line, response,
+                                                  events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
+    return TRUE;
+}
+
+/*
  * AiProvider interface implementation
  */
 
@@ -1555,8 +1696,8 @@ attempt_text_retry(
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);
 
-    rproc = grok_build_spawn(
-        client,
+    rproc = ai_cli_client_spawn(
+        AI_CLI_CLIENT(client),
         (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
@@ -1741,8 +1882,9 @@ ai_grok_build_client_chat_async(
         flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
     }
 
-    subprocess = grok_build_spawn(self, (const gchar * const *)argv,
-                                  flags, &error);
+    subprocess = ai_cli_client_spawn(AI_CLI_CLIENT(self),
+                                     (const gchar * const *)argv,
+                                     flags, &error);
     if (subprocess == NULL)
     {
         g_free(stdin_data);
@@ -1823,203 +1965,12 @@ ai_grok_build_client_provider_init(AiProviderInterface *iface)
 
 /*
  * AiStreamable interface implementation
+ *
+ * The read loop lives in AiCliClient. All this client contributes is the
+ * translation from its wire format into events -- the parse_stream_events
+ * vfunc above. Spawning, line reading, signal emission, the deadline and
+ * the response assembly are shared with every other CLI wrapper.
  */
-
-typedef struct
-{
-    AiGrokBuildClient *client;
-    GTask             *task;
-    GSubprocess       *subprocess;
-    GDataInputStream  *data_stream;
-    GCancellable      *cancellable;
-    AiResponse        *response;
-    GString           *accumulated_text;
-    gboolean           stream_started;
-    gchar             *stdin_data;
-} StreamAsyncData;
-
-static void
-stream_async_data_free(StreamAsyncData *data)
-{
-    g_clear_object(&data->task);
-    g_clear_object(&data->client);
-    g_clear_object(&data->subprocess);
-    g_clear_object(&data->data_stream);
-    g_clear_object(&data->cancellable);
-    g_clear_object(&data->response);
-    g_clear_pointer(&data->stdin_data, g_free);
-
-    if (data->accumulated_text != NULL)
-    {
-        g_string_free(data->accumulated_text, TRUE);
-    }
-
-    g_slice_free(StreamAsyncData, data);
-}
-
-static void read_next_stream_line(StreamAsyncData *data);
-
-static void
-on_stream_line_read(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = NULL;
-    g_autofree gchar *delta_text = NULL;
-    AiCliClientClass *klass;
-    gsize length;
-
-    (void)source;
-
-    line = g_data_input_stream_read_line_finish(data->data_stream, result,
-                                                &length, &error);
-
-    if (error != NULL)
-    {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-        }
-        return;
-    }
-
-    if (line == NULL)
-    {
-        /* EOF — the stream is complete */
-        if (data->response != NULL)
-        {
-            /* Add accumulated text as a content block if not already done */
-            if (data->accumulated_text != NULL &&
-                data->accumulated_text->len > 0 &&
-                ai_response_get_content_blocks(data->response) == NULL)
-            {
-                g_autoptr(AiTextContent) content =
-                    ai_text_content_new(data->accumulated_text->str);
-                ai_response_add_content_block(data->response,
-                    (AiContentBlock *)g_steal_pointer(&content));
-            }
-
-            g_signal_emit_by_name(data->client, "stream-end", data->response);
-            g_task_return_pointer(data->task, g_object_ref(data->response),
-                                  g_object_unref);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR,
-                                    AI_ERROR_INVALID_RESPONSE,
-                                    "Stream ended without a valid response");
-        }
-
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Parse the line */
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    if (klass->parse_stream_line(AI_CLI_CLIENT(data->client), line,
-                                 data->response, &delta_text, &error))
-    {
-        if (delta_text != NULL && delta_text[0] != '\0')
-        {
-            /* Emit stream-start on the first delta */
-            if (!data->stream_started)
-            {
-                data->stream_started = TRUE;
-                g_signal_emit_by_name(data->client, "stream-start");
-            }
-
-            /* Accumulate text */
-            g_string_append(data->accumulated_text, delta_text);
-
-            /* Emit delta signal */
-            g_signal_emit_by_name(data->client, "delta", delta_text);
-        }
-    }
-    else if (error != NULL)
-    {
-        /*
-         * The CLI reported an error mid-stream. Fail the operation rather
-         * than returning the empty response EOF would otherwise produce.
-         */
-        g_task_return_error(data->task, g_steal_pointer(&error));
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Read the next line */
-    read_next_stream_line(data);
-}
-
-static void
-read_next_stream_line(StreamAsyncData *data)
-{
-    g_data_input_stream_read_line_async(
-        data->data_stream,
-        G_PRIORITY_DEFAULT,
-        data->cancellable,
-        on_stream_line_read,
-        data);
-}
-
-static void
-start_stream_reader(StreamAsyncData *data)
-{
-    g_autoptr(GError) error = NULL;
-    GInputStream *stdout_stream;
-    GOutputStream *stdin_stream;
-
-    /*
-     * Write the prompt into the subprocess, then close the stdin pipe:
-     * grok is reading it back through --prompt-file /dev/stdin and needs
-     * the EOF to know the prompt is complete.
-     */
-    if (data->stdin_data != NULL)
-    {
-        stdin_stream = g_subprocess_get_stdin_pipe(data->subprocess);
-        if (stdin_stream != NULL)
-        {
-            g_output_stream_write_all(stdin_stream,
-                                      data->stdin_data,
-                                      strlen(data->stdin_data),
-                                      NULL, NULL, &error);
-            g_output_stream_close(stdin_stream, NULL, NULL);
-        }
-
-        if (error != NULL)
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-            return;
-        }
-    }
-
-    /* Get the stdout pipe */
-    stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
-    if (stdout_stream == NULL)
-    {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "Failed to get subprocess stdout");
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Wrap in a data input stream for line-by-line reading */
-    data->data_stream = g_data_input_stream_new(stdout_stream);
-    g_data_input_stream_set_newline_type(data->data_stream,
-                                         G_DATA_STREAM_NEWLINE_TYPE_ANY);
-
-    /* Create the response object */
-    data->response = ai_response_new("",
-        ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
-    data->accumulated_text = g_string_new("");
-
-    /* Start reading lines */
-    read_next_stream_line(data);
-}
 
 static void
 ai_grok_build_client_chat_stream_async(
@@ -2032,79 +1983,11 @@ ai_grok_build_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    AiGrokBuildClient *self = AI_GROK_BUILD_CLIENT(streamable);
-    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *executable = NULL;
-    g_auto(GStrv) argv = NULL;
-    gchar *stdin_data = NULL;
-    g_autoptr(GSubprocess) subprocess = NULL;
-    StreamAsyncData *data;
-    GTask *task;
-    GSubprocessFlags flags;
-
     (void)tools;  /* Tools not yet supported via CLI */
 
-    task = g_task_new(self, cancellable, callback, user_data);
-
-    /* Resolve executable path */
-    executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
-    if (executable == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build command line arguments for streaming */
-    argv = klass->build_argv(AI_CLI_CLIENT(self), messages, system_prompt,
-                             max_tokens, TRUE);
-    if (argv == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build command line arguments");
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build stdin data if the subclass provides it */
-    if (klass->build_stdin != NULL)
-    {
-        stdin_data = klass->build_stdin(AI_CLI_CLIENT(self), messages);
-    }
-
-    /* Replace the placeholder with the resolved executable path */
-    g_free(argv[0]);
-    argv[0] = g_steal_pointer(&executable);
-
-    /* Spawn subprocess — add STDIN_PIPE if we have stdin data */
-    flags = G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE;
-    if (stdin_data != NULL)
-    {
-        flags |= G_SUBPROCESS_FLAGS_STDIN_PIPE;
-    }
-
-    subprocess = grok_build_spawn(self, (const gchar * const *)argv,
-                                  flags, &error);
-    if (subprocess == NULL)
-    {
-        g_free(stdin_data);
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Set up callback data */
-    data = g_slice_new0(StreamAsyncData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->subprocess = g_object_ref(subprocess);
-    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
-    data->stream_started = FALSE;
-    data->stdin_data = stdin_data;  /* ownership transferred */
-
-    /* Write stdin and start reading stdout */
-    start_stream_reader(data);
+    ai_cli_client_stream_run_async(AI_CLI_CLIENT(streamable), messages,
+                                   system_prompt, max_tokens,
+                                   cancellable, callback, user_data);
 }
 
 static AiResponse *
@@ -2113,8 +1996,8 @@ ai_grok_build_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)streamable;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    return ai_cli_client_stream_run_finish(AI_CLI_CLIENT(streamable),
+                                           result, error);
 }
 
 static void

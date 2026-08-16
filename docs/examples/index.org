@@ -13,6 +13,7 @@ Code examples and tutorials for ai-glib.
 | [[file:web-search.org][Web Search]]               | Search the web with a provider (Brave/Bing/DuckDuckGo)        |
 | [[file:image-generation.org][Image Generation]]   | Generate images from text prompts                             |
 | [[file:python-bindings.org][Python Bindings]]     | Drive ai-glib from PyGObject (works in any GI-aware language) |
+| [[file:transcript-render.org][transcript-render]] | A frontend in a hundred lines, without a terminal library     |
 
 ** Building Examples
 Examples are built automatically with the library:

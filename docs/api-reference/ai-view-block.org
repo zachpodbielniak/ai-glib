@@ -1,0 +1,159 @@
+* AiViewBlock
+=AiViewBlock= is one renderable unit of a
+[[file:ai-transcript.org][transcript]] --- a user turn, a paragraph of
+assistant prose, a group of tool calls. It is a =G_DECLARE_DERIVABLE_TYPE=
+with five final subclasses.
+
+** Class
+#+begin_src C
+struct _AiViewBlockClass
+{
+    GObjectClass parent_class;
+
+    AiRenderedText * (*render)   (AiViewBlock *self);   /* unwrapped */
+    AiViewBlockKind  (*get_kind) (AiViewBlock *self);
+
+    gpointer _reserved[8];
+};
+#+end_src
+
+@render is asked for the block *unwrapped*. Wrapping to a width is done
+once, by the base class, so no subclass reimplements it and no two of them
+can disagree about where a line breaks.
+
+** Common API
+#+begin_src C
+guint64         ai_view_block_get_id       (AiViewBlock *self);
+AiViewBlockKind ai_view_block_get_kind     (AiViewBlock *self);
+
+gboolean ai_view_block_get_expanded (AiViewBlock *self);
+void     ai_view_block_set_expanded (AiViewBlock *self, gboolean expanded);
+
+gboolean ai_view_block_get_complete (AiViewBlock *self);
+void     ai_view_block_set_complete (AiViewBlock *self, gboolean complete);
+
+/* width 0 means "do not wrap". */
+AiRenderedText *ai_view_block_render      (AiViewBlock *self, guint width);
+gchar          *ai_view_block_render_text (AiViewBlock *self, guint width);
+
+/* For a subclass, after mutating: drops the cache and emits ::changed. */
+void ai_view_block_changed (AiViewBlock *self);
+#+end_src
+
+- *=id=* is unique for the life of the process. Key a long-lived map on it,
+  not on the position --- positions shift when blocks are removed.
+- *=expanded=* is the =›= / =⌄= affordance. It lives on the base so a
+  frontend can offer the same key everywhere without asking what it is
+  looking at, even though only some kinds render differently either way.
+- *=complete=* is %FALSE while a block is still being streamed into, which
+  is what a spinner or a trailing cursor keys on.
+
+Renderings are cached against =(width, revision)=, so asking repeatedly at
+one width is cheap and asking after a mutation is correct. A terminal resize
+is a re-render, not a re-derivation.
+
+** Signals
+| Signal     | When                                              |
+|------------+---------------------------------------------------|
+| =changed=  | the content changed and the rendering is stale     |
+
+An =AiTranscript= relays this as its own =::block-changed= with a position,
+so a frontend only ever has to watch the transcript.
+
+** The subclasses
+*** AiViewTurnBlock
+What the user said. Complete on arrival.
+#+begin_src C
+AiViewBlock *ai_view_turn_block_new      (const gchar *text);
+const gchar *ai_view_turn_block_get_text (AiViewTurnBlock *self);
+#+end_src
+
+*** AiViewTextBlock
+Assistant prose, grown one delta at a time.
+#+begin_src C
+AiViewBlock *ai_view_text_block_new    (void);
+void         ai_view_text_block_append (AiViewTextBlock *self, const gchar *text);
+const gchar *ai_view_text_block_get_text (AiViewTextBlock *self);
+#+end_src
+
+*** AiViewThinkingBlock
+Reasoning. Collapsed by default --- it is worth having available and rarely
+worth reading, and left expanded it drowns the answer.
+#+begin_src C
+AiViewBlock *ai_view_thinking_block_new    (void);
+void         ai_view_thinking_block_append (AiViewThinkingBlock *self,
+                                            const gchar *text);
+#+end_src
+
+*** AiViewStatusBlock
+A note, a token count, or a failure.
+#+begin_src C
+AiViewBlock *ai_view_status_block_new       (AiViewStatusKind kind,
+                                             const gchar *text);
+AiViewBlock *ai_view_status_block_new_usage (AiUsage *usage, gint64 cost_micros);
+#+end_src
+
+=AiViewStatusKind= is =INFO=, =USAGE= or =ERROR=. A negative =cost_micros=
+omits the cost entirely rather than showing =$0.0000= --- most providers do
+not report cost, and claiming a turn was free is worse than saying nothing.
+
+*** AiViewToolBlock
+A group of calls, summarised. See
+[[file:ai-tool-call.org][AiToolCall]] for the wording rules; the API is:
+#+begin_src C
+AiViewBlock *ai_view_tool_block_new (void);
+
+/* Adds a call, or updates one already present with the same id. */
+AiToolCall *ai_view_tool_block_add_call  (AiViewToolBlock *self, AiToolUse *tool_use);
+AiToolCall *ai_view_tool_block_find_call (AiViewToolBlock *self, const gchar *id);
+AiToolCall *ai_view_tool_block_get_call  (AiViewToolBlock *self, guint index);
+
+guint  ai_view_tool_block_get_n_calls       (AiViewToolBlock *self);
+guint  ai_view_tool_block_get_lines_added   (AiViewToolBlock *self);
+guint  ai_view_tool_block_get_lines_removed (AiViewToolBlock *self);
+gchar *ai_view_tool_block_get_summary       (AiViewToolBlock *self);
+
+/* Say so after mutating a call the block holds. */
+void ai_view_tool_block_call_changed (AiViewToolBlock *self);
+#+end_src
+
+=add_call()= looks up by id first, because
+=AI_EVENT_TOOL_STARTED= can arrive twice for one call --- a streamed tool
+announces its name before its arguments exist. The second event fills in the
+first rather than adding a duplicate.
+
+** The render contract
+#+begin_src C
+typedef struct { guint start; guint len; AiStyleTag tag; } AiStyleSpan;
+
+const gchar *ai_rendered_text_get_text    (AiRenderedText *self);
+guint        ai_rendered_text_get_length  (AiRenderedText *self);
+guint        ai_rendered_text_get_n_spans (AiRenderedText *self);
+gboolean     ai_rendered_text_get_span    (AiRenderedText *self, guint index,
+                                           guint *out_start, guint *out_len,
+                                           AiStyleTag *out_tag);
+AiStyleTag   ai_rendered_text_get_tag_at  (AiRenderedText *self, guint offset);
+
+const gchar *ai_style_tag_to_string   (AiStyleTag tag);
+AiStyleTag   ai_style_tag_from_string (const gchar *name);
+guint        ai_style_text_width      (const gchar *text);
+#+end_src
+
+Out parameters rather than a returned array because a =GArray= of a plain
+struct does not survive GObject Introspection, and this API has to work from
+the bindings an editor drives it through. =make test-gi= reads spans back
+from Python for exactly that reason.
+
+*Offsets are byte offsets into UTF-8.* Spans are sorted, never overlap, are
+never empty, and never begin or end inside a character. Emacs converts with
+=byte-to-position=; see the recipe in
+[[file:../transcript.org][the transcript document]].
+
+*Width is terminal columns*, not characters --- =ai_style_text_width()= is
+the same measure the wrapper uses, and a renderer counting characters would
+misalign every line containing a CJK ideograph.
+
+** See also
+- [[file:../transcript.org][The transcript]] --- the layer and the Emacs recipe
+- [[file:ai-transcript.org][AiTranscript]] --- what holds blocks
+- [[file:ai-tool-call.org][AiToolCall]] --- tool groups and their wording

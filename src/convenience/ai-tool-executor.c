@@ -20,6 +20,10 @@
 #include <libxml/uri.h>
 
 #include "convenience/ai-tool-executor.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
+#include "core/ai-streamable.h"
+#include "model/ai-tool-result.h"
 #include "convenience/ai-search-provider.h"
 #include "core/ai-error.h"
 #include "core/ai-enums.h"
@@ -80,9 +84,124 @@ struct _AiToolExecutor
     GHashTable       *callbacks;       /* str -> CallbackEntry, owned */
     AiProvider       *active_provider; /* borrowed; set only during a run() */
     gchar            *working_directory; /* nullable, owned */
+
+    AiToolApproval    approval_policy;   /* what DEFAULT resolves to */
+    gboolean          stream;            /* prefer chat_stream_async */
+
+    /* Tool names the user answered ALLOW_ALWAYS for, for this run only. */
+    GHashTable       *always_allowed;
+
+    /* Set when a handler answered DENY_ALL; unwinds the current turn. */
+    gboolean          denied_all;
+
+    /* Provider ::event handler, live only during a run. */
+    gulong            provider_event_id;
+    GObject          *provider_object;
 };
 
-G_DEFINE_TYPE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT)
+static void
+ai_tool_executor_event_source_init (AiEventSourceInterface *iface)
+{
+    (void)iface;
+}
+
+G_DEFINE_TYPE_WITH_CODE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT,
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE,
+                                              ai_tool_executor_event_source_init))
+
+/*
+ * Property and signal IDs.
+ */
+enum
+{
+    PROP_0,
+    PROP_APPROVAL_POLICY,
+    PROP_STREAM,
+    PROP_WORKING_DIRECTORY,
+    N_PROPS
+};
+
+static GParamSpec *properties[N_PROPS];
+
+enum
+{
+    SIGNAL_APPROVAL_REQUESTED,
+    N_SIGNALS
+};
+
+static guint signals[N_SIGNALS];
+
+/*
+ * Keep asking until somebody has an opinion.
+ *
+ * g_signal_accumulator_first_wins() halts after the first handler whatever
+ * it returns, which would let a handler answering DEFAULT ("no opinion")
+ * silently veto every handler behind it. This continues while the answer is
+ * DEFAULT and stops at the first real decision -- which is what makes
+ * DEFAULT mean what its name says.
+ */
+static gboolean
+ai_tool_approval_accumulator(
+    GSignalInvocationHint *hint,
+    GValue                *return_accu,
+    const GValue          *handler_return,
+    gpointer               data
+){
+    gint answer;
+
+    (void)hint;
+    (void)data;
+
+    answer = g_value_get_int(handler_return);
+    g_value_set_int(return_accu, answer);
+
+    /* TRUE continues the emission. */
+    return answer == AI_TOOL_APPROVAL_DEFAULT;
+}
+
+/*
+ * Ask whoever is watching whether this call may run.
+ *
+ * Resolution order: a handler's answer, then the approval-policy property,
+ * and ALLOW if that is somehow unset. With no handler connected the signal
+ * accumulates to zero -- DEFAULT -- so an unwatched executor behaves exactly
+ * as it did before this existed.
+ */
+static AiToolApproval
+ai_tool_executor_ask_approval(
+    AiToolExecutor *self,
+    AiToolUse      *tool_use
+){
+    const gchar *name = ai_tool_use_get_name(tool_use);
+    gint answer = AI_TOOL_APPROVAL_DEFAULT;
+
+    if (name != NULL && self->always_allowed != NULL &&
+        g_hash_table_contains(self->always_allowed, name))
+    {
+        return AI_TOOL_APPROVAL_ALLOW;
+    }
+
+    g_signal_emit(self, signals[SIGNAL_APPROVAL_REQUESTED], 0, tool_use,
+                  &answer);
+
+    if (answer == AI_TOOL_APPROVAL_DEFAULT)
+    {
+        answer = self->approval_policy;
+    }
+
+    if (answer == AI_TOOL_APPROVAL_ALLOW_ALWAYS && name != NULL)
+    {
+        if (self->always_allowed == NULL)
+        {
+            self->always_allowed =
+                g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        }
+
+        g_hash_table_add(self->always_allowed, g_strdup(name));
+    }
+
+    return (AiToolApproval)answer;
+}
 
 /* ================================================================
  * Internal run context (async -> sync bridge)
@@ -112,6 +231,13 @@ typedef struct
 } RunContext;
 
 static void run_context_finish (RunContext *ctx);
+static void executor_unwatch_provider (AiToolExecutor *self);
+static void ai_tool_executor_get_property (GObject *object, guint prop_id,
+                                           GValue *value, GParamSpec *pspec);
+static void ai_tool_executor_set_property (GObject *object, guint prop_id,
+                                           const GValue *value,
+                                           GParamSpec *pspec);
+static void on_run_response_common (RunContext *ctx, AiResponse *response);
 
 /* Forward declaration */
 static void run_context_send (RunContext *ctx);
@@ -155,7 +281,6 @@ on_run_response (
     RunContext *ctx = user_data;
     g_autoptr(AiResponse) response = NULL;
     g_autoptr(GError)     err      = NULL;
-    GList *iter;
 
     response = ai_provider_chat_finish (AI_PROVIDER (source), async_result, &err);
 
@@ -165,6 +290,24 @@ on_run_response (
         run_context_finish (ctx);
         return;
     }
+
+    on_run_response_common (ctx, response);
+}
+
+/*
+ * One turn's response, however it arrived.
+ *
+ * Split out so the streaming and non-streaming paths share every decision
+ * that follows -- whether tools ran, whether the turn limit is reached,
+ * whether to go round again. Two copies of that would be two chances to
+ * disagree about when a run is finished.
+ */
+static void
+on_run_response_common (
+    RunContext *ctx,
+    AiResponse *response
+){
+    GList *iter;
 
     ctx->turn_count++;
 
@@ -235,6 +378,8 @@ on_run_response (
             gboolean          is_error   = FALSE;
             AiMessage        *result_msg;
 
+            AiToolApproval approval;
+
             /* g_debug, not g_warning: a tool call is the loop working
              * as designed.  As a warning it aborted any program run
              * with G_DEBUG=fatal-warnings -- including a GTest suite,
@@ -242,13 +387,56 @@ on_run_response (
             g_debug ("ToolExecutor turn %d: calling tool '%s' (id=%s)",
                        ctx->turn_count, tool_name, tool_id);
 
-            tool_result = ai_tool_executor_execute (
-                ctx->executor, tool_use, ctx->cancellable, NULL);
+            approval = ai_tool_executor_ask_approval (ctx->executor, tool_use);
 
-            if (tool_result == NULL)
+            /*
+             * Announce the call before running it, not after. A tool that
+             * takes thirty seconds should show as running for thirty
+             * seconds, not appear retroactively when it finishes.
+             */
             {
-                tool_result = g_strdup ("Error: tool execution failed");
+                g_autoptr(AiEvent) event = ai_event_new_tool_started (tool_use);
+                ai_event_source_emit (AI_EVENT_SOURCE (ctx->executor), event);
+            }
+
+            if (approval == AI_TOOL_APPROVAL_DENY ||
+                approval == AI_TOOL_APPROVAL_DENY_ALL)
+            {
+                /*
+                 * A refusal is reported to the model as the tool's result
+                 * rather than as a hole in the conversation: it will
+                 * usually acknowledge it and try something else, which is
+                 * more useful than a turn that simply stops.
+                 */
+                tool_result = g_strdup (
+                    "Error: the user denied permission to run this tool.");
                 is_error = TRUE;
+
+                if (approval == AI_TOOL_APPROVAL_DENY_ALL)
+                {
+                    ctx->executor->denied_all = TRUE;
+                }
+            }
+            else
+            {
+                tool_result = ai_tool_executor_execute (
+                    ctx->executor, tool_use, ctx->cancellable, NULL);
+
+                if (tool_result == NULL)
+                {
+                    tool_result = g_strdup ("Error: tool execution failed");
+                    is_error = TRUE;
+                }
+            }
+
+            {
+                g_autoptr(AiToolResult) result_block =
+                    ai_tool_result_new_with_name (tool_id, tool_name,
+                                                  tool_result, is_error);
+                g_autoptr(AiEvent) event =
+                    ai_event_new_tool_finished (tool_use, result_block);
+
+                ai_event_source_emit (AI_EVENT_SOURCE (ctx->executor), event);
             }
 
             /* Pass tool_name so providers like Gemini (whose functionResponse
@@ -261,13 +449,141 @@ on_run_response (
         g_list_free (tool_uses);
     }
 
+    /*
+     * DENY_ALL means stop, not "deny this one". The results gathered so far
+     * are kept and reported as the run's error, so a caller can still see
+     * what happened before the refusal.
+     */
+    if (ctx->executor->denied_all)
+    {
+        ctx->error = g_error_new_literal (AI_ERROR, AI_ERROR_CANCELLED,
+                                          "tool execution denied by the user");
+        run_context_finish (ctx);
+        return;
+    }
+
     /* Continue conversation */
     run_context_send (ctx);
+}
+
+/*
+ * Republish a provider's events on the executor's own stream.
+ *
+ * A frontend then subscribes to exactly one object and sees the whole turn
+ * -- the model's prose from the provider and the tool activity from here --
+ * in the order it happened. The source label is preserved so a transcript
+ * can still tell the two apart.
+ */
+static void
+on_provider_event (
+    AiEventSource *source,
+    AiEvent       *event,
+    gpointer       user_data
+){
+    AiToolExecutor *self = user_data;
+
+    (void)source;
+
+    ai_event_source_emit (AI_EVENT_SOURCE (self), event);
+}
+
+/*
+ * Streaming finished. The response is the same shape chat_async produces,
+ * so the turn logic is shared -- on_run_response decides whether tools ran
+ * and whether to go round again.
+ */
+/*
+ * Subscribe to the provider for the duration of a run.
+ *
+ * Borrowed, not owned: the caller owns the provider and outlives the run.
+ * The handler is disconnected when the run ends, so an executor reused
+ * against a second provider never keeps forwarding the first one's events.
+ */
+static void
+executor_watch_provider (
+    AiToolExecutor *self,
+    AiProvider     *provider
+){
+    if (self->provider_event_id != 0 && self->provider_object != NULL)
+    {
+        g_signal_handler_disconnect (self->provider_object,
+                                     self->provider_event_id);
+        self->provider_event_id = 0;
+        self->provider_object = NULL;
+    }
+
+    if (provider == NULL || !AI_IS_EVENT_SOURCE (provider))
+        return;
+
+    self->provider_object = G_OBJECT (provider);
+    self->provider_event_id = g_signal_connect (provider, "event",
+                                                G_CALLBACK (on_provider_event),
+                                                self);
+}
+
+static void
+executor_unwatch_provider (AiToolExecutor *self)
+{
+    if (self->provider_event_id != 0 && self->provider_object != NULL)
+    {
+        g_signal_handler_disconnect (self->provider_object,
+                                     self->provider_event_id);
+    }
+
+    self->provider_event_id = 0;
+    self->provider_object = NULL;
+}
+
+static void
+on_run_stream_done (
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    RunContext *ctx = user_data;
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+
+    response = ai_streamable_chat_stream_finish (AI_STREAMABLE (source),
+                                                 result, &error);
+
+    if (response == NULL)
+    {
+        ctx->error = error != NULL
+            ? g_steal_pointer (&error)
+            : g_error_new_literal (AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                   "streaming produced no response");
+        run_context_finish (ctx);
+        return;
+    }
+
+    on_run_response_common (ctx, response);
 }
 
 static void
 run_context_send (RunContext *ctx)
 {
+    /*
+     * Streaming and the tool loop used to be mutually exclusive: this always
+     * called chat_async, so a caller got live tokens or tool execution and
+     * never both. The property defaults to FALSE, so every existing caller
+     * takes exactly the path it took before.
+     */
+    if (ctx->executor->stream && AI_IS_STREAMABLE (ctx->provider))
+    {
+        ai_streamable_chat_stream_async (
+            AI_STREAMABLE (ctx->provider),
+            ctx->messages,
+            ctx->system_prompt,
+            ctx->max_tokens,
+            ctx->executor->tools,
+            ctx->cancellable,
+            on_run_stream_done,
+            ctx
+        );
+        return;
+    }
+
     ai_provider_chat_async (
         ctx->provider,
         ctx->messages,
@@ -1788,6 +2104,8 @@ ai_tool_executor_finalize (GObject *object)
     g_clear_object (&self->search_provider);
     g_clear_pointer (&self->callbacks, g_hash_table_unref);
     g_clear_pointer (&self->working_directory, g_free);
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+    executor_unwatch_provider (self);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
 }
@@ -1798,6 +2116,222 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
     GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
     object_class->finalize = ai_tool_executor_finalize;
+    object_class->get_property = ai_tool_executor_get_property;
+    object_class->set_property = ai_tool_executor_set_property;
+
+    /**
+     * AiToolExecutor:approval-policy:
+     *
+     * What an %AI_TOOL_APPROVAL_DEFAULT answer resolves to.
+     *
+     * Defaults to %AI_TOOL_APPROVAL_ALLOW, which with no
+     * #AiToolExecutor::approval-requested handler connected is the
+     * behaviour this class has always had. Set it to
+     * %AI_TOOL_APPROVAL_DENY to make an unanswered call a refusal --- the
+     * safe default for an unattended agent, where nobody is there to say
+     * yes.
+     */
+    properties[PROP_APPROVAL_POLICY] =
+        g_param_spec_int ("approval-policy",
+                          "Approval Policy",
+                          "What a DEFAULT approval answer resolves to",
+                          AI_TOOL_APPROVAL_DEFAULT, AI_TOOL_APPROVAL_DENY_ALL,
+                          AI_TOOL_APPROVAL_ALLOW,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiToolExecutor:stream:
+     *
+     * Whether to stream each turn when the provider supports it.
+     *
+     * The loop has always used ai_provider_chat_async(), so a caller could
+     * have live tokens or tool execution and never both. With this set and
+     * an #AiStreamable provider, the turn goes through
+     * ai_streamable_chat_stream_async() instead and the provider's events
+     * are republished on this executor's own stream.
+     *
+     * Defaults to %FALSE so existing callers take the path they always did.
+     */
+    properties[PROP_STREAM] =
+        g_param_spec_boolean ("stream",
+                              "Stream",
+                              "Stream each turn when the provider supports it",
+                              FALSE,
+                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiToolExecutor:working-directory:
+     *
+     * Directory the built-in tools resolve relative paths against.
+     */
+    properties[PROP_WORKING_DIRECTORY] =
+        g_param_spec_string ("working-directory",
+                             "Working Directory",
+                             "Directory the built-in tools run in",
+                             NULL,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    g_object_class_install_properties (object_class, N_PROPS, properties);
+
+    /**
+     * AiToolExecutor::approval-requested:
+     * @self: the #AiToolExecutor
+     * @tool_use: the call the model wants to make
+     *
+     * Emitted before each tool call, so a host can ask a human.
+     *
+     * Return an #AiToolApproval. %AI_TOOL_APPROVAL_DEFAULT means "no
+     * opinion" and lets the next handler decide, falling through to
+     * #AiToolExecutor:approval-policy when none does. With no handler
+     * connected the emission accumulates to DEFAULT, so an unwatched
+     * executor behaves exactly as it did before this signal existed.
+     *
+     * A handler that asks a human must spin a nested #GMainLoop on
+     * g_main_context_get_thread_default() --- *not* the global default,
+     * which a caller driving the run from a private context would never
+     * dispatch. The loop is synchronous at this point by design: the tool
+     * has not run, and nothing else about the turn may proceed until the
+     * answer arrives.
+     *
+     * This never fires for the CLI wrapper providers. They run their own
+     * tools inside their own process, so approval there is
+     * #AiClaudeCodeClient:permission-mode and its siblings, not this.
+     */
+    signals[SIGNAL_APPROVAL_REQUESTED] =
+        g_signal_new ("approval-requested",
+                      G_TYPE_FROM_CLASS (klass),
+                      G_SIGNAL_RUN_LAST,
+                      0,
+                      ai_tool_approval_accumulator, NULL,
+                      NULL,
+                      G_TYPE_INT, 1,
+                      AI_TYPE_TOOL_USE);
+}
+
+static void
+ai_tool_executor_get_property (
+    GObject    *object,
+    guint       prop_id,
+    GValue     *value,
+    GParamSpec *pspec
+){
+    AiToolExecutor *self = AI_TOOL_EXECUTOR (object);
+
+    switch (prop_id)
+    {
+        case PROP_APPROVAL_POLICY:
+            g_value_set_int (value, self->approval_policy);
+            break;
+        case PROP_STREAM:
+            g_value_set_boolean (value, self->stream);
+            break;
+        case PROP_WORKING_DIRECTORY:
+            g_value_set_string (value, self->working_directory);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+            break;
+    }
+}
+
+static void
+ai_tool_executor_set_property (
+    GObject      *object,
+    guint         prop_id,
+    const GValue *value,
+    GParamSpec   *pspec
+){
+    AiToolExecutor *self = AI_TOOL_EXECUTOR (object);
+
+    switch (prop_id)
+    {
+        case PROP_APPROVAL_POLICY:
+            self->approval_policy = (AiToolApproval) g_value_get_int (value);
+            break;
+        case PROP_STREAM:
+            self->stream = g_value_get_boolean (value);
+            break;
+        case PROP_WORKING_DIRECTORY:
+            ai_tool_executor_set_working_directory (self,
+                                                    g_value_get_string (value));
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+            break;
+    }
+}
+
+/**
+ * ai_tool_executor_get_approval_policy:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: what a %AI_TOOL_APPROVAL_DEFAULT answer resolves to
+ */
+AiToolApproval
+ai_tool_executor_get_approval_policy (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), AI_TOOL_APPROVAL_ALLOW);
+
+    return self->approval_policy;
+}
+
+/**
+ * ai_tool_executor_set_approval_policy:
+ * @self: an #AiToolExecutor
+ * @policy: the fallback decision
+ *
+ * Sets what a %AI_TOOL_APPROVAL_DEFAULT answer resolves to.
+ */
+void
+ai_tool_executor_set_approval_policy (
+    AiToolExecutor *self,
+    AiToolApproval  policy
+){
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    if (self->approval_policy == policy)
+        return;
+
+    self->approval_policy = policy;
+    g_object_notify_by_pspec (G_OBJECT (self),
+                              properties[PROP_APPROVAL_POLICY]);
+}
+
+/**
+ * ai_tool_executor_get_stream:
+ * @self: an #AiToolExecutor
+ *
+ * Returns: whether turns are streamed when the provider supports it
+ */
+gboolean
+ai_tool_executor_get_stream (AiToolExecutor *self)
+{
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), FALSE);
+
+    return self->stream;
+}
+
+/**
+ * ai_tool_executor_set_stream:
+ * @self: an #AiToolExecutor
+ * @stream: %TRUE to stream each turn
+ *
+ * Sets whether to stream each turn when the provider supports it.
+ */
+void
+ai_tool_executor_set_stream (
+    AiToolExecutor *self,
+    gboolean        stream
+){
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+
+    stream = !!stream;
+
+    if (self->stream == stream)
+        return;
+
+    self->stream = stream;
+    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_STREAM]);
 }
 
 static void
@@ -1805,6 +2339,10 @@ ai_tool_executor_init (AiToolExecutor *self)
 {
     self->tools           = NULL;
     self->search_provider = NULL;
+    self->approval_policy = AI_TOOL_APPROVAL_ALLOW;
+    self->stream          = FALSE;
+    self->always_allowed  = NULL;
+    self->denied_all      = FALSE;
     self->callbacks       = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                     g_free, callback_entry_free);
 }
@@ -2233,6 +2771,14 @@ ai_tool_executor_run_full (
      * prompt-based extraction) for the duration of this run only. */
     self->active_provider = provider;
 
+    /*
+     * Per-run state. ALLOW_ALWAYS is remembered for one run only: an
+     * answer given about this task is not consent for the next one.
+     */
+    self->denied_all = FALSE;
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+    executor_watch_provider (self, provider);
+
     /* Shallow-copy the caller's messages so we can extend the list */
     n_input = 0;
     for (iter = messages; iter != NULL; iter = iter->next)
@@ -2246,6 +2792,8 @@ ai_tool_executor_run_full (
     g_main_loop_unref (ctx.loop);
 
     self->active_provider = NULL;
+    executor_unwatch_provider (self);
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
 
     /* Split our list at the caller's originals.  Everything past the
      * first n_input entries was appended during the loop -- the
@@ -2363,6 +2911,14 @@ ai_tool_executor_run_async (
 
     self->active_provider = provider;
 
+    /*
+     * Per-run state. ALLOW_ALWAYS is remembered for one run only: an
+     * answer given about this task is not consent for the next one.
+     */
+    self->denied_all = FALSE;
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+    executor_watch_provider (self, provider);
+
     for (iter = messages; iter != NULL; iter = iter->next)
         ctx->messages = g_list_append (ctx->messages, g_object_ref (iter->data));
 
@@ -2387,5 +2943,7 @@ ai_tool_executor_run_finish (
     g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
 
     self->active_provider = NULL;
+    executor_unwatch_provider (self);
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
     return g_task_propagate_pointer (G_TASK (result), error);
 }

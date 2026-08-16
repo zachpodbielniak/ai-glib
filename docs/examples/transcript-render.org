@@ -1,0 +1,78 @@
+* transcript-render
+A complete frontend in a hundred lines, using ANSI escapes and no terminal
+library at all.
+
+It exists to show that [[file:../transcript.org][the view layer]] is
+genuinely toolkit-agnostic. The only thing this program knows that the
+library does not is which escape sequence means "green" --- everything
+about *what* a conversation is comes from the library.
+
+Read it before writing a frontend of your own.
+
+#+begin_src sh
+make examples
+./build/release/examples/transcript-render "what changed in HEAD?"
+#+end_src
+
+** How it works
+Three pieces, and none of them is large.
+
+*** Map a style role to an appearance
+#+begin_src C
+static const gchar *
+ansi_for_tag (AiStyleTag tag)
+{
+    switch (tag)
+    {
+        case AI_STYLE_TOOL_NAME:   return "\033[1;35m";
+        case AI_STYLE_TOOL_TARGET: return "\033[36m";
+        case AI_STYLE_ADDED:       return "\033[32m";
+        case AI_STYLE_REMOVED:     return "\033[31m";
+        /* ... */
+        default:                   return "";
+    }
+}
+#+end_src
+
+This is the whole of the frontend's own knowledge. An Emacs version
+replaces it with a face lookup; an ncurses one with a colour pair.
+
+*** Walk the spans, not the characters
+#+begin_src C
+for (i = 0; i < ai_rendered_text_get_n_spans (rendered); i++)
+{
+    ai_rendered_text_get_span (rendered, i, &start, &len, &tag);
+
+    if (start > offset)
+        fwrite (text + offset, 1, start - offset, stdout);   /* unstyled gap */
+
+    fputs (ansi_for_tag (tag), stdout);
+    fwrite (text + start, 1, len, stdout);
+    fputs ("\033[0m", stdout);
+
+    offset = start + len;
+}
+#+end_src
+
+Offsets are byte offsets, which is exactly what =fwrite()= wants. The gaps
+between spans are ordinary text.
+
+*** Watch both signals
+#+begin_src C
+g_signal_connect (transcript, "items-changed", G_CALLBACK (on_items_changed), NULL);
+g_signal_connect (transcript, "block-changed", G_CALLBACK (on_block_changed), NULL);
+#+end_src
+
+=items-changed= for blocks appearing, =block-changed= for one growing as it
+streams. A frontend watching only the first would show the opening delta of
+each reply and nothing after it.
+
+** What it does not do
+Cursor addressing, so it prints blocks as they arrive rather than updating
+one in place; scrollback; input. Those are the parts
+[[file:../tui.org][ai-tui]] adds, and they are the parts that differ between
+frontends --- which is the point.
+
+** See also
+- [[file:../transcript.org][The transcript]] --- the layer, and the Emacs recipe
+- [[file:../tui.org][ai-tui]] --- the full terminal frontend

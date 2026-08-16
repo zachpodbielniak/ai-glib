@@ -89,6 +89,8 @@ void ai_mock_provider_set_fallback (AiMockProvider *self, const gchar *text);
  */
 guint ai_mock_provider_get_call_count (AiMockProvider *self);
 
+guint ai_mock_provider_get_stream_call_count (AiMockProvider *self);
+
 /**
  * ai_mock_provider_set_delay_ms:
  * @self: an #AiMockProvider

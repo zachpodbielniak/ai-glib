@@ -12,8 +12,10 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-opencode-client-internal.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "model/ai-tool-result.h"
 
 /*
  * Private structure for AiOpenCodeClient.
@@ -222,12 +224,13 @@ ai_opencode_client_set_property(
  */
 static GSubprocess *
 ai_opencode_client_spawn(
-    AiOpenCodeClient       *self,
+    AiCliClient            *client,
     const gchar *const     *argv,
     GSubprocessFlags        flags,
     GError                **error
 ){
-    const gchar *cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
+    const gchar *cwd = ai_cli_client_get_working_directory(client);
 
     if (self->skip_permissions || (cwd != NULL && cwd[0] != '\0'))
     {
@@ -626,7 +629,8 @@ ai_opencode_client_parse_json_output(
         }
 
         root = json_parser_get_root(parser);
-        if (!JSON_NODE_HOLDS_OBJECT(root))
+        /* NULL root: a bare `null` line. See the streaming parser. */
+        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
         {
             continue;
         }
@@ -854,27 +858,168 @@ ai_opencode_client_parse_json_output(
 }
 
 /*
- * Parse a single NDJSON line from streaming output.
+ * Type-checked JSON accessors, for the same reason grok-build has them:
+ * json-glib's *_member_with_default() emit a critical on a type mismatch,
+ * and subprocess stdout is untrusted input that must not be able to abort a
+ * fatal-warnings run.
+ */
+static const gchar *
+oc_get_string(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+        json_node_get_value_type(node) != G_TYPE_STRING)
+        return NULL;
+
+    return json_node_get_string(node);
+}
+
+static JsonObject *
+oc_get_object(JsonObject *obj, const gchar *member)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return NULL;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
+        return NULL;
+
+    return json_node_get_object(node);
+}
+
+static gint64
+oc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
+{
+    JsonNode *node;
+
+    if (obj == NULL || !json_object_has_member(obj, member))
+        return fallback;
+
+    node = json_object_get_member(obj, member);
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return fallback;
+
+    if (json_node_get_value_type(node) == G_TYPE_INT64)
+        return json_node_get_int(node);
+
+    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
+        return (gint64)json_node_get_double(node);
+
+    return fallback;
+}
+
+/*
+ * Turn one opencode tool_use part into events.
  *
- * Streaming events:
- * {"type":"text","part":{"text":"..."}} -> emit delta
- * {"type":"step_finish","part":{"tokens":{"input":N,"output":N}}} -> final usage
+ * opencode reports a tool as a single part whose state advances -- pending,
+ * running, completed, error -- rather than as separate start and stop
+ * events. A part that arrives already "completed" is the common case, so it
+ * yields both a TOOL_STARTED and a TOOL_FINISHED: the consumer's state
+ * machine then looks the same for opencode as for the providers that really
+ * do announce a call before answering it.
+ *
+ * This information used to be assembled into a markdown string and thrown
+ * away the moment any text arrived, which is why a tool-heavy opencode run
+ * showed nothing of what it did.
+ */
+static void
+oc_emit_tool_part(
+    JsonObject *part,
+    GPtrArray  *out_events
+){
+    JsonObject *state;
+    const gchar *tool;
+    const gchar *status;
+    const gchar *id;
+    JsonNode *input;
+    g_autoptr(AiToolUse) tool_use = NULL;
+
+    if (part == NULL)
+        return;
+
+    tool = oc_get_string(part, "tool");
+
+    if (tool == NULL || tool[0] == '\0')
+        tool = "tool";
+
+    /* opencode has spelled this both ways across versions. */
+    id = oc_get_string(part, "id");
+    if (id == NULL)
+        id = oc_get_string(part, "callID");
+    if (id == NULL)
+        id = "";
+
+    state = oc_get_object(part, "state");
+    status = state != NULL ? oc_get_string(state, "status") : NULL;
+
+    input = state != NULL && json_object_has_member(state, "input")
+        ? json_object_get_member(state, "input")
+        : NULL;
+
+    tool_use = ai_tool_use_new(id, tool,
+                               input);
+
+    g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
+
+    if (g_strcmp0(status, "completed") == 0)
+    {
+        const gchar *output = state != NULL ? oc_get_string(state, "output") : NULL;
+        g_autoptr(AiToolResult) result =
+            ai_tool_result_new_with_name(id, tool,
+                                         output != NULL ? output : "", FALSE);
+
+        g_ptr_array_add(out_events,
+                        ai_event_new_tool_finished(tool_use, result));
+    }
+    else if (g_strcmp0(status, "error") == 0)
+    {
+        const gchar *err = state != NULL ? oc_get_string(state, "error") : NULL;
+        g_autoptr(AiToolResult) result =
+            ai_tool_result_new_with_name(id, tool,
+                                         err != NULL ? err : "unknown error",
+                                         TRUE);
+
+        g_ptr_array_add(out_events,
+                        ai_event_new_tool_finished(tool_use, result));
+    }
+}
+
+/*
+ * Parse a single NDJSON line from opencode into events.
+ *
+ * opencode wraps everything in {"type": ..., "part": {...}}:
+ *   {"type":"text","part":{"text":"..."}}                     -> TEXT_DELTA
+ *   {"type":"tool_use","part":{"tool":..,"state":{...}}}       -> tool events
+ *   {"type":"step_finish","part":{"tokens":{"input":N,...}}}   -> USAGE
+ *
+ * Note that --format json is the only format opencode has; there is no
+ * stream-json. The lines still arrive as the run progresses, so reading them
+ * incrementally is what makes it feel live.
  */
 static gboolean
-ai_opencode_client_parse_stream_line(
+ai_opencode_client_parse_stream_events(
     AiCliClient  *client,
     const gchar  *line,
     AiResponse   *response,
-    gchar       **delta_text,
+    GPtrArray    *out_events,
     GError      **error
 ){
     g_autoptr(JsonParser) parser = NULL;
     JsonNode *root;
     JsonObject *obj;
+    JsonObject *part;
     const gchar *type;
-
-    (void)client;
-    *delta_text = NULL;
+    const gchar *session_id;
 
     if (line == NULL || line[0] == '\0')
     {
@@ -884,62 +1029,93 @@ ai_opencode_client_parse_stream_line(
     parser = json_parser_new();
     if (!json_parser_load_from_data(parser, line, -1, error))
     {
-        /* Non-JSON lines can be ignored */
         g_clear_error(error);
         return TRUE;
     }
 
     root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+
+    /*
+     * A bare `null` document parses successfully and yields a NULL root, and
+     * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
+     * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
+     * the NULL check comes first.
+     */
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         return TRUE;
     }
 
     obj = json_node_get_object(root);
-    type = json_object_get_string_member_with_default(obj, "type", "");
+    type = oc_get_string(obj, "type");
+    part = oc_get_object(obj, "part");
+
+    /* opencode spells this camelCase, unlike the rest of its payload. */
+    session_id = oc_get_string(obj, "sessionID");
+    if (session_id == NULL && part != NULL)
+        session_id = oc_get_string(part, "sessionID");
+
+    if (session_id != NULL && session_id[0] != '\0' &&
+        ai_cli_client_get_session_persistence(client))
+    {
+        ai_cli_client_set_session_id(client, session_id);
+    }
 
     if (g_strcmp0(type, "text") == 0)
     {
-        /* Text delta - extract from part.text */
-        if (json_object_has_member(obj, "part"))
-        {
-            JsonObject *part = json_object_get_object_member(obj, "part");
-            if (part != NULL && json_object_has_member(part, "text"))
-            {
-                const gchar *text = json_object_get_string_member_with_default(
-                    part, "text", "");
-                if (text[0] != '\0')
-                {
-                    *delta_text = g_strdup(text);
-                }
-            }
-        }
+        const gchar *text = part != NULL ? oc_get_string(part, "text") : NULL;
+
+        if (text != NULL && text[0] != '\0')
+            g_ptr_array_add(out_events, ai_event_new_text_delta(text));
+    }
+    else if (g_strcmp0(type, "tool_use") == 0)
+    {
+        oc_emit_tool_part(part, out_events);
     }
     else if (g_strcmp0(type, "step_finish") == 0)
     {
-        /* Final result with usage info - extract from part.tokens */
-        if (json_object_has_member(obj, "part"))
+        JsonObject *tokens = part != NULL ? oc_get_object(part, "tokens") : NULL;
+
+        if (tokens != NULL)
         {
-            JsonObject *part = json_object_get_object_member(obj, "part");
-            if (part != NULL && json_object_has_member(part, "tokens"))
-            {
-                JsonObject *tokens = json_object_get_object_member(part, "tokens");
-                if (tokens != NULL)
-                {
-                    gint input_tokens = json_object_get_int_member_with_default(
-                        tokens, "input", 0);
-                    gint output_tokens = json_object_get_int_member_with_default(
-                        tokens, "output", 0);
-                    g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
+            gint input_tokens = (gint)oc_get_int(tokens, "input", 0);
+            gint output_tokens = (gint)oc_get_int(tokens, "output", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
-                    ai_response_set_usage(response, usage);
-                }
-            }
+            ai_response_set_usage(response, usage);
+
+            /* opencode reports no cost at all, hence -1 rather than 0. */
+            g_ptr_array_add(out_events, ai_event_new_usage(usage, -1));
         }
-
-        ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
     }
 
+    return TRUE;
+}
+
+/*
+ * The pre-event contract, kept because callers and tests still use it.
+ * A projection of parse_stream_events rather than a second implementation.
+ */
+static gboolean
+ai_opencode_client_parse_stream_line(
+    AiCliClient  *client,
+    const gchar  *line,
+    AiResponse   *response,
+    gchar       **delta_text,
+    GError      **error
+){
+    g_autoptr(GPtrArray) events =
+        g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+
+    *delta_text = NULL;
+
+    if (!ai_opencode_client_parse_stream_events(client, line, response,
+                                                events, error))
+    {
+        return FALSE;
+    }
+
+    *delta_text = ai_cli_client_events_to_delta(events);
     return TRUE;
 }
 
@@ -977,6 +1153,13 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;
     cli_class->parse_stream_line = ai_opencode_client_parse_stream_line;
+    cli_class->parse_stream_events = ai_opencode_client_parse_stream_events;
+
+    /*
+     * opencode is the one wrapper that needs more than a working directory
+     * from the launcher, so it is the one that overrides spawn.
+     */
+    cli_class->spawn = ai_opencode_client_spawn;
 
     /**
      * AiOpenCodeClient:skip-permissions:
@@ -1360,8 +1543,8 @@ attempt_text_retry(
     emit_execution_args(client, rargs);
     g_ptr_array_add(rargs, NULL);
 
-    rproc = ai_opencode_client_spawn(
-        client, (const gchar *const *)rargs->pdata,
+    rproc = ai_cli_client_spawn(
+        AI_CLI_CLIENT(client), (const gchar *const *)rargs->pdata,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
         G_SUBPROCESS_FLAGS_STDERR_PIPE,
@@ -1547,8 +1730,8 @@ ai_opencode_client_chat_async(
     stdin_buf = klass->build_stdin(AI_CLI_CLIENT(self), messages);
 
     /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
-    subprocess = ai_opencode_client_spawn(
-        self, (const gchar *const *)argv,
+    subprocess = ai_cli_client_spawn(
+        AI_CLI_CLIENT(self), (const gchar *const *)argv,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
         G_SUBPROCESS_FLAGS_STDERR_PIPE,
@@ -1644,163 +1827,12 @@ ai_opencode_client_provider_init(AiProviderInterface *iface)
 
 /*
  * AiStreamable interface implementation
+ *
+ * The read loop lives in AiCliClient. All this client contributes is the
+ * translation from its wire format into events -- the parse_stream_events
+ * vfunc above. Spawning, line reading, signal emission, the deadline and
+ * the response assembly are shared with every other CLI wrapper.
  */
-
-typedef struct
-{
-    AiOpenCodeClient *client;
-    GTask            *task;
-    GSubprocess      *subprocess;
-    GDataInputStream *data_stream;
-    GCancellable     *cancellable;
-    AiResponse       *response;
-    GString          *accumulated_text;
-    gboolean          stream_started;
-} StreamAsyncData;
-
-static void
-stream_async_data_free(StreamAsyncData *data)
-{
-    g_clear_object(&data->task);
-    g_clear_object(&data->client);
-    g_clear_object(&data->subprocess);
-    g_clear_object(&data->data_stream);
-    g_clear_object(&data->cancellable);
-    g_clear_object(&data->response);
-
-    if (data->accumulated_text != NULL)
-    {
-        g_string_free(data->accumulated_text, TRUE);
-    }
-
-    g_slice_free(StreamAsyncData, data);
-}
-
-static void read_next_stream_line(StreamAsyncData *data);
-
-static void
-on_stream_line_read(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = NULL;
-    g_autofree gchar *delta_text = NULL;
-    AiCliClientClass *klass;
-    gsize length;
-
-    (void)source;
-
-    line = g_data_input_stream_read_line_finish(data->data_stream, result, &length, &error);
-
-    if (error != NULL)
-    {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            stream_async_data_free(data);
-        }
-        return;
-    }
-
-    if (line == NULL)
-    {
-        /* EOF - stream is complete */
-        if (data->response != NULL)
-        {
-            /* Add accumulated text as content block if not already done */
-            if (data->accumulated_text != NULL && data->accumulated_text->len > 0 &&
-                ai_response_get_content_blocks(data->response) == NULL)
-            {
-                g_autoptr(AiTextContent) content = ai_text_content_new(data->accumulated_text->str);
-                ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&content));
-            }
-
-            g_signal_emit_by_name(data->client, "stream-end", data->response);
-            g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                                    "Stream ended without a valid response");
-        }
-
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Parse the line */
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    if (klass->parse_stream_line(AI_CLI_CLIENT(data->client), line, data->response,
-                                  &delta_text, &error))
-    {
-        if (delta_text != NULL && delta_text[0] != '\0')
-        {
-            /* Emit stream-start on first delta */
-            if (!data->stream_started)
-            {
-                data->stream_started = TRUE;
-                g_signal_emit_by_name(data->client, "stream-start");
-            }
-
-            /* Accumulate text */
-            g_string_append(data->accumulated_text, delta_text);
-
-            /* Emit delta signal */
-            g_signal_emit_by_name(data->client, "delta", delta_text);
-        }
-    }
-
-    /* Read next line */
-    read_next_stream_line(data);
-}
-
-static void
-read_next_stream_line(StreamAsyncData *data)
-{
-    g_data_input_stream_read_line_async(
-        data->data_stream,
-        G_PRIORITY_DEFAULT,
-        data->cancellable,
-        on_stream_line_read,
-        data);
-}
-
-static void
-on_stream_subprocess_started(
-    GObject      *source,
-    GAsyncResult *result,
-    gpointer      user_data
-){
-    StreamAsyncData *data = user_data;
-    GInputStream *stdout_stream;
-
-    (void)source;
-    (void)result;
-
-    /* Get stdout pipe */
-    stdout_stream = g_subprocess_get_stdout_pipe(data->subprocess);
-    if (stdout_stream == NULL)
-    {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "Failed to get subprocess stdout");
-        stream_async_data_free(data);
-        return;
-    }
-
-    /* Wrap in data input stream for line-by-line reading */
-    data->data_stream = g_data_input_stream_new(stdout_stream);
-    g_data_input_stream_set_newline_type(data->data_stream, G_DATA_STREAM_NEWLINE_TYPE_ANY);
-
-    /* Create response object */
-    data->response = ai_response_new("", ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
-    data->accumulated_text = g_string_new("");
-
-    /* Start reading lines */
-    read_next_stream_line(data);
-}
 
 static void
 ai_opencode_client_chat_stream_async(
@@ -1813,82 +1845,11 @@ ai_opencode_client_chat_stream_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(streamable);
-    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *executable = NULL;
-    g_auto(GStrv) argv = NULL;
-    g_autoptr(GSubprocess) subprocess = NULL;
-    StreamAsyncData *data;
-    GTask *task;
-
     (void)tools;  /* Tools not yet supported via CLI */
 
-    task = g_task_new(self, cancellable, callback, user_data);
-
-    /* Resolve executable path */
-    executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
-    if (executable == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Build command line arguments for streaming */
-    argv = klass->build_argv(AI_CLI_CLIENT(self), messages, system_prompt,
-                             max_tokens, TRUE);
-    if (argv == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build command line arguments");
-        g_object_unref(task);
-        return;
-    }
-
-    /* Replace first element with resolved executable path */
-    g_free(argv[0]);
-    argv[0] = g_steal_pointer(&executable);
-
-    /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
-    subprocess = ai_opencode_client_spawn(
-        self, (const gchar *const *)argv,
-        G_SUBPROCESS_FLAGS_STDIN_PIPE |
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-        G_SUBPROCESS_FLAGS_STDERR_PIPE,
-        &error);
-    if (subprocess == NULL)
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
-
-    /* Write the prompt to stdin and close it so opencode can start */
-    {
-        g_autofree gchar *stdin_buf =
-            klass->build_stdin(AI_CLI_CLIENT(self), messages);
-        GOutputStream *stdin_pipe = g_subprocess_get_stdin_pipe(subprocess);
-
-        if (stdin_buf != NULL && stdin_pipe != NULL)
-        {
-            g_output_stream_write_all(stdin_pipe, stdin_buf, strlen(stdin_buf),
-                                      NULL, NULL, NULL);
-        }
-        if (stdin_pipe != NULL)
-            g_output_stream_close(stdin_pipe, NULL, NULL);
-    }
-
-    /* Set up callback data */
-    data = g_slice_new0(StreamAsyncData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->subprocess = g_object_ref(subprocess);
-    data->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
-    data->stream_started = FALSE;
-
-    /* Use idle to start reading (subprocess is already running) */
-    on_stream_subprocess_started(NULL, NULL, data);
+    ai_cli_client_stream_run_async(AI_CLI_CLIENT(streamable), messages,
+                                   system_prompt, max_tokens,
+                                   cancellable, callback, user_data);
 }
 
 static AiResponse *
@@ -1897,8 +1858,8 @@ ai_opencode_client_chat_stream_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)streamable;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    return ai_cli_client_stream_run_finish(AI_CLI_CLIENT(streamable),
+                                           result, error);
 }
 
 static void

@@ -279,3 +279,6 @@ int main(void)
 ** Links
 - [[https://docs.x.ai/][xAI API Documentation]]
 - [[https://console.x.ai/][xAI Console]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text and usage.
