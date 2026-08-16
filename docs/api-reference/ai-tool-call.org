@@ -1,0 +1,130 @@
+* AiToolCall
+=AiToolCall= is one tool call as a transcript needs to show it: what was
+asked for, where it got to, what it acted on, and what it changed. An
+[[file:ai-view-block.org][AiViewToolBlock]] holds a group of them and
+summarises them into a line.
+
+** State
+| State                   | Means                          |
+|-------------------------+--------------------------------|
+| =AI_TOOL_CALL_PENDING=  | announced, not started         |
+| =AI_TOOL_CALL_RUNNING=  | in flight                      |
+| =AI_TOOL_CALL_OK=       | finished successfully          |
+| =AI_TOOL_CALL_FAILED=   | finished with an error         |
+| =AI_TOOL_CALL_DENIED=   | refused before it ran          |
+
+=DENIED= is distinct from =FAILED= on purpose: a refusal is a decision, not
+a malfunction, and a transcript should not report the two the same way.
+
+** Functions
+#+begin_src C
+AiToolCall *ai_tool_call_new (AiToolUse *tool_use);
+
+const gchar     *ai_tool_call_get_id       (AiToolCall *self);
+const gchar     *ai_tool_call_get_name     (AiToolCall *self);
+AiToolUse       *ai_tool_call_get_tool_use (AiToolCall *self);
+AiToolCallState  ai_tool_call_get_state    (AiToolCall *self);
+AiToolCategory   ai_tool_call_get_category (AiToolCall *self);
+
+/* What it acted on: a basename for files, the command for a shell call. */
+const gchar *ai_tool_call_get_target (AiToolCall *self);
+
+const gchar *ai_tool_call_get_result   (AiToolCall *self);
+gboolean     ai_tool_call_get_is_error (AiToolCall *self);
+
+void ai_tool_call_finish (AiToolCall *self, AiToolResult *result);
+void ai_tool_call_deny   (AiToolCall *self);
+
+guint  ai_tool_call_get_lines_added   (AiToolCall *self);
+guint  ai_tool_call_get_lines_removed (AiToolCall *self);
+gint64 ai_tool_call_get_duration_us   (AiToolCall *self);
+
+/* Called again as more of the call becomes known. */
+void ai_tool_call_set_tool_use (AiToolCall *self, AiToolUse *tool_use);
+#+end_src
+
+=ai_tool_call_set_tool_use()= is called more than once for one call, because
+a streamed tool announces its name before its arguments exist. Everything
+derived from the input --- the target, the diff counts --- is recomputed
+there rather than at construction, so a call whose arguments arrive late
+still gets both.
+
+=get_target()= reduces a path to its basename: =Edited ai-style.c= is what a
+reader needs, and the full path would push everything else off the line. A
+command is shown whole with newlines flattened, since a multi-line command
+would break the summary it appears in.
+
+** The diff figures
+Not a real diff. An edit replaces one exact string with another, so the line
+counts of =old_string= and =new_string= are the answer; a write adds the
+lines of =content=. Both are derived from the *request*, because the result
+is whatever prose the tool chose to print.
+
+A tool whose =AiToolStyle= does not claim =counts_diff= contributes nothing,
+which is why running a command never inflates the total.
+
+** AiToolStyle: how a tool reads
+#+begin_src C
+typedef struct
+{
+    const gchar    *tool_name;      /* matched case-sensitively    */
+    const gchar    *verb;           /* "Edited", "Ran", "Read"     */
+    const gchar    *noun_singular;  /* "file"                      */
+    const gchar    *noun_plural;    /* "files"                     */
+    AiToolCategory  category;       /* which bucket it groups into */
+    const gchar    *target_key;     /* input naming what it acted on */
+    gboolean        counts_diff;    /* contributes to +N-M?        */
+} AiToolStyle;
+
+void               ai_tool_style_register (const AiToolStyle *style);
+const AiToolStyle *ai_tool_style_lookup   (const gchar *tool_name);
+
+const gchar *ai_tool_category_verb (AiToolCategory category);
+const gchar *ai_tool_category_noun (AiToolCategory category, gboolean plural);
+#+end_src
+
+*This table is the registration*, the same way =AiImageModelInfo= is for
+image models. Teaching a transcript about a new tool is one struct literal:
+
+#+begin_src C
+const AiToolStyle style = {
+    "deploy", "Deployed", "service", "services",
+    AI_TOOL_CATEGORY_COMMAND, "target", FALSE
+};
+
+ai_tool_style_register (&style);
+#+end_src
+
+Registrations are copied, so a stack literal is fine, and they win over the
+built-in table --- which is how a host overrides the shipped wording as well
+as adding to it.
+
+The built-ins cover ai-glib's own lowercase tools (=bash=, =read=, =write=,
+=edit=, =glob=, =grep=, =ls=, =web_fetch=, =web_search=) and the
+capitalised ones the wrapped CLIs use (=Bash=, =Read=, =Write=, =Edit=,
+=MultiEdit=, =Glob=, =Grep=, =WebFetch=, =WebSearch=, =Task=, =TodoWrite=,
+=NotebookEdit=), because both end up in the same transcript. Matching is
+case-sensitive on purpose: =edit= is ours and =Edit= is claude-code's, and
+although they read alike today they need not.
+
+A tool with no entry renders under a generic verb for its category
+(="Used 1 tool"=). A transcript that silently omitted a call would be lying
+about what ran.
+
+** Categories
+| Category                      | Generic verb |
+|-------------------------------+--------------|
+| =AI_TOOL_CATEGORY_FILE_READ=  | Read         |
+| =AI_TOOL_CATEGORY_FILE_WRITE= | Changed      |
+| =AI_TOOL_CATEGORY_COMMAND=    | Ran          |
+| =AI_TOOL_CATEGORY_SEARCH=     | Searched     |
+| =AI_TOOL_CATEGORY_NETWORK=    | Fetched      |
+| =AI_TOOL_CATEGORY_TASK=       | Delegated    |
+| =AI_TOOL_CATEGORY_OTHER=      | Used         |
+
+Buckets appear in the summary *in the order they were first used*, because
+it reads as a sequence of what happened rather than as a tally.
+
+** See also
+- [[file:ai-view-block.org][AiViewBlock]] --- AiViewToolBlock and the render contract
+- [[file:../transcript.org][The transcript]] --- the summarising rules in full

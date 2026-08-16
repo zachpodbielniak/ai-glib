@@ -25,7 +25,7 @@ def main():
         return 0
 
     gi.require_version("AiGlib", "1.0")
-    from gi.repository import AiGlib  # noqa: E402
+    from gi.repository import AiGlib, Gio  # noqa: E402
 
     # ----- Class construction -----
     client = AiGlib.ClaudeClient.new()
@@ -160,6 +160,95 @@ def main():
     assert usage.get_input_tokens() == 100
     assert usage.get_output_tokens() == 50
     assert usage.get_total_tokens() == 150
+
+    # ----- The view layer, which is the Emacs path -----
+    #
+    # An Emacs front-end reaches all of this through introspection, exactly
+    # as PyGObject does here. If a signature stops surviving the scanner,
+    # this is where it shows up rather than in somebody's init.el.
+
+    transcript = AiGlib.Transcript.new()
+    assert isinstance(transcript, Gio.ListModel)
+    assert transcript.get_n_items() == 0
+
+    seen = {"added": 0, "changed": 0}
+
+    def on_items_changed(model, position, removed, added):
+        seen["added"] += added
+
+    def on_block_changed(t, position, block):
+        seen["changed"] += 1
+
+    transcript.connect("items-changed", on_items_changed)
+    transcript.connect("block-changed", on_block_changed)
+
+    turn = AiGlib.ViewTurnBlock.new("hello from python")
+    transcript.append(turn)
+    assert transcript.get_n_blocks() == 1
+    assert seen["added"] == 1
+    assert turn.get_kind() == AiGlib.ViewBlockKind.TURN
+    assert turn.get_id() > 0
+
+    # A block mutating in place is neither an insertion nor a removal, and
+    # ::block-changed is what tells a frontend to update one region.
+    text_block = AiGlib.ViewTextBlock.new()
+    transcript.append(text_block)
+    text_block.append("streamed ")
+    text_block.append("in pieces")
+    assert seen["changed"] >= 2
+
+    # ----- Rendering, and reading the spans back -----
+    #
+    # The out-parameter accessor exists precisely so this works: a GArray of
+    # a plain struct would not survive the scanner.
+    rendered = turn.render(0)
+    assert rendered.get_text() == "> hello from python"
+    assert rendered.get_n_spans() >= 1
+
+    ok, start, length, tag = rendered.get_span(0)
+    assert ok
+    assert length > 0
+    assert start + length <= rendered.get_length()
+
+    # Offsets are byte offsets, which is what byte-to-position converts in
+    # Emacs. Python slices bytes the same way.
+    raw = rendered.get_text().encode("utf-8")
+    assert len(raw[start:start + length]) == length
+
+    # Style names are the frontend's mapping key -- ai-glib-face-<name>.
+    assert AiGlib.style_tag_to_string(AiGlib.StyleTag.TOOL_NAME) == "tool-name"
+    assert AiGlib.style_tag_from_string("tool-name") == AiGlib.StyleTag.TOOL_NAME
+
+    # ----- The tool summary, from bindings -----
+    tool_block = AiGlib.ViewToolBlock.new()
+    for i, (name, args) in enumerate(
+            [("Write", '{"file_path": "a.c", "content": "x\\ny"}'),
+             ("Write", '{"file_path": "b.c", "content": "p"}')]):
+        tu = AiGlib.ToolUse.new_from_json_string(f"t{i}", name, args)
+        tool_block.add_call(tu)
+
+    assert tool_block.get_n_calls() == 2
+    assert tool_block.get_summary() == "Created 2 files  +3-0"
+
+    # ----- A conversation, without sending anything -----
+    conversation = AiGlib.Conversation.new(grok)
+    assert conversation.get_transcript() is not None
+    assert conversation.get_busy() is False
+    conversation.set_system_prompt("be brief")
+    assert conversation.get_system_prompt() == "be brief"
+
+    # local-tools is refused for a CLI wrapper, which runs its own.
+    conversation.set_local_tools(True)
+    assert conversation.get_local_tools() is False
+
+    # ----- Events -----
+    event = AiGlib.Event.new_text_delta("hello")
+    assert event.get_kind() == AiGlib.EventKind.TEXT_DELTA
+    assert event.get_text() == "hello"
+    assert event.get_cost_micros() == -1
+    assert AiGlib.event_kind_to_string(AiGlib.EventKind.TOOL_STARTED) == \
+        "tool-started"
+    assert isinstance(grok, AiGlib.EventSource)
 
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"

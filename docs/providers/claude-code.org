@@ -360,3 +360,9 @@ directory the parent process was started in. It is applied now.
 ** See Also
 - [[file:claude.org][AiClaudeClient]] - HTTP API client for Claude
 - [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text, thinking, tool start, tool arguments, tool results, usage and cost.
+
+True token-level streaming needs =include-partial-messages=; without it the
+deltas arrive a whole content block at a time.

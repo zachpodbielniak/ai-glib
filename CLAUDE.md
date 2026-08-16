@@ -190,6 +190,11 @@ ai-glib/
 │   │   ├── ai-response.h/.c   # API response
 │   │   ├── ai-tool.h/.c       # Tool definition
 │   │   └── ...                # Content block types
+│   ├── view/                  # UI-agnostic conversation model
+│   │   ├── ai-style.h/.c      # Style tags, spans, AiRenderedText
+│   │   ├── ai-view-block.h/.c # Block base class
+│   │   ├── ai-transcript.h/.c # The buffer (GListModel of blocks)
+│   │   └── ai-conversation.h/.c
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
@@ -198,16 +203,17 @@ ai-glib/
 │       └── ai-ollama-client.h/.c
 ├── tests/                     # GTest unit tests
 ├── bin/                       # Installable CLI binaries
-│   └── ai.c                   # `ai` command-line front-end
+│   ├── ai.c                   # `ai` command-line front-end
+│   └── ai-tui.c               # `ai-tui` terminal agent harness
 ├── examples/                  # Example programs
 │   ├── simple-chat-claude.c
 │   ├── simple-chat-openai.c
 │   ├── simple-chat-gemini.c
 │   ├── simple-chat-grok.c
 │   └── simple-chat-ollama.c
-├── docs/                      # Documentation
-│   ├── index.md
-│   ├── contributing.md
+├── docs/                      # Documentation (org-mode throughout)
+│   ├── index.org
+│   ├── contributing.org
 │   ├── providers/             # Provider-specific docs
 │   ├── api-reference/         # API documentation
 │   └── examples/              # Example walkthroughs
@@ -508,6 +514,121 @@ Three things to know before touching the send path:
 6. Cover the wire format in `tests/test-image-serialize.c` and the round trip in
    `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
 7. Document it in `docs/providers/<name>.org` with a capability matrix.
+
+## Event stream
+
+Every provider narrates a turn through one normalized stream: `AiEvent`
+values published on the `::event` signal of the `AiEventSource` interface
+(`src/core/ai-event*.{h,c}`). Text and thinking deltas, tool start /
+arguments / result, usage, status, error, stream boundaries.
+
+Two rules when adding or touching a translator:
+
+- **Read every JSON member through a type-checked accessor.** json-glib's
+  `*_member_with_default()` emit a critical on a type mismatch, and a
+  critical is fatal under `G_DEBUG=fatal-warnings`. Subprocess stdout and
+  server responses are untrusted input. Each provider has `*_get_string` /
+  `_object` / `_int` helpers; keep new fields on them. The same applies to
+  `json_parser_get_root()`, which returns NULL for a bare `null` document.
+- **Return FALSE only for a real failure.** An unrecognised line is not one.
+  FALSE fails the whole turn, which is right for grok's `{"type":"error"}`
+  line (printed on stdout with exit status 0) and wrong for anything else.
+
+`AI_EVENT_TOOL_STARTED` may fire twice for one `tool_use_id`: a streamed
+call knows its name before its arguments exist, and the fragments between
+are not individually valid JSON. Consumers key on the id and update.
+
+`claude-tmux` emits nothing — it reads a finished JSONL transcript rather
+than a stream. `AiConversation` folds its `AiResponse` instead.
+
+For a CLI provider, implement `AiCliClientClass.parse_stream_events` and
+register it in `class_init`; the shared reader in `AiCliClient` does the
+spawning, line reading, signal emission, deadline and response assembly.
+Keep `parse_stream_line` as a projection of it via
+`ai_cli_client_events_to_delta()`, never as a second implementation.
+
+See `docs/events.org`.
+
+## View layer (`src/view/`)
+
+A UI-agnostic model of a conversation, so grouping and summarising tool
+calls is written once rather than once per frontend. `bin/ai-tui.c` and a
+future Emacs frontend both consume it.
+
+- `AiTranscript` — the buffer, a `GListModel` of `AiViewBlock`. Watch
+  **both** `::items-changed` (insert/remove) and `::block-changed` (a block
+  grew). The second is not optional: streaming mutates a block in place,
+  which the first does not cover.
+- `AiViewBlock` + five subclasses. Renders to `AiRenderedText`: text plus
+  `AiStyleSpan` runs. Cached against `(width, revision)`.
+- `AiConversation` — drives a provider, folds its events into blocks.
+
+Three invariants:
+
+1. **Span offsets are byte offsets into UTF-8.** Spans are sorted, never
+   overlap, never empty, and never split a character. Emacs converts with
+   `byte-to-position`.
+2. **Width is terminal columns**, via `g_unichar_iswide()`, not characters.
+   Width 0 means "do not wrap" — what Emacs wants.
+3. **Tags are roles, not colours.** `ai_style_tag_to_string()` gives each a
+   stable name; the frontend decides what it looks like.
+
+Spans are read through `ai_rendered_text_get_span()` out-parameters because
+a `GArray` of a plain struct does not survive g-ir-scanner, and this API has
+to work from bindings. `make test-gi` reads them back from Python for that
+reason — treat it as the standing check that the Emacs path still works.
+
+### Adding a tool to the summary
+
+One struct literal in the `AiToolStyle` table (`src/view/ai-tool-style.c`) —
+**that table is the registration**, the same pattern as `AiImageModelInfo`:
+
+```c
+const AiToolStyle style = {
+    "deploy", "Deployed", "service", "services",
+    AI_TOOL_CATEGORY_COMMAND, "target", /* counts_diff */ FALSE
+};
+ai_tool_style_register(&style);
+```
+
+An unregistered tool renders under a generic verb rather than not at all — a
+transcript that omitted a call would be lying about what ran.
+
+`tests/test-view-tool-block.c` asserts the summary strings literally
+(`Edited 3 files, ran 2 commands  +21-6`). Change the wording, change those.
+
+## Tool approval
+
+`AiToolExecutor::approval-requested` returns an `AiToolApproval`.
+`AI_TOOL_APPROVAL_DEFAULT` is **zero on purpose**: a signal with no handlers
+accumulates to zero, which resolves through the `approval-policy` property
+to `ALLOW`, so an unwatched executor behaves exactly as it did before
+approval existed. Do not add a compatibility branch; the property is the
+mechanism.
+
+The accumulator is custom, not `g_signal_accumulator_first_wins` — that one
+halts after the first handler whatever it returns, so a handler answering
+DEFAULT would silently veto every handler behind it.
+
+A handler that asks a human **must spin a nested `GMainLoop` on
+`g_main_context_get_thread_default()`**, not the global default. Same class
+of hazard as the image-generation timeout note above.
+
+Never fires for the CLI wrappers: they run their own tools in their own
+process. `AiConversation` refuses `local-tools` for them for the same
+reason.
+
+## TUI binary (`ai-tui`)
+
+`bin/ai-tui.c` is a thin ncurses frontend over `AiConversation`. It maps
+style tags to attributes, draws, and reads keys; it knows nothing about what
+a tool is. ncursesw is optional — without it the binary is dropped from the
+build with a notice and its tests skip themselves.
+
+`--dump PROMPT` runs one turn with no terminal and prints
+`ai_transcript_to_text()`. That is what makes it testable:
+`tests/test-ai-tui.c` drives the whole path against a stub `grok` and
+asserts the grouped summary line appears. See `docs/tui.org`.
 
 ## Common Patterns
 

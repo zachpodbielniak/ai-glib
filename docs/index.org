@@ -31,6 +31,7 @@ see their provider pages.
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
+- [[file:tui.org][ai-tui]] - The terminal agent harness
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 
 *** Providers
@@ -51,6 +52,7 @@ see their provider pages.
 
 *** Observing a turn
 - [[file:events.org][The event stream]] - Watch a turn happen: text, reasoning, tool calls, usage
+- [[file:transcript.org][The transcript]] - A renderable model of a conversation, and the Emacs recipe
 - [[file:agents.org][Agents & Brigades]] - Orchestrating multiple agent runs
 
 *** API Reference
@@ -67,6 +69,12 @@ see their provider pages.
 - [[file:api-reference/ai-search-provider.org][AiSearchProvider]] - Web search interface, results, options
 - [[file:api-reference/ai-config.org][AiConfig]] - Configuration
 - [[file:api-reference/ai-error.org][AiError]] - Error codes
+- [[file:api-reference/ai-event.org][AiEvent]] - One thing that happened in a turn
+- [[file:api-reference/ai-event-source.org][AiEventSource]] - Structured turn events
+- [[file:api-reference/ai-transcript.org][AiTranscript]] - The renderable buffer
+- [[file:api-reference/ai-view-block.org][AiViewBlock]] - Blocks and the render contract
+- [[file:api-reference/ai-tool-call.org][AiToolCall]] - Tool calls and how they read
+- [[file:api-reference/ai-conversation.org][AiConversation]] - Drives a provider into a transcript
 
 *** Examples
 - [[file:examples/index.org][Examples Index]] - All examples
@@ -76,6 +84,7 @@ see their provider pages.
 - [[file:examples/tool-use.org][Tool Use]] - Function calling
 - [[file:examples/web-search.org][Web Search]] - Search the web with a provider
 - [[file:examples/image-generation.org][Image Generation]] - Generate images from text, with reference-image conditioning
+- [[file:examples/transcript-render.org][transcript-render]] - A frontend in a hundred lines, without a terminal library
 
 *** Contributing
 - [[file:contributing.org][Contributing]] - How to contribute to ai-glib

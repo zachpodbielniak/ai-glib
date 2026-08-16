@@ -1,0 +1,303 @@
+* The transcript: a conversation you can render
+ai-glib models a conversation as an ordered list of *blocks* --- a user
+turn, a paragraph of assistant prose, a group of tool calls, a token count
+--- and hands a frontend each one as text plus styled spans. Deciding that
+five tool calls read as =Edited 3 files, ran 2 commands  +21-6= happens
+once, in the library. An ncurses harness and an Emacs buffer both consume
+the result and neither of them knows what a tool is.
+
+That split is the whole design. This document is about where the line falls
+and how to sit on either side of it.
+
+#+begin_example
+  providers ──emit AiEvent──▶ AiConversation ──folds into──▶ AiTranscript
+  (AiEventSource)             (the driver)                   (GListModel<AiViewBlock>)
+                                                                     │
+                                               ai_view_block_render(block, width)
+                                                                     │
+                                                     AiRenderedText { text, spans }
+                                                         ╱                    ╲
+                                             ncurses attr_t          Emacs text properties
+#+end_example
+
+** The shortest useful program
+#+begin_src C
+g_autoptr(AiClaudeClient) client = ai_claude_client_new ();
+g_autoptr(AiConversation) conversation = ai_conversation_new (G_OBJECT (client));
+
+g_signal_connect (ai_conversation_get_transcript (conversation),
+                  "items-changed", G_CALLBACK (on_items_changed), self);
+
+ai_conversation_send_async (conversation, "what changed in HEAD?",
+                            NULL, on_sent, loop);
+#+end_src
+
+Everything after that is rendering. =examples/transcript-render.c= is a
+complete frontend in a hundred lines, most of them a switch mapping style
+roles to ANSI colours; read it before writing your own.
+
+** Blocks
+| Kind                     | Type                  | Carries                          |
+|--------------------------+-----------------------+----------------------------------|
+| =AI_VIEW_BLOCK_TURN=     | =AiViewTurnBlock=     | what the user said               |
+| =AI_VIEW_BLOCK_TEXT=     | =AiViewTextBlock=     | assistant prose, grown by deltas |
+| =AI_VIEW_BLOCK_THINKING= | =AiViewThinkingBlock= | reasoning, collapsed by default  |
+| =AI_VIEW_BLOCK_TOOL=     | =AiViewToolBlock=     | a group of calls, summarised     |
+| =AI_VIEW_BLOCK_STATUS=   | =AiViewStatusBlock=   | a note, token counts, a failure  |
+
+Every block answers =ai_view_block_get_id()= with a number unique for the
+life of the process. *Key your frontend's map on that, not on the position.*
+Positions shift when blocks are removed; ids do not.
+
+Two flags live on the base class because a frontend should be able to offer
+the same affordance everywhere without asking what it is looking at:
+=expanded= (the =›= / =⌄= marker) and =complete= (whether the block is still
+being streamed into, which is what a spinner keys on).
+
+** The rhythm, and where it comes from
+A session reads as narration, a collapsed tool group, more narration. That
+is not something the frontend arranges --- it falls out of three rules in
+=AiConversation='s folding:
+
+- A =AI_EVENT_TEXT_DELTA= appends to the open prose block, opening one if
+  there is none.
+- A =AI_EVENT_TOOL_STARTED= joins the open tool group, opening one if there
+  is none. *That is the grouping.*
+- Anything else closes what is open, so the next delta after a tool group
+  starts a *new* paragraph rather than continuing the one before it.
+
+Without that last rule the narration before and after a tool group would run
+together into one paragraph with the group wedged in the middle of it.
+
+** The render contract
+#+begin_src C
+AiRenderedText *rendered = ai_view_block_render (block, width);
+
+const gchar *text = ai_rendered_text_get_text (rendered);
+
+for (i = 0; i < ai_rendered_text_get_n_spans (rendered); i++)
+{
+    guint start, len;
+    AiStyleTag tag;
+
+    ai_rendered_text_get_span (rendered, i, &start, &len, &tag);
+    /* text[start .. start+len) should look like `tag` */
+}
+#+end_src
+
+Three things about that are load-bearing.
+
+*** Offsets are byte offsets into UTF-8
+Which is what C, =fwrite()= and ncurses all want. Emacs counts characters,
+and converts with =byte-to-position=; the recipe below does exactly that. A
+span never begins or ends inside a multi-byte sequence, so the conversion is
+always well defined. Spans are sorted by =start=, never overlap, and are
+never empty.
+
+*** Width is measured in terminal columns
+Not characters. A CJK ideograph is one character and two columns, and a
+renderer that counted characters would misalign every line containing one.
+=ai_style_text_width()= is the same measure the wrapper uses.
+
+Pass =width = 0= to mean *do not wrap*. That is the right answer for Emacs,
+which fills text itself and would fight with pre-wrapped content. A terminal
+passes its column count and gets lines that fit.
+
+*** Tags are roles, not colours
+=AI_STYLE_ADDED= says "this run is an addition". Whether that is green,
+bold, or underlined is the frontend's decision and the library has no
+opinion. =ai_style_tag_to_string()= gives each role a stable name ---
+="tool-name"=, ="added"= --- which is what makes a mapping table one lookup.
+
+| Tag                     | Means                                     |
+|-------------------------+-------------------------------------------|
+| =AI_STYLE_USER_PROMPT=  | something the user typed                  |
+| =AI_STYLE_TOOL_NAME=    | the verb of a group --- "Edited", "Ran"   |
+| =AI_STYLE_TOOL_TARGET=  | what it acted on --- a file or a command  |
+| =AI_STYLE_TOOL_OK= / =_FAILED= / =_PENDING= | a call's outcome      |
+| =AI_STYLE_ADDED= / =_REMOVED= | the =+21= and the =-6=              |
+| =AI_STYLE_THINKING=     | reasoning, which is not the answer        |
+| =AI_STYLE_MARKER=       | the expand/collapse affordance            |
+| =AI_STYLE_CODE= / =_DIM= / =_ERROR= / =_STATUS= / =_LINK= / =_HEADING= | as they read |
+
+Renderings are cached against =(width, revision)=, so asking repeatedly at
+one width is cheap and asking after a mutation is correct. A terminal resize
+re-renders; it does not re-derive.
+
+** Tool groups
+=AiViewToolBlock= is where the summarising lives. Collapsed it is one line;
+expanded it is one line per call. The wording comes out of the
+=AiToolStyle= table:
+
+1. Bucket the calls by category, *in the order the categories were first
+   used* --- the summary reads as a sequence of what happened.
+2. One call in a bucket with a known target names it: =Edited ai-style.c=.
+   Several become a count: =Edited 3 files=.
+3. Join with commas, lowercasing every clause after the first.
+4. Append the aggregate =+21-6=, from the calls whose style says
+   =counts_diff=. Omitted entirely when nothing changed --- a group that
+   only ran commands carries no diff figure.
+5. Append the marker, and a =(2 failed)= clause if anything failed.
+
+The diff figures are derived from the *request*, not the result: an edit
+replaces one exact string with another, so the line counts of the two are
+the answer. A tool whose style does not claim =counts_diff= contributes
+nothing, which is why running a command never inflates the total.
+
+*** Teaching it a new tool
+One struct literal, the same way =AiImageModelInfo= registers an image
+model:
+
+#+begin_src C
+const AiToolStyle style = {
+    "deploy",                    /* the name the model uses      */
+    "Deployed",                  /* past tense, capitalised      */
+    "service", "services",       /* singular, plural             */
+    AI_TOOL_CATEGORY_COMMAND,    /* which bucket it groups into  */
+    "target",                    /* input naming what it acted on */
+    FALSE                        /* contributes to +N-M?          */
+};
+
+ai_tool_style_register (&style);
+#+end_src
+
+The built-in table already covers ai-glib's own lowercase tools (=bash=,
+=edit=, =write=, ...) and the capitalised ones the wrapped CLIs use (=Bash=,
+=Edit=, =Write=, =Task=, ...), because both end up in the same transcript.
+Matching is case-sensitive on purpose: =edit= is ours and =Edit= is
+claude-code's, and although they read alike today they need not.
+
+An unregistered tool still renders, under a generic verb for its category
+(=Used 1 tool=). A transcript that silently omitted a call would be lying
+about what ran.
+
+** Observing changes
+=AiTranscript= is a =GListModel=, so =::items-changed= reports insertions
+and removals in the form every GLib consumer already knows.
+
+That is not enough on its own. A block being *streamed into* is neither an
+insertion nor a removal --- prose grows a delta at a time, a tool group's
+calls change state --- so a frontend watching only =items-changed= would
+show the first delta of a reply and nothing after it. Hence:
+
+#+begin_src C
+void block_changed (AiTranscript *t, guint position, AiViewBlock *block, gpointer data);
+#+end_src
+
+Update that one region rather than redrawing everything. And *coalesce*: a
+streamed reply fires this per token, and redrawing on each would spend the
+whole turn in refresh. =ai-tui= schedules one redraw per main-loop iteration
+with =g_idle_add()=, which is indistinguishable to a reader.
+
+** Rendering into Emacs
+This is the reason the layer exists, so here it is in full. Everything below
+goes through GObject Introspection; =make test-gi= exercises the same calls
+from Python precisely so that this keeps working.
+
+#+begin_src emacs-lisp
+;;; ai-glib-transcript.el --- render an AiTranscript into a buffer -*- lexical-binding: t; -*-
+
+(require 'gi)
+(gi-require-namespace "AiGlib" "1.0")
+
+(defface ai-glib-face-tool-name   '((t :inherit font-lock-keyword-face))   "")
+(defface ai-glib-face-tool-target '((t :inherit font-lock-string-face))    "")
+(defface ai-glib-face-added       '((t :foreground "green"))               "")
+(defface ai-glib-face-removed     '((t :foreground "red"))                 "")
+(defface ai-glib-face-thinking    '((t :inherit shadow :slant italic))     "")
+(defface ai-glib-face-marker      '((t :inherit shadow))                   "")
+;; ... one per ai_style_tag_to_string() name.
+
+(defvar-local ai-glib--regions (make-hash-table)
+  "Block id -> (start-marker . end-marker).")
+
+(defun ai-glib--face-for (tag)
+  "The face for style role TAG, or nil when there is none."
+  (let ((sym (intern (format "ai-glib-face-%s" (AiGlib-style-tag-to-string tag)))))
+    (and (facep sym) sym)))
+
+(defun ai-glib--insert-block (block)
+  "Insert BLOCK at point, applying its spans as text properties."
+  ;; Width 0: Emacs fills text itself, so pre-wrapped content would fight it.
+  (let* ((rendered (AiGlib-view-block-render block 0))
+         (text     (AiGlib-rendered-text-get-text rendered))
+         (origin   (point)))
+    (insert text)
+    (dotimes (i (AiGlib-rendered-text-get-n-spans rendered))
+      (pcase-let ((`(,ok ,start ,len ,tag)
+                   (AiGlib-rendered-text-get-span rendered i)))
+        (when ok
+          ;; Spans are BYTE offsets into UTF-8; Emacs wants character
+          ;; positions. byte-to-position converts, and a span never begins
+          ;; or ends inside a character, so this is always exact.
+          (let ((beg (byte-to-position (+ (position-bytes origin) start)))
+                (end (byte-to-position (+ (position-bytes origin) start len)))
+                (face (ai-glib--face-for tag)))
+            (when face
+              (put-text-property beg end 'face face))))))
+    (insert "\n\n")
+    (puthash (AiGlib-view-block-get-id block)
+             (cons (copy-marker origin) (copy-marker (point) t))
+             ai-glib--regions)))
+
+(defun ai-glib--replace-block (block)
+  "Re-render BLOCK in place, for a block that grew."
+  (let ((region (gethash (AiGlib-view-block-get-id block) ai-glib--regions)))
+    (if (null region)
+        (ai-glib--insert-block block)
+      (save-excursion
+        (delete-region (car region) (cdr region))
+        (goto-char (car region))
+        (ai-glib--insert-block block)))))
+
+(defun ai-glib-attach (conversation buffer)
+  "Mirror CONVERSATION's transcript into BUFFER."
+  (with-current-buffer buffer
+    (let ((transcript (AiGlib-conversation-get-transcript conversation)))
+      ;; Insertions and removals.
+      (gi-signal-connect
+       transcript "items-changed"
+       (lambda (model position _removed added)
+         (with-current-buffer buffer
+           (let ((inhibit-read-only t))
+             (save-excursion
+               (goto-char (point-max))
+               (dotimes (i added)
+                 (ai-glib--insert-block
+                  (g-list-model-get-item model (+ position i)))))))))
+
+      ;; Streaming, which items-changed does not cover.
+      (gi-signal-connect
+       transcript "block-changed"
+       (lambda (_t _position block)
+         (with-current-buffer buffer
+           (let ((inhibit-read-only t))
+             (ai-glib--replace-block block))))))))
+#+end_src
+
+Two things worth repeating, because they are the only places a frontend can
+get this wrong:
+
+- =byte-to-position= is not optional. Span offsets are bytes; a buffer
+  containing one accented filename would misplace every face after it
+  otherwise.
+- =::block-changed= is not optional either. Without it the buffer shows the
+  first delta of each reply and then stops.
+
+The =›= marker is a span like any other, so binding a key to
+=AiGlib-view-block-set-expanded= on the block under point gives you
+collapse/expand with no further work.
+
+** Testing a frontend
+=ai_transcript_to_text (transcript, width)= renders the whole thing as plain
+text, which is what =ai-tui --dump= prints and what
+=tests/test-ai-tui.c= asserts against. It is the cheapest way to check that
+a session produced what you expected without driving a display.
+
+** See also
+- [[file:events.org][The event stream]] --- what fills a transcript, and which providers report what
+- [[file:api-reference/ai-transcript.org][AiTranscript]] --- the buffer
+- [[file:api-reference/ai-view-block.org][AiViewBlock]] --- the blocks and the render contract
+- [[file:api-reference/ai-conversation.org][AiConversation]] --- the driver
+- [[file:tui.org][ai-tui]] --- the terminal frontend
+- [[file:examples/transcript-render.org][transcript-render]] --- a frontend in a hundred lines

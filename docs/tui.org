@@ -1,0 +1,181 @@
+* The =ai-tui= front-end
+=ai-tui= drives any ai-glib provider from a terminal, showing prose,
+reasoning and grouped tool calls as they happen. It is what
+[[file:cli.org][the =ai= CLI]] is for one-shot prompts, but for sitting in.
+
+Everything about *what* a conversation is --- how calls group, how a summary
+reads, which run of bytes is a filename --- lives in
+[[file:transcript.org][the view layer]]. This binary turns a style role into
+an ncurses attribute, puts characters on a screen, and reads keys. That is
+the whole of it, and it is deliberate: an Emacs front-end replaces this one
+file and shares everything else.
+
+** Synopsis
+#+begin_src sh
+ai-tui [-p PROVIDER] [-m MODEL] [-s SYSTEM] [OPTIONS]
+#+end_src
+
+#+begin_src sh
+ai-tui -p claude-code -m opus
+#+end_src
+
+** What it looks like
+#+begin_example
+> build phase 1
+
+Now the codec registry.
+
+Created 2 files  +5-0 ›
+
+Cleaning up a clumsy double-lookup.
+
+Edited cmacs-office-package.c, ran 2 commands  +9-12 ›
+
+1200 in / 340 out  $0.0182
+#+end_example
+
+The alternation is the point. Narration, a collapsed group of what the model
+actually did, more narration --- rather than a wall of tool output with the
+explanation lost inside it.
+
+** Options
+| Option                | Description                                              |
+|-----------------------+----------------------------------------------------------|
+| =-p=, =--provider=    | Provider name; defaults to =$AI_PROVIDER=, else =claude=  |
+| =-m=, =--model=       | Model id                                                 |
+| =-s=, =--system=      | System prompt                                            |
+| =--effort=            | Reasoning effort: =low= … =max= (CLI providers)          |
+| =--max-tokens=        | Cap per response, default 4096                           |
+| =--no-stream=         | Wait for each whole turn instead of streaming it         |
+| =-c=, =--continue=    | Continue the provider's most recent session              |
+| =--skip-permissions=  | Let a wrapped CLI run its tools without asking           |
+| =--local-tools=       | Run tools in this process (HTTP providers only)          |
+| =-y=, =--yes=         | Approve every local tool call without asking             |
+| =--set PROP=VALUE=    | Set any provider property; repeatable                    |
+| =--dump PROMPT=       | Run one turn with no terminal and print the transcript   |
+| =--width N=           | Wrap width for =--dump= (0 for none)                     |
+| =--dry-run=           | Print the command a CLI provider would run, then exit    |
+| =-v=, =--version=     | Print the version                                        |
+| =--license=           | Print licensing information                              |
+
+=--set= is provider-property reflection, exactly as in =ai=: a provider that
+grows a knob is reachable immediately with no flag added here. An unknown
+name is an error rather than a silent no-op, and so is a value that does not
+parse --- a run that quietly ignored the bound you asked for is worse than
+one that refuses to start.
+
+** Keys
+| Key              | Does                                              |
+|------------------+---------------------------------------------------|
+| =Enter=          | Send                                              |
+| =C-c=            | Stop the turn in flight --- never the program     |
+| =C-d=            | Quit, on an empty input line                      |
+| =Up= / =Down=    | Walk the input history                            |
+| =Left= / =Right= | Move the cursor                                   |
+| =C-a= / =C-e=    | Start / end of line                               |
+| =C-u=            | Clear the input                                   |
+| =PgUp= / =PgDn=  | Scroll the transcript                             |
+| =Tab=            | Select the next tool or reasoning block           |
+| =C-b=            | Expand or collapse the selected block             |
+
+=C-c= cancels the turn rather than killing the process, because in a harness
+"stop what you are doing" is what you almost always mean. Quitting is =C-d=
+or =/quit=.
+
+Scrolling away from the bottom stops the view following new output; the
+status bar says =[scrolled]= while that is so. Sending, or scrolling back
+down, resumes following.
+
+** Commands
+| Command        | Does                                          |
+|----------------+-----------------------------------------------|
+| =/quit=, =/q=  | Exit                                          |
+| =/clear=       | Empty the transcript and forget the history   |
+| =/model NAME=  | Switch model without restarting               |
+
+=/clear= empties the *local* view. A provider holding a session of its own
+--- the CLI wrappers do --- is not affected; clearing the transcript does
+not un-say what was already said to it.
+
+** Tool approval
+With =--local-tools= against an HTTP provider, tools run in this process and
+each call is offered for approval:
+
+#+begin_example
+ run Bash: rm -rf build/ ?  [y]es  [n]o  [a]lways  [d]eny all
+#+end_example
+
+| Answer      | Does                                                        |
+|-------------+-------------------------------------------------------------|
+| =y=         | Run this call                                               |
+| =n=         | Refuse it; the model is told, and usually tries something else |
+| =a=         | Run it, and stop asking about this tool for the rest of the run |
+| =d=         | Refuse and abort the turn                                   |
+
+=--yes= approves everything without asking, which is what you want for an
+unattended run and not much else.
+
+Refusing one call does not end the turn. The model is told the tool was
+denied and generally acknowledges it and tries another route, which is more
+useful than a turn that simply stops --- only =d= stops everything. An
+answer of =a= is remembered for that run only: consent given about one task
+is not consent for the next.
+
+*This never appears for the CLI wrapper providers.* claude-code, opencode
+and grok-build run their own tools inside their own processes, and their
+approval is =--skip-permissions= and the per-provider =permission-mode= and
+=allowed-tools= properties, not this. =--local-tools= is refused for them,
+with a note saying so, rather than silently doing nothing.
+
+** =--dump=, and testing
+#+begin_src sh
+ai-tui -p grok-build --dump "list the files here"
+#+end_src
+
+Runs one turn with no terminal at all and prints the transcript as plain
+text. That is how the TUI is tested --- =tests/test-ai-tui.c= drives the
+whole path from argv through the NDJSON parser, the event stream, the
+folding and the summariser against a stub =grok=, with no network and no
+tty, and asserts the grouped summary line comes out with the narration in
+the right order around it.
+
+It is also the right thing to reach for in a script:
+
+#+begin_src sh
+ai-tui -p claude-code --dump "summarise the diff" --width 72 > review.txt
+#+end_src
+
+Started without a terminal and without =--dump=, =ai-tui= says so and exits
+rather than starting ncurses on a pipe.
+
+** Building
+=ai-tui= needs =ncursesw=; the library itself does not. Without it the
+binary is dropped from the build with a notice and its tests skip
+themselves, so a machine with no terminal library still gets a green suite
+for everything else.
+
+On Fedora and its derivatives:
+
+#+begin_src sh
+ncurses-devel
+#+end_src
+
+The library is linked statically into the binary, as with =ai=, so the
+installed =ai-tui= has no runtime dependency on =libai-glib=.
+
+** Notes
+- Keys arrive through the main loop (=g_unix_fd_add=), not a blocking read,
+  so the provider's I/O continues while you type.
+- A terminal resize re-wraps every block at the new width. That is a
+  re-render, not a re-derivation: the library caches renderings per width.
+- Redraws are coalesced onto an idle. A streamed reply fires a change per
+  token, and redrawing on each would spend the whole turn in refresh.
+- =claude-tmux= works here, but produces its answer in one piece: it reads a
+  finished transcript rather than a stream, so there is nothing to show
+  along the way. See the coverage matrix in [[file:events.org][the event stream]].
+
+** See also
+- [[file:transcript.org][The transcript]] --- the layer this is a frontend for
+- [[file:events.org][The event stream]] --- what each provider can report
+- [[file:cli.org][The =ai= CLI]] --- one-shot prompts and scripting
+- [[file:tool-executor.org][Tool Executor]] --- what =--local-tools= runs

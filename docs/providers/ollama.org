@@ -211,3 +211,6 @@ Model gotchas:
 - [[https://ollama.ai/][Ollama Website]]
 - [[https://github.com/ollama/ollama][Ollama GitHub]]
 - [[https://ollama.ai/library][Ollama Model Library]]
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text and usage.

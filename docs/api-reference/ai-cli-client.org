@@ -165,3 +165,73 @@ See [[../contributing.org][Contributing]] for the full checklist. The convention
 - [[file:ai-provider.org][AiProvider]] / [[file:ai-error.org][AiError]]
 - [[../providers/index.org][Providers Overview]]
 - [[../cli.org][The =ai= CLI]] - =--dry-run= and =--set=
+
+* Streaming, and the shared reader
+Streaming is implemented once, in =AiCliClient=. A subclass implements
+=AiStreamable= by forwarding to it and contributing a parser:
+
+#+begin_src C
+static void
+my_client_chat_stream_async (AiStreamable *streamable, GList *messages,
+                             const gchar *system_prompt, gint max_tokens,
+                             GList *tools, GCancellable *cancellable,
+                             GAsyncReadyCallback callback, gpointer user_data)
+{
+    ai_cli_client_stream_run_async (AI_CLI_CLIENT (streamable), messages,
+                                    system_prompt, max_tokens,
+                                    cancellable, callback, user_data);
+}
+#+end_src
+
+=ai_cli_client_stream_run_async()= resolves the executable, builds the argv,
+writes and closes stdin, reads stdout line by line, translates each line
+through @parse_stream_events, publishes the results, enforces
+=process-timeout-ms=, and assembles the final =AiResponse=.
+
+Before this existed, claude-code, opencode and grok-build each carried their
+own copy of that loop --- around 250 lines apiece --- and they had drifted.
+Only one failed the task when a line failed to parse; the others read on to
+EOF and returned the empty response that produces, so a CLI reporting an
+error mid-stream looked like a successful empty answer. And none of them
+enforced the process deadline the synchronous path has always had.
+
+* The vfuncs
+Two of the class's reserved slots are now used.
+
+** parse_stream_events
+#+begin_src C
+gboolean (*parse_stream_events) (AiCliClient  *self,
+                                 const gchar  *line,
+                                 AiResponse   *response,
+                                 GPtrArray    *out_events,
+                                 GError      **error);
+#+end_src
+
+The richer successor to @parse_stream_line: append zero or more
+[[file:ai-event.org][AiEvent]] to @out_events instead of returning one delta
+string. Return %FALSE only for a real failure --- an unrecognised line is
+not one.
+
+Leaving it %NULL still works; the default wraps @parse_stream_line and can
+therefore only ever report text, which is exactly how these wrappers behaved
+before events existed.
+
+=ai_cli_client_events_to_delta()= goes the other way, so a subclass can
+implement the richer vfunc as its single source of truth and still answer
+the older contract. Every shipped provider does that, and a test asserts the
+two agree.
+
+** spawn
+#+begin_src C
+GSubprocess * (*spawn) (AiCliClient          *self,
+                        const gchar * const  *argv,
+                        GSubprocessFlags      flags,
+                        GError              **error);
+#+end_src
+
+The default honours =working-directory=. Override it only to add something
+else to the launcher --- =AiOpenCodeClient= is the one that does, for
+=OPENCODE_PERMISSION=, and overriding here means it gets that on the
+synchronous path too rather than only when streaming.
+
+Call it through =ai_cli_client_spawn()=, never directly.

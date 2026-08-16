@@ -336,3 +336,6 @@ if (error != NULL)
 - [[file:openai.org][AiOpenAIClient]] - Direct HTTP API client for OpenAI
 - [[file:gemini.org][AiGeminiClient]] - Direct HTTP API client for Gemini
 - [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers
+
+* Event coverage
+On [[file:../events.org][the event stream]] this provider reports text, tool start, tool results, usage.
