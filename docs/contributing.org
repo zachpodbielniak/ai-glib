@@ -111,8 +111,10 @@ ai_response_get_text(AiResponse *self);
    - =src/providers/ai-<name>-client.h=
    - =src/providers/ai-<name>-client.c=
 
-2. Extend =AiClient= and implement interfaces:
+2. Extend the right base class and implement the interfaces:
 
+   - =AiClient= for an HTTP provider, =AiCliClient= for a wrapper around a
+     command-line tool (see below)
    - =AiProvider= interface
    - =AiStreamable= interface (for streaming support)
 
@@ -121,17 +123,58 @@ ai_response_get_text(AiResponse *self);
    - Add to =PUBLIC_HEADERS= in Makefile
    - Add to =LIB_SOURCES= in Makefile
 
-4. Add tests:
+4. Register the provider by name --- every one of these is a hand-written
+   switch or table, so a missed one fails silently (usually by falling back
+   to a different provider):
+
+   - =AiProviderType= in =src/core/ai-enums.h= --- *append*, the values are
+     ABI
+   - the =GEnumValue= table, =_to_string= and =_from_string= in
+     =src/core/ai-enums.c=
+   - =provider_name_map[]= in =src/core/ai-config.c= (the YAML key, which is
+     underscored)
+   - the switch in =ai_simple_create_provider()=
+   - =bin/ai.c=: the =--provider= help text, =make_provider()=,
+     =list_providers()=, and (for CLI providers) =dry_run()=
+
+5. Add tests:
 
    - Create =tests/test-<name>-client.c=
+   - Add the name round-trip to =tests/test-enums.c= and a factory check to
+     =tests/test-simple.c=
 
-5. Add documentation:
+6. Add documentation:
 
-   - Create =docs/providers/<name>.md=
+   - Create =docs/providers/<name>.org=
+   - Add it to the tables in =docs/providers/index.org=, =docs/index.org=,
+     =docs/configuration.org= and =docs/cli.org=
 
-6. Update umbrella header:
+7. Update umbrella header and forward declarations:
 
    - Add =#include "providers/ai-<name>-client.h"= to =src/ai-glib.h=
+   - Add the typedef to =src/ai-types.h=
+
+*** CLI Providers
+A provider that wraps a command-line tool derives from =AiCliClient= and
+overrides five vfuncs: =get_executable_path=, =build_argv=, =build_stdin=,
+=parse_json_output= and =parse_stream_line=. The base class supplies the
+whole synchronous pipeline (resolve the binary, build argv, pipe stdin,
+spawn with a timeout, check the exit status, parse), so a subclass usually
+only implements the async and streaming paths itself.
+
+Three conventions are worth copying rather than reinventing:
+
+- *Pipe the prompt, do not pass it.* =build_argv= emits a placeholder
+  program token at index 0 which the caller overwrites with the resolved
+  path; the prompt goes through =build_stdin=. Putting a conversation in
+  argv hits =ARG_MAX= and puts it in =ps= output.
+- *Expose the argv builder through a private =-internal.h=* (guarded on
+  =AI_GLIB_COMPILATION=, and *not* in =PUBLIC_HEADERS=) so tests and
+  =ai --dry-run= can assert the exact command without spawning anything.
+- *Do not trust the exit status alone.* CLIs vary in whether a rejected
+  argument is a non-zero exit, a JSON error payload, or both; parse the
+  output first. =AiGrokBuildClient= is the worked example --- grok exits 0
+  on some errors.
 
 ** Testing
 *** Running Tests
@@ -144,6 +187,37 @@ make test-verbose      # Run with verbose output
 #+begin_src sh
 ./build/release/tests/test-config
 G_TEST_VERBOSE=1 ./build/release/tests/test-message
+#+end_src
+
+*** Sanitizers
+#+begin_src sh
+make DEBUG=1 ASAN=1 UBSAN=1 test
+#+end_src
+
+Builds under =build/debug/= coexist with the release tree, so switching
+back needs no rebuild.
+
+*** Testing a CLI Provider
+Provider tests split in two, and both matter:
+
+- *Unit* --- call the vfuncs directly. Non-static builders can be called by
+  name (=ai_<name>_client_build_argv=); static ones are reachable through
+  =AI_CLI_CLIENT_GET_CLASS(client)->build_argv=. Assert the argv, the piped
+  prompt, and the parsers against real captured payloads, including
+  malformed and wrong-typed ones.
+- *Subprocess* --- point =executable-path= at a stub shell script that
+  records its argv, cwd and stdin and prints a staged response. This is the
+  only way to prove the prompt actually reaches the child, that the working
+  directory is applied, and that the sync, async and streaming paths agree.
+  =tests/test-grok-build-subprocess.c= is the worked example.
+
+Note that GTest makes warnings fatal, so a test that exercises a
+=g_warning= path must wrap it:
+
+#+begin_src C
+g_test_expect_message(NULL, G_LOG_LEVEL_WARNING, "*unknown effort level*");
+argv = build_argv(...);
+g_test_assert_expected_messages();
 #+end_src
 
 *** Writing Tests

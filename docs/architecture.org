@@ -39,6 +39,7 @@ ai-glib/
       ai-ollama-client.h/.c  # Ollama (local)
       ai-claude-code-client.h/.c  # Claude Code CLI
       ai-opencode-client.h/.c     # OpenCode CLI
+      ai-grok-build-client.h/.c   # Grok Build CLI
     convenience/       # High-level convenience wrappers
       ai-simple.h/.c   # Simple LLM interface (3 lines of C)
   tests/               # Unit tests
@@ -70,6 +71,7 @@ GObject
     AiClaudeCodeClient (final)
     AiClaudeTmuxClient (final)
     AiOpenCodeClient   (final)
+    AiGrokBuildClient  (final)
 
 GBoxed
   AiUsage

@@ -1,0 +1,450 @@
+* Grok Build Provider
+The Grok Build provider (=AiGrokBuildClient=) wraps xAI's =grok= CLI (the "Grok Build TUI") in headless mode. It is the agentic counterpart to the HTTP =grok= provider: where =AiGrokClient= talks to the xAI Messages API directly, this one drives the coding agent, with its tools, sessions, permission modes and sandbox profiles.
+
+** Overview
+| Property      | Value                     |
+|---------------+---------------------------|
+| Type          | =AI_PROVIDER_GROK_BUILD=  |
+| Name          | "Grok Build"              |
+| Default Model | =grok-4.6=                |
+| Interface     | CLI (subprocess)          |
+
+** Requirements
+- The =grok= CLI must be installed and authenticated (=grok login=, or a valid =XAI_API_KEY=)
+- The CLI must be available in =$PATH= or named via =GROK_PATH=
+
+** Environment Variables
+| Variable    | Description                                |
+|-------------+--------------------------------------------|
+| =GROK_PATH= | Override the path to the =grok= executable |
+
+Note that the CLI's own credentials (=XAI_API_KEY=, or the OAuth token stored under =~/.grok=) are read by =grok= itself, not by ai-glib. The library never sees them.
+
+** Available Models
+Run =grok models= for the authoritative list; the CLI resolves ids server-side and rejects unknown ones.
+
+| Define                         | Model ID    | Description       |
+|--------------------------------+-------------+-------------------|
+| =AI_GROK_BUILD_MODEL_GROK_4_6= | ="grok-4.6"= | Default           |
+| =AI_GROK_BUILD_MODEL_GROK_4_5= | ="grok-4.5"= | Previous release  |
+
+| Define                       | Points To                      | Description       |
+|------------------------------+--------------------------------+-------------------|
+| =AI_GROK_BUILD_MODEL_LATEST= | =AI_GROK_BUILD_MODEL_GROK_4_6= | Newest build model |
+
+As with the other providers' aliases, =g-ir-scanner= does not export a define whose value is another define, so bindings should use =AI_GROK_BUILD_MODEL_GROK_4_6=.
+
+Do not confuse these with the =AI_GROK_MODEL_*= defines in [[file:grok.org][ai-grok-client.h]] — those are raw xAI API model ids and are not valid =grok --model= arguments.
+
+** How the prompt is delivered
+The prompt is written to the subprocess's stdin and read back by grok through =--prompt-file /dev/stdin=. This is the C equivalent of the shell's =--prompt-file <(echo ...)=: no temporary file to create or clean up, no =ARG_MAX= ceiling on long conversations, and nothing sensitive visible in =ps= output.
+
+The prompt itself therefore never appears in argv. =--verbatim= is passed by default so that a caller's prompt is treated as text — text that happens to begin with =/= must not be taken for a slash command.
+
+The conversation is flattened into that single prompt: user messages verbatim, assistant messages prefixed =Previous assistant response:=, joined with blank lines, and a trailing instruction to always produce a text summary rather than ending on tool calls. The system prompt is *not* part of it — that rides in argv as =--system-prompt-override=, and only on a fresh session.
+
+** Property Reference
+Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
+
+| Property              | Type    | Default   | Effect                                                    |
+|-----------------------+---------+-----------+-----------------------------------------------------------|
+| =config=              | object  | NULL      | An =AiConfig= to construct from                           |
+| =model=               | string  | =grok-4.6= | =--model=                                                |
+| =system-prompt=       | string  | NULL      | =--system-prompt-override= on a fresh session             |
+| =max-tokens=          | int     | 4096      | *Ignored* — grok has no such flag                         |
+| =executable-path=     | string  | NULL      | Explicit binary path; overrides =GROK_PATH= and =$PATH=   |
+| =working-directory=   | string  | NULL      | The child's cwd, and the real boundary on tool reach      |
+| =session-id=          | string  | NULL      | Captured from the response; sent as =--resume=            |
+| =session-persistence= | boolean | TRUE      | Whether to capture and resume sessions at all             |
+| =effort-level=        | string  | =medium=  | =--reasoning-effort=                                      |
+| =process-timeout-ms=  | int     | 1800000   | Bounds the *synchronous* call; 0 disables the bound       |
+
+Added by =AiGrokBuildClient=:
+
+| Property             | Type    | Default | Effect                                              |
+|----------------------+---------+---------+-----------------------------------------------------|
+| =skip-permissions=   | boolean | FALSE   | =--permission-mode bypassPermissions=               |
+| =permission-mode=    | string  | NULL    | =--permission-mode= (validated)                     |
+| =allowed-tools=      | string  | NULL    | CSV → one =--allow <rule>= pair per item            |
+| =disallowed-tools=   | string  | NULL    | CSV → one =--deny <rule>= pair per item             |
+| =sandbox=            | string  | NULL    | =--sandbox=                                         |
+| =max-turns=          | int     | 0       | =--max-turns=; 0 omits the flag                     |
+| =agent=              | string  | NULL    | =--agent=                                           |
+| =rules=              | string  | NULL    | =--rules=                                           |
+| =disable-web-search= | boolean | FALSE   | =--disable-web-search=                              |
+| =verbatim=           | boolean | TRUE    | =--verbatim=                                        |
+| =total-cost=         | double  | 0.0     | Read-only; USD reported by the last response        |
+
+Every one is a real GObject property, so bindings get native syntax and =notify::= signals; the C accessors and =g_object_set()= are interchangeable.
+
+** Signals
+The streaming signals are declared on =AiCliClient= and emitted by this client:
+
+| Signal         | Arguments     | When                                        |
+|----------------+---------------+---------------------------------------------|
+| =stream-start= | —             | Before the first text delta                 |
+| =delta=        | =const gchar*= | Each text delta                            |
+| =stream-end=   | =AiResponse*= | At EOF, with the assembled response         |
+
+=tool-use= is declared on the base class but is not emitted by this provider: grok runs its own tools inside the CLI and does not report them as ai-glib tool calls.
+
+** Usage
+*** Basic Usage
+#+begin_src C
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("Hello!");
+    GList *messages = g_list_append(NULL, msg);
+
+    ai_provider_chat_async(
+        AI_PROVIDER(client),
+        messages,
+        NULL,  /* system prompt */
+        4096,  /* max tokens (ignored: grok has no such flag) */
+        NULL,  /* tools */
+        NULL,  /* cancellable */
+        on_chat_complete,
+        user_data
+    );
+
+    g_list_free(messages);
+    return 0;
+}
+#+end_src
+
+*** Reasoning Effort
+grok accepts exactly =low=, =medium=, =high= and =xhigh=.
+
+#+begin_src C
+ai_cli_client_set_effort_level(AI_CLI_CLIENT(client), "high");
+#+end_src
+
+=AI_EFFORT_MAX= has no grok equivalent, so the client folds ="max"= onto ="xhigh"=. Anything else is dropped with a warning rather than passed through — see [[*Failure modes worth knowing][Failure modes worth knowing]] for why that matters.
+
+*** Tool Permissions
+#+begin_src C
+/* Full bypass: no approval prompts at all. */
+ai_grok_build_client_set_skip_permissions(client, TRUE);
+
+/* Or a narrower mode. */
+ai_grok_build_client_set_permission_mode(client, "acceptEdits");
+
+/* Rules are comma-separated; each becomes its own --allow/--deny pair. */
+ai_grok_build_client_set_allowed_tools(client, "read_file,list_dir");
+ai_grok_build_client_set_disallowed_tools(client, "run_terminal_command");
+#+end_src
+
+Valid modes are =default=, =acceptEdits=, =auto=, =dontAsk=, =bypassPermissions= and =plan=. An unknown mode is dropped with a warning.
+
+=skip-permissions= wins when both are set, and says so with a warning: the two make different claims about the same session, and a caller that asked for =acceptEdits= and silently got a full bypass is exactly the failure worth surfacing.
+
+The working directory, not the permission mode, is the boundary that matters — every mode that can write can write anywhere the process can reach:
+
+#+begin_src C
+ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/scratch");
+#+end_src
+
+*** Sandbox, Turn Budget and Agent Profile
+#+begin_src C
+ai_grok_build_client_set_sandbox(client, "workspace");
+ai_grok_build_client_set_max_turns(client, 20);
+ai_grok_build_client_set_agent(client, "reviewer");
+ai_grok_build_client_set_rules(client, "Never touch files under vendor/.");
+ai_grok_build_client_set_disable_web_search(client, TRUE);
+#+end_src
+
+The sandbox profile must already exist in =~/.grok/sandbox.toml= or =.grok/sandbox.toml=. grok refuses to start on an unknown profile rather than running unsandboxed — a good failure, but a confusing one if you did not expect it.
+
+=max-turns= of 0 (the default) omits the flag entirely and lets the CLI decide.
+
+*** Sessions
+Session persistence is on by default. The first call starts a session and captures its id from the response; subsequent calls resume it with =--resume=, and the system prompt is not re-sent because the session already carries it.
+
+#+begin_src C
+/* After the first call: */
+const gchar *sid = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
+
+/* Or opt out entirely — every call starts fresh. */
+ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), FALSE);
+#+end_src
+
+*** Streaming
+#+begin_src C
+g_signal_connect(client, "stream-start", G_CALLBACK(on_stream_start), NULL);
+g_signal_connect(client, "delta", G_CALLBACK(on_delta), NULL);
+g_signal_connect(client, "stream-end", G_CALLBACK(on_stream_end), NULL);
+
+ai_streamable_chat_stream_async(
+    AI_STREAMABLE(client),
+    messages,
+    system_prompt,
+    max_tokens,
+    NULL,  /* tools */
+    NULL,  /* cancellable */
+    on_stream_complete,
+    user_data
+);
+#+end_src
+
+*** Synchronous Calls
+The inherited =ai_cli_client_chat_sync()= runs the turn to completion and is
+the only path bounded by =process-timeout-ms=:
+
+#+begin_src C
+g_autoptr(GError) error = NULL;
+g_autoptr(AiResponse) response = NULL;
+
+ai_cli_client_set_process_timeout_ms(AI_CLI_CLIENT(client), 120000);
+
+response = ai_cli_client_chat_sync(AI_CLI_CLIENT(client), messages,
+                                   cancellable, &error);
+#+end_src
+
+*** Cost
+#+begin_src C
+gdouble usd = ai_grok_build_client_get_total_cost(client);
+#+end_src
+
+This is the cost of the *last* response, refreshed on every parse — not a
+running total across the session. Read it in the completion callback if you
+want to accumulate it yourself.
+
+*** From Bindings
+The client is fully introspectable; nothing about it needs C:
+
+#+begin_src python
+import gi
+gi.require_version("AiGlib", "1.0")
+from gi.repository import AiGlib, GLib
+
+client = AiGlib.GrokBuildClient.new()
+client.props.skip_permissions = True
+client.props.model = "grok-4.6"
+client.props.effort_level = "low"
+
+loop = GLib.MainLoop()
+
+def done(source, result, data):
+    response = source.chat_finish(result)
+    print(response.get_text())
+    loop.quit()
+
+msg = AiGlib.Message.new_user("What is 2+2?")
+client.chat_async([msg], None, 4096, None, None, done, None)
+loop.run()
+#+end_src
+
+** CLI Invocation Details
+Inspect the exact command with =ai -p grok-build --dry-run "hi"=.
+
+*** Non-Streaming
+#+begin_src sh
+grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+     --verbatim --reasoning-effort medium
+#+end_src
+
+*** Streaming
+#+begin_src sh
+grok --prompt-file /dev/stdin \
+     --output-format streaming-messages-json --include-partial-messages \
+     --model grok-4.6 --verbatim --reasoning-effort medium
+#+end_src
+
+=--include-partial-messages= is what turns whole messages into per-token deltas; without it nothing streams.
+
+** Response Format
+=--output-format json= prints one object in grok's own camelCase shape — note that this is *not* Claude Code's =result= envelope:
+
+#+begin_src json
+{
+  "text": "OK",
+  "stopReason": "end_turn",
+  "sessionId": "01a00812-3ebb-7fb3-87c3-a48ecf4b038a",
+  "requestId": "0bc42b5b-b78b-4e11-b5e0-1206e8bb00c4",
+  "thought": "The user wants me to reply with exactly \"OK\".",
+  "usage": {
+    "input_tokens": 20786,
+    "cache_read_input_tokens": 1408,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 24,
+    "reasoning_tokens": 19,
+    "total_tokens": 22218
+  },
+  "num_turns": 1,
+  "total_cost_usd": 0.0072114
+}
+#+end_src
+
+=--output-format streaming-messages-json= is NDJSON in the Anthropic Messages wire format — the same shape Claude Code's =stream-json= produces:
+
+#+begin_src json
+{"type":"system","subtype":"init","session_id":"...","model":"grok-4.6"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"HELLO"}}}
+{"type":"assistant","message":{"type":"message","content":[{"type":"text","text":"HELLO"}]}}
+{"type":"result","subtype":"success","result":"HELLO","stop_reason":"end_turn","session_id":"...","usage":{...},"total_cost_usd":0.0068}
+#+end_src
+
+The parser reads text from the =stream_event= deltas and ignores the whole-message =assistant= line, which would otherwise double every streamed reply. =thinking_delta= events are dropped: reasoning is not the answer. The =result= line still back-fills the text if no delta ever arrived.
+
+** How output is parsed
+Subprocess stdout is untrusted input — a future CLI version, a plugin writing to stdout, or a truncated write can all produce a shape ai-glib did not expect — so the parser is deliberately total. Three things follow from that:
+
+*** Locating the JSON
+Three attempts, cheapest first:
+
+1. the whole buffer (the normal case, and NDJSON: json-glib folds a newline-separated sequence into an array, and the last object in it is the result line);
+2. the last non-empty line, for output whose earlier lines are not JSON at all;
+3. from the first ={= to the end, which recovers a pretty-printed object preceded by a banner or upgrade notice — the line-based attempt cannot help there, because the object spans lines.
+
+Anything still unparseable becomes =AI_ERROR_CLI_PARSE_ERROR= naming the problem, never a silently empty response.
+
+*** Wrong-typed members
+Every member is read through a type-checked accessor. A =usage= that is a string, a =sessionId= that is a number, a =total_cost_usd= that is an object: each is ignored, leaving the corresponding field unset. json-glib's own =*_member_with_default()= helpers emit criticals in that situation, which under a fatal-warnings test run would abort the process.
+
+*** Nothing is trusted to the exit status alone
+See below.
+
+** Failure modes worth knowing
+- *An error can arrive with exit status 0.* A rejected =--reasoning-effort= prints ={"type":"error","message":"..."}= on stdout and exits 0, while a rejected =--model= exits 1. The client therefore parses stdout *before* consulting the exit status, and reports =AI_ERROR_CLI_EXECUTION= either way. Treating status alone as the signal would silently return an empty response. The status is only consulted when stdout held nothing parseable.
+- *A run can fail after it starts.* The NDJSON result line carries =is_error=; when it is set, the reason is in =result= rather than =message=. That is reported as =AI_ERROR_CLI_EXECUTION= too, not handed back as if the failure text were the answer.
+- *Effort =max= is not accepted.* Hence the fold onto =xhigh=.
+- *An unknown sandbox profile aborts the run* rather than degrading to no sandbox.
+- *A stop reason other than =end_turn= survives.* A turn cut short by the token ceiling arrives as =AI_STOP_REASON_MAX_TOKENS=, so a caller can tell a finished answer from a truncated one.
+
+** Limitations
+- *=max-tokens= does nothing.* grok has no such flag. The property is accepted (it is on the base class) and ignored; bound the run with =max-turns= or a smaller model instead.
+- *Caller-defined tools are not supported.* =tools= is ignored on both =chat_async= and =chat_stream_async=: grok runs its own tools inside the CLI. Use an HTTP provider with =AiToolExecutor= if you need to define tools yourself.
+- *No vision.* =AiImageContent= in a message is not sent; the prompt is flattened to text.
+- *Rule lists are comma-separated*, so a permission rule that itself contains a comma cannot be expressed through =allowed-tools= / =disallowed-tools=. Rules with spaces and parentheses are fine — only the comma is reserved.
+- *=process-timeout-ms= bounds the synchronous path only.* The async and streaming paths, like the other CLI providers', run unbounded; pass a =GCancellable= if you need to be able to stop them.
+- *Sessions are per-client.* The captured id lives on the client object, not on disk; a new process starts a new session unless you carry the id across yourself with =ai_cli_client_set_session_id()=.
+
+** Error Handling
+#+begin_src C
+g_autoptr(GError) error = NULL;
+g_autoptr(AiResponse) response = ai_cli_client_chat_sync(
+    AI_CLI_CLIENT(client), messages, NULL, &error);
+
+if (error != NULL)
+{
+    switch (error->code)
+    {
+        case AI_ERROR_CLI_NOT_FOUND:
+            g_printerr("grok CLI not found. Install it or set GROK_PATH.\n");
+            break;
+        case AI_ERROR_CLI_EXECUTION:
+            g_printerr("CLI reported an error: %s\n", error->message);
+            break;
+        case AI_ERROR_CLI_PARSE_ERROR:
+            g_printerr("Failed to parse CLI output: %s\n", error->message);
+            break;
+        case AI_ERROR_TIMEOUT:
+            g_printerr("CLI exceeded process-timeout-ms\n");
+            break;
+        default:
+            g_printerr("Error: %s\n", error->message);
+            break;
+    }
+}
+#+end_src
+
+** Error Reference
+| Code                          | Cause                                                        |
+|-------------------------------+--------------------------------------------------------------|
+| =AI_ERROR_CLI_NOT_FOUND=      | =grok= is not at =executable-path=, =GROK_PATH= or on =$PATH= |
+| =AI_ERROR_CLI_EXECUTION=      | grok reported an error object, an =is_error= result, or exited non-zero with no parseable output |
+| =AI_ERROR_CLI_PARSE_ERROR=    | stdout was empty, or held nothing that parses as a JSON object |
+| =AI_ERROR_TIMEOUT=            | The synchronous call exceeded =process-timeout-ms=            |
+| =AI_ERROR_INVALID_REQUEST=    | The argv could not be built                                   |
+| =AI_ERROR_INVALID_RESPONSE=   | A stream ended without producing a response                   |
+
+** Troubleshooting
+| Symptom                                            | Likely cause                                                                 |
+|----------------------------------------------------+------------------------------------------------------------------------------|
+| "CLI executable not found: grok"                   | Not installed, or installed somewhere off =$PATH= — set =GROK_PATH=          |
+| "CLI error: ... not logged in"                     | Run =grok login= (or export =XAI_API_KEY=) — ai-glib never handles the credential |
+| "CLI error: unknown effort level"                  | An effort string this client did not recognise reached grok; check the warning it logged |
+| "CLI error: unknown model id"                      | Run =grok models= — the id list is server-side and moves                     |
+| "Could not parse a JSON object from CLI output"    | Something else is writing to grok's stdout; check with =--debug-file=        |
+| Empty answer, warning about re-prompting           | The model ended on tool calls; the client asked it for a summary and is reporting what came back |
+| The run hangs                                      | The async and streaming paths are not bounded by =process-timeout-ms= — use a =GCancellable=, or the sync path |
+
+Reproduce the exact command outside the library with:
+
+#+begin_src sh
+ai -p grok-build -m grok-4.6 --effort low --dry-run "your prompt"
+#+end_src
+
+** From the =ai= CLI
+Every knob above is reachable without writing C. The dedicated flags cover
+the common ones and =--set= covers the rest:
+
+#+begin_example
+$ ai -p grok-build "What is 2+2?"
+$ ai -p grok-build -m grok-4.5 --effort high --stream "Explain this repo"
+$ ai -p grok-build --skip-permissions --set working-directory=/srv/scratch \
+     "fix the failing test"
+$ ai -p grok-build --set sandbox=workspace --set max-turns=20 \
+     --set permission-mode=acceptEdits "refactor the parser"
+$ ai -p grok-build -i        # interactive, keeps the session across turns
+#+end_example
+
+=--dry-run= prints the real command instead of running it, which is the
+quickest way to confirm a setting landed:
+
+#+begin_example
+$ ai -p grok-build --set max-turns=20 --dry-run "hi"
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+  --max-turns 20 --verbatim --reasoning-effort medium
+#+end_example
+
+See [[../cli.org][The =ai= CLI]] for the full flag list and =--set= semantics.
+
+** Testing
+The provider is covered at two levels, both run by =make test=:
+
+- =tests/test-grok-build-client.c= — argv, stdin, and both parsers in
+  isolation, including the malformed and wrong-typed payloads above. No
+  subprocess is spawned.
+- =tests/test-grok-build-subprocess.c= — a stub =grok= shell script stands
+  in for the real binary and records the argv, cwd and stdin it was given.
+  This is what proves the prompt actually arrives on the child's stdin
+  (which is the only thing =--prompt-file /dev/stdin= can read), that the
+  working directory is applied, that the timeout fires, and that the sync,
+  async and streaming paths agree. Configure the stub by staging files in
+  its directory; see =STUB_TEMPLATE= in that file.
+
+- =tests/test-ai-cli.c= — spawns the built =ai= binary and drives this
+  provider through it: the dry-run argv, every =--set= path, and full runs
+  (plain, streaming, prompt-on-stdin, error, missing binary) against a stub
+  =grok=. Nothing here touches the network either.
+
+=tests/test-gi-bindings.py= (=make test-gi=) covers the property and
+interface surface from PyGObject.
+
+** Comparison with the HTTP Grok Provider
+| Feature          | =grok= (HTTP)      | =grok-build= (CLI)          |
+|------------------+--------------------+-----------------------------|
+| Transport        | xAI API over HTTPS | =grok= subprocess           |
+| Credentials      | =XAI_API_KEY=      | The CLI's own auth          |
+| Tool use         | Caller-defined     | The agent's built-in tools  |
+| Filesystem edits | No                 | Yes, subject to permissions |
+| Sessions         | Caller-managed     | =--resume=                  |
+| Images           | Yes                | No                          |
+| Latency          | Direct             | Subprocess overhead         |
+
+** When to Use Grok Build
+- *Agentic work*: the model needs to read, edit and run things, not just answer
+- *Session continuity*: multi-turn work where grok keeps the context
+- *Sandboxed automation*: bounded filesystem and network access via a profile
+- Use the HTTP =grok= provider instead for plain completions, structured output, image generation, or anywhere a subprocess is unwelcome.
+
+** See Also
+- [[file:grok.org][AiGrokClient]] - Direct HTTP API client for xAI Grok
+- [[file:claude-code.org][AiClaudeCodeClient]] - The equivalent wrapper for Claude Code
+- [[file:opencode.org][AiOpenCodeClient]] - The equivalent wrapper for OpenCode
+- [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers
+- [[../cli.org][The =ai= CLI]] - =ai -p grok-build=

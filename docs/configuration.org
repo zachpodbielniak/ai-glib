@@ -80,7 +80,7 @@ By default, =ai_config_new()= reads API keys from environment variables. Multipl
 | Ollama   | =OLLAMA_API_KEY= (optional)                    |
 
 **** CLI Wrapper Providers
-CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=) do not use API keys directly --- they delegate authentication to their respective CLI tools. Optional environment variables:
+CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=, =AiGrokBuildClient=) do not use API keys directly --- they delegate authentication to their respective CLI tools. Optional environment variables:
 
 | Provider           | Environment Variable | Description                              |
 |--------------------+----------------------+------------------------------------------|
@@ -89,6 +89,7 @@ CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=) d
 | Claude Code (tmux) | =TMUX_PATH=          | Override path to =tmux= executable       |
 | Claude Code *      | =OLLAMA_PATH=        | Override path to =ollama= launcher, used for =ollama/<model>= models |
 | OpenCode           | =OPENCODE_PATH=      | Override path to =opencode= executable   |
+| Grok Build         | =GROK_PATH=          | Override path to =grok= executable       |
 
 For the Claude Code (=claude-code=) and Claude Code tmux (=claude-tmux=)
 providers, a model name beginning with =ollama/= routes the turn through
@@ -106,7 +107,7 @@ The default provider and model can be set via environment variables, which overr
 
 | Variable                   | Description           | Example                                                                   |
 |----------------------------+-----------------------+---------------------------------------------------------------------------|
-| =AI_GLIB_DEFAULT_PROVIDER= | Default provider name | =ollama=, =claude=, =openai=, =gemini=, =grok=, =claude-code=, =opencode= |
+| =AI_GLIB_DEFAULT_PROVIDER= | Default provider name | =ollama=, =claude=, =openai=, =gemini=, =grok=, =claude-code=, =claude-tmux=, =opencode=, =grok-build= |
 | =AI_GLIB_DEFAULT_MODEL=    | Default model name    | =qwen2.5:7b=, =claude-sonnet-5=                                  |
 
 #+begin_src sh

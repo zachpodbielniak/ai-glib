@@ -59,7 +59,9 @@ Complete API documentation for ai-glib.
 | Class              | Provider        |
 |--------------------+-----------------|
 | AiClaudeCodeClient | Claude Code CLI |
+| AiClaudeTmuxClient | Claude Code CLI (tmux) |
 | AiOpenCodeClient   | OpenCode CLI    |
+| AiGrokBuildClient  | Grok Build CLI  |
 
 ** Web Search
 See [[file:ai-search-provider.org][AiSearchProvider]] for the full reference.
@@ -84,7 +86,9 @@ typedef enum {
     AI_PROVIDER_GROK,
     AI_PROVIDER_OLLAMA,
     AI_PROVIDER_CLAUDE_CODE,
-    AI_PROVIDER_OPENCODE
+    AI_PROVIDER_OPENCODE,
+    AI_PROVIDER_CLAUDE_TMUX,
+    AI_PROVIDER_GROK_BUILD
 } AiProviderType;
 #+end_src
 

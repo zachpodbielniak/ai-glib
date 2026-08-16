@@ -225,6 +225,8 @@ ai-glib/
 | Ollama   | `OLLAMA_HOST` (default: `http://localhost:11434`), `OLLAMA_API_KEY` (optional) |
 | Claude Code | `CLAUDE_CODE_PATH` (override `claude` path), `OLLAMA_PATH` (override `ollama` launcher for `ollama/` models) |
 | Claude Code (tmux) | `CLAUDE_CODE_PATH`, `TMUX_PATH`, `OLLAMA_PATH` |
+| OpenCode | `OPENCODE_PATH` (override `opencode` path) |
+| Grok Build | `GROK_PATH` (override `grok` path) |
 
 ## Ollama-as-transport (`ollama/` models)
 
@@ -242,11 +244,58 @@ without the prefix are unchanged. The prefix logic lives in one place,
 providers and the retry path. Inspect the exact command with
 `ai -p claude-code -m ollama/<id> --dry-run "hi"`.
 
+## Grok Build (`grok-build`)
+
+`AiGrokBuildClient` wraps xAI's `grok` CLI headlessly. Three things about it
+are load-bearing and easy to get wrong:
+
+1. **The prompt is piped, not passed.** argv carries `--prompt-file
+   /dev/stdin`; `build_stdin()` produces the prompt and the caller writes it
+   to the child's stdin. That is the C equivalent of `--prompt-file
+   <(echo ...)` and it is what keeps long conversations under `ARG_MAX`.
+2. **Exit status is not a reliable error signal.** A rejected
+   `--reasoning-effort` prints `{"type":"error","message":...}` on stdout and
+   exits **0**; a rejected `--model` exits 1. Always parse stdout first and
+   check for `type == "error"` before trusting the status.
+3. **`--output-format json` is grok's own camelCase shape** (`text`,
+   `stopReason`, `sessionId`) — *not* Claude Code's `result` envelope.
+   `--output-format streaming-messages-json` *is* Anthropic-shaped, so the
+   streaming parser mirrors claude-code's, minus the whole-message
+   `assistant` line (deltas already carried that text).
+
+Effort levels are `low|medium|high|xhigh`; `AI_EFFORT_MAX` is folded onto
+`xhigh` because grok rejects `max`. Inspect the command with
+`ai -p grok-build --dry-run "hi"`.
+
+Every JSON member is read through the type-checked `grok_get_*()` helpers
+rather than json-glib's `*_member_with_default()`, which emit criticals on a
+type mismatch — subprocess stdout is untrusted input and must not be able to
+abort a fatal-warnings test run. Keep new fields on those helpers.
+
+Tests live in two files and both are load-bearing:
+
+- `tests/test-grok-build-client.c` — argv/stdin/parsers in isolation.
+- `tests/test-grok-build-subprocess.c` — a stub `grok` script recording its
+  argv, cwd and stdin. This is what proves the prompt reaches the child at
+  all; a regression there would leave every run "succeeding" against an
+  empty prompt. Configure the stub by staging files in its directory
+  (`stdout`, `stdout.<n>` for the Nth call, `stderr`, `exit`, `sleep`).
+
 ## CLI binary (`ai`)
 
 `bin/ai.c` builds a small `ai` front-end (provider/model/system/stream/
 interactive/`--dry-run`/`--list-providers`). It is built by `make` and
 installed by `make install`. See `docs/cli.org`.
+
+`--set PROP=VALUE` (repeatable) sets any GObject property on the resolved
+provider, so a new provider knob needs no new flag here — add the property
+and it is reachable. A bare `--set NAME` sets a boolean true. Unknown names
+print the provider's writable properties; read-only ones and unparseable
+values are errors, not silent no-ops.
+
+`tests/test-ai-cli.c` spawns the built binary (hence `test:` depends on
+`$(BIN_BINARIES)`) and drives it against a stub `grok` via `GROK_PATH`, so
+the CLI wiring is covered without network access.
 
 ## Model Defines
 
@@ -275,6 +324,10 @@ ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_CODE_FAST_1);
 /* Ollama */
 ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_LLAMA3_2);
 ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_DEEPSEEK_R1_14B);
+
+/* Grok Build (CLI) — note the AI_GROK_BUILD_ prefix; the AI_GROK_MODEL_*
+   defines above are xAI API ids and are NOT valid `grok --model` values */
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_6);
 ```
 
 See `src/providers/ai-*-client.h` for complete model lists.

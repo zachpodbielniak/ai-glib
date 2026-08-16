@@ -22,14 +22,15 @@ piping.
 ** Options
 | Option                  | Description                                                        |
 |-------------------------+--------------------------------------------------------------------|
-| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode (default: =$AI_PROVIDER= or =claude=) |
+| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build (default: =$AI_PROVIDER= or =claude=) |
 | =-m=, =--model ID=      | Model id (default: provider default). =ollama/<id>= on the Claude Code providers selects the Ollama transport |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
 | =--max-tokens N=        | Max output tokens (default: 4096)                                  |
 | =--temperature F=       | Sampling temperature (HTTP providers)                             |
 | =--stream=              | Stream the response as it arrives (providers that support it)      |
-| =--skip-permissions=    | Pass =--dangerously-skip-permissions= (claude-code / claude-tmux)  |
+| =--skip-permissions=    | Bypass tool-use approval (claude-code / claude-tmux / grok-build)  |
+| =--set PROP=VALUE=      | Set any provider property; repeatable (see below)                  |
 | =--dry-run=             | Print the command that would be spawned; do not run it             |
 | =--list-providers=      | List known provider names and exit                                 |
 | =-i=, =--interactive=   | Interactive multi-turn REPL (keeps history)                        |
@@ -45,6 +46,7 @@ Providers:
   claude-code    CLI   (model "ollama/<name>" => ollama launch claude)
   claude-tmux    CLI   (model "ollama/<name>" => ollama launch claude)
   opencode       CLI
+  grok-build     CLI
 #+end_example
 
 A one-shot chat (HTTP provider):
@@ -67,6 +69,59 @@ tmux -L ai-glib new-session -d -s ai-glib-dry-run -c <cwd> -- ollama launch clau
 
 $ ai -p claude-code -m sonnet --dry-run "hi"
 /path/to/claude --print --output-format json --model sonnet ...
+
+$ ai -p grok-build -m grok-4.6 --effort low --dry-run "hi"
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 --verbatim --reasoning-effort low
+#+end_example
+
+The =grok-build= prompt never appears in argv: it is piped on stdin and
+read back through =--prompt-file /dev/stdin=.
+
+** Setting provider properties (=--set=)
+The flags above cover what every provider has in common. Everything else --- a
+sandbox profile, a turn budget, an MCP config path, a session to resume --- is a
+GObject property on the provider, and =--set= reaches all of them without a
+flag per provider per knob:
+
+#+begin_example
+$ ai -p grok-build --set sandbox=workspace --set max-turns=20 \
+     --set permission-mode=acceptEdits "refactor the parser"
+#+end_example
+
+- Repeatable; applied left to right, *after* the dedicated flags, so
+  =--set model=...= overrides =-m=.
+- A bare =--set NAME= sets a boolean property to true:
+  =--set disable-web-search=. Booleans also accept
+  =true/false=, =yes/no=, =on/off=, =1/0=.
+- Strings, integers, doubles, booleans and enums are supported. A value that
+  does not parse is an error rather than a silent zero --- otherwise the run
+  proceeds without the bound you asked for.
+- Read-only properties (=total-cost=) are refused.
+- Name a property the provider does not have and it prints the ones it does:
+
+#+begin_example
+$ ai -p grok-build --set nope=1 "hi"
+ai: no property 'nope' on this provider
+ai: AiGrokBuildClient accepts:
+  model                    gchararray
+  system-prompt            gchararray
+  working-directory        gchararray
+  session-id               gchararray
+  effort-level             gchararray
+  skip-permissions         gboolean
+  permission-mode          gchararray
+  allowed-tools            gchararray
+  sandbox                  gchararray
+  max-turns                gint
+  ...
+#+end_example
+
+Pair it with =--dry-run= to confirm what a setting actually produces:
+
+#+begin_example
+$ ai -p grok-build --set sandbox=workspace --set max-turns=20 --dry-run "hi"
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+  --sandbox workspace --max-turns 20 --verbatim --reasoning-effort medium
 #+end_example
 
 An interactive session:
@@ -180,9 +235,12 @@ pollute that list.
   =OPENAI_BASE_URL=, =GEMINI_BASE_URL=, =XAI_BASE_URL=, =ANTHROPIC_BASE_URL=.
 
 ** Notes
-- =--dry-run= prints the real argv for the =claude-code= and =claude-tmux=
-  providers (executable resolved, Ollama transport applied). For other
-  providers it prints a short summary, since they do not spawn a CLI.
+- =--dry-run= prints the real argv for the =claude-code=, =claude-tmux= and
+  =grok-build= providers (executable resolved, and for the claude providers
+  the Ollama transport applied). For other providers it prints a short
+  summary, since they do not spawn a CLI.
+- =--effort= maps to =--reasoning-effort= for =grok-build=, which accepts
+  =low=, =medium=, =high= and =xhigh=; =max= is folded onto =xhigh=.
 - For the Ollama transport the =claude= binary must be installed and on
   =$PATH= (=ollama launch claude= execs it); the launcher path may be
   overridden with =OLLAMA_PATH=.

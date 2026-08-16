@@ -156,6 +156,7 @@ CLI providers use their own tool's authentication and don't require API key envi
 |-------------+-----------------------+-------------------------------------------|
 | Claude Code | =CLAUDE_CODE_PATH=    | Optional path override for =claude= CLI   |
 | OpenCode    | =OPENCODE_PATH=       | Optional path override for =opencode= CLI |
+| Grok Build  | =GROK_PATH=           | Optional path override for =grok= CLI     |
 
 Additionally, the default provider and model can be set via environment variables:
 

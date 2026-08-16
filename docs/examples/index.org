@@ -40,6 +40,16 @@ The library includes simple chat examples for each provider:
 | =simple-chat-grok.c=   | Grok     | =XAI_API_KEY=         |
 | =simple-chat-ollama.c= | Ollama   | Ollama server running |
 
+** CLI-Wrapper Examples
+| File                       | Provider   | Requires                      |
+|----------------------------+------------+-------------------------------|
+| =simple-chat-opencode.c=   | OpenCode   | =opencode= CLI, configured    |
+| =simple-chat-grok-build.c= | Grok Build | =grok= CLI, authenticated     |
+
+These spawn the corresponding CLI rather than talking HTTP, so they need
+the tool installed (in =$PATH=, or named via =OPENCODE_PATH= / =GROK_PATH=)
+rather than an API key. See [[file:../providers/grok-build.org][Grok Build]].
+
 ** Image Generation Examples
 | File                 | Provider           | Requires         |
 |----------------------+--------------------+------------------|
