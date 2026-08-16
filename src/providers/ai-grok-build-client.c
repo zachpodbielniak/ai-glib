@@ -257,7 +257,7 @@ grok_effort_arg(const gchar *effort)
     if (g_strcmp0(effort, "max") == 0)
         return "xhigh";
 
-    g_warning("grok-build: unknown effort level '%s'; omitting "
+    g_message("grok-build: unknown effort level '%s'; omitting "
               "--reasoning-effort. Valid levels: low, medium, high, xhigh",
               effort);
 
@@ -308,7 +308,7 @@ emit_permission_args(AiGrokBuildClient *self, GPtrArray *args)
         if (self->permission_mode != NULL && self->permission_mode[0] != '\0' &&
             g_strcmp0(self->permission_mode, "bypassPermissions") != 0)
         {
-            g_warning("grok-build: skip-permissions and permission-mode '%s' "
+            g_message("grok-build: skip-permissions and permission-mode '%s' "
                       "are both set; using bypassPermissions",
                       self->permission_mode);
         }
@@ -325,7 +325,7 @@ emit_permission_args(AiGrokBuildClient *self, GPtrArray *args)
         }
         else
         {
-            g_warning("grok-build: unknown permission mode '%s'; omitting "
+            g_message("grok-build: unknown permission mode '%s'; omitting "
                       "the flag. Valid modes: default, acceptEdits, auto, "
                       "dontAsk, bypassPermissions, plan",
                       self->permission_mode);
@@ -1494,7 +1494,7 @@ on_retry_communicate_complete(
 
 fallback:
     g_clear_error(&error);
-    g_warning("grok-build: re-prompt failed, using tool summary as fallback");
+    g_debug("grok-build: re-prompt failed, using tool summary as fallback");
 
     response = ai_response_new("",
         ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
@@ -1572,7 +1572,7 @@ attempt_text_retry(
     retry->subprocess   = rproc;   /* takes ownership */
     retry->tool_summary = g_strdup(tool_summary);
 
-    g_warning("grok-build: no text in response, re-prompting for summary "
+    g_debug("grok-build: no text in response, re-prompting for summary "
               "(session=%s)", sid);
 
     g_subprocess_communicate_utf8_async(
@@ -1639,7 +1639,7 @@ on_chat_communicate_complete(
                 }
 
                 /* Retry couldn't start — inject the summary as text */
-                g_warning("grok-build: re-prompt could not start, using "
+                g_debug("grok-build: re-prompt could not start, using "
                           "fallback text");
                 {
                     g_autoptr(AiTextContent) tc = ai_text_content_new(

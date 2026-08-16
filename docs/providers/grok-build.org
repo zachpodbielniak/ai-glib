@@ -123,7 +123,7 @@ grok accepts exactly =low=, =medium=, =high= and =xhigh=.
 ai_cli_client_set_effort_level(AI_CLI_CLIENT(client), "high");
 #+end_src
 
-=AI_EFFORT_MAX= has no grok equivalent, so the client folds ="max"= onto ="xhigh"=. Anything else is dropped with a warning rather than passed through — see [[*Failure modes worth knowing][Failure modes worth knowing]] for why that matters.
+=AI_EFFORT_MAX= has no grok equivalent, so the client folds ="max"= onto ="xhigh"=. Anything else is dropped, with a message saying so, rather than passed through — see [[*Failure modes worth knowing][Failure modes worth knowing]] for why that matters.
 
 *** Tool Permissions
 #+begin_src C
@@ -138,9 +138,9 @@ ai_grok_build_client_set_allowed_tools(client, "read_file,list_dir");
 ai_grok_build_client_set_disallowed_tools(client, "run_terminal_command");
 #+end_src
 
-Valid modes are =default=, =acceptEdits=, =auto=, =dontAsk=, =bypassPermissions= and =plan=. An unknown mode is dropped with a warning.
+Valid modes are =default=, =acceptEdits=, =auto=, =dontAsk=, =bypassPermissions= and =plan=. An unknown mode is dropped, with a message saying so.
 
-=skip-permissions= wins when both are set, and says so with a warning: the two make different claims about the same session, and a caller that asked for =acceptEdits= and silently got a full bypass is exactly the failure worth surfacing.
+=skip-permissions= wins when both are set, and says so: the two make different claims about the same session, and a caller that asked for =acceptEdits= and silently got a full bypass is exactly the failure worth surfacing.
 
 The working directory, not the permission mode, is the boundary that matters — every mode that can write can write anywhere the process can reach:
 
@@ -378,7 +378,7 @@ if (error != NULL)
 |----------------------------------------------------+------------------------------------------------------------------------------|
 | "CLI executable not found: grok"                   | Not installed, or installed somewhere off =$PATH= — set =GROK_PATH=          |
 | "CLI error: ... not logged in"                     | Run =grok login= (or export =XAI_API_KEY=) — ai-glib never handles the credential |
-| "CLI error: unknown effort level"                  | An effort string this client did not recognise reached grok; check the warning it logged |
+| "CLI error: unknown effort level"                  | An effort string this client did not recognise reached grok; check the message it logged |
 | "CLI error: unknown model id"                      | Run =grok models= — the id list is server-side and moves                     |
 | "Could not parse a JSON object from CLI output"    | Something else is writing to grok's stdout; check with =--debug-file=        |
 | Empty answer, warning about re-prompting           | The model ended on tool calls; the client asked it for a summary and is reporting what came back |

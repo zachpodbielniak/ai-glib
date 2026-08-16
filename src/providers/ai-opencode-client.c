@@ -403,7 +403,7 @@ emit_execution_args(AiOpenCodeClient *self, GPtrArray *args)
         }
         else
         {
-            g_warning("opencode: unknown log level '%s'; omitting the flag. "
+            g_message("opencode: unknown log level '%s'; omitting the flag. "
                       "Valid levels: DEBUG, INFO, WARN, ERROR",
                       self->log_level);
         }
@@ -837,7 +837,7 @@ ai_opencode_client_parse_json_output(
     else
     {
         /* Genuinely empty — log raw output for debugging */
-        g_warning("opencode: no text or tool events found in %d bytes of output; "
+        g_debug("opencode: no text or tool events found in %d bytes of output; "
                   "raw output follows:\n%s",
                   (int)(json_output ? strlen(json_output) : 0),
                   json_output ? json_output : "(null)");
@@ -1301,7 +1301,7 @@ on_retry_communicate_complete(
 
 fallback:
     g_clear_error(&error);
-    g_warning("opencode: re-prompt failed, using tool summary as fallback");
+    g_debug("opencode: re-prompt failed, using tool summary as fallback");
 
     response = ai_response_new("",
         ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
@@ -1376,7 +1376,7 @@ attempt_text_retry(
     retry->subprocess  = rproc;   /* takes ownership */
     retry->tool_summary = g_strdup(tool_summary);
 
-    g_warning("opencode: no text in response, re-prompting for summary "
+    g_debug("opencode: no text in response, re-prompting for summary "
               "(session=%s)", sid ? sid : "(none)");
 
     g_subprocess_communicate_utf8_async(

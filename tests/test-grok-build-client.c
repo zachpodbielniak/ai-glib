@@ -288,7 +288,7 @@ test_grok_build_argv_permission_mode_invalid(void)
 
 	ai_grok_build_client_set_permission_mode(client, "yolo");
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*unknown permission mode 'yolo'*");
 	argv = build_argv_for(client, NULL, FALSE);
 	g_test_assert_expected_messages();
@@ -311,7 +311,7 @@ test_grok_build_argv_permission_conflict(void)
 	ai_grok_build_client_set_skip_permissions(client, TRUE);
 	ai_grok_build_client_set_permission_mode(client, "acceptEdits");
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*using bypassPermissions*");
 	argv = build_argv_for(client, NULL, FALSE);
 	g_test_assert_expected_messages();
@@ -531,7 +531,7 @@ test_grok_build_argv_effort_invalid(void)
 
 	ai_cli_client_set_effort_level(AI_CLI_CLIENT(client), "turbo");
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*unknown effort level 'turbo'*");
 	argv = build_argv_for(client, NULL, FALSE);
 	g_test_assert_expected_messages();
@@ -1182,7 +1182,7 @@ test_grok_build_argv_effort_case(void)
 
 	ai_cli_client_set_effort_level(AI_CLI_CLIENT(client), "LOW");
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*unknown effort level 'LOW'*");
 	argv = build_argv_for(client, NULL, FALSE);
 	g_test_assert_expected_messages();

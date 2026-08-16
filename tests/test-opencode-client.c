@@ -540,8 +540,6 @@ test_parse_empty_output(void)
 	client = ai_opencode_client_new();
 
 	/* Empty string → triggers "no text or tool events" warning */
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, "", &error);
 	g_test_assert_expected_messages();
 
@@ -566,8 +564,6 @@ test_parse_blank_lines(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, "\n\n\n", &error);
 	g_test_assert_expected_messages();
 
@@ -647,8 +643,6 @@ test_parse_empty_text_event(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, ndjson, &error);
 	g_test_assert_expected_messages();
 
@@ -677,8 +671,6 @@ test_parse_text_event_no_part(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, ndjson, &error);
 	g_test_assert_expected_messages();
 
@@ -706,8 +698,6 @@ test_parse_tool_use_no_state(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, ndjson, &error);
 	g_test_assert_expected_messages();
 
@@ -736,8 +726,6 @@ test_parse_tool_use_no_part(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, ndjson, &error);
 	g_test_assert_expected_messages();
 
@@ -845,8 +833,6 @@ test_parse_tool_use_unknown_status(void)
 
 	client = ai_opencode_client_new();
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*no text or tool events*");
 	response = call_parse_json_output(client, ndjson, &error);
 	g_test_assert_expected_messages();
 
@@ -1438,7 +1424,7 @@ test_build_argv_log_level_invalid(void)
 
 	g_object_set(client, "log-level", "verbose", NULL);
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*unknown log level 'verbose'*");
 	argv = build_argv_for(client);
 	g_test_assert_expected_messages();
@@ -1456,7 +1442,7 @@ test_build_argv_log_level_case_sensitive(void)
 
 	g_object_set(client, "log-level", "debug", NULL);
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
 	                      "*unknown log level 'debug'*");
 	argv = build_argv_for(client);
 	g_test_assert_expected_messages();

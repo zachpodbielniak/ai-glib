@@ -274,8 +274,8 @@ g_object_set(client,
 
 | Property | Flag | Notes |
 |---+---+---|
-| =skip-permissions= | =--dangerously-skip-permissions= | Wins if both are set, with a warning |
-| =permission-mode= | =--permission-mode= | =acceptEdits=, =auto=, =bypassPermissions=, =manual=, =dontAsk=, =plan=. An unrecognised value warns and is omitted rather than passed through |
+| =skip-permissions= | =--dangerously-skip-permissions= | Wins if both are set, and says so |
+| =permission-mode= | =--permission-mode= | =acceptEdits=, =auto=, =bypassPermissions=, =manual=, =dontAsk=, =plan=. An unrecognised value is reported and omitted rather than passed through |
 | =allowed-tools= | =--allowedTools= | Comma-separated in, one argv word per tool out |
 | =disallowed-tools= | =--disallowedTools= | Same shape |
 | =additional-directories= | =--add-dir= | For trees outside the working directory |

@@ -684,8 +684,6 @@ test_async_reprompt_on_empty_text(void)
 
 	async_ctx_init(&ctx);
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*re-prompting for summary*");
 	ai_provider_chat_async(AI_PROVIDER(client), messages, NULL, 4096,
 	                       NULL, NULL, on_chat_done, &ctx);
 	async_ctx_run(&ctx);
@@ -721,8 +719,6 @@ test_async_reprompt_cannot_start(void)
 	stub_set(stub, "stdout", "{\"text\":\"\"}\n");
 	async_ctx_init(&ctx);
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
-	                      "*re-prompt could not start*");
 	ai_provider_chat_async(AI_PROVIDER(client), messages, NULL, 4096,
 	                       NULL, NULL, on_chat_done, &ctx);
 	async_ctx_run(&ctx);

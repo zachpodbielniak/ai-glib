@@ -467,7 +467,7 @@ emit_permission_args(AiClaudeCodeClient *self, GPtrArray *args)
     {
         if (self->permission_mode != NULL && self->permission_mode[0] != '\0')
         {
-            g_warning("claude-code: skip-permissions and permission-mode '%s' "
+            g_message("claude-code: skip-permissions and permission-mode '%s' "
                       "are both set; using --dangerously-skip-permissions",
                       self->permission_mode);
         }
@@ -483,7 +483,7 @@ emit_permission_args(AiClaudeCodeClient *self, GPtrArray *args)
         }
         else
         {
-            g_warning("claude-code: unknown permission mode '%s'; omitting "
+            g_message("claude-code: unknown permission mode '%s'; omitting "
                       "the flag. Valid modes: acceptEdits, auto, "
                       "bypassPermissions, manual, dontAsk, plan",
                       self->permission_mode);
@@ -1822,7 +1822,7 @@ on_retry_communicate_complete(
 
 fallback:
     g_clear_error(&error);
-    g_warning("claude-code: re-prompt failed, using tool summary as fallback");
+    g_debug("claude-code: re-prompt failed, using tool summary as fallback");
 
     response = ai_response_new("",
         ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
@@ -1913,7 +1913,7 @@ attempt_text_retry(
     retry->subprocess   = rproc;   /* takes ownership */
     retry->tool_summary = g_strdup(tool_summary);
 
-    g_warning("claude-code: no text in response, re-prompting for summary "
+    g_debug("claude-code: no text in response, re-prompting for summary "
               "(session=%s)", sid);
 
     g_subprocess_communicate_utf8_async(
@@ -2008,7 +2008,7 @@ on_chat_communicate_complete(
         }
 
         /* Retry couldn't start — inject tool_summary as text directly */
-        g_warning("claude-code: re-prompt could not start, using fallback text");
+        g_debug("claude-code: re-prompt could not start, using fallback text");
         {
             g_autoptr(AiTextContent) tc = ai_text_content_new(
                 data->client->last_tool_summary);

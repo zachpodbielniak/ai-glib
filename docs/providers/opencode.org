@@ -181,7 +181,7 @@ real boundary — see below.
 | =port=               | =--port=       | Local server port; 0 omits the flag                           |
 | =thinking=           | =--thinking=   | Emit reasoning blocks                                         |
 | =pure=               | =--pure=       | Run without external plugins                                  |
-| =log-level=          | =--log-level=  | =DEBUG=, =INFO=, =WARN=, =ERROR=. Anything else warns and is omitted |
+| =log-level=          | =--log-level=  | =DEBUG=, =INFO=, =WARN=, =ERROR=. Anything else is reported and omitted |
 | =print-logs=         | =--print-logs= | Logs to stderr; does not disturb the parsed stdout            |
 
 Credentials for a password-protected =--attach= server are deliberately

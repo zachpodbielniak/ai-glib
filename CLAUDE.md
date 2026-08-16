@@ -509,6 +509,29 @@ Three things to know before touching the send path:
    `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
 7. Document it in `docs/providers/<name>.org` with a capability matrix.
 
+## Log levels
+
+GTest and `G_DEBUG=fatal-warnings` both make `g_warning()` and
+`g_critical()` **abort the process**. That makes the level a correctness
+decision, not a matter of taste:
+
+| Condition | Level | Why |
+|---|---|---|
+| The remote side or a wrapped CLI did something | `g_debug` | Not a bug in this program, and already handled by returning a `GError` |
+| The caller configured something invalid | `g_message` | Worth saying out loud, but user input must not abort |
+| This program has a bug | `g_warning` / `g_critical` | What those levels mean |
+
+A model answering with tool calls and no prose, a re-prompt that fails, an
+HTTP 500, a turn that gets cancelled: all normal operation. Every one of
+those used to be a `g_warning`, so a transient upstream failure aborted any
+program running with fatal-warnings — and several tests had to declare
+`g_test_expect_message(..., G_LOG_LEVEL_WARNING, ...)` for a path that was
+working as designed. **Needing that declaration for a normal path is the
+symptom**; if you find yourself adding one, the level is probably wrong.
+
+`ai --set effort-level=typo` must not abort either, which is why invalid
+property values are `g_message`. It still prints.
+
 ## Testing against a loopback server
 
 `tests/test-server.h` is a header-only `TServer`: a `SoupServer` on its own
