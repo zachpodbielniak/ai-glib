@@ -36,6 +36,11 @@ G_BEGIN_DECLS
  * @AI_STYLE_STATUS: an informational note
  * @AI_STYLE_LINK: a URL
  * @AI_STYLE_MARKER: the expand/collapse affordance
+ * @AI_STYLE_MENTION: an `@path` the user typed
+ * @AI_STYLE_COMMAND: a `/name` the user typed
+ * @AI_STYLE_TODO_PENDING: a todo item not started
+ * @AI_STYLE_TODO_ACTIVE: the todo item being worked on
+ * @AI_STYLE_TODO_DONE: a finished todo item
  *
  * How a run of characters should look.
  *
@@ -65,6 +70,11 @@ typedef enum
     AI_STYLE_STATUS,
     AI_STYLE_LINK,
     AI_STYLE_MARKER,
+    AI_STYLE_MENTION,
+    AI_STYLE_COMMAND,
+    AI_STYLE_TODO_PENDING,
+    AI_STYLE_TODO_ACTIVE,
+    AI_STYLE_TODO_DONE,
 
     /*< private >*/
     AI_STYLE_N_TAGS

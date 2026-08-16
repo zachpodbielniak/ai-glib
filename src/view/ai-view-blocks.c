@@ -504,3 +504,199 @@ ai_view_status_block_get_text(AiViewStatusBlock *self)
 
     return self->text;
 }
+
+/* ================================================================
+ * The todo list
+ * ================================================================ */
+
+struct _AiViewTodoBlock
+{
+    AiViewBlock  parent_instance;
+    GPtrArray   *todos;      /* AiTodo*, owned */
+};
+
+G_DEFINE_TYPE(AiViewTodoBlock, ai_view_todo_block, AI_TYPE_VIEW_BLOCK)
+
+static AiViewBlockKind
+todo_get_kind(AiViewBlock *block)
+{
+    (void)block;
+    return AI_VIEW_BLOCK_TODO;
+}
+
+/* The box in front of an item. Chosen for the same reason the tool
+ * markers are: one glyph, aligned, and legible in a terminal that has no
+ * colour at all. */
+static const gchar *
+todo_marker(AiTodoState state)
+{
+    switch (state)
+    {
+        case AI_TODO_IN_PROGRESS:
+            return "◐ ";   /* half-filled circle */
+
+        case AI_TODO_COMPLETED:
+            return "☑ ";   /* ballot box with check */
+
+        case AI_TODO_PENDING:
+        default:
+            return "☐ ";   /* empty ballot box */
+    }
+}
+
+static AiStyleTag
+todo_tag(AiTodoState state)
+{
+    switch (state)
+    {
+        case AI_TODO_IN_PROGRESS:
+            return AI_STYLE_TODO_ACTIVE;
+
+        case AI_TODO_COMPLETED:
+            return AI_STYLE_TODO_DONE;
+
+        case AI_TODO_PENDING:
+        default:
+            return AI_STYLE_TODO_PENDING;
+    }
+}
+
+static AiRenderedText *
+todo_render(AiViewBlock *block)
+{
+    AiViewTodoBlock *self = AI_VIEW_TODO_BLOCK(block);
+    AiRenderedText  *out = ai_rendered_text_new();
+    guint            done = 0;
+    guint            i;
+
+    if (self->todos->len == 0)
+    {
+        ai_rendered_text_append(out, "No todos", AI_STYLE_DIM);
+        return out;
+    }
+
+    for (i = 0; i < self->todos->len; i++)
+    {
+        const AiTodo *todo = g_ptr_array_index(self->todos, i);
+        AiStyleTag    tag = todo_tag(todo->state);
+
+        if (todo->state == AI_TODO_COMPLETED)
+        {
+            done++;
+        }
+
+        if (i > 0)
+        {
+            ai_rendered_text_append(out, "\n", AI_STYLE_DEFAULT);
+        }
+
+        ai_rendered_text_append(out, todo_marker(todo->state), tag);
+        ai_rendered_text_append(out, ai_todo_get_label(todo), tag);
+    }
+
+    /*
+     * A count, because the list is often longer than the screen and
+     * "three of nine" is the thing a reader actually wants from it.
+     */
+    {
+        g_autofree gchar *tally =
+            g_strdup_printf("\n%u/%u done", done, self->todos->len);
+
+        ai_rendered_text_append(out, tally, AI_STYLE_DIM);
+    }
+
+    return out;
+}
+
+static void
+ai_view_todo_block_finalize(GObject *object)
+{
+    AiViewTodoBlock *self = AI_VIEW_TODO_BLOCK(object);
+
+    g_clear_pointer(&self->todos, g_ptr_array_unref);
+
+    G_OBJECT_CLASS(ai_view_todo_block_parent_class)->finalize(object);
+}
+
+static void
+ai_view_todo_block_class_init(AiViewTodoBlockClass *klass)
+{
+    AiViewBlockClass *block_class = AI_VIEW_BLOCK_CLASS(klass);
+
+    G_OBJECT_CLASS(klass)->finalize = ai_view_todo_block_finalize;
+    block_class->render = todo_render;
+    block_class->get_kind = todo_get_kind;
+}
+
+static void
+ai_view_todo_block_init(AiViewTodoBlock *self)
+{
+    self->todos = g_ptr_array_new_with_free_func((GDestroyNotify)ai_todo_free);
+}
+
+/**
+ * ai_view_todo_block_new:
+ *
+ * Creates an empty todo block.
+ *
+ * Returns: (transfer full): a new #AiViewTodoBlock
+ */
+AiViewTodoBlock *
+ai_view_todo_block_new(void)
+{
+    return g_object_new(AI_TYPE_VIEW_TODO_BLOCK, NULL);
+}
+
+/**
+ * ai_view_todo_block_set_todos:
+ * @self: an #AiViewTodoBlock
+ * @todos: (nullable) (element-type AiTodo): the current list, copied
+ *
+ * Replaces the list and marks the block changed.
+ *
+ * The block is meant to be updated in place rather than appended anew
+ * each time. A model rewrites its plan eight times over a long task, and
+ * eight copies of a nine-line list is not a transcript anybody can read
+ * --- so this emits #AiViewBlock::changed, which a frontend answers by
+ * redrawing one block, and #AiTranscript reports as ::block-changed
+ * rather than ::items-changed.
+ *
+ * The items are copied, so the executor is free to replace its own list
+ * on the next `todo_write` without disturbing what is on screen.
+ */
+void
+ai_view_todo_block_set_todos(
+    AiViewTodoBlock *self,
+    GPtrArray       *todos
+){
+    guint i;
+
+    g_return_if_fail(AI_IS_VIEW_TODO_BLOCK(self));
+
+    g_ptr_array_set_size(self->todos, 0);
+
+    if (todos != NULL)
+    {
+        for (i = 0; i < todos->len; i++)
+        {
+            g_ptr_array_add(self->todos,
+                            ai_todo_copy(g_ptr_array_index(todos, i)));
+        }
+    }
+
+    ai_view_block_changed(AI_VIEW_BLOCK(self));
+}
+
+/**
+ * ai_view_todo_block_get_n_todos:
+ * @self: an #AiViewTodoBlock
+ *
+ * Returns: how many items the block is showing
+ */
+guint
+ai_view_todo_block_get_n_todos(AiViewTodoBlock *self)
+{
+    g_return_val_if_fail(AI_IS_VIEW_TODO_BLOCK(self), 0);
+
+    return self->todos->len;
+}

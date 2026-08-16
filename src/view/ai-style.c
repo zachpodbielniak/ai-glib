@@ -50,7 +50,12 @@ static const gchar * const TAG_NAMES[AI_STYLE_N_TAGS] = {
     "error",
     "status",
     "link",
-    "marker"
+    "marker",
+    "mention",
+    "command",
+    "todo-pending",
+    "todo-active",
+    "todo-done"
 };
 
 /**

@@ -121,6 +121,10 @@ struct _AiResourceRegistry
      * file the user is looking at is not the one being used. */
     GPtrArray  *shadowed;
 
+    /* Resources an embedder added by hand. Kept separately so a rescan
+     * does not throw away something nothing on disk can restore. */
+    GPtrArray  *pinned;
+
     gboolean    watching;
     GPtrArray  *monitors;
     guint       rescan_id;
@@ -414,6 +418,18 @@ registry_rescan(AiResourceRegistry *self)
     g_hash_table_remove_all(self->resources);
     g_ptr_array_set_size(self->shadowed, 0);
 
+    /*
+     * Pinned resources are filed first, so they win.
+     *
+     * They also have to be refiled at all: an embedder that registered a
+     * command of its own would otherwise lose it the moment the user
+     * changed directory, and nothing on disk could put it back.
+     */
+    for (i = 0; i < self->pinned->len; i++)
+    {
+        registry_file_resource(self, g_ptr_array_index(self->pinned, i));
+    }
+
     for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
     {
         g_autofree gchar *path =
@@ -611,6 +627,7 @@ ai_resource_registry_finalize(GObject *object)
     g_clear_pointer(&self->working_directory, g_free);
     g_clear_pointer(&self->resources, g_hash_table_unref);
     g_clear_pointer(&self->shadowed, g_ptr_array_unref);
+    g_clear_pointer(&self->pinned, g_ptr_array_unref);
     g_clear_pointer(&self->monitors, g_ptr_array_unref);
 
     G_OBJECT_CLASS(ai_resource_registry_parent_class)->finalize(object);
@@ -728,6 +745,7 @@ ai_resource_registry_init(AiResourceRegistry *self)
     self->resources = g_hash_table_new_full(g_str_hash, g_str_equal,
                                             g_free, g_object_unref);
     self->shadowed = g_ptr_array_new_with_free_func(g_object_unref);
+    self->pinned = g_ptr_array_new_with_free_func(g_object_unref);
     self->monitors = g_ptr_array_new_with_free_func(g_object_unref);
 }
 
@@ -927,11 +945,14 @@ ai_resource_registry_list_shadowed(AiResourceRegistry *self)
  *
  * Files a resource that did not come from disk.
  *
- * Intended for tests and for embedders with their own storage. It
- * follows the same first-writer-wins rule as a scan, so adding over an
- * existing name shadows rather than replaces --- and a subsequent
- * ai_resource_registry_scan() discards it, because a scan starts from an
- * empty set.
+ * For tests, and for embedders with storage of their own. Added
+ * resources survive a rescan and take precedence over anything found on
+ * disk: the embedder asked for this one by name, and losing it the
+ * moment the user changed directory --- with nothing on disk able to put
+ * it back --- would make the call useless.
+ *
+ * Adding two with the same name follows the same first-writer-wins rule
+ * a scan does; the second is recorded as shadowed.
  */
 void
 ai_resource_registry_add(
@@ -941,6 +962,7 @@ ai_resource_registry_add(
     g_return_if_fail(AI_IS_RESOURCE_REGISTRY(self));
     g_return_if_fail(AI_IS_RESOURCE(resource));
 
+    g_ptr_array_add(self->pinned, g_object_ref(resource));
     registry_file_resource(self, resource);
 }
 

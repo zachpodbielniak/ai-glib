@@ -23,6 +23,7 @@
 
 #include "view/ai-view-block.h"
 #include "model/ai-usage.h"
+#include "model/ai-todo.h"
 
 G_BEGIN_DECLS
 
@@ -116,5 +117,24 @@ ai_view_status_block_get_status_kind(AiViewStatusBlock *self);
 
 const gchar *
 ai_view_status_block_get_text(AiViewStatusBlock *self);
+
+/* ---- The todo list ---- */
+
+#define AI_TYPE_VIEW_TODO_BLOCK (ai_view_todo_block_get_type())
+
+G_DECLARE_FINAL_TYPE(AiViewTodoBlock, ai_view_todo_block,
+                     AI, VIEW_TODO_BLOCK, AiViewBlock)
+
+AiViewTodoBlock *
+ai_view_todo_block_new(void);
+
+void
+ai_view_todo_block_set_todos(
+    AiViewTodoBlock *self,
+    GPtrArray       *todos
+);
+
+guint
+ai_view_todo_block_get_n_todos(AiViewTodoBlock *self);
 
 G_END_DECLS

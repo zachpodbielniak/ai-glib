@@ -19,6 +19,7 @@
 #include "config.h"
 
 #include "view/ai-conversation.h"
+#include "harness/ai-mention.h"
 #include "view/ai-view-blocks.h"
 #include "view/ai-view-tool-block.h"
 #include "core/ai-cli-client.h"
@@ -55,7 +56,23 @@ struct _AiConversation
     AiViewBlock    *open_thinking;
     AiViewBlock    *open_tools;
 
+    /*
+     * The todo block, if the model has written one. Kept so an update
+     * mutates it in place rather than appending a ninth copy of a
+     * nine-line list.
+     */
+    AiViewBlock    *todo_block;
+
+    /* The input pipeline. NULL command_set means slash commands are not
+     * resolved here at all, which is what an embedder that only wants a
+     * transcript gets. */
+    AiCommandSet   *command_set;
+    gchar          *working_directory;
+    gboolean        passthrough_set;      /* has the caller decided? */
+    gboolean        passthrough;
+
     gulong          event_id;
+    gulong          todos_id;
 };
 
 G_DEFINE_TYPE(AiConversation, ai_conversation, G_TYPE_OBJECT)
@@ -69,6 +86,9 @@ enum
     PROP_LOCAL_TOOLS,
     PROP_BUSY,
     PROP_TRANSCRIPT,
+    PROP_COMMAND_SET,
+    PROP_WORKING_DIRECTORY,
+    PROP_PASSTHROUGH_COMMANDS,
     N_PROPS
 };
 
@@ -546,22 +566,27 @@ on_provider_done(
 }
 
 /**
- * ai_conversation_send_async:
+ * ai_conversation_send_full_async:
  * @self: an #AiConversation
- * @text: what to say
+ * @display_text: (nullable): what to show in the transcript, or %NULL to
+ *   show @text
+ * @text: what to send to the model
  * @cancellable: (nullable): a #GCancellable
- * @callback: (scope async): called when the turn ends
- * @user_data: user data for @callback
+ * @callback: (scope async): called when the turn finishes
+ * @user_data: data for @callback
  *
- * Sends @text and drives the turn, folding what happens into the transcript.
+ * Sends a turn whose transcript entry differs from its message.
  *
- * One turn at a time: sending while #AiConversation:busy fails rather than
- * interleaving two turns into one transcript, which would produce a
- * transcript describing neither.
+ * The two come apart whenever input is expanded: a `@path` mention or a
+ * slash command produces text far longer than what was typed, and the
+ * reader wants their own line back while the model needs the expansion.
+ *
+ * Complete with ai_conversation_send_finish().
  */
 void
-ai_conversation_send_async(
+ai_conversation_send_full_async(
     AiConversation      *self,
+    const gchar         *display_text,
     const gchar         *text,
     GCancellable        *cancellable,
     GAsyncReadyCallback  callback,
@@ -590,7 +615,14 @@ ai_conversation_send_async(
         return;
     }
 
-    turn = ai_view_turn_block_new(text);
+    /*
+     * The transcript shows what the user typed; the model receives the
+     * expansion. Showing the expansion instead would bury a one-line
+     * question under the nine hundred lines it pulled in, and hiding what
+     * was actually sent would make a surprising answer impossible to
+     * explain.
+     */
+    turn = ai_view_turn_block_new(display_text != NULL ? display_text : text);
     ai_transcript_append(self->transcript, turn);
 
     close_open_blocks(self);
@@ -642,6 +674,54 @@ ai_conversation_send_async(
                            self->cancellable,
                            on_provider_done,
                            self);
+}
+
+/**
+ * ai_conversation_send_full_finish:
+ * @self: an #AiConversation
+ * @result: the #GAsyncResult
+ * @error: (nullable): return location for a #GError
+ *
+ * Completes ai_conversation_send_full_async().
+ *
+ * Identical to ai_conversation_send_finish(); both exist because every
+ * async function needs the matching name.
+ *
+ * Returns: %TRUE unless @error is set
+ */
+gboolean
+ai_conversation_send_full_finish(
+    AiConversation  *self,
+    GAsyncResult    *result,
+    GError         **error
+){
+    return ai_conversation_send_finish(self, result, error);
+}
+
+/**
+ * ai_conversation_send_async:
+ * @self: an #AiConversation
+ * @text: the message to send
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): called when the turn finishes
+ * @user_data: data for @callback
+ *
+ * Sends @text as typed, with no command resolution and no mention
+ * expansion.
+ *
+ * For a caller that has already done its own expansion, or wants none.
+ * ai_conversation_send_input_async() is the one that runs the pipeline.
+ */
+void
+ai_conversation_send_async(
+    AiConversation      *self,
+    const gchar         *text,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    ai_conversation_send_full_async(self, NULL, text, cancellable, callback,
+                                    user_data);
 }
 
 /**
@@ -714,6 +794,11 @@ ai_conversation_clear(AiConversation *self)
     self->open_text = NULL;
     self->open_thinking = NULL;
     self->open_tools = NULL;
+
+    /* The todo list belongs to this conversation too; leaving it behind
+     * a /clear would be the one thing on screen that did not go. */
+    self->todo_block = NULL;
+    ai_tool_executor_clear_todos(self->executor);
 }
 
 /* ================================================================
@@ -742,6 +827,43 @@ on_executor_approval(
     return answer;
 }
 
+/*
+ * The model rewrote its plan.
+ *
+ * One block, updated in place. A model revises its todo list eight times
+ * over a long task, and eight copies of a nine-line list is not a
+ * transcript anybody can read --- so this reuses the block if there is
+ * one, which the transcript reports as ::block-changed rather than
+ * ::items-changed.
+ */
+static void
+on_executor_todos_changed(
+    AiToolExecutor *executor,
+    gpointer        user_data
+){
+    AiConversation *self = user_data;
+
+    if (self->todo_block == NULL)
+    {
+        g_autoptr(AiViewTodoBlock) block = NULL;
+
+        /* An empty list is not worth a row. This is also what keeps
+         * ai_conversation_clear() from putting a fresh empty block back
+         * the moment it empties the executor's list. */
+        if (ai_tool_executor_get_n_todos(executor) == 0)
+        {
+            return;
+        }
+
+        block = ai_view_todo_block_new();
+        self->todo_block = AI_VIEW_BLOCK(block);
+        ai_transcript_append(self->transcript, AI_VIEW_BLOCK(block));
+    }
+
+    ai_view_todo_block_set_todos(AI_VIEW_TODO_BLOCK(self->todo_block),
+                                 ai_tool_executor_get_todos(executor));
+}
+
 static void
 ai_conversation_finalize(GObject *object)
 {
@@ -752,11 +874,18 @@ ai_conversation_finalize(GObject *object)
         g_signal_handler_disconnect(self->provider, self->event_id);
     }
 
+    if (self->todos_id != 0 && self->executor != NULL)
+    {
+        g_signal_handler_disconnect(self->executor, self->todos_id);
+    }
+
     g_clear_object(&self->provider);
     g_clear_object(&self->transcript);
     g_clear_object(&self->executor);
     g_clear_object(&self->cancellable);
+    g_clear_object(&self->command_set);
     g_clear_pointer(&self->system_prompt, g_free);
+    g_clear_pointer(&self->working_directory, g_free);
     g_list_free_full(self->messages, g_object_unref);
 
     G_OBJECT_CLASS(ai_conversation_parent_class)->finalize(object);
@@ -791,6 +920,16 @@ ai_conversation_get_property(
         case PROP_TRANSCRIPT:
             g_value_set_object(value, self->transcript);
             break;
+        case PROP_COMMAND_SET:
+            g_value_set_object(value, self->command_set);
+            break;
+        case PROP_WORKING_DIRECTORY:
+            g_value_set_string(value, self->working_directory);
+            break;
+        case PROP_PASSTHROUGH_COMMANDS:
+            g_value_set_boolean(value,
+                                ai_conversation_get_passthrough_commands(self));
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -819,6 +958,17 @@ ai_conversation_set_property(
             break;
         case PROP_LOCAL_TOOLS:
             ai_conversation_set_local_tools(self, g_value_get_boolean(value));
+            break;
+        case PROP_COMMAND_SET:
+            ai_conversation_set_command_set(self, g_value_get_object(value));
+            break;
+        case PROP_WORKING_DIRECTORY:
+            ai_conversation_set_working_directory(self,
+                                                  g_value_get_string(value));
+            break;
+        case PROP_PASSTHROUGH_COMMANDS:
+            ai_conversation_set_passthrough_commands(
+                self, g_value_get_boolean(value));
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -900,6 +1050,50 @@ ai_conversation_class_init(AiConversationClass *klass)
                             AI_TYPE_TRANSCRIPT,
                             G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiConversation:command-set:
+     *
+     * How ai_conversation_send_input_async() resolves a slash command.
+     *
+     * %NULL means it does not: every line goes to the model as typed,
+     * which is what an embedder that only wants a transcript gets.
+     */
+    properties[PROP_COMMAND_SET] =
+        g_param_spec_object("command-set", NULL, NULL, AI_TYPE_COMMAND_SET,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConversation:working-directory:
+     *
+     * What `@path` mentions and shell substitutions resolve against.
+     *
+     * Also set on the conversation's #AiToolExecutor, so the model's
+     * tools and the user's mentions agree about where they are.
+     */
+    properties[PROP_WORKING_DIRECTORY] =
+        g_param_spec_string("working-directory", NULL, NULL, NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConversation:passthrough-commands:
+     *
+     * Whether a line reaches the provider exactly as typed.
+     *
+     * Defaults to %TRUE for a CLI provider and %FALSE for an HTTP one,
+     * and that default is the whole point: claude-code, opencode and
+     * grok already resolve `@`, `/` and their own skills, so expanding
+     * first would fight them and would stop `/compact` from ever
+     * arriving. Setting it explicitly overrides the guess in either
+     * direction.
+     *
+     * Purely local built-ins --- `/quit`, `/clear` --- still run locally
+     * even under passthrough, because the wrapped CLI has no opinion
+     * about this program's transcript.
+     */
+    properties[PROP_PASSTHROUGH_COMMANDS] =
+        g_param_spec_boolean("passthrough-commands", NULL, NULL, FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -936,6 +1130,9 @@ ai_conversation_init(AiConversation *self)
 
     g_signal_connect(self->executor, "approval-requested",
                      G_CALLBACK(on_executor_approval), self);
+    self->todos_id = g_signal_connect(self->executor, "todos-changed",
+                                      G_CALLBACK(on_executor_todos_changed),
+                                      self);
 }
 
 /**
@@ -1210,4 +1407,383 @@ ai_conversation_get_busy(AiConversation *self)
     g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
 
     return self->busy;
+}
+
+/* ================================================================
+ * The input pipeline
+ * ================================================================ */
+
+/**
+ * ai_conversation_set_command_set:
+ * @self: an #AiConversation
+ * @commands: (nullable) (transfer none): how to resolve a slash command
+ *
+ * Sets what ai_conversation_send_input_async() resolves commands with.
+ *
+ * The set's registry, if it has one, is also handed to the conversation's
+ * tool executor, which is what makes the `task` and `skill` tools
+ * available to the model. One assignment, because a user who can type
+ * `/reviewer` expects the model to be able to reach the same agent.
+ */
+void
+ai_conversation_set_command_set(
+    AiConversation *self,
+    AiCommandSet   *commands
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    if (!g_set_object(&self->command_set, commands))
+    {
+        return;
+    }
+
+    ai_tool_executor_set_resource_registry(
+        self->executor,
+        commands != NULL ? ai_command_set_get_registry(commands) : NULL);
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_COMMAND_SET]);
+}
+
+/**
+ * ai_conversation_get_command_set:
+ * @self: an #AiConversation
+ *
+ * Returns: (transfer none) (nullable): the command set, or %NULL
+ */
+AiCommandSet *
+ai_conversation_get_command_set(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    return self->command_set;
+}
+
+/**
+ * ai_conversation_set_working_directory:
+ * @self: an #AiConversation
+ * @path: (nullable): the directory, or %NULL for the process's own
+ *
+ * Sets what mentions, commands and tools resolve paths against.
+ */
+void
+ai_conversation_set_working_directory(
+    AiConversation *self,
+    const gchar    *path
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    if (g_strcmp0(self->working_directory, path) == 0)
+    {
+        return;
+    }
+
+    g_free(self->working_directory);
+    self->working_directory = g_strdup(path);
+
+    /* The model's tools and the user's mentions must agree about where
+     * they are; two settings that could disagree would be a bug waiting
+     * to be filed. */
+    ai_tool_executor_set_working_directory(self->executor, path);
+
+    if (self->command_set != NULL)
+    {
+        AiResourceRegistry *registry =
+            ai_command_set_get_registry(self->command_set);
+
+        if (registry != NULL)
+        {
+            ai_resource_registry_set_working_directory(registry, path);
+        }
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_WORKING_DIRECTORY]);
+}
+
+/**
+ * ai_conversation_get_working_directory:
+ * @self: an #AiConversation
+ *
+ * Returns: (transfer none) (nullable): the directory, or %NULL
+ */
+const gchar *
+ai_conversation_get_working_directory(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    return self->working_directory;
+}
+
+/**
+ * ai_conversation_set_passthrough_commands:
+ * @self: an #AiConversation
+ * @passthrough: whether to send lines exactly as typed
+ *
+ * Overrides the by-provider default.
+ *
+ * Once set, it stays set: the guess is only made for a caller who has
+ * not expressed a preference.
+ */
+void
+ai_conversation_set_passthrough_commands(
+    AiConversation *self,
+    gboolean        passthrough
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    passthrough = !!passthrough;
+
+    if (self->passthrough_set && self->passthrough == passthrough)
+    {
+        return;
+    }
+
+    self->passthrough_set = TRUE;
+    self->passthrough = passthrough;
+
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_PASSTHROUGH_COMMANDS]);
+}
+
+/**
+ * ai_conversation_get_passthrough_commands:
+ * @self: an #AiConversation
+ *
+ * Whether input reaches the provider exactly as typed.
+ *
+ * Unless set explicitly this is %TRUE for a CLI provider and %FALSE for
+ * an HTTP one. claude-code, opencode and grok resolve `@`, `/` and their
+ * own skills themselves; expanding first would fight them and would stop
+ * `/compact` from ever arriving.
+ *
+ * Returns: whether input is passed through untouched
+ */
+gboolean
+ai_conversation_get_passthrough_commands(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+
+    if (self->passthrough_set)
+    {
+        return self->passthrough;
+    }
+
+    return AI_IS_CLI_CLIENT(self->provider);
+}
+
+/*
+ * Is this built-in one the frontend must handle even under passthrough?
+ *
+ * All of them, as it happens: every built-in acts on this program --- its
+ * transcript, its model, its listings --- and a wrapped CLI has no
+ * opinion about any of that. The function exists so the rule is written
+ * down rather than implied by its absence.
+ */
+static gboolean
+builtin_is_local(const gchar *name)
+{
+    (void)name;
+
+    return TRUE;
+}
+
+/**
+ * ai_conversation_resolve_input:
+ * @self: an #AiConversation
+ * @line: what the user typed
+ * @cancellable: (nullable): interrupts a shell substitution
+ * @error: (nullable): return location for a #GError
+ *
+ * Works out what a line of input means, without sending anything.
+ *
+ * This is the first half of ai_conversation_send_input_async(), exposed
+ * so a frontend can implement `/expand` --- and so the decision can be
+ * inspected in a test without a provider.
+ *
+ * Under passthrough, an unknown `/name` resolves to
+ * %AI_COMMAND_OUTCOME_NOT_A_COMMAND rather than an error: it is meant for
+ * the wrapped CLI, not for us.
+ *
+ * Returns: (transfer full) (nullable): what to do, or %NULL on error
+ */
+AiCommandResult *
+ai_conversation_resolve_input(
+    AiConversation  *self,
+    const gchar     *line,
+    GCancellable    *cancellable,
+    GError         **error
+){
+    g_autoptr(AiCommandResult) result = NULL;
+    g_autoptr(GError)          local_error = NULL;
+
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+    g_return_val_if_fail(line != NULL, NULL);
+
+    if (self->command_set == NULL)
+    {
+        return NULL;
+    }
+
+    result = ai_command_set_resolve(self->command_set, line,
+                                    self->working_directory, cancellable,
+                                    &local_error);
+
+    if (result != NULL)
+    {
+        return (AiCommandResult *)g_steal_pointer(&result);
+    }
+
+    /*
+     * An unknown command under passthrough is not an error --- `/compact`
+     * means something to claude and nothing here, and refusing it would
+     * take away a feature the wrapped CLI has.
+     */
+    if (ai_conversation_get_passthrough_commands(self))
+    {
+        return NULL;
+    }
+
+    g_propagate_error(error, g_steal_pointer(&local_error));
+
+    return NULL;
+}
+
+/**
+ * ai_conversation_send_input_async:
+ * @self: an #AiConversation
+ * @line: what the user typed
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): called when the turn finishes
+ * @user_data: data for @callback
+ *
+ * Runs a line of input through the whole pipeline and sends it.
+ *
+ * In order: resolve a slash command, expand `@path` mentions, record what
+ * the user typed in the transcript, and send the expansion to the model.
+ * It lives here rather than in each frontend so `ai`, `ai-tui` and an
+ * Emacs client cannot disagree about that order --- which they would,
+ * because the order is not obvious and two of the steps are easy to swap.
+ *
+ * A line that resolves to a built-in is *not* sent. The call completes
+ * immediately and ai_conversation_send_input_finish() reports it through
+ * @out_command, so the frontend can act on it.
+ *
+ * Under passthrough (a CLI provider, by default) the line reaches the
+ * provider byte-for-byte as typed, except for built-ins, which always run
+ * locally.
+ */
+void
+ai_conversation_send_input_async(
+    AiConversation      *self,
+    const gchar         *line,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    g_autoptr(AiCommandResult) resolved = NULL;
+    g_autoptr(GError)          local_error = NULL;
+    g_autofree gchar          *expanded = NULL;
+    const gchar               *to_send;
+
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+    g_return_if_fail(line != NULL);
+
+    resolved = ai_conversation_resolve_input(self, line, cancellable,
+                                             &local_error);
+
+    if (local_error != NULL)
+    {
+        GTask *task = g_task_new(self, cancellable, callback, user_data);
+
+        g_task_return_error(task, g_steal_pointer(&local_error));
+        g_object_unref(task);
+        return;
+    }
+
+    if (resolved != NULL)
+    {
+        switch (ai_command_result_get_outcome(resolved))
+        {
+            case AI_COMMAND_OUTCOME_BUILTIN:
+                if (builtin_is_local(ai_command_result_get_name(resolved)))
+                {
+                    GTask *task = g_task_new(self, cancellable, callback,
+                                             user_data);
+
+                    g_task_set_task_data(task,
+                                         g_object_ref(resolved),
+                                         g_object_unref);
+                    g_task_return_boolean(task, TRUE);
+                    g_object_unref(task);
+                    return;
+                }
+
+                break;
+
+            case AI_COMMAND_OUTCOME_PROMPT:
+            case AI_COMMAND_OUTCOME_AGENT:
+                to_send = ai_command_result_get_prompt(resolved);
+                expanded = ai_mention_expand(to_send != NULL ? to_send : "",
+                                             self->working_directory, 0,
+                                             NULL);
+                ai_conversation_send_full_async(self, line, expanded,
+                                                cancellable, callback,
+                                                user_data);
+                return;
+
+            case AI_COMMAND_OUTCOME_NOT_A_COMMAND:
+            default:
+                break;
+        }
+    }
+
+    if (ai_conversation_get_passthrough_commands(self))
+    {
+        /* Byte-for-byte. The wrapped CLI resolves its own mentions and
+         * its own commands, and doing it twice would be worse than not
+         * at all. */
+        ai_conversation_send_async(self, line, cancellable, callback,
+                                   user_data);
+        return;
+    }
+
+    expanded = ai_mention_expand(line, self->working_directory, 0, NULL);
+
+    ai_conversation_send_full_async(self, line, expanded, cancellable,
+                                    callback, user_data);
+}
+
+/**
+ * ai_conversation_send_input_finish:
+ * @self: an #AiConversation
+ * @result: the #GAsyncResult
+ * @out_command: (out) (optional) (transfer full) (nullable): the built-in
+ *   the frontend must handle, or %NULL if a turn was sent
+ * @error: (nullable): return location for a #GError
+ *
+ * Completes ai_conversation_send_input_async().
+ *
+ * When @out_command is non-%NULL on return, nothing was sent: the line
+ * was a built-in, and its name and arguments are on the result.
+ *
+ * Returns: %TRUE unless @error is set
+ */
+gboolean
+ai_conversation_send_input_finish(
+    AiConversation   *self,
+    GAsyncResult     *result,
+    AiCommandResult **out_command,
+    GError          **error
+){
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+    g_return_val_if_fail(g_task_is_valid(result, self), FALSE);
+
+    if (out_command != NULL)
+    {
+        gpointer data = g_task_get_task_data(G_TASK(result));
+
+        *out_command = (data != NULL) ? g_object_ref(data) : NULL;
+    }
+
+    return g_task_propagate_boolean(G_TASK(result), error);
 }

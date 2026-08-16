@@ -18,6 +18,7 @@
 
 #include "view/ai-transcript.h"
 #include "convenience/ai-tool-executor.h"
+#include "harness/ai-command.h"
 
 G_BEGIN_DECLS
 
@@ -100,5 +101,74 @@ ai_conversation_cancel(AiConversation *self);
 
 void
 ai_conversation_clear(AiConversation *self);
+
+void
+ai_conversation_send_full_async(
+    AiConversation      *self,
+    const gchar         *display_text,
+    const gchar         *text,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
+gboolean
+ai_conversation_send_full_finish(
+    AiConversation  *self,
+    GAsyncResult    *result,
+    GError         **error
+);
+
+void
+ai_conversation_set_command_set(
+    AiConversation *self,
+    AiCommandSet   *commands
+);
+
+AiCommandSet *
+ai_conversation_get_command_set(AiConversation *self);
+
+void
+ai_conversation_set_working_directory(
+    AiConversation *self,
+    const gchar    *path
+);
+
+const gchar *
+ai_conversation_get_working_directory(AiConversation *self);
+
+void
+ai_conversation_set_passthrough_commands(
+    AiConversation *self,
+    gboolean        passthrough
+);
+
+gboolean
+ai_conversation_get_passthrough_commands(AiConversation *self);
+
+AiCommandResult *
+ai_conversation_resolve_input(
+    AiConversation  *self,
+    const gchar     *line,
+    GCancellable    *cancellable,
+    GError         **error
+);
+
+void
+ai_conversation_send_input_async(
+    AiConversation      *self,
+    const gchar         *line,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
+gboolean
+ai_conversation_send_input_finish(
+    AiConversation   *self,
+    GAsyncResult     *result,
+    AiCommandResult **out_command,
+    GError          **error
+);
 
 G_END_DECLS

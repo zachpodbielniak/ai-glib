@@ -703,6 +703,70 @@ test_add_follows_first_writer_wins(void)
 	}
 }
 
+/*
+ * An added resource survives a rescan.
+ *
+ * Without this, an embedder that registered a command of its own would
+ * lose it the moment the user changed directory -- and nothing on disk
+ * could put it back, because it was never on disk.
+ */
+static void
+test_added_resources_survive_a_scan(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	g_autoptr(AiResource)         pinned = NULL;
+
+	reset();
+	registry = fresh_registry();
+
+	pinned = ai_resource_new_from_data("---\ndescription: mine\n---\nx\n",
+	                                   -1, "embedder-command",
+	                                   AI_RESOURCE_COMMAND, "ai-glib",
+	                                   AI_RESOURCE_SCOPE_BUILTIN, NULL);
+	ai_resource_registry_add(registry, pinned);
+
+	ai_resource_registry_scan(registry);
+	g_assert_nonnull(ai_resource_registry_lookup(registry,
+	                                             AI_RESOURCE_COMMAND,
+	                                             "embedder-command"));
+
+	/* Including the rescan a working-directory change triggers, which is
+	 * the case that actually bites. */
+	ai_resource_registry_set_working_directory(registry, sandbox_home);
+	g_assert_nonnull(ai_resource_registry_lookup(registry,
+	                                             AI_RESOURCE_COMMAND,
+	                                             "embedder-command"));
+}
+
+/*
+ * And it wins against a file of the same name: the embedder asked for
+ * this one specifically.
+ */
+static void
+test_added_resource_beats_a_file(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	g_autoptr(AiResource)         pinned = NULL;
+	AiResource                   *winner;
+
+	reset();
+	write_home(".claude/commands/contested.md",
+	           "---\ndescription: from disk\n---\nx\n");
+
+	registry = fresh_registry();
+
+	pinned = ai_resource_new_from_data("---\ndescription: from embedder\n"
+	                                   "---\nx\n", -1, "contested",
+	                                   AI_RESOURCE_COMMAND, "ai-glib",
+	                                   AI_RESOURCE_SCOPE_BUILTIN, NULL);
+	ai_resource_registry_add(registry, pinned);
+	ai_resource_registry_scan(registry);
+
+	winner = ai_resource_registry_lookup(registry, AI_RESOURCE_COMMAND,
+	                                     "contested");
+	g_assert_cmpstr(ai_resource_get_description(winner), ==, "from embedder");
+}
+
 static void
 test_search_paths_are_reportable(void)
 {
@@ -999,6 +1063,10 @@ main(int argc, char *argv[])
 	                test_list_is_transfer_container);
 	g_test_add_func("/ai-glib/registry/add-first-wins",
 	                test_add_follows_first_writer_wins);
+	g_test_add_func("/ai-glib/registry/added-survives-scan",
+	                test_added_resources_survive_a_scan);
+	g_test_add_func("/ai-glib/registry/added-beats-file",
+	                test_added_resource_beats_a_file);
 	g_test_add_func("/ai-glib/registry/search-paths",
 	                test_search_paths_are_reportable);
 
