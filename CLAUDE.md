@@ -195,6 +195,12 @@ ai-glib/
 │   │   ├── ai-view-block.h/.c # Block base class
 │   │   ├── ai-transcript.h/.c # The buffer (GListModel of blocks)
 │   │   └── ai-conversation.h/.c
+│   ├── harness/               # Commands, skills and agents on disk
+│   │   ├── ai-resource.h/.c   # One markdown+frontmatter file
+│   │   ├── ai-resource-registry.h/.c
+│   │   ├── ai-mention.h/.c    # @path references
+│   │   ├── ai-command.h/.c    # /commands, built-in and from disk
+│   │   └── ai-completion.h/.c # The range + candidates an editor wants
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
@@ -596,6 +602,96 @@ transcript that omitted a call would be lying about what ran.
 
 `tests/test-view-tool-block.c` asserts the summary strings literally
 (`Edited 3 files, ran 2 commands  +21-6`). Change the wording, change those.
+
+## Harness layer (`src/harness/`)
+
+What a *session* knows besides the model: the commands, skills and agents
+other harnesses keep on disk, `@path` mentions, and completion over both.
+It exists as a layer for the same reason `src/view/` does — Emacs has to
+be able to drive it. `ai_completion_context_query()` returning a byte range and a
+candidate list is exactly what `completion-at-point-functions` consumes;
+a popup written in ncurses would be worth nothing to `libreclaw`.
+
+- `AiResource` — one markdown file with YAML frontmatter. All three kinds
+  (command, skill, agent) share the format, which is why one type covers
+  them. Arbitrary frontmatter keys are reachable through
+  `ai_resource_get_meta()` rather than typed getters, because harnesses
+  invent fields and a getter each would mean editing ai-glib every time.
+- `AiResourceRegistry` — the scan. **The search-path table is the
+  registration**, same pattern as `AiToolStyle` and `AiImageModelInfo`:
+  teaching it about another harness is one struct literal.
+- `AiMention`, `AiCommandSet`, `AiCompletionContext` — the input pipeline,
+  driven as a unit by `ai_conversation_send_input_async()`.
+
+Rules that are load-bearing:
+
+1. **These files are not ours.** A malformed one costs itself and nothing
+   else: bad YAML, an unclosed delimiter, a BOM, CRLF all degrade to "no
+   metadata" with a `g_debug`. Same category as subprocess stdout — see
+   the log-level table above. One bad file must not hide sixteen good
+   ones, nor abort a `G_DEBUG=fatal-warnings` run. The one hard failure is
+   invalid UTF-8, because everything downstream assumes it.
+2. **Offsets are byte offsets into UTF-8**, for mentions and for
+   completion ranges, exactly as `AiStyleSpan` already is. One rule for
+   the library; Emacs converts with `byte-to-position`.
+3. **Scanning is pure; expansion touches the disk.** `ai_mention_scan()`
+   runs on every keystroke to highlight the input line, so it must never
+   do I/O. That split is also why a Python `@decorator` needs no special
+   case: it scans like any candidate and then resolves to nothing.
+4. **`!`cmd`` in a command body is opt-in per file** (`shell: true`).
+   These directories are shared with other tools and a frontend builds a
+   listing at startup, unprompted; anything able to write a file there
+   would otherwise be able to run code. `AI_COMMAND_SHELL_NEVER` lets an
+   embedder refuse it outright, overriding the file.
+5. **CLI providers get the line verbatim.** claude-code, opencode and
+   grok resolve `@`, `/` and their own skills already, so
+   `passthrough-commands` defaults TRUE for `AI_IS_CLI_CLIENT` and FALSE
+   otherwise. An unknown `/name` is an error for HTTP and a passthrough
+   for CLI — `/compact` means something to claude and nothing here.
+   Built-ins still run locally; the wrapped CLI has no opinion about our
+   transcript.
+
+Completion candidates and todo items are read through out-parameters for
+the same reason `ai_rendered_text_get_span()` is: a plain struct behind a
+pointer does not survive g-ir-scanner. `make test-gi` reads them back
+from Python — that is the standing check that the Emacs path works.
+
+Every test that touches this **must** sandbox `HOME` and the working
+directory. A suite that reads the developer's real `~/.claude` passes or
+fails by whose machine ran it.
+
+See `docs/harness.org` and `docs/commands.org`.
+
+## The tool list is the grant
+
+`ai_tool_executor_execute()` dispatches a built-in only while the
+executor advertises it. That is what makes `task`'s allowlist structural:
+the child executor is *built* without the tools an agent did not declare,
+so calling one is not refused, it is unrepresentable. Without it the
+global dispatch table would have made the allowlist decoration.
+
+`task` and `skill` appear only when `resource-registry` is set, so an
+executor without one offers exactly what it always did.
+
+Four tools were added alongside them — `todo_write`, `multi_edit`, `task`,
+`skill`. Two things about them generalise:
+
+- **`multi_edit` is all-or-nothing.** Every replacement lands on an
+  in-memory copy and the file is written once. A failure on edit 3 of 4
+  leaves the file byte-identical. That is a stated contract callers rely
+  on, and `tests/test-tool-multi-edit.c` hashes the file to prove it —
+  asserting "it returned an error" would pass against an implementation
+  that had already written half the batch.
+- **A tool's `GError` message becomes the tool result.** The run loop used
+  to substitute "tool execution failed", which threw away every carefully
+  worded error. "no agent named 'reviewr'. Available: reviewer, auditor"
+  gives the model something to do next.
+
+For an array-of-objects parameter use `ai_tool_add_array_parameter()`. A
+bare `{"type":"array"}` is not a schema any provider can act on — Gemini
+rejects it outright and the others guess.
+
+See `docs/tools.org`.
 
 ## Tool approval
 

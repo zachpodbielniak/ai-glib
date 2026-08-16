@@ -386,3 +386,35 @@ approval. Their equivalent is =--skip-permissions= and the per-provider
 =permission-mode= and =allowed-tools= properties. That is also why
 [[file:api-reference/ai-conversation.org][AiConversation]] refuses
 =local-tools= for them.
+
+* The harness-aware tools
+Setting a resource registry adds two more:
+
+#+begin_src C
+ai_tool_executor_set_resource_registry (executor, registry);
+#+end_src
+
+- =task= runs an agent file from disk as a subagent, confined to the
+  tools that file declares.
+- =skill= lets the model load a written procedure for itself.
+
+While no registry is set neither tool exists, so an executor built by
+=ai_tool_executor_new()= advertises exactly what it always has --- adding
+subagent support to the library changed nothing for callers who do not
+want it.
+
+*The tool list is the grant.* A built-in dispatches only while the
+executor advertises it, which is what makes =task='s allowlist structural
+rather than a policy: an agent whose =tools:= omits =bash= has no =bash=
+to call. Without that, the dispatch table being global would have made
+the allowlist decoration.
+
+See [[file:tools.org][The built-in tools]] for every tool's parameters
+and failure modes, and [[file:harness.org][the harness layer]] for where
+the files come from.
+
+* Errors reach the model
+When a tool returns %NULL, its =GError= message becomes the tool result,
+prefixed with "Error: ". That is what makes an error worth wording: "no
+agent named 'reviewr'. Available: reviewer, auditor" gives the model
+something to do next, where "tool execution failed" gives it nothing.

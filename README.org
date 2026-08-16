@@ -18,6 +18,13 @@ A GLib/GObject-based C library for interacting with AI providers.
 - *Renderable transcript*: a UI-agnostic model of a conversation that groups
   and summarises tool calls once, for any frontend to draw (see
   [[file:docs/transcript.org][docs/transcript.org]])
+- *Reads your existing harness files*: the commands, skills and agents already
+  in =~/.claude=, =.opencode= and =.grok= become =/= commands, with =@path=
+  mentions and completion --- all of it library API, so an Emacs frontend gets
+  the same behaviour (see [[file:docs/harness.org][docs/harness.org]])
+- *Agent tools*: =todo_write=, =multi_edit=, =task= (run an agent file as a
+  subagent, confined to the tools it declares) and =skill= (see
+  [[file:docs/tools.org][docs/tools.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
 - *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
 - *TUI*: =ai-tui=, a terminal agent harness over any provider (see [[file:docs/tui.org][docs/tui.org]])
@@ -113,6 +120,9 @@ See the [[file:docs/]] directory for full documentation:
 - [[file:docs/getting-started.org][Getting Started]]
 - [[file:docs/architecture.org][Architecture]]
 - [[file:docs/configuration.org][Configuration]]
+- [[file:docs/harness.org][The harness layer]] --- commands, skills, agents, mentions, completion
+- [[file:docs/commands.org][Authoring commands, skills and agents]]
+- [[file:docs/tools.org][The built-in tools]]
 - [[file:docs/api-reference/][API Reference]]
 - [[file:docs/examples/][Examples]]
 

@@ -247,3 +247,28 @@ the rest.
 
 See [[file:events.org][The event stream]] and
 [[file:transcript.org][The transcript]].
+
+* The harness layer (=src/harness/=)
+What a *session* is, as distinct from what a conversation is
+(=src/view/=) or what a provider is (=src/providers/=): the commands,
+skills and agents on disk, the =@path= mentions in a line of input, and
+the completion a frontend offers over both.
+
+#+begin_example
+  AiResourceRegistry ──▶ AiCommandSet ──▶ AiCompletionContext
+          │                    │                   │
+          │                    └── AiConversation ─┘
+          │                        send_input_async()
+          └──▶ AiToolExecutor (task, skill)
+#+end_example
+
+It exists as a layer for the same reason =src/view/= does: an Emacs
+frontend has to be able to drive it. A completion popup written in
+ncurses is worth nothing to =libreclaw=; =ai_completion_context_query()=
+returning a byte range and a candidate list is exactly what
+=completion-at-point-functions= consumes.
+
+The search-path table in =ai-resource-registry.c= is the registration
+point, the same pattern =AiToolStyle= and =AiImageModelInfo= use.
+
+See [[file:harness.org][The harness layer]].

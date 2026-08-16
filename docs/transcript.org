@@ -301,3 +301,43 @@ a session produced what you expected without driving a display.
 - [[file:api-reference/ai-conversation.org][AiConversation]] --- the driver
 - [[file:tui.org][ai-tui]] --- the terminal frontend
 - [[file:examples/transcript-render.org][transcript-render]] --- a frontend in a hundred lines
+
+* The todo block
+=AiViewTodoBlock= is the sixth block kind, and the only one that mutates
+in place.
+
+#+begin_example
+  ☐ Add the parser
+  ◐ Wiring the registry
+  ☑ Read the files
+  1/3 done
+#+end_example
+
+=AiConversation= watches the executor's =::todos-changed= and keeps one
+block, updating it rather than appending. A model revises its plan
+repeatedly over a long task, and eight appended copies of a nine-line
+list is not a transcript anybody can read.
+
+An update therefore emits =::block-changed=, not =::items-changed= ---
+which is exactly why a frontend has to watch both. An empty list gets no
+block at all.
+
+The in-progress item renders in its active phrasing ("Wiring the
+registry"), because a list is read while it is being worked on. That rule
+lives in =ai_todo_get_label()=, once, rather than in every renderer.
+
+Each line carries a =todo-pending=, =todo-active= or =todo-done= span, so
+a frontend colours them without parsing the glyphs back out of the text.
+
+* Style tags added by the harness layer
+| Tag             | Role                                    |
+|-----------------+-----------------------------------------|
+| =mention=       | an =@path= the user typed               |
+| =command=       | a =/name= the user typed                |
+| =todo-pending=  | an item not started                     |
+| =todo-active=   | the item being worked on                |
+| =todo-done=     | a finished item                         |
+
+The first two are for an input line rather than a transcript:
+=ai_mention_scan()= is pure and cheap enough to run on every keystroke,
+which is what lets a frontend highlight what the pipeline will act on.

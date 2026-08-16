@@ -1,0 +1,89 @@
+* AiCompletionContext
+Completing =/= and =@= at a cursor. The piece an Emacs frontend consumes
+directly.
+
+** Functions
+#+begin_src C
+AiCompletionContext *ai_completion_context_new (AiCommandSet *commands,
+                                                const gchar *working_directory);
+
+void         ai_completion_context_set_working_directory (AiCompletionContext *self,
+                                                          const gchar *path);
+const gchar *ai_completion_context_get_working_directory (AiCompletionContext *self);
+
+void  ai_completion_context_set_max_items (AiCompletionContext *self, guint n);
+guint ai_completion_context_get_max_items (AiCompletionContext *self);
+
+/* Never NULL. Kind AI_COMPLETION_NONE with no items means "nothing here". */
+AiCompletionResult *ai_completion_context_query (AiCompletionContext *self,
+                                         const gchar *buffer,
+                                         guint cursor);
+#+end_src
+
+=cursor= is a byte offset. One past the end is clamped rather than read
+out of bounds.
+
+** AiCompletionResult
+#+begin_src C
+AiCompletionKind ai_completion_result_get_kind    (AiCompletionResult *self);
+guint            ai_completion_result_get_start   (AiCompletionResult *self);
+guint            ai_completion_result_get_end     (AiCompletionResult *self);
+guint            ai_completion_result_get_n_items (AiCompletionResult *self);
+
+const AiCompletionItem *ai_completion_result_get_item (AiCompletionResult *self,
+                                                       guint index);
+
+/* The shape bindings use. FALSE if @index is out of range, leaving the
+   outputs untouched. */
+gboolean ai_completion_result_get_item_fields (AiCompletionResult *self,
+                                               guint index,
+                                               const gchar **out_text,
+                                               const gchar **out_display,
+                                               const gchar **out_description,
+                                               gboolean *out_is_directory);
+
+/* The longest prefix every candidate shares, never splitting a UTF-8
+   sequence. Insert it, then show the menu. */
+gchar *ai_completion_result_get_common_prefix (AiCompletionResult *self);
+#+end_src
+
+** The range is the product
+=get_start()= and =get_end()= are byte offsets bounding the token to
+replace. A frontend replaces =buffer[start..end)= with the chosen text
+and does nothing else --- it never re-derives where the token began,
+which is the part that is easy to get wrong and impossible to notice
+until a multibyte character is involved.
+
+They are precisely what =completion-at-point-functions= wants; see the
+recipe in [[file:../harness.org::*Driving it from Emacs][the harness
+layer]].
+
+** Rules
+- =/= completes only at offset 0, and only while the cursor is inside the
+  name. A slash mid-line is a path separator or prose.
+- =@= completes at a word boundary, using the same rule the mention
+  scanner does.
+- For =@src/co= the range covers everything after the =@= and each
+  candidate carries the whole path, so a frontend never splices a
+  fragment into the middle of one.
+- Directories sort first and carry a trailing slash, so one Tab walks
+  into them.
+- Hidden entries appear only once the fragment starts with a dot; =.git=,
+  =node_modules= and friends never appear.
+
+** Why out-parameters
+=ai_completion_result_get_item_fields()= exists for the same reason
+=ai_rendered_text_get_span()= does: a plain struct behind a pointer does
+not survive =g-ir-scanner= usefully, and this API has to work from
+bindings. =make test-gi= reads candidates back from Python, which is the
+standing check that the Emacs path still works.
+
+** Notes
+=max-items= (200 by default) is a bound, not a nicety. This runs on a
+keystroke, and a directory of forty thousand files must not turn one into
+a pause.
+
+** See also
+[[file:ai-command.org][AiCommandSet]] ·
+[[file:ai-mention.org][AiMention]] ·
+[[file:../harness.org][The harness layer]]

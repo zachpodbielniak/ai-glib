@@ -1,0 +1,278 @@
+* The built-in tools
+=ai_tool_executor_new()= hands the model ten tools; two more appear when
+a search provider or a resource registry is configured. This page is one
+section per tool: what it takes, what it returns, how it fails, and the
+one thing about it that is easy to get wrong.
+
+The loop that calls them is described in
+[[file:tool-executor.org][the tool executor]]. Approval is documented
+there too, and applies to everything here.
+
+| Tool          | Category | Always present?                    |
+|---------------+----------+------------------------------------|
+| =bash=        | command  | yes                                |
+| =read=        | file     | yes                                |
+| =write=       | file     | yes                                |
+| =edit=        | file     | yes                                |
+| =multi_edit=  | file     | yes                                |
+| =glob=        | search   | yes                                |
+| =grep=        | search   | yes                                |
+| =ls=          | file     | yes                                |
+| =web_fetch=   | network  | yes                                |
+| =todo_write=  | task     | yes                                |
+| =web_search=  | search   | with a search provider             |
+| =task=        | task     | with a resource registry           |
+| =skill=       | task     | with a resource registry           |
+
+=ai_tool_executor_new_empty()= starts with none of them, which is what an
+application that wants the model confined to its own tools uses.
+
+**The tool list is the grant.** A built-in dispatches only while the
+executor advertises it, so =ai_tool_executor_unregister()= genuinely
+takes one away rather than hiding it from the model. That is what lets
+=task= confine a subagent to what its agent file declares.
+
+** bash
+| Parameter  | Type   | Required |
+|------------+--------+----------|
+| =command=  | string | yes      |
+
+Runs the command through =/bin/sh -c= in the executor's working
+directory and returns stdout and stderr combined. A nonzero exit is
+reported in the output rather than raised as an error --- a failing
+command is usually the answer to the question, not a reason to abandon
+the turn.
+
+** read
+| Parameter | Type   | Required | Default        |
+|-----------+--------+----------+----------------|
+| =path=    | string | yes      |                |
+| =offset=  | number | no       | 0              |
+| =limit=   | number | no       | the whole file |
+
+Byte offsets, not line numbers. A relative path resolves against the
+executor's working directory.
+
+** write
+| Parameter  | Type   | Required |
+|------------+--------+----------|
+| =path=     | string | yes      |
+| =content=  | string | yes      |
+
+Creates or overwrites. This is the tool for making a new file; =edit= and
+=multi_edit= both require the file to exist.
+
+** edit
+| Parameter     | Type   | Required |
+|---------------+--------+----------|
+| =path=        | string | yes      |
+| =old_string=  | string | yes      |
+| =new_string=  | string | yes      |
+
+Replaces the **first** occurrence. Prefer =multi_edit= when making more
+than one change to a file: it is stricter about ambiguity and it will not
+leave a file half-converted.
+
+** multi_edit
+| Parameter | Type                  | Required |
+|-----------+-----------------------+----------|
+| =path=    | string                | yes      |
+| =edits=   | array of =[old_string, new_string]= objects | yes |
+
+Several edits to one file, applied in order, with two guarantees worth
+relying on.
+
+*** All or nothing
+Every replacement lands on an in-memory copy and the file is written
+once, at the end. If any edit fails --- a missing =old_string=, an
+ambiguous one, a malformed entry --- **the file is byte-for-byte what it
+was**. A failure on the third of four edits cannot leave a file
+half-converted into a state neither the model nor the user asked for.
+
+This is a contract, not an implementation detail. =tests/test-tool-multi-edit.c=
+hashes the file before and after a deliberate mid-batch failure, because
+asserting "the tool returned an error" would pass just as happily against
+an implementation that had already written half the batch.
+
+*** Ambiguity is refused
+Each =old_string= must match exactly once in the file *as it stands at
+that point in the batch* --- so an earlier edit that creates a second
+occurrence makes the later one ambiguous, and the whole batch is refused.
+
+Deliberately stricter than =edit=, which takes the first match. In a
+batch the wrong match is buried among the right ones and the model cannot
+see what it did.
+
+An empty =old_string= is refused: it would match at offset zero every
+time. Use =write=.
+
+** glob
+| Parameter  | Type   | Required | Default           |
+|------------+--------+----------+-------------------|
+| =pattern=  | string | yes      |                   |
+| =path=     | string | no       | working directory |
+
+Matches filenames recursively. =*.c=, =test-*=.
+
+** grep
+| Parameter  | Type   | Required | Default           |
+|------------+--------+----------+-------------------|
+| =pattern=  | string | yes      |                   |
+| =path=     | string | no       | working directory |
+| =glob=     | string | no       | every file        |
+
+A regular expression over file contents, returning matching lines with
+file and line number.
+
+** ls
+| Parameter | Type   | Required | Default           |
+|-----------+--------+----------+-------------------|
+| =path=    | string | no       | working directory |
+
+Type and size per entry.
+
+** web_fetch
+| Parameter | Type   | Required |
+|-----------+--------+----------|
+| =url=     | string | yes      |
+| =prompt=  | string | no       |
+
+HTML becomes readable markdown-ish text; JSON and plain text come back
+as they are. =http://= is upgraded to =https://=. Responses are cached
+for fifteen minutes and capped at 100 KB.
+
+With =prompt=, a model reads the page and only the answer is returned,
+which is how a 90 KB page becomes two sentences.
+
+** web_search
+Registered by =ai_tool_executor_set_search_provider()=. See
+[[file:web-search.org][Web Search]] for the backends and the options.
+
+** todo_write
+| Parameter | Type                                          | Required |
+|-----------+-----------------------------------------------+----------|
+| =todos=   | array of =[content, active_form, status]=      | yes      |
+
+=status= is =pending=, =in_progress= or =completed=. =active_form= is the
+same task phrased as in progress --- "Adding the parser" against "Add the
+parser" --- because a list is read while it is being worked on and only
+the model knows how to say it. It is optional; a renderer falls back to
+=content=.
+
+*** The whole list, every time
+There is no partial update. The model resends every item on every call
+and the previous list is discarded, which is what keeps the two sides
+from ever drifting apart --- and means there is no update protocol to get
+wrong.
+
+*** Reading it back
+#+begin_src C
+guint n = ai_tool_executor_get_n_todos (executor);
+
+for (i = 0; i < n; i++)
+{
+    const gchar *label = NULL;
+    AiTodoState  state = AI_TODO_PENDING;
+
+    ai_tool_executor_get_todo_fields (executor, i, &label, &state);
+}
+#+end_src
+
+=label= already applies the active-phrasing rule, so a renderer does not
+reimplement it. =::todos-changed= fires once per call, not once per item.
+
+=AiConversation= watches that signal and keeps a single
+=AiViewTodoBlock= in the transcript, **updated in place**. A model
+revises its plan repeatedly over a long task, and eight appended copies
+of a nine-line list is not a transcript anybody can read.
+
+*** Being forgiving on purpose
+This reads model output, which is untrusted in the same sense subprocess
+stdout is. A malformed entry is skipped rather than failing the call; an
+unrecognised status is =pending=; =activeForm= is accepted alongside
+=active_form=; =done= and =in-progress= are accepted alongside the
+canonical spellings. Two items marked in progress at once is a
+=g_message=, not a warning --- a model being imprecise is not this
+program being broken, and it must not abort a run under
+=G_DEBUG=fatal-warnings=.
+
+** task
+| Parameter | Type   | Required |
+|-----------+--------+----------|
+| =agent=   | string | yes      |
+| =prompt=  | string | yes      |
+
+Runs an agent file from disk as a subagent and returns its final text.
+Appears only when =ai_tool_executor_set_resource_registry()= has been
+called; see [[file:commands.org::*An agent][writing an agent file]].
+
+The subagent sees nothing of the parent conversation, which is the point:
+its working-out stays out of yours and only the answer comes back.
+
+*** The allowlist is structural
+The child executor is *built* from the agent's =tools:= list. A tool the
+agent did not declare is not present, so calling it is not denied --- it
+is unrepresentable. That distinction matters: a policy that refuses calls
+can be bypassed by any code path that forgets to consult it, and a tool
+that does not exist cannot.
+
+An agent that declares no =tools:= inherits the parent's full set, which
+is what claude-code does and what the files on disk assume.
+
+The child inherits the parent's working directory, resource registry,
+search provider and approval policy. A subagent that ignored a =DENY=
+policy would be a way around it.
+
+*** Recursion is capped
+=AI_TOOL_EXECUTOR_MAX_TASK_DEPTH= (2). A subagent delegating to a
+subagent delegating to a subagent is a runaway, not a plan.
+
+The refusal is **reported to the model** as the tool's result, naming the
+limit, so it does the work itself rather than wondering why nothing
+happened. A cap the model cannot see is a silent truncation.
+
+*** Events
+The child's events reach the parent's =::event= stream, so a frontend
+watching one object sees the subagent's tool calls too.
+
+** skill
+| Parameter | Type   | Required |
+|-----------+--------+----------|
+| =name=    | string | yes      |
+
+Returns a skill's body, so the model can load a written procedure for
+itself rather than waiting to be handed one. Appears alongside =task=
+when a registry is configured.
+
+An unknown name lists the skills that do exist --- which turns a dead end
+into a next step, and is the reason the executor loop propagates a tool's
+own =GError= text into the tool result rather than substituting a generic
+one.
+
+** Adding a tool
+1. Write the function, matching the =ToolFn= signature in
+   =src/convenience/ai-tool-executor.c=.
+2. Add it to =BUILTIN_TOOLS=.
+3. Define it in =ai_tool_executor_new()= --- or in the setter that
+   enables it, if it depends on something optional, as =web_search=,
+   =task= and =skill= do.
+4. Add a row to the =AiToolStyle= table (=src/view/ai-tool-style.c=) so
+   the transcript summarises it properly. That table *is* the
+   registration; an unregistered tool renders under a generic verb rather
+   than not at all.
+
+For a parameter that is a list of objects, use
+=ai_tool_add_array_parameter()= rather than =ai_tool_add_parameter(...,
+"array", ...)=. A bare ={"type":"array"}= is not a schema any provider
+can act on --- Gemini rejects it outright and the others guess.
+
+Read every JSON member through a type check. json-glib's
+=*_member_with_default()= emit a critical on a type mismatch, and a
+critical is fatal under =G_DEBUG=fatal-warnings=; model output is
+untrusted input in exactly the sense subprocess stdout is.
+
+** See also
+- [[file:tool-executor.org][The tool executor]] --- the loop, approval, and streaming
+- [[file:harness.org][The harness layer]] --- where =task= and =skill= find their files
+- [[file:web-search.org][Web search]] --- =web_search= and its backends
+- [[file:transcript.org][The transcript]] --- how tool calls are grouped and summarised

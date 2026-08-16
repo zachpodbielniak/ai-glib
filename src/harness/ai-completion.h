@@ -137,7 +137,7 @@ guint
 ai_completion_context_get_max_items(AiCompletionContext *self);
 
 AiCompletionResult *
-ai_completion_query(
+ai_completion_context_query(
     AiCompletionContext *self,
     const gchar         *buffer,
     guint                cursor

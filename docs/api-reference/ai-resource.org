@@ -1,0 +1,78 @@
+* AiResource
+One markdown file with optional YAML frontmatter --- a command, a skill
+or an agent. All three harnesses store all three kinds this way, which is
+why one type covers them.
+
+Construction reads a file or a buffer; there is no setter. A resource is
+what was on disk at the moment it was read.
+
+** Functions
+#+begin_src C
+AiResource *ai_resource_new_from_file (const gchar *path,
+                                       const gchar *name,      /* nullable */
+                                       AiResourceKind kind,
+                                       const gchar *origin,    /* nullable */
+                                       AiResourceScope scope,
+                                       GError **error);
+
+AiResource *ai_resource_new_from_data (const gchar *data, gssize length,
+                                       const gchar *name,
+                                       AiResourceKind kind,
+                                       const gchar *origin,
+                                       AiResourceScope scope,
+                                       GError **error);
+
+AiResourceKind  ai_resource_get_kind        (AiResource *self);
+AiResourceScope ai_resource_get_scope       (AiResource *self);
+const gchar    *ai_resource_get_name        (AiResource *self);
+const gchar    *ai_resource_get_description (AiResource *self);
+const gchar    *ai_resource_get_body        (AiResource *self);
+const gchar    *ai_resource_get_path        (AiResource *self);
+const gchar    *ai_resource_get_origin      (AiResource *self);
+
+/* Any frontmatter key. A sequence comes back joined with ", ". */
+const gchar *ai_resource_get_meta         (AiResource *self, const gchar *key);
+
+/* A sequence as written, or a scalar split on commas and trimmed. */
+gchar      **ai_resource_get_meta_list    (AiResource *self, const gchar *key);
+
+/* Strictly parsed: true/yes/on/1 and false/no/off/0; anything else is
+   @fallback. The key that decides whether a file may run shell commands
+   is worth reading strictly. */
+gboolean     ai_resource_get_meta_boolean (AiResource *self, const gchar *key,
+                                           gboolean fallback);
+
+gchar      **ai_resource_get_meta_keys    (AiResource *self);
+
+const gchar *ai_resource_kind_to_string  (AiResourceKind kind);
+const gchar *ai_resource_scope_to_string (AiResourceScope scope);
+#+end_src
+
+Pass =name= to =ai_resource_new_from_file()= when the path alone does not
+say it --- that is how a namespaced command in =git/status.md= becomes
+=git:status=. A frontmatter =name:= still wins over both.
+
+** Properties
+All read-only: =kind=, =scope=, =name=, =description=, =body=, =path=,
+=origin=.
+
+** Enumerations
+| =AiResourceKind=      | =AI_RESOURCE_COMMAND=, =_SKILL=, =_AGENT=              |
+| =AiResourceScope=     | =AI_RESOURCE_SCOPE_BUILTIN=, =_USER=, =_PROJECT=       |
+
+** Notes
+- *A description is one line.* Folded and literal YAML scalars are
+  flattened at parse time, because every consumer of a description ---
+  completion menu, listing, status bar --- has room for exactly one.
+- *Malformed frontmatter is not an error.* The resource still exists,
+  without metadata, and the failure is a =g_debug=. One bad file must not
+  hide the others, nor abort a suite running with fatal warnings.
+- *Invalid UTF-8 is an error.* Everything downstream assumes valid UTF-8;
+  accepting it would only move the crash.
+- Frontmatter is recognised only when the very first line is =---=. A
+  =---= further down is a horizontal rule and stays in the body.
+
+** See also
+[[file:ai-resource-registry.org][AiResourceRegistry]] ·
+[[file:../harness.org][The harness layer]] ·
+[[file:../commands.org][Authoring these files]]

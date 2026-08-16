@@ -1,0 +1,266 @@
+* Authoring commands, skills and agents
+A file ai-glib will find, in each of the three flavours. If you already
+have files for claude-code or opencode, they work as they are --- this is
+for when you want to write a new one, or work out why an existing one is
+not showing up.
+
+The mechanics are in [[file:harness.org][the harness layer]]; this page is
+the practical half.
+
+** A command
+=/deploy staging=, for a prompt you type often enough to name.
+
+Put it in =.claude/commands/deploy.md= for one project, or
+=~/.claude/commands/deploy.md= for everywhere. If you want it to belong
+to ai-glib rather than be borrowed from claude-code, use
+=~/.config/ai-glib/commands/deploy.md= instead --- it wins a collision.
+
+#+begin_src markdown
+---
+name: deploy
+description: Walk through a deployment to one environment
+argument-hint: <environment>
+---
+We are deploying to $1.
+
+Check in order:
+
+1. The working tree is clean and the tag is signed.
+2. The migration list in db/migrations matches what is live.
+3. The rollback command is written down before anything starts.
+
+Report each step before doing the next.
+#+end_src
+
+| Key             | Optional? | What it is for                                    |
+|-----------------+-----------+---------------------------------------------------|
+| =name=          | yes       | overrides the filename; the filename is the default |
+| =description=   | yes       | one line, in =/help= and completion               |
+| =argument-hint= | yes       | shown after the name in listings: =/deploy <environment>= |
+| =shell=         | yes       | see [[*Running a command's output into the prompt][below]]; defaults to false |
+
+Everything else in the frontmatter is preserved and reachable through
+=ai_resource_get_meta()=, so a file carrying claude-code's =allowed-tools=
+or opencode's own keys loses nothing by being read here.
+
+*** Arguments
+| You type             | =$ARGUMENTS= | =$1=      | =$2=   |
+|----------------------+--------------+-----------+--------|
+| =/deploy staging=    | =staging=    | =staging= | (empty) |
+| =/deploy staging eu= | =staging eu= | =staging= | =eu=   |
+| =/deploy "a b" c=    | =a b c=      | =a b=     | =c=    |
+| =/deploy=            | (empty)      | (empty)   | (empty) |
+
+A placeholder with nothing to fill it becomes empty rather than staying
+literal --- a command written for two arguments and invoked with one
+should not send the model a stray =$2=.
+
+=$$= is a literal dollar. Everything else is left alone, =$HOME= and
+=$PATH= included, because command bodies routinely contain shell
+snippets and rewriting those would be worse than useless.
+
+*** Namespaces
+A file in a subdirectory takes its name from the path:
+=.claude/commands/git/status.md= becomes =/git:status=. Useful when a
+project grows more than a handful.
+
+*** Running a command's output into the prompt
+A body may embed =!`command`=, and the command's output replaces it ---
+but only if the file says so:
+
+#+begin_src markdown
+---
+description: Review what is currently uncommitted
+shell: true
+---
+Here is the working tree:
+
+!`git status --short`
+
+And the diff:
+
+!`git diff --stat`
+
+Tell me what is worth committing separately.
+#+end_src
+
+**Without =shell: true= the backticks stay literal.** These directories
+are shared with other tools and a frontend builds its listing at startup,
+so anything able to write a file into =~/.claude/commands= would
+otherwise be able to run code unprompted. Opting in per file means the
+author of that file meant it.
+
+Limits when it does run: ten seconds, 64 KB of output, stderr discarded,
+and a nonzero exit substitutes whatever was printed rather than failing
+the whole command. Your host application may refuse it outright
+regardless of what the file says.
+
+** A skill
+A written procedure for a kind of work. Invoked the same way a command
+is, and --- unlike a command --- the *model* can load one for itself
+through the =skill= tool.
+
+Two layouts, both understood:
+
+#+begin_example
+  ~/.claude/skills/gtest-scaffold/SKILL.md     the usual shape
+  ~/.config/opencode/skills/gtest-scaffold.md  also fine
+#+end_example
+
+#+begin_src markdown
+---
+name: gtest-scaffold
+description: Scaffold a GTest file with fixtures and Makefile wiring
+---
+Generate a `tests/test-<component>.c` for $ARGUMENTS.
+
+Follow these rules:
+
+- gnu89, tabs for indentation, `g_test_add_func` per case.
+- One fixture per resource that needs teardown; never leak across cases.
+- Assert the strings literally rather than matching patterns.
+- Add nothing to the Makefile: `TEST_SOURCES` is wildcard-driven.
+#+end_src
+
+The description matters more here than anywhere else. It is what the
+model reads when deciding whether a skill applies, so write it as a
+trigger --- "when creating a new test file for a GLib project" --- rather
+than as a title.
+
+Skills are found under =~/.claude/skills=, =~/.config/opencode/skills=,
+=~/.opencode/skills= and =~/.config/ai-glib/skills=, plus the
+project-local =.claude/skills= and =.opencode/skills=.
+
+** An agent
+A persona with its own tools, run as a subagent through the =task= tool
+so its working-out does not fill your conversation.
+
+=~/.claude/agents/security-auditor.md=:
+
+#+begin_src markdown
+---
+name: security-auditor
+description: Audits code for vulnerabilities and fixes them in place
+tools: Bash, Glob, Grep, Read, Edit
+model: sonnet
+---
+You are an application security engineer auditing C, Bash and Python.
+
+Identify vulnerabilities, fix them in the code, and annotate every change
+with the CWE or ShellCheck code it addresses. Report what you changed and
+why; do not report what you considered and rejected.
+#+end_src
+
+| Key           | Optional? | What ai-glib does with it                        |
+|---------------+-----------+--------------------------------------------------|
+| =name=        | yes       | as for a command                                 |
+| =description= | yes       | shown in =/agents= and in the =task= tool's error when the name is wrong |
+| =tools=       | yes       | the allowlist; omit it to inherit everything     |
+| =model=       | yes       | preserved but not yet acted on                   |
+
+The body is the agent's system prompt.
+
+*** The tools list
+Written either way, with no difference:
+
+#+begin_src yaml
+tools: Bash, Read, Write
+#+end_src
+
+#+begin_src yaml
+tools:
+  - Bash
+  - Read
+  - Write
+#+end_src
+
+claude-code's capitalised names are mapped onto ai-glib's:
+
+| In the file                | ai-glib's tool |
+|----------------------------+----------------|
+| =Bash=, =Read=, =Write=, =Edit=, =Glob=, =Grep= | the same, lowercased |
+| =WebFetch=                 | =web_fetch=    |
+| =WebSearch=                | =web_search=   |
+| =MultiEdit=                | =multi_edit=   |
+| =TodoWrite=                | =todo_write=   |
+
+The allowlist is **structural**: the subagent's executor is built without
+the tools you did not list, so calling one is not refused, it is
+unrepresentable. Omitting =tools:= entirely inherits the parent's full
+set, which is what claude-code does and what most files on disk assume.
+
+** Which file wins
+Two rules, in order:
+
+1. A project file beats a user file. =.claude/commands/build.md= in the
+   repository you are in beats =~/.claude/commands/build.md=.
+2. Within one scope, ai-glib's own directory comes first, then claude,
+   then opencode, then grok.
+
+A built-in always beats a file, so a =quit.md= will not take away
+=/quit=.
+
+A skill and a command may share a name --- they are looked up separately
+--- but only one of them appears in =/help=, because typing the name
+reaches exactly one of them (the command).
+
+** Why is my file not showing up
+In order of likelihood:
+
+*** It is in a directory that is not searched
+#+begin_src
+/commands
+#+end_src
+
+With nothing found, that prints every directory it looked in. Compare
+against where you put the file.
+
+*** Something else has the same name
+The same listing prints shadowed entries with their full paths:
+
+#+begin_example
+  (shadowed) build -> /home/you/.claude/commands/build.md
+#+end_example
+
+That file exists and parses; another one won.
+
+*** The frontmatter did not parse
+The file still appears, but without its description --- that is the
+symptom. The reason is logged at debug level:
+
+#+begin_src bash
+G_MESSAGES_DEBUG=all ai-tui --dump /commands
+#+end_src
+
+The usual causes are a tab used for indentation (YAML forbids it), an
+unquoted value containing a colon, and an opening =---= with no closing
+one.
+
+*** It is not =.md=
+Only =.md= files are read. A =.markdown= or =.txt= is ignored silently.
+
+*** The name is not what you expect
+A skill in =skills/foo/SKILL.md= is =/foo=, not =/SKILL=. A command in
+=commands/git/status.md= is =/git:status=, not =/status=. A frontmatter
+=name:= overrides both.
+
+*** You are driving a CLI provider
+claude-code, opencode and grok resolve slash commands themselves, so
+ai-glib passes the line straight through to them and your file is never
+consulted --- theirs is. That is deliberate; see
+[[file:harness.org::*Passthrough][Passthrough]]. Use =/expand= to see
+what would actually be sent.
+
+** Checking a file without sending anything
+#+begin_src
+/expand /deploy staging
+#+end_src
+
+Prints the fully resolved and expanded prompt --- placeholders filled,
+shell substitutions run, mentions inlined --- and sends nothing. It is
+the fastest way to find out whether =$1= landed where you meant.
+
+** See also
+- [[file:harness.org][The harness layer]] --- search paths, precedence, and the API
+- [[file:tools.org][The built-in tools]] --- =task= and =skill=, which read these same files
+- [[file:tui.org][ai-tui]] --- where you will be typing these

@@ -278,3 +278,32 @@ pollute that list.
   overridden with =OLLAMA_PATH=.
 - HTTP providers read their API keys from the usual environment variables
   (see [[file:configuration.org][Configuration]]).
+
+** Commands and mentions
+=ai= runs the same input pipeline =ai-tui= does, so a prompt may name a
+command or reference files:
+
+#+begin_src bash
+ai '/skill-gtest-scaffold src/core/ai-event.c'
+#+end_src
+
+#+begin_src bash
+ai 'what does this do? @src/core/ai-event.c'
+#+end_src
+
+The command is looked up in the same directories every other harness
+uses --- see [[file:harness.org][the harness layer]] --- and =@path=
+mentions are appended to the prompt.
+
+Three cases where it does not apply:
+
+- *CLI providers.* claude-code, opencode and grok resolve both
+  themselves, so the prompt goes through untouched.
+- *=--dry-run=.* The point there is the command line, not the filesystem;
+  expanding first would put a file into the argv dump.
+- *=--no-expand=.* Turns it off outright.
+
+A built-in like =/clear= acts on a session, and a one-shot run has none,
+so =ai= says so and points at =ai-tui=. An unknown =/name= is an error
+rather than a prompt beginning with a slash --- use =--no-expand= if you
+meant it literally.

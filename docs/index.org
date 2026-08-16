@@ -48,7 +48,12 @@ see their provider pages.
 
 *** Tools & Search
 - [[file:tool-executor.org][Tool Executor]] - Built-in tools and the multi-turn tool-use loop
+- [[file:tools.org][The built-in tools]] - One section per tool, including task and skill
 - [[file:web-search.org][Web Search]] - The web_search tool and its providers
+
+*** Commands, skills and agents
+- [[file:harness.org][The harness layer]] - Reading the other harnesses' files, @ mentions, completion
+- [[file:commands.org][Authoring commands, skills and agents]] - File formats, with worked examples
 
 *** Observing a turn
 - [[file:events.org][The event stream]] - Watch a turn happen: text, reasoning, tool calls, usage

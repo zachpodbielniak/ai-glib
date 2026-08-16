@@ -1,0 +1,77 @@
+* AiMention
+=@path= references in a line of input.
+
+** The boxed type
+#+begin_src C
+typedef struct {
+    guint  start;   /* byte offset of the '@' */
+    guint  len;     /* bytes, including the '@' */
+    gchar *path;    /* as written, unresolved */
+} AiMention;
+#+end_src
+
+Offsets are *byte offsets into UTF-8*, the same convention
+=AiStyleSpan= uses. One rule for the whole library, and what Emacs
+converts with =byte-to-position=.
+
+** Functions
+#+begin_src C
+AiMention *ai_mention_new  (guint start, guint len, const gchar *path);
+AiMention *ai_mention_copy (const AiMention *self);
+void       ai_mention_free (AiMention *self);
+
+/* Pure and syntactic: touches no filesystem, because a frontend calls
+   this on every keystroke to highlight the input line.
+   (transfer full) (element-type AiMention) */
+GList *ai_mention_scan (const gchar *text);
+
+/* ~ and the working directory. No globbing, ever. */
+gchar *ai_mention_resolve (const gchar *path, const gchar *cwd);
+
+/* Appends every mention that names something real. Cannot fail. */
+gchar *ai_mention_expand (const gchar *text, const gchar *cwd,
+                          gsize max_bytes,      /* 0 for the default */
+                          GList **out_files);   /* (out) (optional) */
+#+end_src
+
+=AI_MENTION_DEFAULT_MAX_BYTES= is 256 KB.
+
+** The scan/expand split
+This is the design, not an implementation detail. Scanning finds
+*candidates* and never touches a disk; expansion decides which of them
+name anything.
+
+That split is why a Python =@decorator= is left alone without this code
+knowing what Python is: it is scanned like any other candidate and then,
+resolving to nothing, left exactly as written. An email address never
+gets that far --- a mention opens only at the start of the text or after
+whitespace or an opening bracket, and the =@= in
+=z.podbielniak@gmail.com= follows a letter.
+
+** What expansion produces
+The prompt is left exactly as written and the files follow it under a
+=--- Referenced files ---= heading. Replacing each mention in place would
+put nine hundred lines between a verb and its object.
+
+| Input                      | Output                                    |
+|----------------------------+-------------------------------------------|
+| a text file                | fenced, language hinted by extension      |
+| a directory                | a listing, capped at 200 entries          |
+| a binary file              | named, with its size, contents omitted    |
+| an unreadable file         | named, with the reason                    |
+| a path that does not exist | nothing; the text is untouched            |
+
+The same file mentioned twice is included once. Truncation is stated in
+the output --- a model given half a file without being told will answer
+confidently about the half it never saw. Expansion is not re-entrant: an
+inlined file containing a mention does not pull in a second.
+
+** No GError
+Every way this can go wrong --- a missing path, an unreadable file, a
+directory that cannot be listed --- is reported *inside the returned
+text*, where the model can see it, rather than as a failure that throws
+the prompt away.
+
+** See also
+[[file:ai-completion.org][AiCompletionContext]] ·
+[[file:../harness.org::*Mentions][Mentions]]

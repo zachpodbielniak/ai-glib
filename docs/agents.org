@@ -109,3 +109,26 @@ tool calls ran.
 It is a parameter rather than a constant because an orchestrator budgets
 turns per agent, and a limit the caller cannot set is one they have to
 work around.
+
+* Agents from disk
+Separately from =AiAgent= and =AiBrigade=, which orchestrate runs this
+program starts, ai-glib reads the agent *files* other harnesses keep ---
+=~/.claude/agents/*.md=, =.opencode/agent/*.md= and friends.
+
+Give an executor a resource registry and the model gains a =task= tool
+that runs one:
+
+#+begin_src C
+ai_tool_executor_set_resource_registry (executor, registry);
+#+end_src
+
+The subagent runs with the agent file's body as its system prompt and
+*only* the tools its =tools:= list declares --- the child executor is
+built without the others, so calling one is not refused, it is
+unrepresentable. Recursion is capped at
+=AI_TOOL_EXECUTOR_MAX_TASK_DEPTH=, and the refusal is reported to the
+model so it does the work itself rather than wondering why nothing
+happened.
+
+See [[file:tools.org::*task][the task tool]] and
+[[file:commands.org::*An agent][writing an agent file]].

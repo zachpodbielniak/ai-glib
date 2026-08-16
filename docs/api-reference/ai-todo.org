@@ -1,0 +1,78 @@
+* AiTodo
+One item on an agent's todo list. A refcount-free boxed type, copied in
+and out.
+
+#+begin_src C
+typedef struct {
+    gchar       *content;      /* "Add the parser" */
+    gchar       *active_form;  /* "Adding the parser", nullable */
+    AiTodoState  state;
+} AiTodo;
+#+end_src
+
+=active_form= exists because a list is read while it is being worked on:
+the item in progress reads better in the present participle, and only the
+model knows how to say it.
+
+** Functions
+#+begin_src C
+AiTodo *ai_todo_new  (const gchar *content, const gchar *active_form,
+                      AiTodoState state);
+AiTodo *ai_todo_copy (const AiTodo *self);
+void    ai_todo_free (AiTodo *self);
+
+/* The active phrasing while in progress, the plain one otherwise, with a
+   fallback to content. The rule lives here so no renderer repeats it. */
+const gchar *ai_todo_get_label (const AiTodo *self);
+
+const gchar *ai_todo_state_to_string   (AiTodoState state);
+AiTodoState  ai_todo_state_from_string (const gchar *name);
+#+end_src
+
+=AiTodoState= is =AI_TODO_PENDING=, =AI_TODO_IN_PROGRESS= or
+=AI_TODO_COMPLETED=. The strings are =pending=, =in_progress= and
+=completed= --- the same ones claude-code's TodoWrite uses, so a model
+that has seen either writes the same thing.
+
+=ai_todo_state_from_string()= accepts =done=, =complete=, =in-progress=
+and =active= as well, and returns =PENDING= for anything unrecognised. A
+run must not stop because a model invented a status word.
+
+** On the executor
+#+begin_src C
+guint         ai_tool_executor_get_n_todos (AiToolExecutor *self);
+const AiTodo *ai_tool_executor_get_todo    (AiToolExecutor *self, guint index);
+GPtrArray    *ai_tool_executor_get_todos   (AiToolExecutor *self);
+void          ai_tool_executor_clear_todos (AiToolExecutor *self);
+
+/* The binding-friendly reader. @out_label already applies the
+   active-phrasing rule. */
+gboolean ai_tool_executor_get_todo_fields (AiToolExecutor *self, guint index,
+                                           const gchar **out_label,
+                                           AiTodoState *out_state);
+#+end_src
+
+=AiToolExecutor::todos-changed= fires once per =todo_write= call, not
+once per item.
+
+** In the transcript
+=AiConversation= keeps a single =AiViewTodoBlock=, **updated in place**:
+
+#+begin_example
+  ☐ Add the parser
+  ◐ Wiring the registry
+  ☑ Read the files
+  1/3 done
+#+end_example
+
+Updating emits =::block-changed=, not =::items-changed=. A model revises
+its plan repeatedly over a long task, and eight appended copies of a
+nine-line list is not a transcript anybody can read.
+
+Each line is spanned =todo-pending=, =todo-active= or =todo-done= so a
+frontend can colour them without parsing the glyphs back out.
+
+** See also
+[[file:../tools.org::*todo_write][The todo_write tool]] ·
+[[file:ai-view-block.org][AiViewBlock]] ·
+[[file:../transcript.org][The transcript]]

@@ -767,7 +767,7 @@ complete_paths(
 }
 
 /**
- * ai_completion_query:
+ * ai_completion_context_query:
  * @self: an #AiCompletionContext
  * @buffer: the whole input line
  * @cursor: a byte offset into @buffer
@@ -787,7 +787,7 @@ complete_paths(
  *   items and kind %AI_COMPLETION_NONE means "nothing to do here".
  */
 AiCompletionResult *
-ai_completion_query(
+ai_completion_context_query(
     AiCompletionContext *self,
     const gchar         *buffer,
     guint                cursor

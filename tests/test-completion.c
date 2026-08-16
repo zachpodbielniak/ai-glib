@@ -109,7 +109,7 @@ static void
 test_empty_buffer(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "", 0);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "", 0);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 0);
@@ -120,7 +120,7 @@ static void
 test_null_buffer(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, NULL, 0);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, NULL, 0);
 
 	/* Never NULL: a caller should not have to test the result before
 	 * asking it how many items it has. */
@@ -133,7 +133,7 @@ test_plain_text(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, "just some words", 15);
+		ai_completion_context_query(ctx, "just some words", 15);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
 }
@@ -142,7 +142,7 @@ static void
 test_cursor_past_the_end_is_clamped(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/dep", 9999);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/dep", 9999);
 
 	/* A frontend bug is not a reason to read out of bounds. Under ASAN
 	 * this case is the one that would catch it. */
@@ -158,7 +158,7 @@ static void
 test_slash_at_start(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/dep", 4);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/dep", 4);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==,
 	                AI_COMPLETION_COMMAND);
@@ -174,7 +174,7 @@ static void
 test_bare_slash_offers_everything(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/", 1);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/", 1);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==,
 	                AI_COMPLETION_COMMAND);
@@ -188,7 +188,7 @@ test_slash_not_at_start_does_not_complete(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, "text /dep", 9);
+		ai_completion_context_query(ctx, "text /dep", 9);
 
 	/* A slash mid-line is a path separator or prose, never a command. */
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
@@ -199,7 +199,7 @@ test_no_completion_past_the_command_name(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, "/deploy production", 18);
+		ai_completion_context_query(ctx, "/deploy production", 18);
 
 	/* The name is settled; what follows is arguments. */
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
@@ -209,7 +209,7 @@ static void
 test_command_candidates_carry_their_origin(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/deploy", 7);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/deploy", 7);
 	const AiCompletionItem        *item;
 
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 1);
@@ -226,7 +226,7 @@ static void
 test_no_matching_command(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/zzz", 4);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/zzz", 4);
 
 	/* Kind is still COMMAND -- the user is typing a command, there is
 	 * just nothing to offer. A frontend needs that difference to decide
@@ -240,7 +240,7 @@ static void
 test_common_prefix(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/skill-g", 8);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/skill-g", 8);
 	g_autofree gchar              *prefix = NULL;
 
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 2);
@@ -255,7 +255,7 @@ static void
 test_common_prefix_of_one(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/deplo", 6);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/deplo", 6);
 	g_autofree gchar              *prefix =
 		ai_completion_result_get_common_prefix(r);
 
@@ -267,7 +267,7 @@ test_context_without_commands(void)
 {
 	g_autoptr(AiCompletionContext) ctx =
 		ai_completion_context_new(NULL, sandbox);
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "/h", 2);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/h", 2);
 
 	/* No command set is legal; paths still complete. */
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 0);
@@ -281,7 +281,7 @@ static void
 test_path_at_start(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "@RE", 3);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "@RE", 3);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_PATH);
 	g_assert_cmpuint(ai_completion_result_get_start(r), ==, 1);
@@ -295,7 +295,7 @@ test_path_mid_line(void)
 	const gchar                   *buffer = "please read @src";
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, buffer, (guint)strlen(buffer));
+		ai_completion_context_query(ctx, buffer, (guint)strlen(buffer));
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_PATH);
 	g_assert_cmpuint(ai_completion_result_get_start(r), ==, 13);
@@ -307,7 +307,7 @@ static void
 test_directories_get_a_trailing_slash(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "@s", 2);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "@s", 2);
 	const AiCompletionItem        *item;
 
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 1);
@@ -325,7 +325,7 @@ test_path_with_a_directory_component(void)
 	const gchar                   *buffer = "@src/core/ai-ev";
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, buffer, (guint)strlen(buffer));
+		ai_completion_context_query(ctx, buffer, (guint)strlen(buffer));
 
 	/*
 	 * The range covers everything after the `@`, directory component
@@ -345,7 +345,7 @@ static void
 test_directories_sort_first(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "@", 1);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "@", 1);
 	guint                          i;
 	gboolean                       saw_file = FALSE;
 
@@ -373,8 +373,8 @@ static void
 test_hidden_files_need_the_dot(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  bare = ai_completion_query(ctx, "@", 1);
-	g_autoptr(AiCompletionResult)  dotted = ai_completion_query(ctx, "@.", 2);
+	g_autoptr(AiCompletionResult)  bare = ai_completion_context_query(ctx, "@", 1);
+	g_autoptr(AiCompletionResult)  dotted = ai_completion_context_query(ctx, "@.", 2);
 
 	g_assert_false(has_item(bare, ".hidden"));
 
@@ -386,8 +386,8 @@ static void
 test_noise_directories_are_skipped(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  dotted = ai_completion_query(ctx, "@.", 2);
-	g_autoptr(AiCompletionResult)  node = ai_completion_query(ctx, "@n", 2);
+	g_autoptr(AiCompletionResult)  dotted = ai_completion_context_query(ctx, "@.", 2);
+	g_autoptr(AiCompletionResult)  node = ai_completion_context_query(ctx, "@n", 2);
 
 	/* .git is hidden anyway, but it stays out even when the dot is
 	 * typed; node_modules is neither hidden nor ever the answer. */
@@ -400,7 +400,7 @@ test_nonexistent_directory_is_quiet(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, "@no/such/place/x", 16);
+		ai_completion_context_query(ctx, "@no/such/place/x", 16);
 
 	/* Half-typed paths name directories that do not exist yet; that is
 	 * the normal case, not a problem. */
@@ -414,7 +414,7 @@ test_at_in_an_email_does_not_complete(void)
 	const gchar                   *buffer = "mail z.podbielniak@gmail";
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, buffer, (guint)strlen(buffer));
+		ai_completion_context_query(ctx, buffer, (guint)strlen(buffer));
 
 	/* Same boundary rule the scanner uses, applied at the cursor. */
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
@@ -432,7 +432,7 @@ test_multibyte_before_the_cursor(void)
 	const gchar                   *buffer = "héllo @src";
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
 	g_autoptr(AiCompletionResult)  r =
-		ai_completion_query(ctx, buffer, (guint)strlen(buffer));
+		ai_completion_context_query(ctx, buffer, (guint)strlen(buffer));
 
 	g_assert_cmpuint(ai_completion_result_get_start(r), ==, 8);
 	g_assert_cmpint(buffer[ai_completion_result_get_start(r) - 1], ==, '@');
@@ -470,7 +470,7 @@ test_common_prefix_never_splits_a_character(void)
 	}
 
 	ctx = context_with_commands();
-	r = ai_completion_query(ctx, "@wide/", 6);
+	r = ai_completion_context_query(ctx, "@wide/", 6);
 
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 2);
 
@@ -509,7 +509,7 @@ test_max_items_is_enforced(void)
 	ai_completion_context_set_max_items(ctx, 25);
 	g_assert_cmpuint(ai_completion_context_get_max_items(ctx), ==, 25);
 
-	r = ai_completion_query(ctx, "@many/f-", 8);
+	r = ai_completion_context_query(ctx, "@many/f-", 8);
 	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 25);
 }
 
@@ -528,7 +528,7 @@ test_large_buffer(void)
 
 	g_string_append(big, "@src");
 
-	r = ai_completion_query(ctx, big->str, (guint)big->len);
+	r = ai_completion_context_query(ctx, big->str, (guint)big->len);
 
 	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_PATH);
 	g_assert_true(has_item(r, "src/"));
@@ -538,7 +538,7 @@ static void
 test_item_fields_out_parameters(void)
 {
 	g_autoptr(AiCompletionContext) ctx = context_with_commands();
-	g_autoptr(AiCompletionResult)  r = ai_completion_query(ctx, "@RE", 3);
+	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "@RE", 3);
 	const gchar                   *text = NULL;
 	const gchar                   *display = NULL;
 	const gchar                   *description = NULL;
@@ -622,7 +622,7 @@ test_repeated_queries_are_clean(void)
 	for (i = 0; i < 200; i++)
 	{
 		g_autoptr(AiCompletionResult) r =
-			ai_completion_query(ctx, "@src/core/ai-", 13);
+			ai_completion_context_query(ctx, "@src/core/ai-", 13);
 
 		g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 3);
 	}

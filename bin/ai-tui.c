@@ -1327,7 +1327,7 @@ completion_close(App *app)
 /*
  * Open the popup, or step through it if it is already open.
  *
- * All of the thinking is in ai_completion_query(): this decides nothing
+ * All of the thinking is in ai_completion_context_query(): this decides nothing
  * about what completes where, which is why the same behaviour will come
  * out of an Emacs frontend calling the same function.
  */
@@ -1351,7 +1351,7 @@ completion_advance(App *app)
         return;
     }
 
-    app->candidates = ai_completion_query(app->completion, app->input->str,
+    app->candidates = ai_completion_context_query(app->completion, app->input->str,
                                           app->cursor);
     app->candidate_index = 0;
 
@@ -1386,7 +1386,7 @@ completion_advance(App *app)
             app->cursor = start + (guint)strlen(prefix);
 
             g_clear_object(&app->candidates);
-            app->candidates = ai_completion_query(app->completion,
+            app->candidates = ai_completion_context_query(app->completion,
                                                   app->input->str,
                                                   app->cursor);
             app->candidate_index = 0;

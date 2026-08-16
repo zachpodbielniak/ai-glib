@@ -75,7 +75,9 @@ one that refuses to start.
 | =C-a= / =C-e=    | Start / end of line                               |
 | =C-u=            | Clear the input                                   |
 | =PgUp= / =PgDn=  | Scroll the transcript                             |
-| =Tab=            | Select the next tool or reasoning block           |
+| =Tab=            | Complete a =/command= or an =@path=               |
+| =Escape=         | Dismiss the completion menu                       |
+| =C-n=            | Select the next tool or reasoning block           |
 | =C-b=            | Expand or collapse the selected block             |
 
 =C-c= cancels the turn rather than killing the process, because in a harness
@@ -86,16 +88,80 @@ Scrolling away from the bottom stops the view following new output; the
 status bar says =[scrolled]= while that is so. Sending, or scrolling back
 down, resumes following.
 
+** Completion
+=Tab= completes what is under the cursor. A =/= at the start of the line
+completes commands, skills and agents; an =@= anywhere completes paths.
+
+One candidate inserts itself. Several insert their common prefix and open
+a menu, so a second =Tab= is a choice rather than a repetition; =Enter=
+takes the highlighted one and =Escape= dismisses the menu. Directories
+carry a trailing slash, so one more =Tab= walks into them.
+
+Mentions and command names are highlighted as you type, using the same
+scanner the pipeline uses. A mention that will not resolve still lights
+up --- it is a candidate, and you can see it was noticed.
+
+None of this is decided here: =ai_completion_context_query()= returns the byte
+range to replace and the candidate list, and this program does the
+replacing. An Emacs frontend will call the same function. See
+[[file:harness.org][the harness layer]].
+
 ** Commands
-| Command        | Does                                          |
-|----------------+-----------------------------------------------|
-| =/quit=, =/q=  | Exit                                          |
-| =/clear=       | Empty the transcript and forget the history   |
-| =/model NAME=  | Switch model without restarting               |
+The built-ins, plus every command, skill and agent found in the
+directories the other harnesses use. =/help= lists all of it with origins.
+
+| Command             | Does                                              |
+|---------------------+---------------------------------------------------|
+| =/help=             | Every command, skill and agent, and the keys      |
+| =/clear=            | Empty the transcript, the history and the todos   |
+| =/quit=             | Exit                                              |
+| =/model [NAME]=     | Show or switch the model without restarting       |
+| =/provider=         | Show the provider                                 |
+| =/tools=            | The tools the model can call                      |
+| =/commands=         | Commands from disk, and what shadows what         |
+| =/skills=           | Skills                                            |
+| =/agents=           | Agents                                            |
+| =/reload=           | Rescan the search paths                           |
+| =/cwd [PATH]=       | Show or change the working directory              |
+| =/todos=            | The current todo list                             |
+| =/expand LINE=      | What a line would send, without sending it        |
+| =/save PATH=        | Write the transcript to a file                    |
+
+Anything else is a command file: =/deploy staging= runs
+=~/.claude/commands/deploy.md= with =staging= as =$1=. See
+[[file:commands.org][authoring them]].
 
 =/clear= empties the *local* view. A provider holding a session of its own
 --- the CLI wrappers do --- is not affected; clearing the transcript does
 not un-say what was already said to it.
+
+*** When a command is not found
+=/commands= with nothing to show prints every directory it searched,
+which is the answer to the question you are about to ask. If a file is
+there but another one won, the same listing prints the winner's path.
+
+*** CLI providers handle their own
+claude-code, opencode and grok resolve =@=, =/= and their own skills
+themselves, so with one of those selected a line reaches the child
+exactly as typed and =/compact= still means what it means to them. The
+built-ins above still run locally --- the wrapped tool has no opinion
+about this program's transcript.
+
+=--no-expand= turns the pipeline off entirely, for the case where the
+text must reach the model verbatim.
+
+** Mentions
+=@path= pulls a file in. The prompt keeps its shape and the files follow
+it, so a one-line question is not buried under the file it named.
+
+#+begin_example
+  > explain @src/core/ai-event.c and @src/core/ai-event.h
+#+end_example
+
+A directory expands to a listing, a binary file is named but not inlined,
+and a path that does not exist is left exactly as written --- which is
+what makes an email address or a Python decorator harmless. Use =/expand=
+to see the result before sending it.
 
 ** Tool approval
 With =--local-tools= against an HTTP provider, tools run in this process and

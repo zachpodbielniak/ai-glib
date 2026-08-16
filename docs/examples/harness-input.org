@@ -1,0 +1,139 @@
+* harness-input --- the input pipeline without a terminal
+=examples/harness-input.c= takes a line of input and prints what a
+frontend would do with it: which command it resolved to, what would be
+sent to the model, which files a mention pulled in, and what would
+complete at the cursor.
+
+No ncurses, no network, no API key. That is the point --- the input
+pipeline is library code, and this proves it can be driven from anywhere.
+Read it before writing the Emacs side; it is the same sequence of calls,
+in a hundred and fifty lines of C rather than elisp.
+
+#+begin_src bash
+make examples
+#+end_src
+
+** Resolving a line
+#+begin_src bash
+./build/release/examples/harness-input 'explain @src/core/ai-event.c'
+#+end_src
+
+#+begin_example
+  An ordinary prompt.
+
+  --- would send ---
+  explain @src/core/ai-event.c
+
+  --- Referenced files ---
+
+  @src/core/ai-event.c
+  ```c
+  /*
+   * ai-event.c - One thing that happened during a turn
+   ...
+  ```
+
+  --- files pulled in ---
+    /home/you/src/ai-glib/src/core/ai-event.c
+#+end_example
+
+The prompt keeps its shape and the file follows it. Replacing the mention
+in place would put nine hundred lines between the verb and its object.
+
+** A command from disk
+#+begin_src bash
+./build/release/examples/harness-input '/deploy staging'
+#+end_src
+
+#+begin_example
+  Expands the command /deploy
+
+  --- would send ---
+  We are deploying to staging.
+  ...
+#+end_example
+
+If you have no such command it says so, and names the near misses:
+
+#+begin_example
+  harness-input: unknown command '/deploi'; did you mean: deploy
+#+end_example
+
+** A built-in
+#+begin_src bash
+./build/release/examples/harness-input '/clear'
+#+end_src
+
+#+begin_example
+  A built-in: /clear
+  Nothing would be sent; the frontend handles it.
+#+end_example
+
+Which is the whole contract: =AiCommandSet= decides what a name means,
+and the frontend decides what to do about it. This example has no
+transcript to clear, so it says so and stops.
+
+** Completion
+#+begin_src bash
+./build/release/examples/harness-input --complete '@src/co'
+#+end_src
+
+#+begin_example
+  Completing @src/co
+    replacing bytes [1, 7) --- "src/co"
+    common prefix: "src/core/"
+    1 candidate:
+      src/core/                                (dir)
+#+end_example
+
+The range is printed because the range is the product. A frontend
+replaces =buffer[start..end)= with a candidate's text and does nothing
+else, so an off-by-one here is a corrupted line there --- and it is
+invisible once a menu is drawing over it.
+
+Note that the candidate carries the whole path, not the fragment. That is
+why a frontend never has to splice.
+
+#+begin_src bash
+./build/release/examples/harness-input --complete '/sk'
+#+end_src
+
+#+begin_example
+  Completing /sk
+    replacing bytes [1, 3) --- "sk"
+    common prefix: "skill-"
+    14 candidates:
+      skill-agent-writer                       Create new agent definition files…  (claude)
+      skill-dotfiles-script                    Write a dotfiles script…  (claude)
+      ...
+#+end_example
+
+One Tab would insert the common prefix and show the menu; a second is a
+choice rather than a repetition.
+
+** Listing everything
+#+begin_src bash
+./build/release/examples/harness-input --list
+#+end_src
+
+Every command, skill and agent the registry found, with its argument
+hint, its description and which harness's directory it came from.
+
+** What to copy
+The setup is three lines:
+
+#+begin_src C
+registry = ai_resource_registry_new ();
+ai_resource_registry_scan (registry);
+commands = ai_command_set_new (registry);
+#+end_src
+
+Everything after that is =ai_command_set_resolve()=,
+=ai_mention_expand()= and =ai_completion_context_query()= --- and in a real
+frontend, =ai_conversation_send_input_async()= does the first two for you
+in the right order.
+
+** See also
+- [[file:../harness.org][The harness layer]] --- including the Emacs recipe
+- [[file:../commands.org][Authoring commands, skills and agents]]
+- [[file:transcript-render.org][transcript-render]] --- the rendering half of the same story

@@ -1,0 +1,579 @@
+* The harness layer: commands, skills and agents on disk
+Every coding agent on your machine keeps a directory of markdown files
+--- commands you can invoke with a slash, skills describing how to do a
+kind of work, agent personas to delegate to. claude-code has one,
+opencode has one, grok has one. They are near enough the same format that
+ai-glib can read all of them, and it does.
+
+This document is about that layer: what it finds, how it decides between
+two files claiming the same name, what `@` and `/` do to a line of input,
+and how to drive the whole thing from somewhere that is not a terminal.
+
+#+begin_example
+  ~/.claude/commands/*.md ─┐
+  ~/.claude/skills/*/      ├─▶ AiResourceRegistry ──▶ AiCommandSet ──▶ AiCompletionContext
+  ~/.claude/agents/*.md    │         │                     │                    │
+  .opencode/command/*.md   │         │                     │           ai_completion_context_query()
+  ~/.config/opencode/...  ─┘         │                     │                    │
+                                     │              resolve("/deploy x")   (start, end, items)
+                                     │                     │
+                              AiToolExecutor         AiConversation
+                              (task, skill)      send_input_async()
+#+end_example
+
+The frontend does no parsing and makes no decisions. =bin/ai-tui.c=
+consumes this, =bin/ai.c= consumes this, and an Emacs client will consume
+the same functions --- which is the only reason any of it is in the
+library rather than in the terminal program that first needed it.
+
+** The shortest useful program
+#+begin_src C
+g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new ();
+g_autoptr(AiCommandSet) commands = NULL;
+
+ai_resource_registry_scan (registry);
+commands = ai_command_set_new (registry);
+
+ai_conversation_set_command_set (conversation, commands);
+ai_conversation_send_input_async (conversation, "explain @src/main.c",
+                                  NULL, on_sent, self);
+#+end_src
+
+That is the whole integration. =ai_conversation_send_input_async()=
+resolves the command, expands the mentions, records what the user typed,
+and sends the expansion.
+
+** What a resource is
+One markdown file with optional YAML frontmatter, which is the storage
+all three harnesses use for all three kinds of thing. =AiResource= models
+it:
+
+| Property      | Meaning                                              |
+|---------------+------------------------------------------------------|
+| =kind=        | =COMMAND=, =SKILL= or =AGENT=                        |
+| =name=        | what you type after the slash                        |
+| =description= | one line, for listings and completion                |
+| =body=        | everything after the frontmatter                     |
+| =path=        | where it was read from                               |
+| =origin=      | ="claude"=, ="opencode"=, ="grok"= or ="ai-glib"=    |
+| =scope=       | =PROJECT=, =USER= or =BUILTIN=                       |
+
+Everything else in the frontmatter is reachable generically:
+
+#+begin_src C
+const gchar *model = ai_resource_get_meta (resource, "model");
+g_auto(GStrv) tools = ai_resource_get_meta_list (resource, "tools");
+gboolean shell = ai_resource_get_meta_boolean (resource, "shell", FALSE);
+#+end_src
+
+That is deliberate. Harnesses invent fields --- =color=, =memory=,
+=argument-hint=, =allowed-tools= --- and a typed getter per field would
+mean editing ai-glib every time one of them does.
+
+=ai_resource_get_meta_list()= exists because there is one real
+incompatibility worth papering over: the agent files under
+=~/.claude/agents= write =tools:= as a comma-separated string and
+opencode writes a YAML sequence. Both come back as the same =GStrv=, and
+a caller never has to know which it got.
+
+*** The frontmatter dialect
+Frontmatter is recognised only when the very first line is =---=. A =---=
+further down is a horizontal rule and stays in the body, because guessing
+otherwise would silently swallow content.
+
+All three of these shapes exist in the wild and all three parse:
+
+#+begin_src yaml
+---
+name: deploy
+description: Ship it
+---
+#+end_src
+
+#+begin_src yaml
+---
+description: >
+  Generate GTest scaffolds with fixtures,
+  setup and teardown.
+---
+#+end_src
+
+#+begin_src markdown
+# Agent: Reviewer
+
+Reviews C code.
+#+end_src
+
+The third has no frontmatter at all --- that is what
+=~/.config/opencode/agents/agent-code-reviewer.md= actually looks like.
+The name then comes from the filename and the description from the first
+line of prose that is neither a heading nor a fence.
+
+A description is always **one line**. A folded or literal YAML scalar
+arrives with its newlines intact, and every consumer --- a completion
+menu, a =/help= listing, a status bar --- has room for exactly one, so
+the flattening happens once at parse time rather than in each of them.
+
+*** When a file is wrong
+It degrades. A stray tab that makes libyaml refuse the document, an
+unclosed delimiter, a frontmatter block that is a sequence rather than a
+mapping: each costs the file its metadata and nothing else. The failure
+is logged at =g_debug=.
+
+This is not politeness. These files are not ours --- they are written by
+other programs, by plugins, and by hand at three in the morning --- and
+one bad file must not take the other sixteen with it. It must also not
+abort a program running with =G_DEBUG=fatal-warnings=, which is the same
+rule the provider translators follow for subprocess output. See the log
+level table in =CLAUDE.md=.
+
+The one hard failure is content that is not valid UTF-8, because
+everything downstream --- byte offsets, wrapping, the model itself ---
+assumes it, and pretending otherwise would only move the crash.
+
+** Where things are looked for
+The search table in =src/harness/ai-resource-registry.c= *is* the
+registration --- the same pattern =AiToolStyle= and =AiImageModelInfo=
+already use. Teaching ai-glib about another harness is one struct
+literal, and nothing else in the library learns its name.
+
+| Kind    | claude                                   | opencode                                                        | grok               | ai-glib                        |
+|---------+------------------------------------------+-----------------------------------------------------------------+--------------------+--------------------------------|
+| command | =.claude/commands=, =~/.claude/commands= | =.opencode/command=, =$XDG_CONFIG_HOME/opencode/command=        | =.grok/commands=   | =$XDG_CONFIG_HOME/ai-glib/commands= |
+| skill   | =.claude/skills=, =~/.claude/skills=     | =$XDG_CONFIG_HOME/opencode/skills=, =~/.opencode/skills=        | ---                | =$XDG_CONFIG_HOME/ai-glib/skills=   |
+| agent   | =.claude/agents=, =~/.claude/agents=     | =.opencode/agent=, =$XDG_CONFIG_HOME/opencode/agents=           | =.grok/agents=     | =$XDG_CONFIG_HOME/ai-glib/agents=   |
+
+Within a directory, three layouts are understood:
+
+- =<name>.md= --- the ordinary case.
+- =<name>/SKILL.md= --- what a skill usually looks like. The directory
+  names it; otherwise every skill on the system would be called "SKILL".
+  =AGENT.md= and =COMMAND.md= work the same way.
+- =<namespace>/<name>.md= --- becomes =/namespace:name=, which is how
+  claude spells a command in =git/status.md=.
+
+=~/.config/opencode/skills= really does hold the first two side by side,
+which is why both are supported rather than one.
+
+*** Precedence
+Two rules, in this order:
+
+1. **Scope.** Every project directory is searched before any user
+   directory, so a repository can override a personal command without
+   the user editing anything.
+2. **Table order.** Within one scope, ai-glib's own directories come
+   first, then claude, then opencode, then grok. A file written
+   specifically for ai-glib beats one it is merely borrowing.
+
+Resources added by hand with =ai_resource_registry_add()= sit above all
+of that and survive a rescan. An embedder that registered a command of
+its own would otherwise lose it the moment the user changed directory,
+with nothing on disk able to put it back.
+
+Lookup is keyed on kind *and* name, so a skill and a command called the
+same thing coexist. The loser of an actual collision is kept:
+
+#+begin_src C
+GList *shadowed = ai_resource_registry_list_shadowed (registry);
+#+end_src
+
+That is what lets =/commands= answer "why is my file not the one
+running" with the path of the file that beat it, instead of omitting
+both halves of the problem.
+
+*** Watching
+#+begin_src C
+ai_resource_registry_set_watching (registry, TRUE);
+#+end_src
+
+Attaches a =GFileMonitor= per existing directory and emits
+=::changed= a quarter-second after things settle. Events are coalesced:
+an editor writing a file as four operations, or a =git pull= touching
+thirty of them, produces one notification rather than thirty.
+
+Off by default --- a registry built to answer one question should not
+leave inotify watches behind. The debounce timer attaches to the
+**thread-default** main context, not the global default, for the same
+reason the image-generation timeouts do: a caller driving a nested loop
+on a private context would never see a global-default timer fire.
+
+** Mentions
+=@path= in a line of input pulls a file in.
+
+#+begin_src C
+GList *files = NULL;
+g_autofree gchar *expanded =
+    ai_mention_expand ("explain @src/main.c", cwd, 0, &files);
+#+end_src
+
+The prompt is left exactly as written and the files follow it under a
+=--- Referenced files ---= heading. Replacing each mention in place would
+take "explain @src/ai-event.c please" and put nine hundred lines between
+the verb and its object.
+
+*** The boundary rule
+A mention opens only at the start of the text or after whitespace or an
+opening bracket. That single rule is what keeps =z.podbielniak@gmail.com=
+out: the =@= follows a letter, so it is never a candidate.
+
+A Python =@decorator= is handled differently, and the difference is worth
+understanding. Scanning is **pure and syntactic** --- it touches no
+filesystem, because a frontend calls it on every keystroke to highlight
+the input line. Whether a mention names anything real is decided later,
+by =ai_mention_expand()=. A decorator is scanned like any other
+candidate and then, resolving to nothing, left exactly as written. This
+code never had to learn what Python is.
+
+Trailing punctuation belongs to the sentence: =see @foo.c.= names
+=foo.c=. A path with a space needs quoting: =@"my notes/today.org"=.
+
+*** What expansion does
+| Input                | Result                                              |
+|----------------------+-----------------------------------------------------|
+| a text file          | fenced, with a language hint from the extension     |
+| a directory          | a listing, directories marked, capped at 200 entries |
+| a binary file        | named, with its size; contents omitted              |
+| an unreadable file   | named, with the reason                              |
+| a path that does not exist | nothing at all; the text is untouched         |
+
+Resolution is literal --- a leading =~=, and otherwise the working
+directory. There is deliberately no globbing: =@x= must not be able to
+pull in something the user did not name. Traversal upward is allowed,
+because a user naming a file outside the project usually means it, but
+every resolved path is reported through =out_files= so a frontend can
+show what was actually included.
+
+The total is capped (256 KB by default) and truncation is **stated in the
+output**. A model given half a file without being told will answer
+confidently about the half it never saw.
+
+Expansion is not re-entrant: an inlined file that itself contains a
+mention does not pull in a second file. One round, always.
+
+=ai_mention_expand()= has no =GError=. Every way it can go wrong is
+reported inside the returned text, where the model can see it, rather
+than as a failure that throws the prompt away.
+
+** Commands
+=AiCommandSet= holds the built-ins plus everything the registry found,
+and resolves one line:
+
+#+begin_src C
+g_autoptr(AiCommandResult) result =
+    ai_command_set_resolve (commands, line, cwd, cancellable, &error);
+
+switch (ai_command_result_get_outcome (result))
+{
+    case AI_COMMAND_OUTCOME_NOT_A_COMMAND:  /* an ordinary prompt */
+    case AI_COMMAND_OUTCOME_BUILTIN:        /* you handle it */
+    case AI_COMMAND_OUTCOME_PROMPT:         /* send get_prompt() */
+    case AI_COMMAND_OUTCOME_AGENT:          /* dispatch a subagent */
+}
+#+end_src
+
+A line that is not a slash command resolves to =NOT_A_COMMAND= rather
+than failing, so a caller can run every line through here
+unconditionally. A lone =/= is not a command, and neither is
+=/usr/bin/thing= --- a path is something people type about far more often
+than they type a command called =usr=.
+
+An unknown =/name= *is* an error, and the message names the near misses.
+
+*** Built-ins
+Registered in the library, not in the TUI, so =ai=, =ai-tui= and an Emacs
+frontend offer the same set --- and so completion has something to offer
+before a single file has been read.
+
+| Command      | Argument     | What it does                                  |
+|--------------+--------------+-----------------------------------------------|
+| =/help=      |              | every command, skill and agent, with origins  |
+| =/clear=     |              | empty the transcript, the history and the todos |
+| =/quit=      |              | leave                                         |
+| =/model=     | =[model]=    | show or change the model                      |
+| =/provider=  | =[provider]= | show the provider                             |
+| =/tools=     |              | the tools the model can call                  |
+| =/commands=  |              | commands, and what shadows what               |
+| =/skills=    |              | skills                                        |
+| =/agents=    |              | agents                                        |
+| =/reload=    |              | rescan the search paths                       |
+| =/cwd=       | =[path]=     | show or change the working directory          |
+| =/todos=     |              | the current todo list                         |
+| =/expand=    | =<line>=     | what a line would send, without sending it    |
+| =/save=      | =<path>=     | write the transcript to a file                |
+
+A built-in always beats a file of the same name. That is not politeness:
+a stray =quit.md= in a scanned directory must not be able to take away
+the way out of the program.
+
+*** Placeholders
+| In the body   | Becomes                                          |
+|---------------+--------------------------------------------------|
+| =$ARGUMENTS=  | everything after the command name                |
+| =$1= … =$9=   | individual arguments, shell-quoted               |
+| =$$=          | a literal =$=                                    |
+| anything else | itself --- =$HOME=, =$0= and =$FOO= are untouched |
+
+A placeholder with nothing to fill it becomes empty rather than staying
+literal, so a command written for two arguments and invoked with one does
+not send the model a stray =$2= to puzzle over. =$10= is =$1= followed by
+a zero.
+
+Command bodies contain shell snippets, which is why only those three
+forms mean anything: rewriting =$HOME= inside one would be worse than
+useless.
+
+Argument splitting handles single quotes, double quotes and backslash
+escapes. An unterminated quote is *recovered* rather than rejected --- the
+user is mid-keystroke, and refusing the line because a quote is still
+open would be useless.
+
+*** Shell substitution, and why it is off
+A command body may embed =!`command`= and have its output substituted.
+**It does not run unless the file asks for it:**
+
+#+begin_src yaml
+---
+description: Summarise the working tree
+shell: true
+---
+Here is the current state:
+
+!`git status --short`
+#+end_src
+
+Without =shell: true= the backticks stay literal text.
+
+The reason is worth stating plainly. These directories are shared with
+other tools, and a frontend builds a listing at startup, unprompted.
+Anything able to drop a file into =~/.claude/commands= --- a plugin, a
+sync tool, an unlucky =git pull= --- would otherwise be able to run code
+the next time anything looked at the directory. Opt-in per file means the
+author of that file said so.
+
+An embedder can refuse it outright, and gets the final word over the
+file:
+
+#+begin_src C
+ai_command_set_set_shell_policy (commands, AI_COMMAND_SHELL_NEVER);
+#+end_src
+
+When it does run: ten-second timeout, output capped at 64 KB, stderr
+discarded, and a nonzero exit substitutes whatever was printed rather
+than failing the expansion. A command body embedding =git status= in a
+repository with no commits should still produce a prompt.
+
+** Completion
+The part an Emacs frontend actually needs.
+
+#+begin_src C
+g_autoptr(AiCompletionContext) ctx =
+    ai_completion_context_new (commands, working_directory);
+g_autoptr(AiCompletionResult) result =
+    ai_completion_context_query (ctx, buffer, cursor_byte_offset);
+
+guint start = ai_completion_result_get_start (result);
+guint end   = ai_completion_result_get_end (result);
+#+end_src
+
+=start= and =end= are byte offsets into =buffer=: the region to replace.
+That pair is the product. A frontend replaces =buffer[start..end)= with
+the chosen text and does nothing else --- it never re-derives where the
+token began, which is the part that is easy to get wrong and impossible
+to notice until a multibyte character is involved.
+
+- =/= completes commands, skills and agents, but only at offset 0 ---
+  a slash mid-line is a path separator or prose.
+- =@= completes paths from the working directory, directories first and
+  marked with a trailing slash so one Tab walks into them. Hidden
+  entries appear only once the user types the dot; =.git=, =build= and
+  friends never appear.
+- The range for =@src/co= covers everything after the =@=, directory
+  component included, and each candidate carries the whole path. A
+  frontend splicing a fragment into the middle of a path would be doing
+  the library's job badly.
+
+=ai_completion_result_get_common_prefix()= returns the longest prefix
+every candidate shares, and never splits a UTF-8 sequence. Insert it,
+show the menu, and one Tab becomes useful when eight things match.
+
+Candidates are read through out-parameters:
+
+#+begin_src C
+const gchar *text = NULL;
+const gchar *display = NULL;
+const gchar *description = NULL;
+gboolean is_directory = FALSE;
+
+ai_completion_result_get_item_fields (result, i, &text, &display,
+                                      &description, &is_directory);
+#+end_src
+
+for the same reason =ai_rendered_text_get_span()= exists: a plain struct
+behind a pointer does not survive =g-ir-scanner= usefully, and this API
+has to work from bindings. =make test-gi= reads them back from Python,
+which is the standing check that the Emacs path still works.
+
+=max-items= caps a query (200 by default). This runs on a keystroke, and
+a directory of forty thousand files must not turn one into a pause.
+
+** The input pipeline
+=ai_conversation_send_input_async()= is the whole thing in one call:
+
+1. Resolve the slash command.
+2. Expand =@= mentions in whatever came out.
+3. Record **what the user typed** in the transcript.
+4. Send **the expansion** to the model.
+
+Steps 3 and 4 differ on purpose. Showing the expansion would bury a
+one-line question under the file it pulled in; hiding what was sent would
+make a surprising answer impossible to explain.
+
+The order lives here rather than in each frontend because it is not
+obvious, two of the steps are easy to swap, and =ai=, =ai-tui= and an
+Emacs client disagreeing about it would be a bug none of them could see
+alone.
+
+A line that resolves to a built-in is not sent at all:
+
+#+begin_src C
+static void
+on_sent (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    g_autoptr(AiCommandResult) command = NULL;
+    g_autoptr(GError) error = NULL;
+
+    ai_conversation_send_input_finish (AI_CONVERSATION (source), result,
+                                       &command, &error);
+
+    if (command != NULL)
+        act_on_builtin (ai_command_result_get_name (command),
+                        ai_command_result_get_arguments (command));
+}
+#+end_src
+
+*** Passthrough
+claude-code, opencode and grok resolve =@=, =/= and their own skills
+themselves. So for a CLI provider the line reaches the child
+**byte-for-byte as typed**, and =passthrough-commands= defaults to =TRUE=
+there and =FALSE= for an HTTP provider.
+
+Two consequences:
+
+- An unknown =/name= is an error for an HTTP provider and a passthrough
+  for a CLI one. =/compact= means something to claude and nothing here;
+  refusing it would take away a feature the wrapped tool has.
+- Built-ins still run locally either way, because the wrapped CLI has no
+  opinion about this program's transcript.
+
+Override it in either direction when you mean to:
+
+#+begin_src C
+ai_conversation_set_passthrough_commands (conversation, FALSE);
+#+end_src
+
+** Driving it from Emacs
+This is the argument for putting any of it in the library. Everything
+below goes through GObject Introspection; nothing is C-only.
+
+#+begin_src elisp
+;;; -*- lexical-binding: t; -*-
+(require 'gir)
+
+(defvar ai-glib--ctx nil "The AiCompletionContext for this buffer.")
+
+(defun ai-glib-setup-completion (registry-scan)
+  "Build the harness layer and wire it into completion-at-point."
+  (let* ((registry (gir-call "AiGlib" "ResourceRegistry" "new"))
+         (commands (progn
+                     (when registry-scan
+                       (gir-call registry "scan"))
+                     (gir-call "AiGlib" "CommandSet" "new" registry))))
+    (setq-local ai-glib--ctx
+                (gir-call "AiGlib" "CompletionContext" "new"
+                          commands default-directory))
+    ;; A file appearing under ~/.claude/commands should show up without
+    ;; a restart. One notification per rescan, not one per file.
+    (gir-call registry "set_watching" t)
+    (gir-connect registry "changed"
+                 (lambda (&rest _) (ai-glib--invalidate-cache)))
+    (add-hook 'completion-at-point-functions
+              #'ai-glib-completion-at-point nil t)))
+
+(defun ai-glib-completion-at-point ()
+  "A completion-at-point function backed by ai_completion_context_query."
+  (when ai-glib--ctx
+    (let* ((buffer (buffer-substring-no-properties (point-min) (point-max)))
+           ;; The library speaks byte offsets throughout -- the same
+           ;; convention AiStyleSpan uses -- so convert in both
+           ;; directions and never mix the two.
+           (cursor (1- (position-bytes (point))))
+           (result (gir-call ai-glib--ctx "query" buffer cursor))
+           (start  (gir-call result "get_start"))
+           (end    (gir-call result "get_end"))
+           (n      (gir-call result "get_n_items"))
+           (items  nil))
+      (when (> n 0)
+        (dotimes (i n)
+          ;; Out-parameters, because a struct behind a pointer does not
+          ;; survive introspection. Bindings get (ok text display
+          ;; description is-directory).
+          (pcase-let ((`(,_ok ,text ,display ,description ,dir-p)
+                       (gir-call result "get_item_fields" i)))
+            (push (propertize text
+                              :display display
+                              :annotation description
+                              :directory dir-p)
+                  items)))
+        (list (byte-to-position (1+ start))
+              (byte-to-position (1+ end))
+              (nreverse items)
+              :annotation-function
+              (lambda (candidate) (get-text-property 0 :annotation candidate))
+              :exclusive 'no)))))
+
+(defun ai-glib-send (conversation line)
+  "Send LINE through the whole input pipeline."
+  (gir-call conversation "send_input_async" line nil
+            (lambda (source result)
+              (pcase-let ((`(,_ok ,command)
+                           (gir-call source "send_input_finish" result)))
+                (if command
+                    ;; A built-in. The conversation cannot know what
+                    ;; /clear means to a buffer, so it hands it back.
+                    (ai-glib--builtin (gir-call command "get_name")
+                                      (gir-call command "get_arguments"))
+                  (ai-glib--redraw))))
+            nil))
+#+end_src
+
+Two things to get right, and they are the same two the ncurses frontend
+had to:
+
+1. **Byte offsets, not character positions.** =position-bytes= going in,
+   =byte-to-position= coming out. Both are 1-based in Emacs and 0-based
+   in the library, hence the =1-= and =1+=.
+2. **Let the library decide the range.** =start= and =end= come back from
+   the query. Recomputing them in elisp --- "the word before point",
+   say --- will disagree the first time somebody completes =@src/co=,
+   where the token includes a slash.
+
+** Adding a harness
+One struct literal in =RESOURCE_SOURCES=
+(=src/harness/ai-resource-registry.c=):
+
+#+begin_src C
+{ "mytool", AI_RESOURCE_COMMAND, ".mytool/commands",
+  USER_BASE_XDG_CONFIG, "mytool/commands" },
+#+end_src
+
+=project_dir= is relative to the working directory; =user_dir= is
+relative to =$HOME= or =$XDG_CONFIG_HOME= depending on =user_base=.
+Either may be =NULL=. Nothing else in the library needs to change: the
+layouts, the precedence, the completion and the =/help= listing all come
+from the table.
+
+** See also
+- [[file:commands.org][Authoring commands, skills and agents]] --- the file formats, with worked examples
+- [[file:tools.org][The built-in tools]] --- including =task= and =skill=, which reach the same registry
+- [[file:tui.org][ai-tui]] --- the frontend this was built for
+- [[file:transcript.org][The transcript]] --- the other half of the Emacs story, and the rendering recipe

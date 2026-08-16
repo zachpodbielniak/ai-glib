@@ -1,0 +1,80 @@
+* AiResourceRegistry
+Finds the commands, skills and agents that other harnesses have already
+put on disk, and decides which one wins when two claim a name.
+
+** Functions
+#+begin_src C
+AiResourceRegistry *ai_resource_registry_new (void);
+
+/* Setting this rescans: a different project has different commands. */
+void         ai_resource_registry_set_working_directory (AiResourceRegistry *self,
+                                                         const gchar *path);
+const gchar *ai_resource_registry_get_working_directory (AiResourceRegistry *self);
+
+/* Rereads everything and emits ::changed. Idempotent. */
+void ai_resource_registry_scan (AiResourceRegistry *self);
+
+/* Keyed on kind AND name, so a skill and a command may share one. */
+AiResource *ai_resource_registry_lookup (AiResourceRegistry *self,
+                                         AiResourceKind kind,
+                                         const gchar *name);
+
+/* (transfer container), sorted by name. */
+GList *ai_resource_registry_list          (AiResourceRegistry *self,
+                                           AiResourceKind kind);
+
+/* Everything that lost a name collision, with its path. */
+GList *ai_resource_registry_list_shadowed (AiResourceRegistry *self);
+
+/* Survives a rescan and outranks anything on disk. */
+void ai_resource_registry_add (AiResourceRegistry *self, AiResource *resource);
+
+void     ai_resource_registry_set_watching (AiResourceRegistry *self,
+                                            gboolean watching);
+gboolean ai_resource_registry_get_watching (AiResourceRegistry *self);
+
+/* Every directory that would be searched, in precedence order, whether
+   or not it exists. What a /commands listing shows when the answer is
+   "you put it somewhere else". */
+gchar **ai_resource_registry_get_search_paths (AiResourceRegistry *self,
+                                               AiResourceKind kind);
+#+end_src
+
+** Properties
+| Property              | Type      | Default           |
+|-----------------------+-----------+-------------------|
+| =working-directory=   | string    | the current one   |
+| =watching=            | boolean   | =FALSE=           |
+
+** Signals
+| Signal     | Arguments | When                                     |
+|------------+-----------+------------------------------------------|
+| =changed=  | none      | after a scan --- once, not once per file |
+
+A =git pull= touching thirty files produces one notification. A frontend
+rebuilding a completion list wants one rebuild.
+
+** Precedence
+1. Resources added with =ai_resource_registry_add()=.
+2. Every project-scope directory, in table order.
+3. Every user-scope directory, in table order.
+
+First writer wins; the rest are recorded as shadowed. The table order
+within a scope is ai-glib, claude, opencode, grok --- a file written
+specifically for ai-glib beats one it is borrowing.
+
+** Notes
+- A missing directory is the normal case, not an error: most of the
+  search table will not exist on any given machine.
+- An unreadable directory, a symlink loop, a file where a directory was
+  expected: all skipped, the scan continues.
+- The rescan debounce timer attaches to the *thread-default* main
+  context, not the global default. A caller driving a nested loop on a
+  private context would never see a global-default timer fire.
+- Teaching it about another harness is one struct literal in
+  =RESOURCE_SOURCES=. That table is the registration.
+
+** See also
+[[file:ai-resource.org][AiResource]] ·
+[[file:ai-command.org][AiCommandSet]] ·
+[[file:../harness.org][The harness layer]]

@@ -1,0 +1,103 @@
+* AiCommand, AiCommandSet, AiCommandResult
+Turning a line beginning with =/= into something to do.
+
+** AiCommand
+One invocable name. Either a built-in the frontend acts on, a file that
+expands to a prompt, or an agent to dispatch.
+
+#+begin_src C
+AiCommand *ai_command_new_builtin      (const gchar *name,
+                                        const gchar *description,
+                                        const gchar *argument_hint);
+AiCommand *ai_command_new_for_resource (AiResource *resource);
+
+const gchar   *ai_command_get_name          (AiCommand *self);
+const gchar   *ai_command_get_description   (AiCommand *self);
+const gchar   *ai_command_get_argument_hint (AiCommand *self);
+AiCommandKind  ai_command_get_kind          (AiCommand *self);
+AiResource    *ai_command_get_resource      (AiCommand *self);
+const gchar   *ai_command_get_origin        (AiCommand *self);
+#+end_src
+
+=AiCommandKind= is =AI_COMMAND_BUILTIN=, =_PROMPT= or =_AGENT=.
+
+** AiCommandSet
+#+begin_src C
+AiCommandSet       *ai_command_set_new          (AiResourceRegistry *registry);
+AiResourceRegistry *ai_command_set_get_registry (AiCommandSet *self);
+
+/* A built-in always wins. A stray quit.md must not take away /quit. */
+AiCommand *ai_command_set_lookup (AiCommandSet *self, const gchar *name);
+
+/* Every command, one entry per name, sorted. (transfer full) */
+GList *ai_command_set_list (AiCommandSet *self);
+
+/* FALSE for a lone "/", for "/usr/bin/thing", and for ordinary prose. */
+gboolean ai_command_set_is_command_line (const gchar *line);
+
+AiCommandResult *ai_command_set_resolve (AiCommandSet *self,
+                                         const gchar *line,
+                                         const gchar *cwd,
+                                         GCancellable *cancellable,
+                                         GError **error);
+
+void                 ai_command_set_set_shell_policy (AiCommandSet *self,
+                                                      AiCommandShellPolicy policy);
+AiCommandShellPolicy ai_command_set_get_shell_policy (AiCommandSet *self);
+#+end_src
+
+=registry= may be =NULL=, leaving only the built-ins --- what an embedder
+that will not read the user's home directory gets.
+
+** AiCommandResult
+#+begin_src C
+AiCommandOutcome  ai_command_result_get_outcome   (AiCommandResult *self);
+AiCommand        *ai_command_result_get_command   (AiCommandResult *self);
+const gchar      *ai_command_result_get_name      (AiCommandResult *self);
+const gchar      *ai_command_result_get_arguments (AiCommandResult *self);
+const gchar      *ai_command_result_get_prompt    (AiCommandResult *self);
+#+end_src
+
+| =AiCommandOutcome=                 | What the caller does            |
+|------------------------------------+---------------------------------|
+| =AI_COMMAND_OUTCOME_NOT_A_COMMAND= | send the line as an ordinary prompt |
+| =AI_COMMAND_OUTCOME_BUILTIN=       | act on =get_name()= yourself    |
+| =AI_COMMAND_OUTCOME_PROMPT=        | send =get_prompt()=             |
+| =AI_COMMAND_OUTCOME_AGENT=         | dispatch a subagent with =get_prompt()= |
+
+A line that is not a command resolves rather than failing, so every line
+can go through =resolve()= unconditionally. An unknown =/name= is an
+error whose message names the near misses.
+
+Mentions are *not* expanded here. That happens once, further along the
+pipeline, so a =@path= in a command body and one the user typed are
+treated identically and neither is expanded twice.
+
+** Expansion helpers
+#+begin_src C
+/* Shell-like splitting. An unterminated quote is recovered, not
+   rejected: the user is mid-keystroke. */
+gchar **ai_command_split_arguments (const gchar *arguments);
+
+/* $ARGUMENTS, $1..$9 and $$. Everything else --- $HOME, $0, $FOO --- is
+   left alone, because command bodies contain shell snippets. */
+gchar  *ai_command_substitute (const gchar *body,
+                               const gchar *arguments,
+                               const gchar *const *argv);
+#+end_src
+
+** Shell policy
+| Value                       | Effect                                    |
+|-----------------------------+-------------------------------------------|
+| =AI_COMMAND_SHELL_OPT_IN=   | default --- runs only with =shell: true=  |
+| =AI_COMMAND_SHELL_NEVER=    | never; overrides the file                 |
+| =AI_COMMAND_SHELL_ALWAYS=   | always                                    |
+
+The default is opt-in because scanning a directory must not be enough to
+make the files in it executable. These directories are shared with other
+tools, and a frontend builds its listing unprompted at startup.
+
+** See also
+[[file:ai-completion.org][AiCompletionContext]] ·
+[[file:ai-mention.org][AiMention]] ·
+[[file:../commands.org][Authoring commands]]

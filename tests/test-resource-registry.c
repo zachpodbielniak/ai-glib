@@ -767,6 +767,37 @@ test_added_resource_beats_a_file(void)
 	g_assert_cmpstr(ai_resource_get_description(winner), ==, "from embedder");
 }
 
+/*
+ * A file found through two overlapping search paths is not a collision.
+ *
+ * Directories overlap in real setups -- a project checked out in $HOME
+ * is the obvious one -- and listing a file as shadowing itself would put
+ * pure noise in front of somebody trying to work out which file won.
+ */
+static void
+test_a_file_does_not_shadow_itself(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	GList                        *shadowed;
+
+	reset();
+	write_home(".claude/commands/only.md", "One file.\n");
+
+	registry = ai_resource_registry_new();
+
+	/* Working directory == HOME, so .claude/commands is both the project
+	 * path and the user path. */
+	ai_resource_registry_set_working_directory(registry, sandbox_home);
+	ai_resource_registry_scan(registry);
+
+	g_assert_nonnull(ai_resource_registry_lookup(registry,
+	                                             AI_RESOURCE_COMMAND,
+	                                             "only"));
+
+	shadowed = ai_resource_registry_list_shadowed(registry);
+	g_assert_null(shadowed);
+}
+
 static void
 test_search_paths_are_reportable(void)
 {
@@ -1067,6 +1098,8 @@ main(int argc, char *argv[])
 	                test_added_resources_survive_a_scan);
 	g_test_add_func("/ai-glib/registry/added-beats-file",
 	                test_added_resource_beats_a_file);
+	g_test_add_func("/ai-glib/registry/no-self-shadow",
+	                test_a_file_does_not_shadow_itself);
 	g_test_add_func("/ai-glib/registry/search-paths",
 	                test_search_paths_are_reportable);
 

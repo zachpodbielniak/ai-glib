@@ -14,7 +14,9 @@ Run via `make test-gi`, or directly:
 
 Requires python3-gobject (Fedora) / python3-gi (Debian).
 """
+import os
 import sys
+import tempfile
 
 
 def main():
@@ -249,6 +251,84 @@ def main():
     assert AiGlib.event_kind_to_string(AiGlib.EventKind.TOOL_STARTED) == \
         "tool-started"
     assert isinstance(grok, AiGlib.EventSource)
+
+    # ----- The harness layer -----
+    #
+    # This section is the standing check that an Emacs frontend can drive
+    # the input pipeline: everything below goes through introspection, and
+    # if any of it stops being reachable from Python it has stopped being
+    # reachable from elisp too.
+    with tempfile.TemporaryDirectory() as box:
+        os.makedirs(os.path.join(box, ".claude", "commands"))
+        with open(os.path.join(box, ".claude", "commands", "deploy.md"),
+                  "w") as fp:
+            fp.write("---\ndescription: Ship it\n"
+                     "argument-hint: <env>\n---\nDeploy to $1.\n")
+        with open(os.path.join(box, "hello.c"), "w") as fp:
+            fp.write("int main(void) { return 0; }\n")
+
+        registry = AiGlib.ResourceRegistry.new()
+        registry.set_working_directory(box)
+
+        # The scan reads $HOME too, which this process cannot redirect
+        # after GLib has cached it -- so assert only on the project file.
+        registry.scan()
+
+        resource = registry.lookup(AiGlib.ResourceKind.COMMAND, "deploy")
+        assert resource is not None
+        assert resource.get_description() == "Ship it"
+        assert resource.get_origin() == "claude"
+        assert resource.get_meta("argument-hint") == "<env>"
+
+        commands = AiGlib.CommandSet.new(registry)
+        resolved = commands.resolve("/deploy staging", box, None)
+        assert resolved.get_outcome() == AiGlib.CommandOutcome.PROMPT
+        assert resolved.get_prompt() == "Deploy to staging.\n"
+
+        # A built-in comes back for the frontend to act on.
+        builtin = commands.resolve("/clear", box, None)
+        assert builtin.get_outcome() == AiGlib.CommandOutcome.BUILTIN
+        assert builtin.get_name() == "clear"
+
+        # ----- Mentions -----
+        mentions = AiGlib.mention_scan("explain @hello.c please")
+        assert len(mentions) == 1
+        assert mentions[0].path == "hello.c"
+        # Byte offsets, the same convention AiStyleSpan uses.
+        assert mentions[0].start == 8
+
+        expanded = AiGlib.mention_expand("explain @hello.c", box, 0)
+        assert "int main(void)" in expanded[0]
+
+        # ----- Completion: the range is what completion-at-point wants -----
+        ctx = AiGlib.CompletionContext.new(commands, box)
+
+        result = ctx.query("@hel", 4)
+        assert result.get_kind() == AiGlib.CompletionKind.PATH
+        assert result.get_start() == 1
+        assert result.get_end() == 4
+        assert result.get_n_items() == 1
+
+        ok, text, display, description, is_dir = result.get_item_fields(0)
+        assert ok is True
+        assert text == "hello.c"
+        assert is_dir is False
+
+        result = ctx.query("/dep", 4)
+        assert result.get_kind() == AiGlib.CompletionKind.COMMAND
+        assert result.get_start() == 1
+        assert result.get_common_prefix() == "deploy"
+
+    # ----- Todos -----
+    todo = AiGlib.Todo.new("Add the parser", "Adding the parser",
+                           AiGlib.TodoState.IN_PROGRESS)
+    assert todo.get_label() == "Adding the parser"
+    assert AiGlib.todo_state_to_string(AiGlib.TodoState.COMPLETED) == \
+        "completed"
+
+    todo_block = AiGlib.ViewTodoBlock.new()
+    assert todo_block.get_n_todos() == 0
+    assert todo_block.get_kind() == AiGlib.ViewBlockKind.TODO
 
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"

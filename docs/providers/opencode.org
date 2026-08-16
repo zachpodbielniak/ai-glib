@@ -339,3 +339,16 @@ if (error != NULL)
 
 * Event coverage
 On [[file:../events.org][the event stream]] this provider reports text, tool start, tool results, usage.
+
+** Slash commands and mentions
+This provider resolves =@= file references and its own slash commands
+itself, so ai-glib passes a line through byte-for-byte rather than
+expanding first --- doing it twice would be worse than not at all, and
+=/compact= and its friends would never arrive.
+
+=AiConversation:passthrough-commands= defaults to =TRUE= here for that
+reason. ai-glib's own built-ins (=/help=, =/clear=, =/quit= and the
+listings) still run locally, because the wrapped tool has no opinion
+about this program's transcript.
+
+See [[file:../harness.org::*Passthrough][the harness layer]].

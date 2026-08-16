@@ -255,7 +255,26 @@ registry_file_resource(
 
     if (g_hash_table_contains(self->resources, key))
     {
-        g_ptr_array_add(self->shadowed, g_object_ref(resource));
+        AiResource *winner = g_hash_table_lookup(self->resources, key);
+
+        /*
+         * The same file reached through two search paths is not a
+         * collision worth reporting. It happens whenever directories
+         * overlap --- a project checked out in $HOME, say --- and
+         * listing a file as shadowing itself is pure noise.
+         */
+        const gchar *winner_path = ai_resource_get_path(winner);
+        const gchar *loser_path = ai_resource_get_path(resource);
+
+        /* Both NULL means two resources built from data, which really
+         * are two different things. Only equal *paths* are the same
+         * file. */
+        if (winner_path == NULL || loser_path == NULL ||
+            g_strcmp0(winner_path, loser_path) != 0)
+        {
+            g_ptr_array_add(self->shadowed, g_object_ref(resource));
+        }
+
         return;
     }
 
