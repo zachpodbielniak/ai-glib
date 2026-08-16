@@ -27,6 +27,7 @@ G_BEGIN_DECLS
  * @AI_VIEW_BLOCK_TOOL: a group of tool calls
  * @AI_VIEW_BLOCK_STATUS: a note, a token count, or a failure
  * @AI_VIEW_BLOCK_TODO: the current todo list
+ * @AI_VIEW_BLOCK_AGENT: background agents and what they are doing
  *
  * What a block is, for a frontend that would rather switch than downcast.
  */
@@ -37,7 +38,8 @@ typedef enum
     AI_VIEW_BLOCK_THINKING,
     AI_VIEW_BLOCK_TOOL,
     AI_VIEW_BLOCK_STATUS,
-    AI_VIEW_BLOCK_TODO
+    AI_VIEW_BLOCK_TODO,
+    AI_VIEW_BLOCK_AGENT
 } AiViewBlockKind;
 
 #define AI_TYPE_VIEW_BLOCK (ai_view_block_get_type())

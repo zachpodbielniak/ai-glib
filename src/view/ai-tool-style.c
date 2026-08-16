@@ -42,6 +42,11 @@ static const AiToolStyle BUILTIN_STYLES[] = {
     { "todo_write",   "Updated",   "todo list", "todo lists", AI_TOOL_CATEGORY_TASK,   NULL,      FALSE },
     { "task",         "Ran",       "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent",   FALSE },
     { "skill",        "Loaded",    "skill",   "skills",   AI_TOOL_CATEGORY_TASK,       "name",    FALSE },
+    { "agent_spawn",  "Started",   "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "description", FALSE },
+    { "agent_status", "Checked",   "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent_id", FALSE },
+    { "agent_result", "Collected", "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent_id", FALSE },
+    { "agent_wait",   "Waited for","agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent_id", FALSE },
+    { "agent_cancel", "Stopped",   "agent",   "agents",   AI_TOOL_CATEGORY_TASK,       "agent_id", FALSE },
 
     /* What the wrapped CLIs call theirs */
     { "Bash",         "Ran",       "command", "commands", AI_TOOL_CATEGORY_COMMAND,    "command", FALSE },

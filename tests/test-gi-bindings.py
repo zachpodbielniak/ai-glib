@@ -337,6 +337,66 @@ def main():
     assert todo_block.get_n_todos() == 0
     assert todo_block.get_kind() == AiGlib.ViewBlockKind.TODO
 
+    # ----- Background agents -----
+    #
+    # The same standing check for the agent layer: an Emacs frontend
+    # spawns, watches and kills background agents through exactly these
+    # calls. Nothing here contacts a provider -- the agent is never
+    # started -- so this stays offline like the rest of the file.
+    brigade = AiGlib.Brigade.new()
+    worker = AiGlib.LocalWorker.new()
+    brigade.set_worker(worker)
+    brigade.set_max_concurrent(2)
+    assert brigade.get_max_concurrent() == 2
+    assert brigade.get_worker() is not None
+
+    # Ids are minted by the brigade, so a frontend need not invent them.
+    agent_id = brigade.generate_id("reviewer")
+    assert agent_id.startswith("reviewer-")
+
+    agent = AiGlib.Agent.new(agent_id, None)
+    agent.set_description("read the diff")
+    assert brigade.add(agent) is True
+    assert brigade.get(agent_id) is agent
+    assert len(brigade.list()) == 1
+    assert brigade.count_live() == 0
+
+    # AiAgent owns the ai_agent_ prefix, so the scanner files these under
+    # the class rather than at namespace level. Asserted in the shape a
+    # binding actually sees, which is the shape elisp will use.
+    assert AiGlib.Agent.state_to_string(AiGlib.AgentState.RUNNING) == "running"
+    assert AiGlib.Agent.state_is_live(AiGlib.AgentState.RUNNING) is True
+    assert AiGlib.Agent.state_is_terminal(AiGlib.AgentState.DONE) is True
+
+    # Cancelling is always allowed, and the state says what happened.
+    agent.cancel()
+    assert agent.get_state() == AiGlib.AgentState.CANCELLED
+
+    # A finish is remembered until it is collected -- the mechanism a
+    # frontend polls, and the one the model is notified through.
+    assert brigade.take_finished() == agent_id
+    assert brigade.take_finished() is None
+
+    # Reaping returns whatever it produced and forgets the agent.
+    reaped = brigade.reap(agent_id)
+    assert reaped is not None
+    assert brigade.get(agent_id) is None
+
+    # The panel renders from live agents and keeps its rows afterwards.
+    agent_block = AiGlib.ViewAgentBlock.new()
+    assert agent_block.get_kind() == AiGlib.ViewBlockKind.AGENT
+    assert agent_block.get_n_agents() == 0
+    agent_block.set_agents([agent])
+    assert agent_block.get_n_agents() == 1
+    assert agent_block.get_n_live() == 0
+    assert "read the diff" in agent_block.render(0).get_text()
+
+    # And a conversation turns the whole thing on in one call, which is
+    # what an embedder does when it wants the model to have the tools.
+    assert conversation.get_brigade() is None
+    installed = conversation.enable_background_agents(4)
+    assert conversation.get_brigade() is installed
+
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"
           f" {AiGlib.__path__ if hasattr(AiGlib, '__path__') else '(typelib)'}")

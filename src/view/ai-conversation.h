@@ -19,6 +19,7 @@
 #include "view/ai-transcript.h"
 #include "convenience/ai-tool-executor.h"
 #include "harness/ai-command.h"
+#include "agent/ai-brigade.h"
 
 G_BEGIN_DECLS
 
@@ -167,6 +168,35 @@ ai_conversation_send_input_async(
     GCancellable        *cancellable,
     GAsyncReadyCallback  callback,
     gpointer             user_data
+);
+
+void
+ai_conversation_set_brigade(
+    AiConversation *self,
+    AiBrigade      *brigade
+);
+
+AiBrigade *
+ai_conversation_get_brigade(AiConversation *self);
+
+/**
+ * ai_conversation_enable_background_agents:
+ * @self: an #AiConversation
+ * @max_concurrent: how many may run at once, or 0 for no limit
+ *
+ * The one-line way to turn background agents on.
+ *
+ * Builds a brigade with an #AiLocalWorker and installs it, which is what
+ * `ai-tui` does. An application wanting a store, a price table or a
+ * worker of its own assembles the brigade itself and calls
+ * ai_conversation_set_brigade().
+ *
+ * Returns: (transfer none): the brigade now in use.
+ */
+AiBrigade *
+ai_conversation_enable_background_agents(
+    AiConversation *self,
+    guint           max_concurrent
 );
 
 gboolean

@@ -44,6 +44,7 @@ static gboolean  opt_local_tools = FALSE;
 static gboolean  opt_yes = FALSE;
 static gboolean  opt_dry_run = FALSE;
 static gboolean  opt_no_expand = FALSE;
+static gboolean  opt_no_agents = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 
@@ -73,6 +74,8 @@ static const GOptionEntry option_entries[] = {
       "Set a provider property (repeatable)", "PROP=VALUE" },
     { "no-expand", 0, 0, G_OPTION_ARG_NONE, &opt_no_expand,
       "Send input verbatim: no @ mentions, no / commands", NULL },
+    { "no-agents", 0, 0, G_OPTION_ARG_NONE, &opt_no_agents,
+      "Do not let the model start background agents", NULL },
     { "dump", 0, 0, G_OPTION_ARG_STRING, &opt_dump,
       "Run one prompt without a terminal and print the transcript", "PROMPT" },
     { "width", 0, 0, G_OPTION_ARG_INT, &opt_width,
@@ -214,6 +217,16 @@ attr_for_tag(AiStyleTag tag)
  * a slow model is not also spending a core on redrawing one glyph.
  */
 #define SPINNER_INTERVAL_MS (110)
+
+/*
+ * How many background agents may run at once.
+ *
+ * A ceiling rather than a queue depth --- anything beyond it waits its
+ * turn, nothing is dropped. Four because these are real model calls
+ * being billed, and a model that decides to fan out twenty ways should
+ * find out about the limit rather than the bill.
+ */
+#define AGENT_MAX_CONCURRENT (4)
 
 /*
  * The frames. Braille cells, because they animate in place without the
@@ -1083,6 +1096,136 @@ show_todos(App *app)
     say(app, "%s", out->str);
 }
 
+/*
+ * What the background agents are doing.
+ *
+ * Distinct from /agents, which lists the agent *definitions* found on
+ * disk. This is the running ones -- the answer to "is that review
+ * finished yet?".
+ */
+static void
+show_running(App *app)
+{
+    AiBrigade         *brigade =
+        ai_conversation_get_brigade(app->conversation);
+    g_autoptr(GString) out = g_string_new("Background agents\n");
+    g_autoptr(GList)   agents = NULL;
+    GList             *iter;
+
+    if (brigade == NULL)
+    {
+        say(app, "Background agents are not enabled.");
+        return;
+    }
+
+    agents = ai_brigade_list(brigade);
+
+    if (agents == NULL)
+    {
+        say(app, "No background agents.");
+        return;
+    }
+
+    for (iter = agents; iter != NULL; iter = iter->next)
+    {
+        AiAgent     *agent = iter->data;
+        const gchar *what  = ai_agent_get_description(agent);
+
+        g_string_append_printf(out, "  %-16s %-10s %3" G_GINT64_FORMAT "s  %s\n",
+                               ai_agent_get_id(agent),
+                               ai_agent_state_to_string(
+                                   ai_agent_get_state(agent)),
+                               ai_agent_get_elapsed_ms(agent) / 1000,
+                               what != NULL ? what : "");
+    }
+
+    say(app, "%s", out->str);
+}
+
+static void
+kill_agent(App *app, const gchar *arguments)
+{
+    AiBrigade *brigade = ai_conversation_get_brigade(app->conversation);
+    AiAgent   *agent;
+
+    if (brigade == NULL)
+    {
+        say(app, "Background agents are not enabled.");
+        return;
+    }
+
+    if (arguments == NULL || arguments[0] == '\0')
+    {
+        say(app, "/kill needs an agent id, or \"all\".");
+        return;
+    }
+
+    if (g_strcmp0(arguments, "all") == 0)
+    {
+        guint n = ai_brigade_cancel_all(brigade);
+
+        say(app, "Stopped %u agent%s.", n, n == 1 ? "" : "s");
+        return;
+    }
+
+    agent = ai_brigade_get(brigade, arguments);
+
+    if (agent == NULL)
+    {
+        say(app, "No agent '%s'. /running lists them.", arguments);
+        return;
+    }
+
+    ai_agent_cancel(agent);
+    say(app, "Stopped '%s'.", arguments);
+}
+
+/*
+ * A background agent stopped.
+ *
+ * Says so on screen straight away. The model is told separately, by the
+ * executor, at the next turn boundary -- but the person watching should
+ * not have to send a message to discover that the thing they started ten
+ * minutes ago has finished.
+ */
+static void
+on_agent_finished(
+    AiConversation *conversation,
+    const gchar    *agent_id,
+    gint            state,
+    gpointer        user_data
+){
+    App         *app = user_data;
+    AiAgent     *agent;
+    const gchar *what = NULL;
+
+    (void)conversation;
+
+    agent = ai_brigade_get(ai_conversation_get_brigade(app->conversation),
+                           agent_id);
+
+    /* The agent may already have been reaped by the model's agent_result
+     * between the brigade emitting and this running, in which case its
+     * description is gone and the id is all there is to say. */
+    if (agent != NULL)
+    {
+        what = ai_agent_get_description(agent);
+    }
+
+    if (what != NULL && what[0] != '\0')
+    {
+        say(app, "Agent '%s' %s: %s", agent_id,
+            ai_agent_state_to_string((AiAgentState)state), what);
+    }
+    else
+    {
+        say(app, "Agent '%s' %s.", agent_id,
+            ai_agent_state_to_string((AiAgentState)state));
+    }
+
+    app_schedule_redraw(app);
+}
+
 static void
 save_transcript(App *app, const gchar *path)
 {
@@ -1241,6 +1384,14 @@ handle_builtin(App *app, AiCommandResult *result)
     else if (g_strcmp0(name, "todos") == 0)
     {
         show_todos(app);
+    }
+    else if (g_strcmp0(name, "running") == 0)
+    {
+        show_running(app);
+    }
+    else if (g_strcmp0(name, "kill") == 0)
+    {
+        kill_agent(app, arguments);
     }
     else if (g_strcmp0(name, "cwd") == 0)
     {
@@ -2384,6 +2535,25 @@ main(int argc, char *argv[])
 
         ai_conversation_set_command_set(app.conversation, app.commands);
         ai_conversation_set_working_directory(app.conversation, cwd);
+    }
+
+    /*
+     * Background agents, on by default -- ai-tui is the reference
+     * frontend and this is what it is for. An application embedding the
+     * harness gets none of this unless it asks: the library creates no
+     * brigade of its own, precisely because unattended model runs that
+     * outlive a turn are a grant an embedder should make deliberately.
+     *
+     * --no-agents is the way out for somebody who wants ai-tui without
+     * it.
+     */
+    if (!opt_no_agents)
+    {
+        ai_conversation_enable_background_agents(app.conversation,
+                                                 AGENT_MAX_CONCURRENT);
+
+        g_signal_connect(app.conversation, "agent-finished",
+                         G_CALLBACK(on_agent_finished), &app);
     }
 
     /*

@@ -11,6 +11,11 @@
 
 #include "view/ai-view-blocks.h"
 
+/* The agent block reads state out of live #AiAgent objects. The view
+ * layer already reaches into the agent layer through #AiConversation,
+ * which drives a brigade; this is the same direction. */
+#include "agent/ai-agent.h"
+
 /* ================================================================
  * The user's turn
  * ================================================================ */
@@ -699,4 +704,262 @@ ai_view_todo_block_get_n_todos(AiViewTodoBlock *self)
     g_return_val_if_fail(AI_IS_VIEW_TODO_BLOCK(self), 0);
 
     return self->todos->len;
+}
+
+/* ================================================================
+ * Background agents
+ * ================================================================ */
+
+/*
+ * What the block remembers about one agent.
+ *
+ * Copied rather than referenced. A brigade forgets an agent the moment
+ * its answer is collected, and a panel that emptied itself as each
+ * result came back would be at its least informative exactly when the
+ * reader wants to look at it.
+ */
+typedef struct
+{
+    gchar        *id;
+    gchar        *description;
+    AiAgentState  state;
+    gint64        elapsed_ms;
+} AgentRow;
+
+static void
+agent_row_free(gpointer data)
+{
+    AgentRow *row = data;
+
+    if (row == NULL) return;
+
+    g_free(row->id);
+    g_free(row->description);
+    g_free(row);
+}
+
+struct _AiViewAgentBlock
+{
+    AiViewBlock  parent_instance;
+    GPtrArray   *rows;      /* AgentRow*, owned */
+};
+
+G_DEFINE_TYPE(AiViewAgentBlock, ai_view_agent_block, AI_TYPE_VIEW_BLOCK)
+
+static AiViewBlockKind
+agent_get_kind(AiViewBlock *block)
+{
+    (void)block;
+    return AI_VIEW_BLOCK_AGENT;
+}
+
+/* One glyph per state, legible with no colour at all --- the same rule
+ * the todo and tool markers follow. */
+static const gchar *
+agent_marker(AiAgentState state)
+{
+    switch (state)
+    {
+        case AI_AGENT_STATE_DONE:
+            return "✔ ";
+
+        case AI_AGENT_STATE_FAILED:
+        case AI_AGENT_STATE_OVER_BUDGET:
+            return "✘ ";
+
+        case AI_AGENT_STATE_CANCELLED:
+        case AI_AGENT_STATE_INTERRUPTED:
+            return "⊘ ";
+
+        case AI_AGENT_STATE_QUEUED:
+        case AI_AGENT_STATE_IDLE:
+            return "· ";
+
+        default:
+            return "▸ ";   /* starting, running, waiting, blocked */
+    }
+}
+
+/*
+ * Agent state reuses the tool tags rather than adding three of its own.
+ * They already mean "in flight", "succeeded" and "did not", which is
+ * exactly the distinction here --- and a frontend that has chosen colours
+ * for those gets this block right without being changed at all.
+ */
+static AiStyleTag
+agent_tag(AiAgentState state)
+{
+    switch (state)
+    {
+        case AI_AGENT_STATE_DONE:
+            return AI_STYLE_TOOL_OK;
+
+        case AI_AGENT_STATE_FAILED:
+        case AI_AGENT_STATE_CANCELLED:
+        case AI_AGENT_STATE_OVER_BUDGET:
+        case AI_AGENT_STATE_INTERRUPTED:
+            return AI_STYLE_TOOL_FAILED;
+
+        default:
+            return AI_STYLE_TOOL_PENDING;
+    }
+}
+
+static AiRenderedText *
+agent_render(AiViewBlock *block)
+{
+    AiViewAgentBlock *self = AI_VIEW_AGENT_BLOCK(block);
+    AiRenderedText   *out = ai_rendered_text_new();
+    guint             live = 0;
+    guint             i;
+
+    if (self->rows->len == 0)
+    {
+        ai_rendered_text_append(out, "No background agents", AI_STYLE_DIM);
+        return out;
+    }
+
+    for (i = 0; i < self->rows->len; i++)
+    {
+        const AgentRow   *row = g_ptr_array_index(self->rows, i);
+        AiStyleTag        tag = agent_tag(row->state);
+        g_autofree gchar *timing = NULL;
+
+        if (ai_agent_state_is_live(row->state)) live++;
+
+        if (i > 0)
+        {
+            ai_rendered_text_append(out, "\n", AI_STYLE_DEFAULT);
+        }
+
+        ai_rendered_text_append(out, agent_marker(row->state), tag);
+        ai_rendered_text_append(out, row->id, AI_STYLE_TOOL_NAME);
+
+        if (row->description != NULL && row->description[0] != '\0')
+        {
+            ai_rendered_text_append(out, "  ", AI_STYLE_DEFAULT);
+            ai_rendered_text_append(out, row->description,
+                                    AI_STYLE_TOOL_TARGET);
+        }
+
+        /*
+         * The state word and the clock, dim. A reader scanning the panel
+         * is looking for the marker and the name; the numbers matter
+         * only once one of those has caught the eye.
+         */
+        timing = g_strdup_printf("  %s %" G_GINT64_FORMAT "s",
+                                 ai_agent_state_to_string(row->state),
+                                 row->elapsed_ms / 1000);
+        ai_rendered_text_append(out, timing, AI_STYLE_DIM);
+    }
+
+    {
+        g_autofree gchar *tally =
+            g_strdup_printf("\n%u running, %u total", live, self->rows->len);
+
+        ai_rendered_text_append(out, tally, AI_STYLE_DIM);
+    }
+
+    return out;
+}
+
+static void
+ai_view_agent_block_finalize(GObject *object)
+{
+    AiViewAgentBlock *self = AI_VIEW_AGENT_BLOCK(object);
+
+    g_clear_pointer(&self->rows, g_ptr_array_unref);
+
+    G_OBJECT_CLASS(ai_view_agent_block_parent_class)->finalize(object);
+}
+
+static void
+ai_view_agent_block_class_init(AiViewAgentBlockClass *klass)
+{
+    AiViewBlockClass *block_class = AI_VIEW_BLOCK_CLASS(klass);
+
+    G_OBJECT_CLASS(klass)->finalize = ai_view_agent_block_finalize;
+    block_class->render = agent_render;
+    block_class->get_kind = agent_get_kind;
+}
+
+static void
+ai_view_agent_block_init(AiViewAgentBlock *self)
+{
+    self->rows = g_ptr_array_new_with_free_func(agent_row_free);
+}
+
+/**
+ * ai_view_agent_block_new:
+ *
+ * Creates an empty background-agent block.
+ *
+ * Returns: (transfer full): a new #AiViewAgentBlock
+ */
+AiViewAgentBlock *
+ai_view_agent_block_new(void)
+{
+    return g_object_new(AI_TYPE_VIEW_AGENT_BLOCK, NULL);
+}
+
+void
+ai_view_agent_block_set_agents(
+    AiViewAgentBlock *self,
+    GList            *agents
+){
+    GList *iter;
+
+    g_return_if_fail(AI_IS_VIEW_AGENT_BLOCK(self));
+
+    g_ptr_array_set_size(self->rows, 0);
+
+    for (iter = agents; iter != NULL; iter = iter->next)
+    {
+        AiAgent  *agent = iter->data;
+        AgentRow *row;
+
+        if (!AI_IS_AGENT(agent)) continue;
+
+        row = g_new0(AgentRow, 1);
+        row->id          = g_strdup(ai_agent_get_id(agent));
+        row->description = g_strdup(ai_agent_get_description(agent));
+        row->state       = ai_agent_get_state(agent);
+        row->elapsed_ms  = ai_agent_get_elapsed_ms(agent);
+
+        g_ptr_array_add(self->rows, row);
+    }
+
+    ai_view_block_changed(AI_VIEW_BLOCK(self));
+}
+
+/**
+ * ai_view_agent_block_get_n_agents:
+ * @self: an #AiViewAgentBlock
+ *
+ * Returns: how many agents the block is showing
+ */
+guint
+ai_view_agent_block_get_n_agents(AiViewAgentBlock *self)
+{
+    g_return_val_if_fail(AI_IS_VIEW_AGENT_BLOCK(self), 0);
+
+    return self->rows->len;
+}
+
+guint
+ai_view_agent_block_get_n_live(AiViewAgentBlock *self)
+{
+    guint live = 0;
+    guint i;
+
+    g_return_val_if_fail(AI_IS_VIEW_AGENT_BLOCK(self), 0);
+
+    for (i = 0; i < self->rows->len; i++)
+    {
+        const AgentRow *row = g_ptr_array_index(self->rows, i);
+
+        if (ai_agent_state_is_live(row->state)) live++;
+    }
+
+    return live;
 }

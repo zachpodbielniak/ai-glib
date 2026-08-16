@@ -608,6 +608,185 @@ test_todo_updates_reuse_one_block(void)
 			ai_conversation_get_transcript(conversation)), ==, 1);
 }
 
+/* ----------------------------------------------------------------
+ * Background agents
+ * ---------------------------------------------------------------- */
+
+/*
+ * A conversation offers no background-agent tools until it is given a
+ * brigade. Restated here as well as on the executor, because this is the
+ * object an application actually holds.
+ */
+static void
+test_background_agents_are_off_until_enabled(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(mock));
+	AiToolExecutor           *executor =
+		ai_conversation_get_executor(conversation);
+	GList                    *iter;
+	gboolean                  found = FALSE;
+
+	g_assert_null(ai_conversation_get_brigade(conversation));
+
+	for (iter = ai_tool_executor_get_tools(executor); iter != NULL;
+	     iter = iter->next)
+	{
+		if (g_strcmp0(ai_tool_get_name(iter->data), "agent_spawn") == 0)
+			found = TRUE;
+	}
+
+	g_assert_false(found);
+}
+
+static void
+test_enabling_installs_a_working_brigade(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(mock));
+	AiBrigade                *brigade;
+
+	brigade = ai_conversation_enable_background_agents(conversation, 2);
+
+	g_assert_nonnull(brigade);
+	g_assert_true(ai_conversation_get_brigade(conversation) == brigade);
+	g_assert_nonnull(ai_brigade_get_worker(brigade));
+	g_assert_cmpuint(ai_brigade_get_max_concurrent(brigade), ==, 2);
+
+	/* The executor is where the tools live, and it has them now. */
+	g_assert_true(ai_tool_executor_get_brigade(
+		ai_conversation_get_executor(conversation)) == brigade);
+
+	/* Enabling twice keeps the first one rather than replacing it and
+	 * orphaning whatever was already running in it. */
+	g_assert_true(
+		ai_conversation_enable_background_agents(conversation, 8) == brigade);
+	g_assert_cmpuint(ai_brigade_get_max_concurrent(brigade), ==, 2);
+}
+
+typedef struct
+{
+	guint  count;
+	gchar *last_id;
+} FinishSpy;
+
+static void
+on_conversation_agent_finished(AiConversation *conversation,
+                               const gchar *agent_id, gint state,
+                               gpointer user_data)
+{
+	FinishSpy *spy = user_data;
+
+	(void)conversation; (void)state;
+
+	spy->count++;
+	g_free(spy->last_id);
+	spy->last_id = g_strdup(agent_id);
+}
+
+/*
+ * The panel appears when something is spawned, updates in place, and the
+ * finish is republished for a frontend to show.
+ *
+ * The signal matters because the model is told separately and later ---
+ * at the next turn boundary. The person watching should not have to send
+ * a message to find out that the thing they started has finished.
+ */
+static void
+test_agents_get_a_block_and_a_signal(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiMockProvider) agent_mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiAgent)        agent = NULL;
+	AiBrigade                *brigade;
+	FinishSpy                 spy = { 0 };
+	AiTranscript             *transcript =
+		ai_conversation_get_transcript(conversation);
+	guint                     blocks_after_start;
+
+	ai_mock_provider_push_text(agent_mock, "the finding");
+
+	brigade = ai_conversation_enable_background_agents(conversation, 4);
+
+	g_signal_connect(conversation, "agent-finished",
+	                 G_CALLBACK(on_conversation_agent_finished), &spy);
+
+	agent = ai_agent_new("a1", AI_PROVIDER(agent_mock));
+	ai_agent_set_description(agent, "the work");
+
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 0);
+
+	ai_brigade_start(brigade, agent, "go", NULL);
+
+	blocks_after_start = ai_transcript_get_n_blocks(transcript);
+	g_assert_cmpuint(blocks_after_start, ==, 1);
+
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+
+		while (spy.count == 0 && g_get_monotonic_time() < deadline)
+		{
+			if (!g_main_context_iteration(NULL, FALSE)) g_usleep(1000);
+		}
+	}
+
+	g_assert_cmpuint(spy.count, ==, 1);
+	g_assert_cmpstr(spy.last_id, ==, "a1");
+
+	/* Still one block: the state change rewrote it rather than adding a
+	 * second copy, exactly as the todo list does. */
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 1);
+
+	g_free(spy.last_id);
+}
+
+/*
+ * /clear empties the panel and leaves the agents alone.
+ *
+ * Clearing a transcript is an instruction about the display. Killing
+ * work somebody started because they wanted a clean screen would be a
+ * surprising way to lose an hour of it.
+ */
+static void
+test_clear_empties_the_panel_but_not_the_brigade(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiMockProvider) agent_mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiAgent)        agent = NULL;
+	AiBrigade                *brigade;
+
+	ai_mock_provider_push_text(agent_mock, "hi");
+	ai_mock_provider_set_delay_ms(agent_mock, 50);
+
+	brigade = ai_conversation_enable_background_agents(conversation, 4);
+
+	agent = ai_agent_new("a1", AI_PROVIDER(agent_mock));
+	ai_brigade_start(brigade, agent, "go", NULL);
+
+	ai_conversation_clear(conversation);
+
+	g_assert_cmpuint(
+		ai_transcript_get_n_blocks(
+			ai_conversation_get_transcript(conversation)), ==, 0);
+	g_assert_nonnull(ai_brigade_get(brigade, "a1"));
+
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+
+		while (ai_agent_state_is_live(ai_agent_get_state(agent)) &&
+		       g_get_monotonic_time() < deadline)
+		{
+			if (!g_main_context_iteration(NULL, FALSE)) g_usleep(1000);
+		}
+	}
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -655,6 +834,15 @@ main(int argc, char *argv[])
 	                test_clear_empties_the_todo_list);
 	g_test_add_func("/ai-glib/input/todo-one-block",
 	                test_todo_updates_reuse_one_block);
+
+	g_test_add_func("/ai-glib/input/agents-off-by-default",
+	                test_background_agents_are_off_until_enabled);
+	g_test_add_func("/ai-glib/input/agents-enable",
+	                test_enabling_installs_a_working_brigade);
+	g_test_add_func("/ai-glib/input/agents-block-and-signal",
+	                test_agents_get_a_block_and_a_signal);
+	g_test_add_func("/ai-glib/input/agents-survive-clear",
+	                test_clear_empties_the_panel_but_not_the_brigade);
 
 	status = g_test_run();
 

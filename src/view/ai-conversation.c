@@ -19,6 +19,8 @@
 #include "config.h"
 
 #include "view/ai-conversation.h"
+
+#include "agent/ai-local-worker.h"
 #include "harness/ai-mention.h"
 #include "view/ai-view-blocks.h"
 #include "view/ai-view-tool-block.h"
@@ -64,6 +66,14 @@ struct _AiConversation
      */
     AiViewBlock    *todo_block;
 
+    /*
+     * The background-agent panel, on the same terms as the todo block:
+     * one block that keeps being rewritten, because an agent changes
+     * state several times and a transcript is not a log file.
+     */
+    AiViewBlock    *agent_block;
+    AiBrigade      *brigade;
+
     /* The input pipeline. NULL command_set means slash commands are not
      * resolved here at all, which is what an embedder that only wants a
      * transcript gets. */
@@ -83,6 +93,8 @@ struct _AiConversation
 
     gulong          event_id;
     gulong          todos_id;
+    gulong          agent_state_id;
+    gulong          agent_finished_id;
 };
 
 G_DEFINE_TYPE(AiConversation, ai_conversation, G_TYPE_OBJECT)
@@ -100,6 +112,7 @@ enum
     PROP_WORKING_DIRECTORY,
     PROP_PASSTHROUGH_COMMANDS,
     PROP_ACTIVITY,
+    PROP_BRIGADE,
     N_PROPS
 };
 
@@ -108,6 +121,7 @@ static GParamSpec *properties[N_PROPS];
 enum
 {
     SIGNAL_APPROVAL_REQUESTED,
+    SIGNAL_AGENT_FINISHED,
     N_SIGNALS
 };
 
@@ -934,6 +948,14 @@ ai_conversation_clear(AiConversation *self)
      * a /clear would be the one thing on screen that did not go. */
     self->todo_block = NULL;
     ai_tool_executor_clear_todos(self->executor);
+
+    /*
+     * The panel goes; the agents do not. Clearing a transcript is an
+     * instruction about the display, and killing work somebody started
+     * because they wanted a clean screen would be a surprising way to
+     * lose an hour of it. ai_brigade_cancel_all() is how you stop them.
+     */
+    self->agent_block = NULL;
 }
 
 /* ================================================================
@@ -999,6 +1021,168 @@ on_executor_todos_changed(
                                  ai_tool_executor_get_todos(executor));
 }
 
+/*
+ * A background agent changed state.
+ *
+ * The panel is rebuilt from the brigade rather than patched, because a
+ * reap removes an agent and there is no state-change event for "gone".
+ * Rebuilding is a handful of strdups over a list that is never long.
+ */
+static void
+conversation_refresh_agents(AiConversation *self)
+{
+    g_autoptr(GList) agents = NULL;
+
+    if (self->brigade == NULL) return;
+
+    agents = ai_brigade_list(self->brigade);
+
+    if (self->agent_block == NULL)
+    {
+        g_autoptr(AiViewAgentBlock) block = NULL;
+
+        /* Nothing has ever been spawned: no panel.  Same rule as the
+         * todo block, and it is what stops ai_conversation_clear() from
+         * putting an empty one back. */
+        if (agents == NULL) return;
+
+        block = ai_view_agent_block_new();
+        self->agent_block = AI_VIEW_BLOCK(block);
+        ai_transcript_append(self->transcript, AI_VIEW_BLOCK(block));
+    }
+
+    ai_view_agent_block_set_agents(AI_VIEW_AGENT_BLOCK(self->agent_block),
+                                   agents);
+}
+
+static void
+on_brigade_agent_state_changed(
+    AiBrigade   *brigade,
+    const gchar *agent_id,
+    gint         state,
+    gpointer     user_data
+){
+    (void)brigade;
+    (void)agent_id;
+    (void)state;
+
+    conversation_refresh_agents(user_data);
+}
+
+/*
+ * Republished so a frontend can react without knowing what a brigade is.
+ *
+ * The model is told separately, by #AiToolExecutor, at the next turn
+ * boundary --- it is only awake between turns. This signal is for the
+ * person watching, who is not.
+ */
+static void
+on_brigade_agent_finished(
+    AiBrigade   *brigade,
+    const gchar *agent_id,
+    gint         state,
+    gpointer     user_data
+){
+    AiConversation *self = user_data;
+
+    (void)brigade;
+
+    conversation_refresh_agents(self);
+
+    g_signal_emit(self, signals[SIGNAL_AGENT_FINISHED], 0, agent_id, state);
+}
+
+/**
+ * ai_conversation_set_brigade:
+ * @self: an #AiConversation
+ * @brigade: (nullable) (transfer none): where background agents run
+ *
+ * Lets this conversation start background agents, and shows them.
+ *
+ * Passing a brigade registers the `agent_*` tools on the executor and
+ * adds a panel to the transcript that tracks what is running. Passing
+ * %NULL takes both away. An application that never calls this is
+ * unaffected --- which is the point, since a model able to start
+ * unattended work that outlives the turn is a grant an embedder should
+ * make deliberately.
+ *
+ * The brigade needs a worker to run anything; see ai_local_worker_new().
+ */
+void
+ai_conversation_set_brigade(
+    AiConversation *self,
+    AiBrigade      *brigade
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+    g_return_if_fail(brigade == NULL || AI_IS_BRIGADE(brigade));
+
+    if (self->brigade == brigade) return;
+
+    if (self->brigade != NULL)
+    {
+        if (self->agent_state_id != 0)
+            g_signal_handler_disconnect(self->brigade, self->agent_state_id);
+        if (self->agent_finished_id != 0)
+            g_signal_handler_disconnect(self->brigade, self->agent_finished_id);
+    }
+
+    self->agent_state_id = 0;
+    self->agent_finished_id = 0;
+
+    g_set_object(&self->brigade, brigade);
+    ai_tool_executor_set_brigade(self->executor, brigade);
+
+    if (brigade != NULL)
+    {
+        self->agent_state_id =
+            g_signal_connect(brigade, "agent-state-changed",
+                             G_CALLBACK(on_brigade_agent_state_changed), self);
+        self->agent_finished_id =
+            g_signal_connect(brigade, "agent-finished",
+                             G_CALLBACK(on_brigade_agent_finished), self);
+
+        conversation_refresh_agents(self);
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BRIGADE]);
+}
+
+/**
+ * ai_conversation_get_brigade:
+ * @self: an #AiConversation
+ *
+ * Returns: (transfer none) (nullable): the brigade, or %NULL
+ */
+AiBrigade *
+ai_conversation_get_brigade(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+    return self->brigade;
+}
+
+AiBrigade *
+ai_conversation_enable_background_agents(
+    AiConversation *self,
+    guint           max_concurrent
+){
+    g_autoptr(AiBrigade)     brigade = NULL;
+    g_autoptr(AiLocalWorker) worker  = NULL;
+
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    if (self->brigade != NULL) return self->brigade;
+
+    brigade = ai_brigade_new();
+    worker  = ai_local_worker_new();
+
+    ai_brigade_set_worker(brigade, AI_AGENT_WORKER(worker));
+    ai_brigade_set_max_concurrent(brigade, max_concurrent);
+
+    ai_conversation_set_brigade(self, brigade);
+
+    return self->brigade;
+}
+
 static void
 ai_conversation_finalize(GObject *object)
 {
@@ -1014,6 +1198,15 @@ ai_conversation_finalize(GObject *object)
         g_signal_handler_disconnect(self->executor, self->todos_id);
     }
 
+    if (self->brigade != NULL)
+    {
+        if (self->agent_state_id != 0)
+            g_signal_handler_disconnect(self->brigade, self->agent_state_id);
+        if (self->agent_finished_id != 0)
+            g_signal_handler_disconnect(self->brigade, self->agent_finished_id);
+    }
+
+    g_clear_object(&self->brigade);
     g_clear_object(&self->provider);
     g_clear_object(&self->transcript);
     g_clear_object(&self->executor);
@@ -1068,6 +1261,9 @@ ai_conversation_get_property(
             break;
         case PROP_ACTIVITY:
             g_value_set_string(value, self->activity);
+            break;
+        case PROP_BRIGADE:
+            g_value_set_object(value, self->brigade);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -1253,6 +1449,18 @@ ai_conversation_class_init(AiConversationClass *klass)
         g_param_spec_string("activity", NULL, NULL, NULL,
                             G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiConversation:brigade:
+     *
+     * Where background agents run, or %NULL.
+     *
+     * Setting one is what gives the model the `agent_*` tools and adds
+     * the panel that tracks them. See ai_conversation_set_brigade().
+     */
+    properties[PROP_BRIGADE] =
+        g_param_spec_object("brigade", NULL, NULL, AI_TYPE_BRIGADE,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -1276,6 +1484,32 @@ ai_conversation_class_init(AiConversationClass *klass)
                      NULL,
                      G_TYPE_INT, 1,
                      AI_TYPE_TOOL_USE);
+
+    /**
+     * AiConversation::agent-finished:
+     * @self: the conversation
+     * @agent_id: which agent
+     * @state: the terminal #AiAgentState it reached
+     *
+     * A background agent stopped working.
+     *
+     * Forwarded from the brigade so a frontend connects to one object.
+     * The model is told separately and later --- at the next turn
+     * boundary, since that is the only moment it exists to be told
+     * anything. This signal is for the person watching, who does not
+     * have to wait for a turn.
+     *
+     * The answer is not carried here. Collect it with ai_brigade_reap(),
+     * bearing in mind the model's `agent_result` tool reaps too, so
+     * whichever asks first gets it.
+     */
+    signals[SIGNAL_AGENT_FINISHED] =
+        g_signal_new("agent-finished",
+                     G_TYPE_FROM_CLASS(klass),
+                     G_SIGNAL_RUN_LAST,
+                     0, NULL, NULL, NULL,
+                     G_TYPE_NONE, 2,
+                     G_TYPE_STRING, G_TYPE_INT);
 }
 
 static void

@@ -53,6 +53,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "reload",   "Rescan the command, skill and agent paths",  NULL },
     { "cwd",      "Show or change the working directory",       "[path]" },
     { "todos",    "Show the current todo list",                 NULL },
+    { "running",  "Show background agents and what they are doing", NULL },
+    { "kill",     "Stop a background agent",                    "<id|all>" },
     { "expand",   "Show what a line would send, without sending it",
       "<line>" },
     { "save",     "Write the transcript to a file",             "<path>" },

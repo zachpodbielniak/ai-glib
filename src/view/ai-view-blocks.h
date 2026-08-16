@@ -137,4 +137,47 @@ ai_view_todo_block_set_todos(
 guint
 ai_view_todo_block_get_n_todos(AiViewTodoBlock *self);
 
+/* ---- Background agents ---- */
+
+#define AI_TYPE_VIEW_AGENT_BLOCK (ai_view_agent_block_get_type())
+
+G_DECLARE_FINAL_TYPE(AiViewAgentBlock, ai_view_agent_block,
+                     AI, VIEW_AGENT_BLOCK, AiViewBlock)
+
+AiViewAgentBlock *
+ai_view_agent_block_new(void);
+
+/**
+ * ai_view_agent_block_set_agents:
+ * @self: an #AiViewAgentBlock
+ * @agents: (nullable) (element-type AiAgent): the agents to show
+ *
+ * Replaces the list and marks the block changed.
+ *
+ * Updated in place for the same reason #AiViewTodoBlock is: a background
+ * agent changes state several times over its life, and a transcript that
+ * grew a new block for each would bury the conversation it belongs to.
+ * A reader wants one panel that keeps saying what is going on.
+ *
+ * The details shown are copied out of each #AiAgent, so this block keeps
+ * rendering correctly after the brigade has reaped them.
+ */
+void
+ai_view_agent_block_set_agents(
+    AiViewAgentBlock *self,
+    GList            *agents
+);
+
+guint
+ai_view_agent_block_get_n_agents(AiViewAgentBlock *self);
+
+/**
+ * ai_view_agent_block_get_n_live:
+ * @self: an #AiViewAgentBlock
+ *
+ * Returns: how many of the agents shown are still working
+ */
+guint
+ai_view_agent_block_get_n_live(AiViewAgentBlock *self);
+
 G_END_DECLS
