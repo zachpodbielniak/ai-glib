@@ -23,6 +23,7 @@
 #include <gio/gio.h>
 #include <string.h>
 #include <unistd.h>
+#include <utime.h>
 
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-claude-tmux-client-internal.h"
@@ -642,6 +643,140 @@ test_compute_jsonl_path_default_root(void)
                                 "-home-zach-work",
                                 "abc-uuid.jsonl", NULL);
     g_assert_cmpstr(path, ==, expected);
+}
+
+/* ================================================================== */
+/* find_latest_session_id (continue-session)                           */
+/* ================================================================== */
+
+/*
+ * Write an empty transcript for @session_id under @root/@cwd's project
+ * folder, and stamp it with @mtime so "newest" is deterministic rather
+ * than dependent on how fast the test runs.
+ */
+static void
+write_transcript(const gchar *root, const gchar *cwd,
+                 const gchar *session_id, time_t mtime)
+{
+    g_autofree gchar *path = NULL;
+    g_autofree gchar *dir = NULL;
+    g_autoptr(GError) error = NULL;
+    struct utimbuf times;
+
+    path = ai_claude_tmux_client_compute_jsonl_path(root, cwd, session_id);
+    dir = g_path_get_dirname(path);
+    g_assert_cmpint(g_mkdir_with_parents(dir, 0700), ==, 0);
+
+    g_file_set_contents(path, "{}\n", -1, &error);
+    g_assert_no_error(error);
+
+    times.actime = mtime;
+    times.modtime = mtime;
+    g_assert_cmpint(g_utime(path, &times), ==, 0);
+}
+
+static void
+remove_transcript(const gchar *root, const gchar *cwd,
+                  const gchar *session_id)
+{
+    g_autofree gchar *path =
+        ai_claude_tmux_client_compute_jsonl_path(root, cwd, session_id);
+
+    g_remove(path);
+}
+
+/*
+ * continue-session resolves the id itself rather than passing claude's
+ * --continue, because everything downstream is keyed by session id and
+ * --continue never reports which session it picked. The newest transcript
+ * in the directory's project folder is that session.
+ */
+static void
+test_find_latest_session_id_picks_newest(void)
+{
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *found = NULL;
+    g_autoptr(GError) error = NULL;
+    const gchar *cwd = "/home/zach/work";
+
+    root = g_dir_make_tmp("ai-glib-tmux-XXXXXX", &error);
+    g_assert_no_error(error);
+
+    write_transcript(root, cwd, "older-session", 1000000);
+    write_transcript(root, cwd, "newest-session", 2000000);
+    write_transcript(root, cwd, "middle-session", 1500000);
+
+    found = ai_claude_tmux_client_find_latest_session_id(root, cwd);
+    g_assert_cmpstr(found, ==, "newest-session");
+
+    remove_transcript(root, cwd, "older-session");
+    remove_transcript(root, cwd, "newest-session");
+    remove_transcript(root, cwd, "middle-session");
+}
+
+/* Nothing to continue is not an error: the caller starts fresh. */
+static void
+test_find_latest_session_id_empty(void)
+{
+    g_autofree gchar *root = NULL;
+    g_autoptr(GError) error = NULL;
+
+    root = g_dir_make_tmp("ai-glib-tmux-XXXXXX", &error);
+    g_assert_no_error(error);
+
+    /* No project folder at all. */
+    g_assert_null(ai_claude_tmux_client_find_latest_session_id(
+        root, "/home/zach/never-used"));
+
+    g_rmdir(root);
+}
+
+/* Only transcripts count; a stray file in the folder is not a session. */
+static void
+test_find_latest_session_id_ignores_non_transcripts(void)
+{
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *found = NULL;
+    g_autofree gchar *stray = NULL;
+    g_autofree gchar *dir = NULL;
+    g_autoptr(GError) error = NULL;
+    const gchar *cwd = "/home/zach/work2";
+
+    root = g_dir_make_tmp("ai-glib-tmux-XXXXXX", &error);
+    g_assert_no_error(error);
+
+    write_transcript(root, cwd, "real-session", 1000000);
+
+    /* Newer, but not a transcript. */
+    {
+        g_autofree gchar *path = ai_claude_tmux_client_compute_jsonl_path(
+            root, cwd, "x");
+        dir = g_path_get_dirname(path);
+    }
+    stray = g_build_filename(dir, "notes.txt", NULL);
+    g_file_set_contents(stray, "hi", -1, &error);
+    g_assert_no_error(error);
+
+    found = ai_claude_tmux_client_find_latest_session_id(root, cwd);
+    g_assert_cmpstr(found, ==, "real-session");
+
+    g_remove(stray);
+    remove_transcript(root, cwd, "real-session");
+}
+
+/* The property exists and round-trips; it is off by default. */
+static void
+test_continue_session_property(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    gboolean value = TRUE;
+
+    g_object_get(client, "continue-session", &value, NULL);
+    g_assert_false(value);
+
+    g_object_set(client, "continue-session", TRUE, NULL);
+    g_object_get(client, "continue-session", &value, NULL);
+    g_assert_true(value);
 }
 
 static void
@@ -1897,6 +2032,16 @@ main(int argc, char *argv[])
                     test_encode_cwd_dots_and_dashes_passthrough);
     g_test_add_func("/claude-tmux/encode-cwd/unicode",
                     test_encode_cwd_unicode_passthrough);
+
+    /* continue-session */
+    g_test_add_func("/claude-tmux/continue-session/picks-newest",
+                    test_find_latest_session_id_picks_newest);
+    g_test_add_func("/claude-tmux/continue-session/empty",
+                    test_find_latest_session_id_empty);
+    g_test_add_func("/claude-tmux/continue-session/ignores-non-transcripts",
+                    test_find_latest_session_id_ignores_non_transcripts);
+    g_test_add_func("/claude-tmux/continue-session/property",
+                    test_continue_session_property);
 
     /* compute_jsonl_path */
     g_test_add_func("/claude-tmux/jsonl-path/default-root",

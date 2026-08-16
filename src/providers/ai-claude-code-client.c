@@ -69,6 +69,7 @@ struct _AiClaudeCodeClient
     gboolean debug;
     gboolean bare;
     gboolean safe_mode;
+    gboolean continue_session;
 
     /* Cached summary for the re-prompt fallback when the AI
      * produces no text (empty "result" with tool use only). */
@@ -125,6 +126,7 @@ enum
     PROP_DEBUG,
     PROP_BARE,
     PROP_SAFE_MODE,
+    PROP_CONTINUE_SESSION,
     N_PROPS
 };
 
@@ -248,6 +250,9 @@ ai_claude_code_client_get_property(
             break;
         case PROP_SAFE_MODE:
             g_value_set_boolean(value, self->safe_mode);
+            break;
+        case PROP_CONTINUE_SESSION:
+            g_value_set_boolean(value, self->continue_session);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -378,6 +383,9 @@ ai_claude_code_client_set_property(
             break;
         case PROP_SAFE_MODE:
             self->safe_mode = g_value_get_boolean(value);
+            break;
+        case PROP_CONTINUE_SESSION:
+            self->continue_session = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -757,6 +765,19 @@ ai_claude_code_client_build_argv(
          * Branch the resumed conversation instead of extending it. Only
          * valid alongside --resume, which is why it lives here.
          */
+        if (self->fork_session)
+            g_ptr_array_add(args, g_strdup("--fork-session"));
+    }
+    else if (persist && self->continue_session)
+    {
+        /*
+         * No id to resume, but the caller asked to pick up where this
+         * directory left off. As with --resume the conversation already
+         * carries its system prompt, so it is not re-sent -- and claude
+         * accepts --fork-session here too.
+         */
+        g_ptr_array_add(args, g_strdup("--continue"));
+
         if (self->fork_session)
             g_ptr_array_add(args, g_strdup("--fork-session"));
     }
@@ -1620,6 +1641,26 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     properties[PROP_SAFE_MODE] =
         g_param_spec_boolean("safe-mode", "Safe Mode",
                              "Start with all customizations disabled",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:continue-session:
+     *
+     * Whether to pass `--continue`, resuming the most recent conversation
+     * in the working directory when no #AiCliClient:session-id is known.
+     *
+     * An explicit session id wins: the two name different conversations,
+     * and silently preferring the wrong one is worse than either. Ignored
+     * when #AiCliClient:session-persistence is off, which asks for a fresh
+     * conversation every time.
+     *
+     * #AiClaudeCodeClient:fork-session applies here as well as to
+     * `--resume`.
+     */
+    properties[PROP_CONTINUE_SESSION] =
+        g_param_spec_boolean("continue-session", "Continue Session",
+                             "Continue the most recent conversation (--continue)",
                              FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 

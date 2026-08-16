@@ -60,6 +60,9 @@ struct _AiClaudeTmuxClient
                                            * prompt when a whole Enter ladder
                                            * fails, i.e. the draft box was
                                            * empty (default 3) */
+    gboolean  continue_session;     /* resume this directory's most recent
+                                     * transcript instead of starting a
+                                     * new session */
     gboolean  dismiss_resume_prompt;     /* press Enter once on resume to
                                           * clear claude's resume-mode
                                           * picker (default TRUE) */
@@ -99,6 +102,7 @@ enum
     PROP_PROMPT_RESEND_INTERVAL_MS,
     PROP_MAX_PROMPT_SEND_ATTEMPTS,
     PROP_MAX_PROMPT_DELIVERY_PASSES,
+    PROP_CONTINUE_SESSION,
     PROP_DISMISS_RESUME_PROMPT,
     PROP_PROMPT_SEND_EXPONENTIAL_BACKOFF,
     PROP_COMMAND_TIMEOUT_MS,
@@ -141,19 +145,18 @@ ai_claude_tmux_client_encode_cwd(const gchar *cwd)
     return g_string_free(out, FALSE);
 }
 
-gchar *
-ai_claude_tmux_client_compute_jsonl_path(
+/*
+ * The directory claude keeps this working directory's transcripts in:
+ * <project_dir or ~/.claude/projects>/<cwd with slashes turned to dashes>.
+ */
+static gchar *
+compute_project_transcript_dir(
     const gchar *project_dir,
-    const gchar *cwd,
-    const gchar *session_id
+    const gchar *cwd
 ){
     g_autofree gchar *encoded = NULL;
     g_autofree gchar *default_root = NULL;
-    g_autofree gchar *filename = NULL;
     const gchar *root;
-
-    g_return_val_if_fail(cwd != NULL, NULL);
-    g_return_val_if_fail(session_id != NULL, NULL);
 
     if (project_dir != NULL && project_dir[0] != '\0')
     {
@@ -167,9 +170,79 @@ ai_claude_tmux_client_compute_jsonl_path(
     }
 
     encoded = ai_claude_tmux_client_encode_cwd(cwd);
+
+    return g_build_filename(root, encoded, NULL);
+}
+
+gchar *
+ai_claude_tmux_client_compute_jsonl_path(
+    const gchar *project_dir,
+    const gchar *cwd,
+    const gchar *session_id
+){
+    g_autofree gchar *dir = NULL;
+    g_autofree gchar *filename = NULL;
+
+    g_return_val_if_fail(cwd != NULL, NULL);
+    g_return_val_if_fail(session_id != NULL, NULL);
+
+    dir = compute_project_transcript_dir(project_dir, cwd);
     filename = g_strconcat(session_id, ".jsonl", NULL);
 
-    return g_build_filename(root, encoded, filename, NULL);
+    return g_build_filename(dir, filename, NULL);
+}
+
+gchar *
+ai_claude_tmux_client_find_latest_session_id(
+    const gchar *project_dir,
+    const gchar *cwd
+){
+    g_autofree gchar *dir_path = NULL;
+    g_autoptr(GDir) dir = NULL;
+    g_autofree gchar *newest_id = NULL;
+    const gchar *name;
+    gint64 newest_mtime = -1;
+
+    g_return_val_if_fail(cwd != NULL, NULL);
+
+    dir_path = compute_project_transcript_dir(project_dir, cwd);
+
+    dir = g_dir_open(dir_path, 0, NULL);
+    if (dir == NULL)
+    {
+        return NULL;
+    }
+
+    while ((name = g_dir_read_name(dir)) != NULL)
+    {
+        g_autofree gchar *full = NULL;
+        g_autoptr(GFile) file = NULL;
+        g_autoptr(GFileInfo) info = NULL;
+        gint64 mtime;
+
+        if (!g_str_has_suffix(name, ".jsonl"))
+            continue;
+
+        full = g_build_filename(dir_path, name, NULL);
+        file = g_file_new_for_path(full);
+        info = g_file_query_info(file, G_FILE_ATTRIBUTE_TIME_MODIFIED,
+                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+        if (info == NULL)
+            continue;
+
+        mtime = (gint64)g_file_info_get_attribute_uint64(
+            info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
+
+        if (mtime > newest_mtime)
+        {
+            newest_mtime = mtime;
+            g_free(newest_id);
+            /* The transcript is named <session-id>.jsonl. */
+            newest_id = g_strndup(name, strlen(name) - strlen(".jsonl"));
+        }
+    }
+
+    return g_steal_pointer(&newest_id);
 }
 
 /*
@@ -1301,6 +1374,9 @@ ai_claude_tmux_client_get_property(
         case PROP_MAX_PROMPT_DELIVERY_PASSES:
             g_value_set_int(value, self->max_prompt_delivery_passes);
             break;
+        case PROP_CONTINUE_SESSION:
+            g_value_set_boolean(value, self->continue_session);
+            break;
         case PROP_DISMISS_RESUME_PROMPT:
             g_value_set_boolean(value, self->dismiss_resume_prompt);
             break;
@@ -1368,6 +1444,9 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_MAX_PROMPT_DELIVERY_PASSES:
             self->max_prompt_delivery_passes = g_value_get_int(value);
+            break;
+        case PROP_CONTINUE_SESSION:
+            self->continue_session = g_value_get_boolean(value);
             break;
         case PROP_DISMISS_RESUME_PROMPT:
             self->dismiss_resume_prompt = g_value_get_boolean(value);
@@ -1527,6 +1606,29 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "never landed -- which no further Enter keystroke can fix, so the "
         "prompt is cleared and re-pasted and the ladder restarts",
         1, G_MAXINT, 3,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeTmuxClient:continue-session:
+     *
+     * Continue this working directory's most recent conversation instead
+     * of starting a new one, the way `claude --continue` does.
+     *
+     * Implemented by resolving the newest transcript in the directory's
+     * project folder and resuming it *by id*, rather than by passing
+     * `--continue`. Everything downstream here is keyed by session id --
+     * the transcript this client reads to detect the accepted prompt and
+     * parse the reply is `<session-id>.jsonl` -- and `--continue` never
+     * reports which session it picked, so the client would be left
+     * watching a path that never appears.
+     *
+     * An explicit #AiCliClient:session-id wins. With nothing to continue,
+     * a fresh session is started rather than failing.
+     */
+    properties[PROP_CONTINUE_SESSION] = g_param_spec_boolean(
+        "continue-session", "Continue Session",
+        "Continue this directory's most recent conversation",
+        FALSE,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_DISMISS_RESUME_PROMPT] = g_param_spec_boolean(
@@ -1967,17 +2069,38 @@ ai_claude_tmux_client_chat_sync_real(
         return NULL;
     }
 
+    cwd = resolve_session_cwd(self);
+
     configured_session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(self));
     if (configured_session_id != NULL && configured_session_id[0] != '\0')
     {
         session_id = g_strdup(configured_session_id);
     }
+    else if (self->continue_session)
+    {
+        /*
+         * "Continue the most recent conversation here" is claude's own
+         * --continue, but this client cannot use that flag: everything
+         * downstream is keyed by session id -- the transcript it reads to
+         * detect the accepted prompt and parse the reply is
+         * <session-id>.jsonl -- and --continue never tells us which id it
+         * picked. So resolve the same thing ourselves, by newest
+         * transcript in this directory's project folder, and resume it by
+         * id. Same semantics, and the id stays known.
+         */
+        session_id = ai_claude_tmux_client_find_latest_session_id(
+            self->claude_project_dir, cwd);
+
+        if (session_id == NULL)
+        {
+            /* Nothing to continue: start fresh rather than fail. */
+            session_id = g_uuid_string_random();
+        }
+    }
     else
     {
         session_id = g_uuid_string_random();
     }
-
-    cwd = resolve_session_cwd(self);
     jsonl_path = ai_claude_tmux_client_compute_jsonl_path(
         self->claude_project_dir, cwd, session_id);
 

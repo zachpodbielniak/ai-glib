@@ -433,6 +433,59 @@ test_grok_build_argv_resume_no_persistence(void)
 	                ==, "You are terse.");
 }
 
+/*
+ * --continue resumes the most recent session for the working directory,
+ * for a caller that has no id to resume. As with --resume, the session
+ * already carries its system prompt, so it is not re-sent.
+ */
+static void
+test_grok_build_argv_continue(void)
+{
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	argv = build_argv_for(client, "SYS", FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--continue"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--system-prompt-override"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--resume"), ==, -1);
+}
+
+/*
+ * An explicit session id wins. The two name different sessions, and
+ * silently picking the wrong one is worse than either.
+ */
+static void
+test_grok_build_argv_continue_yields_to_session_id(void)
+{
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "sess-9");
+	argv = build_argv_for(client, NULL, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--resume"), ==, "sess-9");
+	g_assert_cmpint(argv_index_of(argv, "--continue"), ==, -1);
+}
+
+/* Persistence off asks for a fresh session every time. */
+static void
+test_grok_build_argv_continue_needs_persistence(void)
+{
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), FALSE);
+	argv = build_argv_for(client, "SYS", FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--continue"), ==, -1);
+	g_assert_cmpstr(argv_value_after(argv, "--system-prompt-override"),
+	                ==, "SYS");
+}
+
 /* The four levels grok accepts pass straight through. */
 static void
 test_grok_build_argv_effort_levels(void)
@@ -1783,6 +1836,12 @@ main(
 	                test_grok_build_argv_resume);
 	g_test_add_func("/ai-glib/grok-build-client/build-argv/resume-no-persistence",
 	                test_grok_build_argv_resume_no_persistence);
+	g_test_add_func("/ai-glib/grok-build-client/build-argv/continue",
+	                test_grok_build_argv_continue);
+	g_test_add_func("/ai-glib/grok-build-client/build-argv/continue-yields-to-id",
+	                test_grok_build_argv_continue_yields_to_session_id);
+	g_test_add_func("/ai-glib/grok-build-client/build-argv/continue-needs-persistence",
+	                test_grok_build_argv_continue_needs_persistence);
 	g_test_add_func("/ai-glib/grok-build-client/build-argv/effort-levels",
 	                test_grok_build_argv_effort_levels);
 	g_test_add_func("/ai-glib/grok-build-client/build-argv/effort-max-clamped",

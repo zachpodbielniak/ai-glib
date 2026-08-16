@@ -696,6 +696,74 @@ test_cc_argv_fork_session(void)
 	g_assert_cmpint(argv_index_of(argv, "--fork-session"), >, 0);
 }
 
+/*
+ * --continue picks up the most recent conversation in the directory when
+ * there is no id to resume. The system prompt is not re-sent: the
+ * conversation already carries it, same as on a --resume.
+ */
+static void
+test_cc_argv_continue(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                        "SYS", 4096, FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--continue"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--system-prompt"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--resume"), ==, -1);
+
+	g_list_free_full(messages, g_object_unref);
+}
+
+/* An explicit session id names a different conversation, and wins. */
+static void
+test_cc_argv_continue_yields_to_session_id(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "sess-3");
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--resume"), ==, "sess-3");
+	g_assert_cmpint(argv_index_of(argv, "--continue"), ==, -1);
+}
+
+/* claude accepts --fork-session with --continue as well as with --resume. */
+static void
+test_cc_argv_continue_with_fork(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, "fork-session", TRUE, NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--continue"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--fork-session"), >, 0);
+}
+
+/* Persistence off asks for a fresh conversation every time. */
+static void
+test_cc_argv_continue_needs_persistence(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), FALSE);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--continue"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--no-session-persistence"), >, 0);
+}
+
 /* An unconfigured client must still build the command it always did. */
 static void
 test_cc_argv_defaults_unchanged(void)
@@ -794,6 +862,14 @@ main(
 	                test_cc_argv_stream_only_flags);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/fork-session",
 	                test_cc_argv_fork_session);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/continue",
+	                test_cc_argv_continue);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/continue-yields-to-id",
+	                test_cc_argv_continue_yields_to_session_id);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/continue-with-fork",
+	                test_cc_argv_continue_with_fork);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/continue-needs-persistence",
+	                test_cc_argv_continue_needs_persistence);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/defaults-unchanged",
 	                test_cc_argv_defaults_unchanged);
 	g_test_add_func("/ai-glib/claude-code-client/property-round-trip",

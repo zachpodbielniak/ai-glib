@@ -51,6 +51,7 @@ struct _AiGrokBuildClient
     gchar   *rules;
     gboolean disable_web_search;
     gboolean verbatim;
+    gboolean continue_session;
 
     /* Cached summary for the re-prompt fallback when the model produces
      * no text (empty "text" with tool use only). */
@@ -86,6 +87,7 @@ enum
     PROP_RULES,
     PROP_DISABLE_WEB_SEARCH,
     PROP_VERBATIM,
+    PROP_CONTINUE_SESSION,
     N_PROPS
 };
 
@@ -134,6 +136,9 @@ ai_grok_build_client_get_property(
             break;
         case PROP_VERBATIM:
             g_value_set_boolean(value, self->verbatim);
+            break;
+        case PROP_CONTINUE_SESSION:
+            g_value_set_boolean(value, self->continue_session);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -187,6 +192,9 @@ ai_grok_build_client_set_property(
             break;
         case PROP_VERBATIM:
             self->verbatim = g_value_get_boolean(value);
+            break;
+        case PROP_CONTINUE_SESSION:
+            self->continue_session = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -512,6 +520,15 @@ ai_grok_build_client_build_argv(
          */
         g_ptr_array_add(args, g_strdup("--resume"));
         g_ptr_array_add(args, g_strdup(session_id));
+    }
+    else if (persist && self->continue_session)
+    {
+        /*
+         * No id to resume, but the caller asked to pick up where this
+         * directory left off. Like --resume, the session already carries
+         * its system prompt, so it is not re-sent.
+         */
+        g_ptr_array_add(args, g_strdup("--continue"));
     }
     else if (system_prompt != NULL && system_prompt[0] != '\0')
     {
@@ -1318,6 +1335,24 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
                              "Verbatim",
                              "Whether to send the prompt exactly as given",
                              TRUE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiGrokBuildClient:continue-session:
+     *
+     * Whether to pass `--continue`, resuming the most recent session for
+     * the working directory when no #AiCliClient:session-id is known.
+     *
+     * An explicit session id wins: the two name different sessions, and
+     * silently preferring the wrong one is worse than either. Ignored when
+     * #AiCliClient:session-persistence is off, which asks for a fresh
+     * session every time.
+     */
+    properties[PROP_CONTINUE_SESSION] =
+        g_param_spec_boolean("continue-session",
+                             "Continue Session",
+                             "Continue the most recent session (--continue)",
+                             FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);

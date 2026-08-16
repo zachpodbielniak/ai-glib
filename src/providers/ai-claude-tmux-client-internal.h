@@ -73,6 +73,24 @@ ai_claude_tmux_client_build_session_argv(
  * Returns: (transfer full): a NULL-terminated #GPtrArray (free func g_free);
  *   free with g_ptr_array_unref().
  */
+/*
+ * Return the session id of the newest transcript in @cwd's project
+ * folder, or NULL when there is none.
+ *
+ * This is how continue-session is implemented: claude's own --continue
+ * picks the most recent conversation but never says which, and this
+ * client needs the id to find the transcript it reads.
+ *
+ * @project_dir: (nullable): override for ~/.claude/projects.
+ *
+ * Returns: (transfer full) (nullable): the session id, free with g_free().
+ */
+gchar *
+ai_claude_tmux_client_find_latest_session_id(
+    const gchar *project_dir,
+    const gchar *cwd
+);
+
 GPtrArray *
 ai_claude_tmux_client_build_paste_argv(
     const gchar *tmux_bin,
