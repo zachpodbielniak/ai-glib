@@ -40,6 +40,36 @@ struct _AiClaudeCodeClient
     gchar   *disallowed_tools;
     gchar   *additional_directories;
 
+    /*
+     * The rest of what `claude --print` accepts. Each is emitted only when
+     * set, so an unconfigured client builds the same argv it always did.
+     */
+    gchar   *agent;
+    gchar   *agents_json;
+    gchar   *append_system_prompt;
+    gchar   *fallback_model;
+    gchar   *json_schema;
+    gchar   *settings;
+    gchar   *setting_sources;
+    gchar   *tools;
+    gchar   *betas;
+    gchar   *autocompact;
+    gchar   *plugin_dirs;
+    gchar   *plugin_urls;
+    gchar   *debug_filter;
+    gchar   *debug_file;
+    gdouble  max_budget_usd;          /* 0 means "unset" */
+    gboolean strict_mcp_config;
+    gboolean disable_slash_commands;
+    gboolean fork_session;
+    gboolean include_partial_messages;
+    gboolean include_hook_events;
+    gboolean forward_subagent_text;
+    gboolean exclude_dynamic_system_prompt_sections;
+    gboolean debug;
+    gboolean bare;
+    gboolean safe_mode;
+
     /* Cached summary for the re-prompt fallback when the AI
      * produces no text (empty "result" with tool use only). */
     gchar *last_tool_summary;
@@ -70,6 +100,31 @@ enum
     PROP_ALLOWED_TOOLS,
     PROP_DISALLOWED_TOOLS,
     PROP_ADDITIONAL_DIRECTORIES,
+    PROP_AGENT,
+    PROP_AGENTS_JSON,
+    PROP_APPEND_SYSTEM_PROMPT,
+    PROP_FALLBACK_MODEL,
+    PROP_JSON_SCHEMA,
+    PROP_SETTINGS,
+    PROP_SETTING_SOURCES,
+    PROP_TOOLS,
+    PROP_BETAS,
+    PROP_AUTOCOMPACT,
+    PROP_PLUGIN_DIRS,
+    PROP_PLUGIN_URLS,
+    PROP_DEBUG_FILTER,
+    PROP_DEBUG_FILE,
+    PROP_MAX_BUDGET_USD,
+    PROP_STRICT_MCP_CONFIG,
+    PROP_DISABLE_SLASH_COMMANDS,
+    PROP_FORK_SESSION,
+    PROP_INCLUDE_PARTIAL_MESSAGES,
+    PROP_INCLUDE_HOOK_EVENTS,
+    PROP_FORWARD_SUBAGENT_TEXT,
+    PROP_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS,
+    PROP_DEBUG,
+    PROP_BARE,
+    PROP_SAFE_MODE,
     N_PROPS
 };
 
@@ -118,6 +173,82 @@ ai_claude_code_client_get_property(
         case PROP_ADDITIONAL_DIRECTORIES:
             g_value_set_string(value, self->additional_directories);
             break;
+        case PROP_AGENT:
+            g_value_set_string(value, self->agent);
+            break;
+        case PROP_AGENTS_JSON:
+            g_value_set_string(value, self->agents_json);
+            break;
+        case PROP_APPEND_SYSTEM_PROMPT:
+            g_value_set_string(value, self->append_system_prompt);
+            break;
+        case PROP_FALLBACK_MODEL:
+            g_value_set_string(value, self->fallback_model);
+            break;
+        case PROP_JSON_SCHEMA:
+            g_value_set_string(value, self->json_schema);
+            break;
+        case PROP_SETTINGS:
+            g_value_set_string(value, self->settings);
+            break;
+        case PROP_SETTING_SOURCES:
+            g_value_set_string(value, self->setting_sources);
+            break;
+        case PROP_TOOLS:
+            g_value_set_string(value, self->tools);
+            break;
+        case PROP_BETAS:
+            g_value_set_string(value, self->betas);
+            break;
+        case PROP_AUTOCOMPACT:
+            g_value_set_string(value, self->autocompact);
+            break;
+        case PROP_PLUGIN_DIRS:
+            g_value_set_string(value, self->plugin_dirs);
+            break;
+        case PROP_PLUGIN_URLS:
+            g_value_set_string(value, self->plugin_urls);
+            break;
+        case PROP_DEBUG_FILTER:
+            g_value_set_string(value, self->debug_filter);
+            break;
+        case PROP_DEBUG_FILE:
+            g_value_set_string(value, self->debug_file);
+            break;
+        case PROP_MAX_BUDGET_USD:
+            g_value_set_double(value, self->max_budget_usd);
+            break;
+        case PROP_STRICT_MCP_CONFIG:
+            g_value_set_boolean(value, self->strict_mcp_config);
+            break;
+        case PROP_DISABLE_SLASH_COMMANDS:
+            g_value_set_boolean(value, self->disable_slash_commands);
+            break;
+        case PROP_FORK_SESSION:
+            g_value_set_boolean(value, self->fork_session);
+            break;
+        case PROP_INCLUDE_PARTIAL_MESSAGES:
+            g_value_set_boolean(value, self->include_partial_messages);
+            break;
+        case PROP_INCLUDE_HOOK_EVENTS:
+            g_value_set_boolean(value, self->include_hook_events);
+            break;
+        case PROP_FORWARD_SUBAGENT_TEXT:
+            g_value_set_boolean(value, self->forward_subagent_text);
+            break;
+        case PROP_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS:
+            g_value_set_boolean(value,
+                self->exclude_dynamic_system_prompt_sections);
+            break;
+        case PROP_DEBUG:
+            g_value_set_boolean(value, self->debug);
+            break;
+        case PROP_BARE:
+            g_value_set_boolean(value, self->bare);
+            break;
+        case PROP_SAFE_MODE:
+            g_value_set_boolean(value, self->safe_mode);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -157,6 +288,96 @@ ai_claude_code_client_set_property(
         case PROP_ADDITIONAL_DIRECTORIES:
             g_free(self->additional_directories);
             self->additional_directories = g_value_dup_string(value);
+            break;
+        case PROP_AGENT:
+            g_free(self->agent);
+            self->agent = g_value_dup_string(value);
+            break;
+        case PROP_AGENTS_JSON:
+            g_free(self->agents_json);
+            self->agents_json = g_value_dup_string(value);
+            break;
+        case PROP_APPEND_SYSTEM_PROMPT:
+            g_free(self->append_system_prompt);
+            self->append_system_prompt = g_value_dup_string(value);
+            break;
+        case PROP_FALLBACK_MODEL:
+            g_free(self->fallback_model);
+            self->fallback_model = g_value_dup_string(value);
+            break;
+        case PROP_JSON_SCHEMA:
+            g_free(self->json_schema);
+            self->json_schema = g_value_dup_string(value);
+            break;
+        case PROP_SETTINGS:
+            g_free(self->settings);
+            self->settings = g_value_dup_string(value);
+            break;
+        case PROP_SETTING_SOURCES:
+            g_free(self->setting_sources);
+            self->setting_sources = g_value_dup_string(value);
+            break;
+        case PROP_TOOLS:
+            g_free(self->tools);
+            self->tools = g_value_dup_string(value);
+            break;
+        case PROP_BETAS:
+            g_free(self->betas);
+            self->betas = g_value_dup_string(value);
+            break;
+        case PROP_AUTOCOMPACT:
+            g_free(self->autocompact);
+            self->autocompact = g_value_dup_string(value);
+            break;
+        case PROP_PLUGIN_DIRS:
+            g_free(self->plugin_dirs);
+            self->plugin_dirs = g_value_dup_string(value);
+            break;
+        case PROP_PLUGIN_URLS:
+            g_free(self->plugin_urls);
+            self->plugin_urls = g_value_dup_string(value);
+            break;
+        case PROP_DEBUG_FILTER:
+            g_free(self->debug_filter);
+            self->debug_filter = g_value_dup_string(value);
+            break;
+        case PROP_DEBUG_FILE:
+            g_free(self->debug_file);
+            self->debug_file = g_value_dup_string(value);
+            break;
+        case PROP_MAX_BUDGET_USD:
+            self->max_budget_usd = g_value_get_double(value);
+            break;
+        case PROP_STRICT_MCP_CONFIG:
+            self->strict_mcp_config = g_value_get_boolean(value);
+            break;
+        case PROP_DISABLE_SLASH_COMMANDS:
+            self->disable_slash_commands = g_value_get_boolean(value);
+            break;
+        case PROP_FORK_SESSION:
+            self->fork_session = g_value_get_boolean(value);
+            break;
+        case PROP_INCLUDE_PARTIAL_MESSAGES:
+            self->include_partial_messages = g_value_get_boolean(value);
+            break;
+        case PROP_INCLUDE_HOOK_EVENTS:
+            self->include_hook_events = g_value_get_boolean(value);
+            break;
+        case PROP_FORWARD_SUBAGENT_TEXT:
+            self->forward_subagent_text = g_value_get_boolean(value);
+            break;
+        case PROP_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS:
+            self->exclude_dynamic_system_prompt_sections =
+                g_value_get_boolean(value);
+            break;
+        case PROP_DEBUG:
+            self->debug = g_value_get_boolean(value);
+            break;
+        case PROP_BARE:
+            self->bare = g_value_get_boolean(value);
+            break;
+        case PROP_SAFE_MODE:
+            self->safe_mode = g_value_get_boolean(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -264,6 +485,118 @@ emit_permission_args(AiClaudeCodeClient *self, GPtrArray *args)
     emit_list_flag(args, "--allowedTools", self->allowed_tools);
     emit_list_flag(args, "--disallowedTools", self->disallowed_tools);
     emit_list_flag(args, "--add-dir", self->additional_directories);
+    emit_list_flag(args, "--tools", self->tools);
+}
+
+/*
+ * Append a comma-separated value as the flag repeated once per item,
+ * which is the shape --plugin-dir and --plugin-url take (they accumulate
+ * rather than accepting a list).
+ */
+static void
+emit_repeated_flag(GPtrArray *args, const gchar *flag, const gchar *csv)
+{
+    g_auto(GStrv) parts = NULL;
+    gsize i;
+
+    if (csv == NULL || csv[0] == '\0')
+        return;
+
+    parts = g_strsplit(csv, ",", -1);
+
+    for (i = 0; parts[i] != NULL; i++)
+    {
+        g_strstrip(parts[i]);
+        if (parts[i][0] == '\0')
+            continue;
+
+        g_ptr_array_add(args, g_strdup(flag));
+        g_ptr_array_add(args, g_strdup(parts[i]));
+    }
+}
+
+/*
+ * Emit a flag with a value, when the value is set.
+ */
+static void
+emit_value_flag(GPtrArray *args, const gchar *flag, const gchar *value)
+{
+    if (value == NULL || value[0] == '\0')
+        return;
+
+    g_ptr_array_add(args, g_strdup(flag));
+    g_ptr_array_add(args, g_strdup(value));
+}
+
+/*
+ * Emit the session-independent knobs: which agent and tools the session
+ * gets, where its settings and plugins come from, what it may spend, and
+ * the diagnostics.
+ *
+ * Shared with the re-prompt path, so a follow-up runs under the same
+ * settings, budget and plugin set as the turn it is summarising.
+ */
+static void
+emit_session_args(AiClaudeCodeClient *self, GPtrArray *args)
+{
+    emit_value_flag(args, "--agent", self->agent);
+    emit_value_flag(args, "--agents", self->agents_json);
+    emit_value_flag(args, "--append-system-prompt", self->append_system_prompt);
+    emit_value_flag(args, "--fallback-model", self->fallback_model);
+    emit_value_flag(args, "--json-schema", self->json_schema);
+    emit_value_flag(args, "--settings", self->settings);
+    emit_value_flag(args, "--setting-sources", self->setting_sources);
+    emit_value_flag(args, "--autocompact", self->autocompact);
+
+    emit_list_flag(args, "--betas", self->betas);
+    emit_repeated_flag(args, "--plugin-dir", self->plugin_dirs);
+    emit_repeated_flag(args, "--plugin-url", self->plugin_urls);
+
+    if (self->max_budget_usd > 0.0)
+    {
+        /*
+         * Locale-independent: %f would emit a comma for the decimal
+         * separator under a locale that uses one, and claude parses this
+         * as a number.
+         */
+        gchar buf[G_ASCII_DTOSTR_BUF_SIZE];
+
+        g_ascii_dtostr(buf, sizeof buf, self->max_budget_usd);
+        g_ptr_array_add(args, g_strdup("--max-budget-usd"));
+        g_ptr_array_add(args, g_strdup(buf));
+    }
+
+    if (self->strict_mcp_config)
+        g_ptr_array_add(args, g_strdup("--strict-mcp-config"));
+
+    if (self->disable_slash_commands)
+        g_ptr_array_add(args, g_strdup("--disable-slash-commands"));
+
+    if (self->exclude_dynamic_system_prompt_sections)
+        g_ptr_array_add(args,
+            g_strdup("--exclude-dynamic-system-prompt-sections"));
+
+    if (self->bare)
+        g_ptr_array_add(args, g_strdup("--bare"));
+
+    if (self->safe_mode)
+        g_ptr_array_add(args, g_strdup("--safe-mode"));
+
+    /*
+     * --debug takes an optional filter. A filter on its own is enough to
+     * mean "debug with this filter"; the boolean covers the plain case.
+     */
+    if (self->debug_filter != NULL && self->debug_filter[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--debug"));
+        g_ptr_array_add(args, g_strdup(self->debug_filter));
+    }
+    else if (self->debug)
+    {
+        g_ptr_array_add(args, g_strdup("--debug"));
+    }
+
+    emit_value_flag(args, "--debug-file", self->debug_file);
 }
 
 /*
@@ -370,12 +703,29 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup("--output-format"));
         g_ptr_array_add(args, g_strdup("stream-json"));
         g_ptr_array_add(args, g_strdup("--verbose"));
+
+        /*
+         * These three only mean anything with stream-json, and claude
+         * rejects them elsewhere, so they are gated on the format rather
+         * than left to the caller to remember.
+         */
+        if (self->include_partial_messages)
+            g_ptr_array_add(args, g_strdup("--include-partial-messages"));
+
+        if (self->include_hook_events)
+            g_ptr_array_add(args, g_strdup("--include-hook-events"));
+
+        if (self->forward_subagent_text)
+            g_ptr_array_add(args, g_strdup("--forward-subagent-text"));
     }
     else
     {
         g_ptr_array_add(args, g_strdup("--output-format"));
         g_ptr_array_add(args, g_strdup("json"));
     }
+
+    /* Agent, settings, plugins, budget and diagnostics. */
+    emit_session_args(self, args);
 
     /*
      * Model. Omitted in Ollama mode -- there the model is carried solely
@@ -402,6 +752,13 @@ ai_claude_code_client_build_argv(
          */
         g_ptr_array_add(args, g_strdup("--resume"));
         g_ptr_array_add(args, g_strdup(session_id));
+
+        /*
+         * Branch the resumed conversation instead of extending it. Only
+         * valid alongside --resume, which is why it lives here.
+         */
+        if (self->fork_session)
+            g_ptr_array_add(args, g_strdup("--fork-session"));
     }
     else
     {
@@ -793,6 +1150,20 @@ ai_claude_code_client_finalize(GObject *object)
     g_free(self->allowed_tools);
     g_free(self->disallowed_tools);
     g_free(self->additional_directories);
+    g_free(self->agent);
+    g_free(self->agents_json);
+    g_free(self->append_system_prompt);
+    g_free(self->fallback_model);
+    g_free(self->json_schema);
+    g_free(self->settings);
+    g_free(self->setting_sources);
+    g_free(self->tools);
+    g_free(self->betas);
+    g_free(self->autocompact);
+    g_free(self->plugin_dirs);
+    g_free(self->plugin_urls);
+    g_free(self->debug_filter);
+    g_free(self->debug_file);
 
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
@@ -911,6 +1282,346 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
                             "Comma-separated paths for --add-dir",
                             NULL,
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:agent:
+     *
+     * The agent to run as, passed as `--agent`. Overrides the `agent`
+     * setting for this session only.
+     */
+    properties[PROP_AGENT] =
+        g_param_spec_string("agent", "Agent",
+                            "Agent for the session (--agent)", NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:agents-json:
+     *
+     * A JSON object defining custom subagents, passed as `--agents`, e.g.
+     * `{"reviewer": {"description": "Reviews code", "prompt": "..."}}`.
+     */
+    properties[PROP_AGENTS_JSON] =
+        g_param_spec_string("agents-json", "Agents JSON",
+                            "JSON object defining custom agents (--agents)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:append-system-prompt:
+     *
+     * Text appended to the default system prompt, passed as
+     * `--append-system-prompt`.
+     *
+     * Unlike #AiCliClient:system-prompt this adds to the default prompt
+     * rather than replacing it, and it is sent on every turn rather than
+     * only when a session is created.
+     */
+    properties[PROP_APPEND_SYSTEM_PROMPT] =
+        g_param_spec_string("append-system-prompt", "Append System Prompt",
+                            "Text appended to the default system prompt",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:fallback-model:
+     *
+     * Model(s) to fall back to when the primary is overloaded or
+     * unavailable, passed as `--fallback-model`. A comma-separated list is
+     * tried in order. Only meaningful in print mode, which is the only
+     * mode this client uses.
+     */
+    properties[PROP_FALLBACK_MODEL] =
+        g_param_spec_string("fallback-model", "Fallback Model",
+                            "Model(s) to fall back to (--fallback-model)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:json-schema:
+     *
+     * A JSON Schema the reply must validate against, passed as
+     * `--json-schema`. The schema constrains the model's output; the
+     * result still arrives through the usual response text.
+     */
+    properties[PROP_JSON_SCHEMA] =
+        g_param_spec_string("json-schema", "JSON Schema",
+                            "JSON Schema for structured output",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:settings:
+     *
+     * A settings JSON file path or JSON string, passed as `--settings`.
+     */
+    properties[PROP_SETTINGS] =
+        g_param_spec_string("settings", "Settings",
+                            "Settings file path or JSON string (--settings)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:setting-sources:
+     *
+     * Comma-separated setting sources to load (user, project, local),
+     * passed as `--setting-sources`. Use this to stop a run picking up
+     * settings from a repository it does not control.
+     */
+    properties[PROP_SETTING_SOURCES] =
+        g_param_spec_string("setting-sources", "Setting Sources",
+                            "Setting sources to load (--setting-sources)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:tools:
+     *
+     * Comma-separated built-in tool names, passed as `--tools`. This
+     * selects which built-ins exist at all, where
+     * #AiClaudeCodeClient:allowed-tools decides which of the existing ones
+     * may run without approval.
+     */
+    properties[PROP_TOOLS] =
+        g_param_spec_string("tools", "Tools",
+                            "Comma-separated built-in tools (--tools)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:betas:
+     *
+     * Comma-separated beta headers for API requests, passed as `--betas`.
+     * API-key users only.
+     */
+    properties[PROP_BETAS] =
+        g_param_spec_string("betas", "Betas",
+                            "Comma-separated beta headers (--betas)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:autocompact:
+     *
+     * Auto-compact window size, passed as `--autocompact`: "auto", or a
+     * token count between 100k and 1M.
+     *
+     * Compaction is what #AiClaudeCodeClient::context-compacted reports
+     * after the fact; this is the knob that governs when it happens.
+     */
+    properties[PROP_AUTOCOMPACT] =
+        g_param_spec_string("autocompact", "Autocompact",
+                            "Auto-compact window size (--autocompact)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:plugin-dirs:
+     *
+     * Comma-separated plugin directories or .zip paths for this session,
+     * each emitted as its own `--plugin-dir`.
+     */
+    properties[PROP_PLUGIN_DIRS] =
+        g_param_spec_string("plugin-dirs", "Plugin Dirs",
+                            "Comma-separated plugin paths (--plugin-dir)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:plugin-urls:
+     *
+     * Comma-separated plugin .zip URLs for this session, each emitted as
+     * its own `--plugin-url`. These are fetched and run, so point them
+     * only at sources you trust.
+     */
+    properties[PROP_PLUGIN_URLS] =
+        g_param_spec_string("plugin-urls", "Plugin URLs",
+                            "Comma-separated plugin URLs (--plugin-url)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:debug-filter:
+     *
+     * A category filter for `--debug`, e.g. "api,hooks" or "!1p,!file".
+     * Setting this enables debug mode on its own; see
+     * #AiClaudeCodeClient:debug for the unfiltered case.
+     */
+    properties[PROP_DEBUG_FILTER] =
+        g_param_spec_string("debug-filter", "Debug Filter",
+                            "Category filter for --debug",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:debug-file:
+     *
+     * Path for claude's own debug log, passed as `--debug-file`. Setting
+     * it implicitly enables debug mode. The log goes to this file rather
+     * than to stderr, so it does not disturb the parsed output.
+     */
+    properties[PROP_DEBUG_FILE] =
+        g_param_spec_string("debug-file", "Debug File",
+                            "Path for claude's debug log (--debug-file)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:max-budget-usd:
+     *
+     * A ceiling in USD on what this run may spend on API calls, passed as
+     * `--max-budget-usd`. Zero, the default, omits the flag.
+     *
+     * The most direct bound available on an autonomous run: unlike a turn
+     * limit it caps the thing that actually costs money.
+     */
+    properties[PROP_MAX_BUDGET_USD] =
+        g_param_spec_double("max-budget-usd", "Max Budget USD",
+                            "Spend ceiling in USD (--max-budget-usd)",
+                            0.0, G_MAXDOUBLE, 0.0,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:strict-mcp-config:
+     *
+     * Whether to pass `--strict-mcp-config`, using only the servers from
+     * #AiClaudeCodeClient:mcp-config-path and ignoring every other MCP
+     * configuration.
+     *
+     * Without it --mcp-config is additive: the session keeps whatever
+     * servers the workspace's own .mcp.json declares and gains these as
+     * well.
+     */
+    properties[PROP_STRICT_MCP_CONFIG] =
+        g_param_spec_boolean("strict-mcp-config", "Strict MCP Config",
+                             "Use only the servers from --mcp-config",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:disable-slash-commands:
+     *
+     * Whether to pass `--disable-slash-commands`, disabling all skills.
+     */
+    properties[PROP_DISABLE_SLASH_COMMANDS] =
+        g_param_spec_boolean("disable-slash-commands", "Disable Slash Commands",
+                             "Whether to disable all skills",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:fork-session:
+     *
+     * Whether to pass `--fork-session`, branching a resumed conversation
+     * into a new session id instead of extending the original. Only
+     * emitted alongside `--resume`, which is the only place claude accepts
+     * it.
+     */
+    properties[PROP_FORK_SESSION] =
+        g_param_spec_boolean("fork-session", "Fork Session",
+                             "Branch a resumed session (--fork-session)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:include-partial-messages:
+     *
+     * Whether to pass `--include-partial-messages` when streaming, making
+     * claude emit partial chunks as they arrive rather than whole
+     * messages. Ignored for non-streaming calls, where claude rejects it.
+     */
+    properties[PROP_INCLUDE_PARTIAL_MESSAGES] =
+        g_param_spec_boolean("include-partial-messages",
+                             "Include Partial Messages",
+                             "Emit partial chunks while streaming",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:include-hook-events:
+     *
+     * Whether to pass `--include-hook-events` when streaming, adding hook
+     * lifecycle events to the output stream. Ignored for non-streaming
+     * calls.
+     */
+    properties[PROP_INCLUDE_HOOK_EVENTS] =
+        g_param_spec_boolean("include-hook-events", "Include Hook Events",
+                             "Include hook lifecycle events while streaming",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:forward-subagent-text:
+     *
+     * Whether to pass `--forward-subagent-text` when streaming, forwarding
+     * subagent text and thinking as messages with parent_tool_use_id set.
+     * Ignored for non-streaming calls.
+     */
+    properties[PROP_FORWARD_SUBAGENT_TEXT] =
+        g_param_spec_boolean("forward-subagent-text", "Forward Subagent Text",
+                             "Forward subagent output while streaming",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:exclude-dynamic-system-prompt-sections:
+     *
+     * Whether to pass `--exclude-dynamic-system-prompt-sections`, moving
+     * per-machine sections (cwd, env, memory paths, git status) out of the
+     * system prompt and into the first user message.
+     *
+     * Worth setting for a fleet of identical runs: it is what lets them
+     * share a prompt cache rather than each carrying a unique prefix.
+     * Only applies with the default system prompt.
+     */
+    properties[PROP_EXCLUDE_DYNAMIC_SYSTEM_PROMPT_SECTIONS] =
+        g_param_spec_boolean("exclude-dynamic-system-prompt-sections",
+                             "Exclude Dynamic System Prompt Sections",
+                             "Move per-machine sections out of the system prompt",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:debug:
+     *
+     * Whether to pass `--debug`. #AiClaudeCodeClient:debug-filter narrows
+     * it to particular categories and enables it on its own.
+     */
+    properties[PROP_DEBUG] =
+        g_param_spec_boolean("debug", "Debug",
+                             "Whether to enable claude's debug mode",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:bare:
+     *
+     * Whether to pass `--bare`: skip hooks, LSP, plugin sync, auto-memory
+     * and CLAUDE.md discovery, and read Anthropic auth strictly from
+     * ANTHROPIC_API_KEY.
+     *
+     * The most predictable way to run: what the session sees is what this
+     * client passed, not whatever the host machine happens to have
+     * configured.
+     */
+    properties[PROP_BARE] =
+        g_param_spec_boolean("bare", "Bare",
+                             "Skip hooks, plugins and auto-discovery (--bare)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:safe-mode:
+     *
+     * Whether to pass `--safe-mode`, starting with all customizations
+     * (CLAUDE.md, skills, plugins, hooks, MCP servers, commands, agents)
+     * disabled. Auth, model selection, built-in tools and permissions
+     * still work.
+     */
+    properties[PROP_SAFE_MODE] =
+        g_param_spec_boolean("safe-mode", "Safe Mode",
+                             "Start with all customizations disabled",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
@@ -1140,6 +1851,8 @@ attempt_text_retry(
         g_ptr_array_add(rargs,
             g_strdup(model ? model : AI_CLAUDE_CODE_DEFAULT_MODEL));
     }
+    /* Same agent, settings, plugins and budget as the turn being retried. */
+    emit_session_args(client, rargs);
     g_ptr_array_add(rargs, g_strdup("--resume"));
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);

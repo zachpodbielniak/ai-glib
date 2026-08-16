@@ -6,6 +6,8 @@
  */
 
 #include <glib.h>
+#include <locale.h>
+#include <string.h>
 
 #include "providers/ai-claude-code-client.h"
 #include "providers/ai-claude-code-client-internal.h"
@@ -410,6 +412,337 @@ test_claude_code_parse_stream_no_text_block(void)
 }
 
 
+/* ----------------------------------------------------------------
+ * build_argv: the rest of what `claude --print` accepts
+ * ---------------------------------------------------------------- */
+
+static const gchar *
+argv_value_after(gchar **argv, const gchar *needle)
+{
+	gint i = argv_index_of(argv, needle);
+
+	if (i < 0 || argv[i + 1] == NULL)
+		return NULL;
+
+	return argv[i + 1];
+}
+
+/* Build argv for a one-message turn against @client. */
+static gchar **
+build_argv_for(AiClaudeCodeClient *client, gboolean streaming)
+{
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	gchar **argv;
+
+	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                        NULL, 4096, streaming);
+
+	g_list_free_full(messages, g_object_unref);
+	return argv;
+}
+
+static void
+test_cc_argv_agent_and_agents(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "agent", "reviewer",
+	             "agents-json", "{\"r\":{\"description\":\"d\"}}",
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--agent"), ==, "reviewer");
+	g_assert_cmpstr(argv_value_after(argv, "--agents"),
+	                ==, "{\"r\":{\"description\":\"d\"}}");
+}
+
+/*
+ * --append-system-prompt adds to the default prompt, where
+ * AiCliClient:system-prompt replaces it. They are separate flags and must
+ * both be able to appear.
+ */
+static void
+test_cc_argv_append_system_prompt(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "append-system-prompt", "Be terse.", NULL);
+	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                        "You are helpful.", 4096, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--system-prompt"),
+	                ==, "You are helpful.");
+	g_assert_cmpstr(argv_value_after(argv, "--append-system-prompt"),
+	                ==, "Be terse.");
+
+	g_list_free_full(messages, g_object_unref);
+}
+
+static void
+test_cc_argv_fallback_and_schema(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "fallback-model", "haiku,sonnet",
+	             "json-schema", "{\"type\":\"object\"}",
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--fallback-model"),
+	                ==, "haiku,sonnet");
+	g_assert_cmpstr(argv_value_after(argv, "--json-schema"),
+	                ==, "{\"type\":\"object\"}");
+}
+
+/*
+ * The budget must be spelled with a dot regardless of locale: claude
+ * parses it as a number, and a locale that formats 1.25 as "1,25" would
+ * produce a flag it rejects.
+ */
+static void
+test_cc_argv_max_budget_locale_independent(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+	const gchar *value;
+
+	/* Best-effort: if the locale is unavailable the C locale still
+	 * exercises the formatting path. */
+	setlocale(LC_NUMERIC, "de_DE.UTF-8");
+
+	g_object_set(client, "max-budget-usd", 1.25, NULL);
+	argv = build_argv_for(client, FALSE);
+
+	value = argv_value_after(argv, "--max-budget-usd");
+	g_assert_nonnull(value);
+	g_assert_nonnull(strchr(value, '.'));
+	g_assert_null(strchr(value, ','));
+
+	setlocale(LC_NUMERIC, "C");
+}
+
+/* Zero means "no ceiling", not "--max-budget-usd 0". */
+static void
+test_cc_argv_max_budget_zero(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--max-budget-usd"), ==, -1);
+}
+
+static void
+test_cc_argv_settings_and_sources(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "settings", "/etc/claude/settings.json",
+	             "setting-sources", "user,project",
+	             "strict-mcp-config", TRUE,
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpstr(argv_value_after(argv, "--settings"),
+	                ==, "/etc/claude/settings.json");
+	g_assert_cmpstr(argv_value_after(argv, "--setting-sources"),
+	                ==, "user,project");
+	g_assert_cmpint(argv_index_of(argv, "--strict-mcp-config"), >, 0);
+}
+
+/* --tools and --betas take each item as its own argv word. */
+static void
+test_cc_argv_tools_and_betas(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+	gint ti;
+
+	g_object_set(client,
+	             "tools", "Bash,Edit,Read",
+	             "betas", "beta-one,beta-two",
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	ti = argv_index_of(argv, "--tools");
+	g_assert_cmpint(ti, >, 0);
+	g_assert_cmpstr(argv[ti + 1], ==, "Bash");
+	g_assert_cmpstr(argv[ti + 2], ==, "Edit");
+	g_assert_cmpstr(argv[ti + 3], ==, "Read");
+	g_assert_cmpint(argv_count(argv, "--tools"), ==, 1);
+
+	g_assert_cmpint(argv_index_of(argv, "beta-one"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "beta-two"), >, 0);
+}
+
+/* Plugins accumulate: one flag per path rather than one list. */
+static void
+test_cc_argv_plugins(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "plugin-dirs", "/opt/a, /opt/b",
+	             "plugin-urls", "https://example.invalid/p.zip",
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpint(argv_count(argv, "--plugin-dir"), ==, 2);
+	g_assert_cmpint(argv_index_of(argv, "/opt/a"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "/opt/b"), >, 0);
+	g_assert_cmpint(argv_count(argv, "--plugin-url"), ==, 1);
+}
+
+static void
+test_cc_argv_isolation_switches(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "bare", TRUE,
+	             "safe-mode", TRUE,
+	             "disable-slash-commands", TRUE,
+	             "exclude-dynamic-system-prompt-sections", TRUE,
+	             "autocompact", "auto",
+	             NULL);
+	argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpint(argv_index_of(argv, "--bare"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--safe-mode"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--disable-slash-commands"), >, 0);
+	g_assert_cmpint(argv_index_of(argv,
+	                "--exclude-dynamic-system-prompt-sections"), >, 0);
+	g_assert_cmpstr(argv_value_after(argv, "--autocompact"), ==, "auto");
+}
+
+/* --debug takes an optional filter; a filter alone is enough to enable it. */
+static void
+test_cc_argv_debug(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "debug", TRUE, NULL);
+	argv = build_argv_for(client, FALSE);
+	g_assert_cmpint(argv_index_of(argv, "--debug"), >, 0);
+	/* No filter, so --debug must not swallow the next flag's value. */
+	g_assert_cmpint(argv_index_of(argv, "--model"), >, 0);
+	g_strfreev(g_steal_pointer(&argv));
+
+	g_object_set(client, "debug-filter", "api,hooks",
+	                     "debug-file", "/tmp/claude.log", NULL);
+	argv = build_argv_for(client, FALSE);
+	g_assert_cmpstr(argv_value_after(argv, "--debug"), ==, "api,hooks");
+	g_assert_cmpstr(argv_value_after(argv, "--debug-file"),
+	                ==, "/tmp/claude.log");
+}
+
+/*
+ * These three are only valid with stream-json, and claude rejects them
+ * elsewhere, so they are gated on the output format rather than left to
+ * the caller.
+ */
+static void
+test_cc_argv_stream_only_flags(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "include-partial-messages", TRUE,
+	             "include-hook-events", TRUE,
+	             "forward-subagent-text", TRUE,
+	             NULL);
+
+	argv = build_argv_for(client, FALSE);
+	g_assert_cmpint(argv_index_of(argv, "--include-partial-messages"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--include-hook-events"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--forward-subagent-text"), ==, -1);
+	g_strfreev(g_steal_pointer(&argv));
+
+	argv = build_argv_for(client, TRUE);
+	g_assert_cmpint(argv_index_of(argv, "--include-partial-messages"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--include-hook-events"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--forward-subagent-text"), >, 0);
+}
+
+/* --fork-session is only accepted alongside --resume. */
+static void
+test_cc_argv_fork_session(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "fork-session", TRUE, NULL);
+
+	argv = build_argv_for(client, FALSE);
+	g_assert_cmpint(argv_index_of(argv, "--fork-session"), ==, -1);
+	g_strfreev(g_steal_pointer(&argv));
+
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "sess-1");
+	argv = build_argv_for(client, FALSE);
+	g_assert_cmpint(argv_index_of(argv, "--resume"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--fork-session"), >, 0);
+}
+
+/* An unconfigured client must still build the command it always did. */
+static void
+test_cc_argv_defaults_unchanged(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_auto(GStrv) argv = build_argv_for(client, FALSE);
+
+	g_assert_cmpstr(argv[0], ==, "claude");
+	g_assert_cmpstr(argv[1], ==, "--print");
+	g_assert_cmpstr(argv_value_after(argv, "--output-format"), ==, "json");
+	g_assert_cmpstr(argv_value_after(argv, "--model"), ==, "sonnet");
+	/* Nothing new leaks into the default command line. */
+	g_assert_cmpint(argv_index_of(argv, "--agent"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--bare"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--tools"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--debug"), ==, -1);
+}
+
+static void
+test_cc_property_round_trip(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autofree gchar *agent = NULL;
+	g_autofree gchar *tools = NULL;
+	gdouble budget = 0.0;
+	gboolean bare = FALSE;
+
+	g_object_set(client,
+	             "agent", "reviewer",
+	             "tools", "Bash",
+	             "max-budget-usd", 2.5,
+	             "bare", TRUE,
+	             NULL);
+
+	g_object_get(client,
+	             "agent", &agent,
+	             "tools", &tools,
+	             "max-budget-usd", &budget,
+	             "bare", &bare,
+	             NULL);
+
+	g_assert_cmpstr(agent, ==, "reviewer");
+	g_assert_cmpstr(tools, ==, "Bash");
+	g_assert_cmpfloat(budget, ==, 2.5);
+	g_assert_true(bare);
+}
+
 int
 main(
 	int   argc,
@@ -436,6 +769,35 @@ main(
 	                test_claude_code_build_argv_ollama_streaming);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv-ollama-skip-system",
 	                test_claude_code_build_argv_ollama_skip_and_system);
+
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/agent-and-agents",
+	                test_cc_argv_agent_and_agents);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/append-system-prompt",
+	                test_cc_argv_append_system_prompt);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/fallback-and-schema",
+	                test_cc_argv_fallback_and_schema);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/max-budget-locale",
+	                test_cc_argv_max_budget_locale_independent);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/max-budget-zero",
+	                test_cc_argv_max_budget_zero);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/settings",
+	                test_cc_argv_settings_and_sources);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/tools-and-betas",
+	                test_cc_argv_tools_and_betas);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/plugins",
+	                test_cc_argv_plugins);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/isolation-switches",
+	                test_cc_argv_isolation_switches);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/debug",
+	                test_cc_argv_debug);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/stream-only-flags",
+	                test_cc_argv_stream_only_flags);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/fork-session",
+	                test_cc_argv_fork_session);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/defaults-unchanged",
+	                test_cc_argv_defaults_unchanged);
+	g_test_add_func("/ai-glib/claude-code-client/property-round-trip",
+	                test_cc_property_round_trip);
 
 	g_test_add_func("/ai-glib/claude-code-client/parse-stream-content-blocks",
 	                test_claude_code_parse_stream_content_blocks);
