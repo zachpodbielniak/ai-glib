@@ -1,0 +1,81 @@
+* AiLocalWorker
+The =AiAgentWorker= that runs an agent in this process.
+
+Each run is one =ai_tool_executor_run_async()= against the agent's own
+executor and its own provider, on the thread-default =GMainContext=.
+Nothing blocks: an agent started here is a set of callbacks the main loop
+will get round to, which is what makes "in the background" mean anything
+in a single-threaded GLib program.
+
+#+begin_src C
+g_autoptr(AiLocalWorker) worker = ai_local_worker_new ();
+
+ai_brigade_set_worker (brigade, AI_AGENT_WORKER (worker));
+#+end_src
+
+One worker serves any number of agents; it keeps per-run state keyed by
+agent id, because =cancel= and =read_output= arrive later with nothing
+but the agent and have to find the run again.
+
+** The agent brings its own provider
+This is the point of the design rather than an implementation detail.
+The worker never consults whoever asked for the run, so a conversation
+held with one model can start an agent on another --- an HTTP turn
+delegating to a =claude-code= subprocess, say.
+
+#+begin_src C
+g_autoptr(GObject) other = ai_provider_factory_new_from_string (
+    "claude-code", NULL, &error);
+
+ai_agent_set_provider (agent, AI_PROVIDER (other));
+#+end_src
+
+Likewise the *executor*: whatever is installed with
+=ai_agent_set_executor()= is what runs, which is how an agent file's
+=tools:= allowlist is enforced structurally. An agent built without
+=bash= has no =bash= to call.
+
+** State is pushed, not polled
+The worker moves the agent through =AI_AGENT_STATE_RUNNING= to a
+terminal state, and =AiAgent::state-changed= announces it. =poll_state=
+is therefore =NULL= and =ai_brigade_sweep()= skips this worker entirely
+--- =ai_agent_worker_can_poll()= returns =FALSE=.
+
+A worker that spawned detached processes would be the other shape: it
+cannot push, so it implements =poll_state= and gets swept. That
+asymmetry is why =AiAgentWorker= is an interface rather than an enum.
+
+** Outcomes
+| Result                | State                        |
+|-----------------------+------------------------------|
+| the run answered      | =AI_AGENT_STATE_DONE=        |
+| the provider failed   | =AI_AGENT_STATE_FAILED=      |
+| somebody cancelled it | =AI_AGENT_STATE_CANCELLED=   |
+| no provider was set   | =AI_AGENT_STATE_FAILED=      |
+
+*A cancelled run is not a failed one.* The distinction reaches the
+status listing, and somebody deciding whether to retry needs to know
+which happened. A late failure arriving after a cancellation does not
+rewrite the outcome.
+
+Whatever the run managed to say before it stopped is kept as the agent's
+result: a half-finished answer is worth more than an empty one.
+
+** Reading a run in progress
+#+begin_src C
+gchar *text = ai_agent_worker_read_output (worker, agent, NULL);
+#+end_src
+
+Text deltas are accumulated as they arrive, so this shows a partial
+answer while the run is still going --- most of what "check on a
+background agent" means. The finished result wins over the partial one,
+which matters because a non-streaming provider produces no deltas at all
+and the result is then the only thing there is.
+
+Usage events are charged to the agent's budget, which is also the
+brigade's, so a ceiling is enforced against what was actually spent
+rather than against an estimate kept in parallel.
+
+** See also
+- [[file:ai-brigade.org][AiBrigade]] --- what dispatches to this
+- [[file:../agents.org][Agent orchestration]]

@@ -1,0 +1,104 @@
+* background-agents --- work that outlives the turn
+=examples/background-agents.c= starts three agents against
+=AiMockProvider=, watches them through a concurrency limit, cancels one,
+and collects the rest.
+
+No network, no API key, no bill. The arrangement is easier to understand
+as forty lines that run than as four pages that do not, and the Emacs
+side will do exactly this: build a brigade, connect two signals, and read
+state out of =AiAgent=.
+
+#+begin_src bash
+make examples
+#+end_src
+
+#+begin_src bash
+./build/release/examples/background-agents
+#+end_src
+
+#+begin_example
+  Starting three agents, at most two at a time:
+
+    reviewer-1   starting   read the diff
+    reviewer-1   running    read the diff
+    auditor-1    starting   check the search code
+    auditor-1    running    check the search code
+    loiterer-1   queued     take far too long
+
+  2 live, queued is waiting for a slot.
+
+    reviewer-1   done       read the diff
+    loiterer-1   starting   take far too long
+    loiterer-1   running    take far too long
+    auditor-1    done       check the search code
+    loiterer-1   cancelled  take far too long
+
+  Results:
+
+    reviewer-1   Looks fine.
+    auditor-1    Two issues.
+    loiterer-1   agent 'loiterer-1' cancelled and produced no output
+
+  0 agents left registered.
+#+end_example
+
+** What the output shows
+*The third agent queued rather than failing.* =max-concurrent= is 2, so
+=loiterer-1= waited. Nothing is dropped for want of a slot, and when
+=reviewer-1= finished the queue was pumped in arrival order.
+
+*A cancelled agent is =cancelled=, not =failed=.* Somebody deciding
+whether to retry needs to know which happened, so the distinction
+survives all the way to the listing.
+
+*Reaping empties the brigade.* Collecting an answer is what ends an
+agent's life; a session that never reaped would accumulate every agent
+it had ever run. A cancelled agent still reaps --- "what happened to it"
+is exactly what was asked.
+
+** The parts
+#+begin_src C
+g_autoptr(AiBrigade)     brigade = ai_brigade_new ();
+g_autoptr(AiLocalWorker) worker  = ai_local_worker_new ();
+
+ai_brigade_set_worker (brigade, AI_AGENT_WORKER (worker));
+ai_brigade_set_max_concurrent (brigade, 2);
+#+end_src
+
+A brigade tracks; a worker runs. =AiLocalWorker= runs agents in this
+process, asynchronously, on the thread-default main context --- so three
+concurrent agents are three sets of pending callbacks on one thread, not
+three threads.
+
+#+begin_src C
+g_signal_connect (brigade, "agent-state-changed",
+                  G_CALLBACK (on_state_changed), &demo);
+g_signal_connect (brigade, "agent-finished",
+                  G_CALLBACK (on_agent_finished), &demo);
+#+end_src
+
+A frontend draws from exactly these. Neither waits for a model turn: the
+person watching should not have to send a message to find out that the
+thing they started has finished.
+
+** Swapping in a real provider
+The example uses mocks so it runs anywhere. One line changes that, and
+it is the same line that makes an agent run on a model the conversation
+is not using:
+
+#+begin_src C
+g_autoptr(GObject) real = ai_provider_factory_new_from_string (
+    "claude-code", NULL, &error);
+
+ai_agent_set_provider (agent, AI_PROVIDER (real));
+#+end_src
+
+Nothing ties an agent to whoever asked for it, which is the whole point.
+
+** Watching a model do it
+#+begin_src bash
+ai-tui -p claude --local-tools
+#+end_src
+
+Then ask it to spawn some. =/running= lists them, =/kill= stops one. See
+[[file:../agents.org::*Background agents][background agents]].

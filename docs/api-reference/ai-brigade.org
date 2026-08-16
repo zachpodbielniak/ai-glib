@@ -1,0 +1,112 @@
+* AiBrigade
+Tracks a set of agents, caps how many run at once, shares a budget
+across them, and remembers which have finished until somebody asks.
+
+A brigade does not know how to run anything. It hands each agent to an
+=AiAgentWorker=, which decides whether that means a set of callbacks in
+this process, a subprocess, or a job on another machine. See
+[[file:ai-local-worker.org][AiLocalWorker]] for the one the library
+ships.
+
+** Construction
+#+begin_src C
+g_autoptr(AiBrigade)     brigade = ai_brigade_new ();
+g_autoptr(AiLocalWorker) worker  = ai_local_worker_new ();
+
+ai_brigade_set_worker (brigade, AI_AGENT_WORKER (worker));
+ai_brigade_set_max_concurrent (brigade, 4);
+#+end_src
+
+Without a worker, =ai_brigade_start()= fails with a =GError= saying so.
+Membership, listing and budgets all work regardless --- a brigade
+restored from an =AiAgentStore= at startup is useful before anything is
+running.
+
+** Running
+#+begin_src C
+gboolean ai_brigade_start (AiBrigade *self, AiAgent *agent,
+                           const gchar *prompt, GError **error);
+#+end_src
+
+Returns as soon as the agent is *admitted*, not when it finishes. That
+is what "background" means here: the outcome arrives later through
+=AiBrigade::agent-finished=, or is found by asking, and the caller
+carries on meanwhile.
+
+An agent beyond =max-concurrent= is =AI_AGENT_STATE_QUEUED= and is
+dispatched, in arrival order, when a slot frees. *Nothing is dropped for
+want of a slot.* An agent cancelled while queued is never dispatched: a
+queue entry is an intention, not a commitment, and starting work
+somebody explicitly stopped would make a kill look like a delay.
+
+=ai_brigade_start()= registers the agent if it is not already present,
+so a caller need not =ai_brigade_add()= first. A colliding id is an
+error rather than a silent replacement.
+
+** Collecting
+#+begin_src C
+gchar *ai_brigade_take_finished (AiBrigade *self);           /* an id, or NULL */
+gchar *ai_brigade_reap (AiBrigade *self, const gchar *id, GError **error);
+#+end_src
+
+These do different jobs and it is worth being clear which.
+
+=ai_brigade_take_finished()= reports *news*: one id per call, oldest
+first, each exactly once, and the agent stays registered. It exists
+because the thing that most wants to know an agent finished --- a
+conversation, between turns --- is not listening at the moment it
+happens. =AiToolExecutor= drains this before every turn; see
+[[file:../agents.org::*How it is told][how it is told]].
+
+=ai_brigade_reap()= collects the *answer* and forgets the agent. It
+refuses one that is still live rather than waiting, because a call that
+blocks there has stopped being a caller and become the run. Check
+=ai_agent_get_state()= first, or wait for =::agent-finished=. A failed
+run still reaps, with its error message as the output.
+
+Removing an agent takes its pending notification with it: announcing the
+finish of something nobody can look up would be worse than silence.
+
+** Ids
+#+begin_src C
+gchar *ai_brigade_generate_id (AiBrigade *self, const gchar *prefix);
+#+end_src
+
+Short and readable --- =agent-1=, =reviewer-2= --- because they are
+typed back at a tool and read in a status listing. A UUID would be
+correct and useless. Never collides with an id already registered.
+
+** Signals
+| Signal                 | Arguments               | When                                |
+|------------------------+-------------------------+-------------------------------------|
+| =agent-state-changed=  | =(id, AiAgentState)=    | any transition                      |
+| =agent-finished=       | =(id, AiAgentState)=    | a terminal transition, once         |
+| =budget-exceeded=      | =(reason)=              | a shared ceiling was reached        |
+| =idle=                 | ---                     | the last live agent finished        |
+
+=idle= fires *after* the queue has been given a chance to start
+something, so a queued agent taking the freed slot means the brigade was
+never idle --- which is the truth.
+
+** Budgets
+Both levels are enforced. An agent's own budget catches one runaway; the
+brigade's shared budget catches fifty well-behaved agents that add up to
+too much. Neither subsumes the other, and the brigade's is charged from
+each agent's own accounting so the two cannot disagree about what was
+spent.
+
+** Sweeping
+#+begin_src C
+guint ai_brigade_sweep (AiBrigade *self);
+#+end_src
+
+For workers that cannot push. A detached, double-forked process is
+reparented to init, so no =SIGCHLD= reaches this program and nothing
+announces that it finished. Harmless with a worker that pushes ---
+=ai_agent_worker_can_poll()= is checked first and it simply finds
+nothing.
+
+** See also
+- [[file:../agents.org][Agent orchestration]] --- the whole arrangement
+- [[file:ai-local-worker.org][AiLocalWorker]] --- running agents in this process
+- [[file:ai-conversation.org][AiConversation]] --- =enable_background_agents()=

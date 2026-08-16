@@ -1,8 +1,8 @@
 * The built-in tools
-=ai_tool_executor_new()= hands the model ten tools; two more appear when
-a search provider or a resource registry is configured. This page is one
-section per tool: what it takes, what it returns, how it fails, and the
-one thing about it that is easy to get wrong.
+=ai_tool_executor_new()= hands the model ten tools; the rest appear when
+a search provider, a resource registry or a brigade is configured. This
+page is one section per tool: what it takes, what it returns, how it
+fails, and the one thing about it that is easy to get wrong.
 
 The loop that calls them is described in
 [[file:tool-executor.org][the tool executor]]. Approval is documented
@@ -23,6 +23,11 @@ there too, and applies to everything here.
 | =web_search=  | search   | with a search provider             |
 | =task=        | task     | with a resource registry           |
 | =skill=       | task     | with a resource registry           |
+| =agent_spawn=  | agent   | with a brigade                     |
+| =agent_status= | agent   | with a brigade                     |
+| =agent_result= | agent   | with a brigade                     |
+| =agent_wait=   | agent   | with a brigade                     |
+| =agent_cancel= | agent   | with a brigade                     |
 
 =ai_tool_executor_new_empty()= starts with none of them, which is what an
 application that wants the model confined to its own tools uses.
@@ -248,6 +253,107 @@ An unknown name lists the skills that do exist --- which turns a dead end
 into a next step, and is the reason the executor loop propagates a tool's
 own =GError= text into the tool result rather than substituting a generic
 one.
+
+** agent_spawn
+| Parameter      | Type   | Required |
+|----------------+--------+----------|
+| =prompt=       | string | yes      |
+| =description=  | string | no       |
+| =agent=        | string | no       |
+| =provider=     | string | no       |
+| =model=        | string | no       |
+
+Starts an agent working in the background and returns its id
+immediately. Appears when the executor has an =AiBrigade= and
+=AI_TOOL_FEATURE_BACKGROUND= is set; see
+[[file:agents.org::*Background agents][background agents]] for the whole
+arrangement.
+
+With =agent=, the named agent file supplies the system prompt and its
+=tools:= list confines the child executor, exactly as =task= does.
+Without one, the agent is general-purpose.
+
+=provider= and =model= go through the same factory =ai -p= uses, so an
+agent can run on a model the conversation is not using. Omitted, it
+inherits the conversation's provider. An unknown provider is an error,
+and naming a model without a provider is refused --- both would
+otherwise run the agent on something other than what was asked for.
+
+=description= is what the status listing shows; without one the prompt
+stands in, because a row reading =agent-1 running 0:42= and nothing else
+tells nobody anything.
+
+*** A spawned agent cannot spawn
+The child's executor is built without the group. One level of fan-out is
+delegation; agents spawning agents with nobody watching is a fork bomb
+that bills.
+
+** agent_status
+| Parameter   | Type   | Required |
+|-------------+--------+----------|
+| =agent_id=  | string | no       |
+
+State, elapsed seconds, turns and tokens for one agent, or all of them.
+Includes a *peek* --- the first line of what the agent has produced so
+far --- because the point of asking is to decide whether to keep
+waiting, and one agent's half-written answer in full would crowd out
+every other row.
+
+An unknown id lists the ones that exist.
+
+** agent_result
+| Parameter   | Type   | Required |
+|-------------+--------+----------|
+| =agent_id=  | string | yes      |
+
+Collects a finished agent's answer *and reaps it*: the record is
+dropped, so later listings do not grow without bound.
+
+Refuses an agent that is still running rather than waiting for it. A
+call that blocked here would have stopped being a caller and become the
+run; =agent_wait= is the tool that waits on purpose.
+
+A run that *failed* still reaps, with its error message as the output.
+"What happened to it" is exactly what was asked.
+
+** agent_wait
+| Parameter          | Type    | Required | Default |
+|--------------------+---------+----------+---------|
+| =agent_id=         | string  | no       | any     |
+| =timeout_seconds=  | integer | no       | 600     |
+
+Blocks until an agent finishes, then returns its answer and reaps it.
+Without an id it waits for whichever finishes first --- including one
+that finished a moment ago, since the answer is sitting right there.
+
+Capped at =AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS=. A tool that waits
+forever is a hung program with extra steps: the main loop keeps turning,
+but the conversation never gets another turn and the person in front of
+it has no way to know why.
+
+*** A timeout is not a failure
+It returns "still running", and the agent keeps going. Stopping work
+because somebody gave up on waiting for it would be the wrong reading of
+a timeout, and an error the model has to interpret is worse than a
+sentence it can act on.
+
+*** The nested loop
+The wait runs a =GMainLoop= on =g_main_context_get_thread_default()=, not
+the global default. A synchronous caller may already be driving a private
+context --- =ai_tool_executor_run()= does exactly that --- and a loop
+attached to the global default would never dispatch what it is waiting
+on. Same hazard as an approval handler that asks a human.
+
+** agent_cancel
+| Parameter   | Type   | Required |
+|-------------+--------+----------|
+| =agent_id=  | string | yes      |
+
+Stops one agent, or every running one with ="all"=. Whatever it had
+already done stands, and is still available through =agent_result=.
+
+Cancelling something that has already finished is *not* an error: the
+caller wanted it stopped, and it is.
 
 ** Adding a tool
 1. Write the function, matching the =ToolFn= signature in

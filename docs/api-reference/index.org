@@ -37,6 +37,17 @@ Complete API documentation for ai-glib.
 | [[file:ai-completion.org][AiCompletionContext]]            | Completing =/= and =@= at a cursor              |
 | [[file:ai-todo.org][AiTodo]]                               | One item on an agent's todo list                |
 
+** Agent Layer
+Running work that outlives the turn it was asked in. See
+[[file:../agents.org][Agent orchestration]] for the arrangement as a
+whole.
+
+| Class                                            | Description                                       |
+|--------------------------------------------------+---------------------------------------------------|
+| [[file:ai-agent.org][AiAgent]]                    | One run: provider, executor, budget, state        |
+| [[file:ai-brigade.org][AiBrigade]]                | Tracks them, caps concurrency, remembers finishes |
+| [[file:ai-local-worker.org][AiLocalWorker]]       | Runs an agent in this process                     |
+
 ** View Layer
 A UI-agnostic model of a conversation: what an ncurses harness and an Emacs
 buffer both render. See [[file:../transcript.org][The transcript]] for the

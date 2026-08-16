@@ -31,6 +31,165 @@ And four interfaces:
 | =AiAgentStore=       | where records survive a restart                   |
 | =AiAgentIsolation=   | where it is allowed to make a mess                |
 
+=AiLocalWorker= is the one implementation the library ships: it runs an
+agent in this process, asynchronously, against the agent's own provider.
+That is enough for a terminal frontend or an editor, and it is what
+=ai-tui= uses.
+
+* Background agents
+
+The short version: a conversation can start work that outlives the turn
+it was asked in, on any provider and any model, and is told when it
+finishes.
+
+** Turning it on
+
+Nothing here happens unless the embedding application asks for it. The
+library never creates a brigade of its own, because a model able to start
+unattended, billable runs is a grant an embedder should make deliberately
+--- the same reasoning behind =ai_tool_executor_new_empty()=.
+
+One call does it:
+
+#+begin_src C
+ai_conversation_enable_background_agents (conversation, /* max */ 4);
+#+end_src
+
+That builds an =AiBrigade= with an =AiLocalWorker=, installs it, and with
+it five tools appear on the executor. Assembling the brigade yourself ---
+to give it a store, a price table, or a worker that spawns detached
+processes --- and calling =ai_conversation_set_brigade()= does the same
+job.
+
+To take it away again, pass =NULL=. To keep a brigade for the
+application's own purposes while denying the model access to it, clear
+the feature bit instead:
+
+#+begin_src C
+ai_tool_executor_set_features (executor,
+                               ai_tool_executor_get_features (executor) &
+                                   ~AI_TOOL_FEATURE_BACKGROUND);
+#+end_src
+
+=AiToolFeatures= has two bits, both set by default:
+
+| Bit                          | Tools                                              | Also needs         |
+|------------------------------+----------------------------------------------------+--------------------|
+| =AI_TOOL_FEATURE_SUBAGENTS=    | =task=, =skill=                                        | a resource registry |
+| =AI_TOOL_FEATURE_BACKGROUND=   | =agent_spawn=, =agent_status=, =agent_result=, =agent_wait=, =agent_cancel= | a brigade          |
+
+A bit decides whether a group *may* appear; the thing it runs on decides
+whether it does. So an application that sets up neither is unaffected by
+any of this, and =tests/test-tool-executor.c= asserts exactly that.
+
+=ai-tui= enables background agents by default, being the reference
+frontend; =--no-agents= turns them off.
+
+** Any provider, any model
+
+An agent runs on its own provider. Nothing about it is tied to the
+provider of whoever asked for it, which is what makes this work:
+
+#+begin_example
+> spawn an agent on claude-code/sonnet to audit the search backends
+#+end_example
+
+...in a conversation being held with Grok over HTTP. The =provider= and
+=model= parameters go through =ai_provider_factory_new_from_string()=,
+the same path =ai -p= and =ai-tui -p= take, so every provider name that
+works there works here. Omit them and the agent inherits the
+conversation's provider.
+
+An unrecognised provider name is an error, not a redirection ---
+=ai_provider_type_from_string()= answers =claude= for anything it does
+not know, and an agent quietly running on the wrong model is worse than
+a message the model can act on. Naming a model without a provider is
+refused for the same reason.
+
+** How it is told
+
+A model exists only between turns, so a turn boundary is the only moment
+it can be told anything. The brigade holds each finish until somebody
+collects it, and =AiToolExecutor='s run loop collects before every turn
+and appends a note:
+
+#+begin_example
+Background agent 'reviewer-1' done: audit the search backends
+
+Collect an answer with agent_result, or carry on if it is no longer
+relevant.
+#+end_example
+
+Two consequences worth knowing:
+
+- *Each finish is reported exactly once.* Draining is destructive, so a
+  long conversation does not accumulate the same notice.
+- *A final answer is not final while there is news.* If an agent
+  finishes while the model is composing what would have been the last
+  word, the note is appended and the turn continues. Bounded by the same
+  turn limit as everything else.
+
+The note carries *that* an agent finished, never *what it said*. Pasting
+a subagent's whole answer into a conversation that has not asked for it
+is how delegating a task ends up costing more context than doing it
+inline; =agent_result= fetches it when the model decides it wants it.
+
+A frontend does not wait for a turn. =AiConversation::agent-finished=
+fires immediately, and =AiViewAgentBlock= --- a panel that updates in
+place, like the todo list --- tracks what is running.
+
+** Checking, killing, reaping
+
+| Tool           | Does                                                     |
+|----------------+----------------------------------------------------------|
+| =agent_spawn=    | starts one and returns its id straight away              |
+| =agent_status=   | state, elapsed, turns, tokens, and a peek at the output  |
+| =agent_result=   | collects a finished agent's answer and forgets it        |
+| =agent_wait=     | blocks until one finishes, with a timeout                |
+| =agent_cancel=   | stops one, or =all=                                        |
+
+=agent_status= shows a *peek* --- the first line of what an agent has
+written so far --- rather than the whole thing, because the point of
+asking is to decide whether to keep waiting, and one agent's half-written
+answer in full would crowd out every other row.
+
+=agent_result= reaps: collecting the answer is what ends an agent's life,
+so later listings do not grow forever. It refuses an agent that is still
+running rather than waiting, because a call that blocks there has stopped
+being a caller and become the run.
+
+=agent_wait= is the deliberate block. It waits for a named agent or for
+whichever finishes first, up to
+=AI_TOOL_EXECUTOR_AGENT_WAIT_MAX_SECONDS= (600). A timeout is *not* an
+error: the agent is still working, and the agent is certainly not
+stopped by somebody giving up on waiting for it.
+
+A cancelled agent is =cancelled=, not =failed=. Somebody deciding
+whether to retry needs to know which happened, so the distinction
+survives all the way to the status listing.
+
+** Limits that are load-bearing
+
+- *A background agent may not spawn background agents.* Its executor is
+  built without the group. One level of fan-out is delegation; agents
+  spawning agents unattended is a fork bomb that bills.
+- *Concurrency queues, it does not drop.* Agents beyond
+  =max-concurrent= sit in =AI_AGENT_STATE_QUEUED= and are dispatched in
+  arrival order as slots free. An agent cancelled while queued is never
+  dispatched --- a queue entry is an intention, not a commitment.
+- */clear empties the panel and leaves the agents running.* Clearing a
+  transcript is an instruction about the display; killing an hour of
+  work because somebody wanted a clean screen would be a surprise.
+  =ai_brigade_cancel_all()= is how you stop them.
+
+** From the terminal
+
+: /running        what the background agents are doing
+: /kill <id|all>  stop one, or all of them
+
+=/agents= is a different thing: it lists the agent *definitions* found on
+disk. =/running= is the ones actually running.
+
 * Concurrency
 
 The reason the async executor API exists.

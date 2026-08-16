@@ -670,8 +670,17 @@ the child executor is *built* without the tools an agent did not declare,
 so calling one is not refused, it is unrepresentable. Without it the
 global dispatch table would have made the allowlist decoration.
 
-`task` and `skill` appear only when `resource-registry` is set, so an
-executor without one offers exactly what it always did.
+`task` and `skill` appear only when `resource-registry` is set; the five
+`agent_*` tools only when `brigade` is set. An executor handed neither
+offers exactly what it always did, which `tests/test-tool-executor.c`
+asserts by name.
+
+`AiToolFeatures` is the second half of that gate — a flags property,
+both bits set by default. The bit decides whether a group *may* appear;
+the dependency decides whether it does. That is the switch for an
+embedder that has a brigade for its own purposes and does not want the
+model driving it. Do not add a third mechanism: a new optional group is
+one bit, one `executor_sync_*_tools()` helper, and the object it runs on.
 
 Four tools were added alongside them — `todo_write`, `multi_edit`, `task`,
 `skill`. Two things about them generalise:
@@ -692,6 +701,52 @@ bare `{"type":"array"}` is not a schema any provider can act on — Gemini
 rejects it outright and the others guess.
 
 See `docs/tools.org`.
+
+## Background agents (`src/agent/`)
+
+`AiAgentWorker` had no implementation for a long time. `AiLocalWorker`
+is it: one `ai_tool_executor_run_async()` per agent, on the
+thread-default context, against **the agent's own provider**. That last
+part is the whole feature — a turn held with Grok over HTTP can start a
+`claude-code` agent, because nothing in the agent layer consults whoever
+asked for the run. `ai_provider_factory_new_from_string()` is how a
+provider name becomes one.
+
+`AiBrigade` gained the dispatch half it never had: `ai_brigade_start()`,
+a queue for anything over `max-concurrent`, `ai_brigade_reap()`, and
+`ai_brigade_take_finished()`.
+
+Four rules are load-bearing and each has a test that fails by name
+without it:
+
+- **A queue entry is an intention, not a commitment.** `pump_queue` skips
+  an agent that has left `AI_AGENT_STATE_QUEUED`. Without that check, an
+  agent cancelled while waiting gets dispatched when a slot frees — a
+  kill that reads as a delay.
+- **A finish is remembered until collected.** The model exists only
+  between turns, so the run loop drains `take_finished()` before each
+  turn and appends a note. Each finish is reported once, and a *final*
+  answer is not final while there is unreported news — the turn
+  continues so the model can react.
+- **The note says an agent finished, never what it said.** Pasting a
+  subagent's answer into a conversation that has not asked for it is how
+  delegating costs more context than doing the work inline.
+- **`agent_wait` with no id must check for an already-finished agent
+  first.** It waits on a *future* `::agent-finished`; an agent that
+  completed a moment ago has already emitted it, and the wait would run
+  to its timeout with the answer sitting right there.
+
+`agent_wait` spins a nested `GMainLoop` on
+`g_main_context_get_thread_default()`, not the global default — same
+hazard as an approval handler that asks a human, and for the same
+reason: `ai_tool_executor_run()` drives a private context.
+
+A spawned agent gets `AI_TOOL_FEATURE_BACKGROUND` cleared, so it cannot
+spawn further agents. One level of fan-out is delegation; unattended
+recursion is a fork bomb that bills.
+
+`ai-tui` enables all of this by default (`--no-agents` opts out) and the
+library creates no brigade of its own, ever. See `docs/agents.org`.
 
 ## Tool approval
 

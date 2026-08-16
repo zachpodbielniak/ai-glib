@@ -329,6 +329,41 @@ lives in =ai_todo_get_label()=, once, rather than in every renderer.
 Each line carries a =todo-pending=, =todo-active= or =todo-done= span, so
 a frontend colours them without parsing the glyphs back out of the text.
 
+* The background-agent block
+=AiViewAgentBlock= is the seventh block kind, and follows the todo
+block's rule for the same reason: an agent changes state several times
+over its life, and a transcript that grew a block per change would bury
+the conversation the panel belongs to.
+
+#+begin_example
+  ▸ reviewer-1  read the diff  running 12s
+  ✔ auditor-1  check the search code  done 4s
+  ⊘ loiterer-1  take far too long  cancelled 30s
+  1 running, 3 total
+#+end_example
+
+=AiConversation= watches the brigade's =::agent-state-changed= and keeps
+one block, rebuilt from the brigade each time --- a reap removes an
+agent and there is no state-change event for "gone".
+
+One glyph per state, legible with no colour at all: =▸= working, =✔=
+done, =✘= failed, =⊘= stopped, =·= queued.
+
+Two decisions worth knowing:
+
+- *The rows are copies, not references.* A brigade forgets an agent the
+  moment its answer is collected, and a panel that emptied itself as
+  each result came back would be at its least informative exactly when
+  somebody looks at it.
+- *Agent state reuses the tool tags* --- =tool-pending=, =tool-ok=,
+  =tool-failed= --- rather than adding three of its own. They already
+  mean "in flight", "succeeded" and "did not", and a frontend that has
+  chosen colours for those renders this block correctly without being
+  changed at all.
+
+=/clear= drops the panel and leaves the agents running. See
+[[file:agents.org::*Background agents][background agents]].
+
 * Style tags added by the harness layer
 | Tag             | Role                                    |
 |-----------------+-----------------------------------------|

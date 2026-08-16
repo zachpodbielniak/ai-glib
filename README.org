@@ -25,6 +25,11 @@ A GLib/GObject-based C library for interacting with AI providers.
 - *Agent tools*: =todo_write=, =multi_edit=, =task= (run an agent file as a
   subagent, confined to the tools it declares) and =skill= (see
   [[file:docs/tools.org][docs/tools.org]])
+- *Background agents*: a turn can start work that outlives it, on *any*
+  provider and model --- a conversation held with Grok over HTTP can spawn a
+  =claude-code= agent --- then check on it, kill it and collect its answer.
+  The model is told when one finishes. Off unless the embedding application
+  asks for it (see [[file:docs/agents.org][docs/agents.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
 - *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
 - *TUI*: =ai-tui=, a terminal agent harness over any provider (see [[file:docs/tui.org][docs/tui.org]])

@@ -48,7 +48,7 @@ see their provider pages.
 
 *** Tools & Search
 - [[file:tool-executor.org][Tool Executor]] - Built-in tools and the multi-turn tool-use loop
-- [[file:tools.org][The built-in tools]] - One section per tool, including task and skill
+- [[file:tools.org][The built-in tools]] - One section per tool, including task, skill and the agent_* group
 - [[file:web-search.org][Web Search]] - The web_search tool and its providers
 
 *** Commands, skills and agents
@@ -58,7 +58,7 @@ see their provider pages.
 *** Observing a turn
 - [[file:events.org][The event stream]] - Watch a turn happen: text, reasoning, tool calls, usage
 - [[file:transcript.org][The transcript]] - A renderable model of a conversation, and the Emacs recipe
-- [[file:agents.org][Agents & Brigades]] - Orchestrating multiple agent runs
+- [[file:agents.org][Agents & Brigades]] - Orchestrating agent runs, and background agents on any provider
 
 *** API Reference
 - [[file:api-reference/index.org][API Reference Index]] - Complete API documentation

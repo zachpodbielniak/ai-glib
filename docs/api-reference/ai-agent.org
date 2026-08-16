@@ -1,0 +1,88 @@
+* AiAgent
+One agent run: a provider, a tool executor, a budget, and a state.
+
+#+begin_src C
+g_autoptr(AiAgent) agent = ai_agent_new ("reviewer-1", AI_PROVIDER (client));
+
+ai_agent_set_description (agent, "read the diff");
+ai_agent_set_system_prompt (agent, "You review C for memory errors.");
+ai_agent_set_max_tokens (agent, 8192);
+#+end_src
+
+=provider= is nullable at construction; set one later with
+=ai_agent_set_provider()=. An agent that reaches a worker without one
+fails cleanly rather than crashing.
+
+** Each agent owns its executor
+Not tidiness. An executor holds the tool list and per-run state, so
+agents sharing one would see each other's tools and race on it. Owning
+one apiece is also what makes an allowlist *structural*: an agent is
+handed an executor built from what it may call, so calling anything else
+is not refused, it is unrepresentable.
+
+=ai_agent_new()= builds a full one; replace it when you have assembled a
+narrower one:
+
+#+begin_src C
+ai_agent_set_executor (agent, child);   /* built from the agent file's tools: */
+#+end_src
+
+** Whose provider
+An agent runs on *its* provider, never on that of whoever asked for the
+run. That is what lets a conversation held with Grok over HTTP start an
+agent on =claude-code=; nothing in the agent layer consults the parent.
+
+** State
+| Function                        | Notes                                     |
+|---------------------------------+-------------------------------------------|
+| =ai_agent_get_state()=          | the current #AiAgentState                 |
+| =ai_agent_set_state()=          | emits =::state-changed=, and =::finished= once |
+| =ai_agent_get_elapsed_ms()=     | frozen on entering a terminal state       |
+| =ai_agent_get_result()=         | the final text, once there is one         |
+| =ai_agent_get_error()=          | why it failed, if it did                  |
+
+=::finished= fires exactly once, on the way into a terminal state,
+because every path into one goes through =ai_agent_set_state()=.
+
+The elapsed clock stops when the run does. A finished agent should keep
+reporting what it took, not go on counting for as long as the record is
+kept --- the opposite of what the figure means.
+
+** Cancelling
+#+begin_src C
+ai_agent_cancel (agent);
+#+end_src
+
+Always allowed, and idempotent: a caller who wants an agent stopped must
+never be refused, including one who asks twice. Cancels the
+=GCancellable= and moves the agent to =AI_AGENT_STATE_CANCELLED= at
+once, before the provider has answered --- that immediacy is the point
+of a kill switch.
+
+** Description
+#+begin_src C
+ai_agent_set_description (agent, "audit the search backends");
+#+end_src
+
+What this agent was asked to do, in a few words. An id is not an answer
+to "what is that one doing?": a listing of =a1 running 0:42= tells nobody
+anything, and =a1 running 0:42  audit the search backends= does. Shown
+by =agent_status=, by =/running=, and by
+[[file:ai-view-block.org][AiViewAgentBlock]].
+
+** Accounting
+#+begin_src C
+ai_agent_record_turn (agent, in_tokens, out_tokens, cost_micros);
+#+end_src
+
+Charges the agent's budget and emits =::progress=. Pass =-1= for
+=cost_micros= when the model is unpriced --- unknown is not free, and
+adding a negative would quietly subtract from the total.
+
+=AiLocalWorker= calls this for you, from the usage events on the
+executor's stream.
+
+** See also
+- [[file:ai-brigade.org][AiBrigade]] --- tracking a set of them
+- [[file:ai-local-worker.org][AiLocalWorker]] --- running one
+- [[file:../agents.org][Agent orchestration]]
