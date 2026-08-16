@@ -1,0 +1,173 @@
+* AiEvent
+=AiEvent= is a refcounted boxed type describing one thing that happened during
+a turn: a chunk of prose, a tool starting, a token count, a failure. It is the
+normalized currency of [[file:ai-event-source.org][AiEventSource]], and the
+only thing a frontend has to learn in order to render any provider.
+
+An event is *immutable once published*. That is what lets one instance be
+handed to every subscriber without defensive copying --- which is also why
+=g_boxed_copy()= on an =AiEvent= returns the same pointer with a bumped
+reference rather than a duplicate.
+
+** Kinds
+#+begin_src C
+typedef enum
+{
+    AI_EVENT_STREAM_START,
+    AI_EVENT_TEXT_DELTA,
+    AI_EVENT_THINKING_DELTA,
+    AI_EVENT_TOOL_STARTED,
+    AI_EVENT_TOOL_INPUT_DELTA,
+    AI_EVENT_TOOL_FINISHED,
+    AI_EVENT_USAGE,
+    AI_EVENT_STATUS,
+    AI_EVENT_ERROR,
+    AI_EVENT_STREAM_END
+} AiEventKind;
+#+end_src
+
+| Kind                        | Carries                                    | Meaning                                          |
+|-----------------------------+--------------------------------------------+--------------------------------------------------|
+| =AI_EVENT_STREAM_START=     | ---                                        | the provider began producing output              |
+| =AI_EVENT_TEXT_DELTA=       | =text=                                     | a chunk of assistant prose                       |
+| =AI_EVENT_THINKING_DELTA=   | =text=                                     | a chunk of reasoning, which is *not* the answer  |
+| =AI_EVENT_TOOL_STARTED=     | =tool_use=, =tool_use_id=                  | the model asked for a tool                       |
+| =AI_EVENT_TOOL_INPUT_DELTA= | =tool_use_id=, =text=                      | a fragment of that tool's arguments              |
+| =AI_EVENT_TOOL_FINISHED=    | =tool_use=, =tool_result=, =tool_use_id=   | the tool produced a result, or failed            |
+| =AI_EVENT_USAGE=            | =usage=, =cost_micros=                     | token counts, and cost when the provider says    |
+| =AI_EVENT_STATUS=           | =text=                                     | something worth telling a human                  |
+| =AI_EVENT_ERROR=            | =error=, =text=                            | the turn failed                                  |
+| =AI_EVENT_STREAM_END=       | ---                                        | no further events for this turn                  |
+
+The set is deliberately small and provider-neutral. Each provider speaks a
+different wire format --- Anthropic SSE, Claude Code's NDJSON, opencode's
+={type,part}= envelope --- and a consumer that had to learn all of them would
+gain a new bug every time one changed. A translator per provider is written
+once; everything downstream reads only this.
+
+** Why reasoning is a separate kind
+=AI_EVENT_THINKING_DELTA= is not folded into =AI_EVENT_TEXT_DELTA= because the
+two have opposite fates. A frontend usually wants reasoning collapsed behind
+an affordance, and a caller assembling the final answer must not include it at
+all. Providers that stream reasoning (grok-build's =thinking_delta=, claude's
+=thinking= blocks) used to have it silently discarded for exactly that reason;
+giving it its own kind means it can be shown *and* excluded.
+
+** Why =AI_EVENT_TOOL_INPUT_DELTA= exists
+Providers that stream tool arguments emit them in fragments that are not
+individually valid JSON --- only the concatenation parses. This kind exists so
+a frontend can render "running bash..." before the arguments are complete. A
+consumer that only wants whole calls may ignore it and wait for
+=AI_EVENT_TOOL_STARTED=; nothing is lost by doing so.
+
+** Constructors
+Each sets its own fields and leaves the rest =NULL= / zero, so the getters are
+safe to call on any event regardless of kind. All return =(transfer full)=.
+
+#+begin_src C
+AiEvent *ai_event_new              (AiEventKind kind);
+AiEvent *ai_event_new_text_delta   (const gchar *text);
+AiEvent *ai_event_new_thinking_delta (const gchar *text);
+AiEvent *ai_event_new_tool_started (AiToolUse *tool_use);
+AiEvent *ai_event_new_tool_input_delta (const gchar *tool_use_id,
+                                        const gchar *fragment);
+AiEvent *ai_event_new_tool_finished (AiToolUse    *tool_use,
+                                     AiToolResult *tool_result);
+AiEvent *ai_event_new_usage        (AiUsage *usage, gint64 cost_micros);
+AiEvent *ai_event_new_status       (const gchar *text);
+AiEvent *ai_event_new_error        (const GError *error);
+#+end_src
+
+=ai_event_new_usage()= copies its =AiUsage= and =ai_event_new_error()= copies
+its =GError=, because both are almost always held in a =g_autoptr= that will
+unwind as the emitting frame returns, while a subscriber may keep the event
+for as long as it likes.
+
+=ai_event_new_error()= also mirrors the message into =text=, so a frontend
+that only renders text does not have to special-case this kind.
+
+** Accessors
+| Getter                          | Returns                                                    |
+|---------------------------------+------------------------------------------------------------|
+| =ai_event_get_kind=             | the =AiEventKind=                                          |
+| =ai_event_get_text=             | prose / reasoning / fragment / message, or =NULL=          |
+| =ai_event_get_tool_use=         | =(transfer none)= the request, or =NULL=                   |
+| =ai_event_get_tool_result=      | =(transfer none)= what it produced, or =NULL=              |
+| =ai_event_get_tool_use_id=      | the id tying the three tool kinds together, or =NULL=      |
+| =ai_event_get_usage=            | =(transfer none)= token counts, or =NULL=                  |
+| =ai_event_get_cost_micros=      | cost in micro-dollars, or *-1* when unpriced               |
+| =ai_event_get_error=            | =(transfer none)= the =GError=, or =NULL=                  |
+| =ai_event_get_source=           | who emitted it, or =NULL= until published                  |
+| =ai_event_get_timestamp=        | microseconds on the *monotonic* clock                      |
+| =ai_event_kind_to_string=       | a stable lowercase name, never =NULL=                      |
+
+Two of those are easy to misread:
+
+- =cost_micros= is *-1* for "the provider does not report cost", not zero. A
+  zero would read as "this turn was free", which for an unpriced local model
+  is true and for a rate-limited API call is a lie. opencode reports no cost
+  at all, so every one of its usage events carries -1.
+- =timestamp= is monotonic rather than wall-clock. The only thing anybody asks
+  of it is how long a tool took, and a clock adjustment mid-run must not
+  answer that with a negative number.
+
+=ai_event_get_tool_use_id()= answers for all three tool kinds, including
+=AI_EVENT_TOOL_INPUT_DELTA= which has no =AiToolUse= to offer. On a
+=TOOL_FINISHED= the id is taken from the =AiToolUse= when present and from the
+=AiToolResult= otherwise --- several providers report a result without
+repeating the request, and a result nobody can match to a call is not much
+use.
+
+** Ownership
+#+begin_src C
+AiEvent *ai_event_ref   (AiEvent *self);   /* NULL-safe, returns self */
+void     ai_event_unref (AiEvent *self);   /* NULL-safe no-op */
+#+end_src
+
+Use =g_autoptr(AiEvent)=; the cleanup func is registered. A handler that wants
+to keep an event past the signal emission must =ai_event_ref()= it.
+
+** The one mutator
+#+begin_src C
+void ai_event_set_source (AiEvent *self, const gchar *source);
+#+end_src
+
+For the *emitter* to call between constructing an event and publishing it.
+=ai_event_source_emit()= does it automatically, stamping the emitting object's
+type name when no label is set. Do not call it on an event you received:
+subscribers share one instance, and changing it under them is a data race.
+
+** Example
+#+begin_src C
+static void
+on_event (AiEventSource *source, AiEvent *event, gpointer user_data)
+{
+    switch (ai_event_get_kind (event))
+    {
+        case AI_EVENT_TEXT_DELTA:
+            g_print ("%s", ai_event_get_text (event));
+            break;
+
+        case AI_EVENT_TOOL_STARTED:
+            g_print ("\n[%s]\n",
+                     ai_tool_use_get_name (ai_event_get_tool_use (event)));
+            break;
+
+        case AI_EVENT_USAGE:
+        {
+            AiUsage *u = ai_event_get_usage (event);
+            g_print ("\n%d in / %d out\n",
+                     ai_usage_get_input_tokens (u),
+                     ai_usage_get_output_tokens (u));
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+#+end_src
+
+** See also
+- [[file:ai-event-source.org][AiEventSource]] --- the interface that publishes these
+- [[file:../events.org][The event stream]] --- per-provider coverage and ordering guarantees

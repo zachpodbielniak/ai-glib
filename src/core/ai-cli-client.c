@@ -11,6 +11,7 @@
 
 #include "core/ai-cli-client.h"
 #include "core/ai-error.h"
+#include "core/ai-event-source.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
 
@@ -31,7 +32,14 @@ typedef struct
     gboolean  session_persistence;
 } AiCliClientPrivate;
 
-G_DEFINE_TYPE_WITH_PRIVATE(AiCliClient, ai_cli_client, G_TYPE_OBJECT)
+/*
+ * The event-source interface is implemented on the base rather than on each
+ * wrapper, so a subclass gets the ::event signal for free and only has to
+ * translate its own wire format.  There are no vfuncs to fill in.
+ */
+G_DEFINE_TYPE_WITH_CODE(AiCliClient, ai_cli_client, G_TYPE_OBJECT,
+                        G_ADD_PRIVATE(AiCliClient)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
 
 /*
  * Property IDs.

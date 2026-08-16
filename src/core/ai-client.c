@@ -11,6 +11,7 @@
 
 #include "core/ai-client.h"
 #include "core/ai-error.h"
+#include "core/ai-event-source.h"
 
 /*
  * Private data for AiClient.
@@ -25,7 +26,13 @@ typedef struct
     gdouble      temperature;
 } AiClientPrivate;
 
-G_DEFINE_TYPE_WITH_PRIVATE(AiClient, ai_client, G_TYPE_OBJECT)
+/*
+ * As on AiCliClient: the interface carries only the ::event signal, so every
+ * HTTP provider becomes observable without touching any of them.
+ */
+G_DEFINE_TYPE_WITH_CODE(AiClient, ai_client, G_TYPE_OBJECT,
+                        G_ADD_PRIVATE(AiClient)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
 
 /*
  * Property IDs.
