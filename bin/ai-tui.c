@@ -243,6 +243,11 @@ typedef struct
     AiCompletionResult  *candidates;
     guint                candidate_index;
 
+    /* The first visible row. Kept across keystrokes so moving the
+     * selection one row scrolls by one row, rather than recentring the
+     * whole menu every time. */
+    guint                candidate_first;
+
     /* Set by Escape, cleared by the next edit. Without it the menu would
      * reappear on the very next keystroke and Escape would do nothing. */
     gboolean             completion_dismissed;
@@ -271,6 +276,7 @@ static void app_schedule_redraw(App *app);
 static void draw_completion(App *app);
 static void completion_advance(App *app);
 static void completion_refresh(App *app);
+static gboolean completion_select(App *app, gint delta);
 static void completion_accept(App *app);
 static void completion_close(App *app);
 static void on_input_sent(GObject *source, GAsyncResult *result,
@@ -1220,27 +1226,47 @@ drain_keys(App *app)
                 break;
 
             case KEY_UP:
-                input_recall(app, -1);
-                completion_close(app);
+                /* The menu owns the arrows while it is showing; the
+                 * history gets them back the moment it is not. */
+                if (!completion_select(app, -1))
+                {
+                    input_recall(app, -1);
+                }
                 break;
 
             case KEY_DOWN:
-                input_recall(app, 1);
-                completion_close(app);
+                if (!completion_select(app, 1))
+                {
+                    input_recall(app, 1);
+                }
                 break;
 
             case KEY_PPAGE:
+                if (completion_select(app, -MENU_MAX_ROWS))
+                {
+                    break;
+                }
+
                 app->follow = FALSE;
                 app->scroll -= getmaxy(app->transcript_win) / 2;
                 break;
 
             case KEY_NPAGE:
+                if (completion_select(app, MENU_MAX_ROWS))
+                {
+                    break;
+                }
+
                 app->scroll += getmaxy(app->transcript_win) / 2;
                 app->follow = TRUE;   /* re-clamped on redraw */
                 break;
 
             case '\t':
                 completion_advance(app);
+                break;
+
+            case KEY_BTAB:  /* Shift-Tab */
+                completion_select(app, -1);
                 break;
 
             case 14:  /* ^N: cycle tool and thinking blocks */
@@ -1426,6 +1452,7 @@ completion_close(App *app)
 {
     g_clear_object(&app->candidates);
     app->candidate_index = 0;
+    app->candidate_first = 0;
 }
 
 /*
@@ -1445,6 +1472,7 @@ completion_refresh(App *app)
 
     g_clear_object(&app->candidates);
     app->candidate_index = 0;
+    app->candidate_first = 0;
 
     if (app->input->len == 0)
     {
@@ -1460,6 +1488,36 @@ completion_refresh(App *app)
     {
         g_clear_object(&app->candidates);
     }
+}
+
+/*
+ * Move the highlight, wrapping at both ends.
+ *
+ * Returns %FALSE when there is no menu, which is how the arrow keys know
+ * to fall through to the input history instead --- one key, two jobs,
+ * decided by what is on screen.
+ */
+static gboolean
+completion_select(App *app, gint delta)
+{
+    guint n;
+
+    if (app->candidates == NULL)
+    {
+        return FALSE;
+    }
+
+    n = ai_completion_result_get_n_items(app->candidates);
+
+    if (n == 0)
+    {
+        return FALSE;
+    }
+
+    app->candidate_index =
+        (guint)(((gint)app->candidate_index + delta + (gint)n) % (gint)n);
+
+    return TRUE;
 }
 
 /*
@@ -1646,9 +1704,25 @@ draw_completion(App *app)
         return;
     }
 
-    /* Keep the highlighted entry on screen when the list is long. */
-    first = MAX(0, (gint)app->candidate_index - rows + 1);
-    first = MIN(first, MAX(0, (gint)n - rows));
+    /*
+     * Scroll only as far as it takes to bring the selection back into
+     * view. Recomputing the top from the selection instead would make
+     * every downward step jump the whole menu, which is unreadable to
+     * navigate by.
+     */
+    first = (gint)app->candidate_first;
+
+    if ((gint)app->candidate_index < first)
+    {
+        first = (gint)app->candidate_index;
+    }
+    else if ((gint)app->candidate_index >= first + rows)
+    {
+        first = (gint)app->candidate_index - rows + 1;
+    }
+
+    first = CLAMP(first, 0, MAX(0, (gint)n - rows));
+    app->candidate_first = (guint)first;
 
     /* Size the name column to what is actually showing, so short names do
      * not push the descriptions half a screen away. */

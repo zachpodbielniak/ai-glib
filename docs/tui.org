@@ -70,11 +70,11 @@ one that refuses to start.
 | =Enter=          | Send                                              |
 | =C-c=            | Stop the turn in flight --- never the program     |
 | =C-d=            | Quit, on an empty input line                      |
-| =Up= / =Down=    | Walk the input history                            |
+| =Up= / =Down=    | Walk the input history, or the completion menu     |
 | =Left= / =Right= | Move the cursor                                   |
 | =C-a= / =C-e=    | Start / end of line                               |
 | =C-u=            | Clear the input                                   |
-| =PgUp= / =PgDn=  | Scroll the transcript                             |
+| =PgUp= / =PgDn=  | Scroll the transcript, or page the completion menu |
 | =Tab=            | Take a completion, or step to the next            |
 | =Escape=         | Dismiss the completion menu                       |
 | =C-n=            | Select the next tool or reasoning block           |
@@ -93,11 +93,19 @@ The menu opens as you type. A =/= at the start of the line lists every
 command, skill and agent, and each character after it narrows the list;
 an =@= anywhere lists paths.
 
-| Key       | Does                                                     |
-|-----------+----------------------------------------------------------|
-| =Tab=     | Take what is on offer, or step to the next candidate     |
-| =Enter=   | Accept the highlighted candidate (it does not send)      |
-| =Escape=  | Dismiss, until the line changes again                    |
+| Key                | Does                                            |
+|--------------------+-------------------------------------------------|
+| =Up= / =Down=      | Move the highlight, wrapping at both ends       |
+| =PgUp= / =PgDn=    | Move it a page at a time                        |
+| =Tab=              | Take what is on offer, or step to the next      |
+| =Shift-Tab=        | Step back                                       |
+| =Enter=            | Accept the highlighted candidate (does not send) |
+| =Escape=           | Dismiss, until the line changes again           |
+
+The arrows, =PgUp= and =PgDn= belong to the menu while it is showing and
+to the input history and the transcript when it is not --- one key, two
+jobs, decided by what is on screen. Press =Escape= first if you want the
+history back with a half-typed command still on the line.
 
 Each row is the name in bold, its description dimmed, and the harness it
 came from right-aligned --- the origin has its own column because the
