@@ -50,6 +50,14 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
+	$(SRCDIR)/view/ai-style.h \
+	$(SRCDIR)/view/ai-tool-call.h \
+	$(SRCDIR)/view/ai-tool-style.h \
+	$(SRCDIR)/view/ai-view-block.h \
+	$(SRCDIR)/view/ai-view-blocks.h \
+	$(SRCDIR)/view/ai-view-tool-block.h \
+	$(SRCDIR)/view/ai-transcript.h \
+	$(SRCDIR)/view/ai-conversation.h \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-content-block.h \
 	$(SRCDIR)/model/ai-text-content.h \
@@ -106,6 +114,14 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
+	$(SRCDIR)/view/ai-style.c \
+	$(SRCDIR)/view/ai-tool-call.c \
+	$(SRCDIR)/view/ai-tool-style.c \
+	$(SRCDIR)/view/ai-view-block.c \
+	$(SRCDIR)/view/ai-view-blocks.c \
+	$(SRCDIR)/view/ai-view-tool-block.c \
+	$(SRCDIR)/view/ai-transcript.c \
+	$(SRCDIR)/view/ai-conversation.c \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-content-block.c \
 	$(SRCDIR)/model/ai-text-content.c \
