@@ -69,6 +69,54 @@ call_build_argv(
 }
 
 /* ───────────────────────────────────────────────────────────────────
+ * Helpers: locate flags in a built argv.
+ * ─────────────────────────────────────────────────────────────────── */
+static gint
+argv_index_of(gchar **argv, const gchar *needle)
+{
+	gint i;
+	for (i = 0; argv[i] != NULL; i++)
+		if (g_strcmp0(argv[i], needle) == 0)
+			return i;
+	return -1;
+}
+
+static gint
+argv_count(gchar **argv, const gchar *needle)
+{
+	gint i, n = 0;
+	for (i = 0; argv[i] != NULL; i++)
+		if (g_strcmp0(argv[i], needle) == 0)
+			n++;
+	return n;
+}
+
+static const gchar *
+argv_value_after(gchar **argv, const gchar *needle)
+{
+	gint i = argv_index_of(argv, needle);
+
+	if (i < 0 || argv[i + 1] == NULL)
+		return NULL;
+
+	return argv[i + 1];
+}
+
+/* Build argv for a one-message turn against @client. */
+static gchar **
+build_argv_for(AiOpenCodeClient *client)
+{
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	gchar **argv;
+
+	argv = call_build_argv(client, messages, NULL, 4096, FALSE);
+
+	g_list_free_full(messages, g_object_unref);
+	return argv;
+}
+
+/* ───────────────────────────────────────────────────────────────────
  * Basic construction / interface tests
  * ─────────────────────────────────────────────────────────────────── */
 
@@ -1151,6 +1199,360 @@ test_finalize_without_tool_summary(void)
  * main
  * ─────────────────────────────────────────────────────────────────── */
 
+/*
+ * opencode's own errors nest the human-readable text two levels down, in
+ * error.data.message, with the class in error.name. Reading only
+ * error.message meant the caller got the whole object serialised back as
+ * the message -- raw JSON where a sentence belonged.
+ *
+ * This is a real payload from opencode 1.18.18.
+ */
+static void
+test_parse_error_nested_data_message(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autoptr(GError) error = NULL;
+	AiResponse *resp;
+
+	resp = call_parse_json_output(client,
+		"{\"type\":\"error\",\"timestamp\":1786847476620,"
+		"\"sessionID\":\"ses_x\",\"error\":{\"name\":\"UnknownError\","
+		"\"data\":{\"message\":\"Unexpected server error.\","
+		"\"ref\":\"err_5f996935\"}}}",
+		&error);
+
+	g_assert_null(resp);
+	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	g_assert_nonnull(strstr(error->message, "Unexpected server error."));
+	/* The class name is worth keeping. */
+	g_assert_nonnull(strstr(error->message, "UnknownError"));
+	/* And the raw object must not be what the caller reads. */
+	g_assert_null(strstr(error->message, "\"timestamp\""));
+}
+
+/* The flatter shapes must keep working. */
+static void
+test_parse_error_flat_shapes(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autoptr(GError) string_error = NULL;
+	g_autoptr(GError) object_error = NULL;
+
+	g_assert_null(call_parse_json_output(client,
+		"{\"error\":\"plain string\"}", &string_error));
+	g_assert_nonnull(strstr(string_error->message, "plain string"));
+
+	g_assert_null(call_parse_json_output(client,
+		"{\"error\":{\"message\":\"one level\"}}", &object_error));
+	g_assert_nonnull(strstr(object_error->message, "one level"));
+}
+
+/* ───────────────────────────────────────────────────────────────────
+ * build_argv: the `opencode run` options
+ * ─────────────────────────────────────────────────────────────────── */
+
+/*
+ * skip-permissions emits --auto, opencode's equivalent of Claude Code's
+ * --dangerously-skip-permissions. Before this it relied solely on the
+ * OPENCODE_PERMISSION environment variable, which the inherited
+ * synchronous path never set -- so a sync call with skip-permissions on
+ * still stopped for approval.
+ */
+static void
+test_build_argv_auto(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--auto"), ==, -1);
+	g_strfreev(g_steal_pointer(&argv));
+
+	ai_opencode_client_set_skip_permissions(client, TRUE);
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--auto"), >, 0);
+}
+
+static void
+test_build_argv_agent(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "agent", "build", NULL);
+	argv = build_argv_for(client);
+
+	g_assert_cmpstr(argv_value_after(argv, "--agent"), ==, "build");
+}
+
+static void
+test_build_argv_title_and_share(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "title", "nightly run", "share", TRUE, NULL);
+	argv = build_argv_for(client);
+
+	g_assert_cmpstr(argv_value_after(argv, "--title"), ==, "nightly run");
+	g_assert_cmpint(argv_index_of(argv, "--share"), >, 0);
+}
+
+/* Sharing is off unless asked for: a session can contain anything. */
+static void
+test_build_argv_share_defaults_off(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = build_argv_for(client);
+
+	g_assert_cmpint(argv_index_of(argv, "--share"), ==, -1);
+}
+
+/* Each file becomes its own --file pair; blank items are dropped. */
+static void
+test_build_argv_files(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "files", "a.txt, b.txt, ,", NULL);
+	argv = build_argv_for(client);
+
+	g_assert_cmpint(argv_count(argv, "--file"), ==, 2);
+	g_assert_cmpint(argv_index_of(argv, "a.txt"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "b.txt"), >, 0);
+}
+
+/* An explicit session id wins over --continue, which names a different one. */
+static void
+test_build_argv_continue_vs_session(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "continue-session", TRUE, NULL);
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--continue"), >, 0);
+	g_strfreev(g_steal_pointer(&argv));
+
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "ses_123");
+	argv = build_argv_for(client);
+	g_assert_cmpstr(argv_value_after(argv, "--session"), ==, "ses_123");
+	g_assert_cmpint(argv_index_of(argv, "--continue"), ==, -1);
+}
+
+/* --fork needs something to fork; it is not emitted on a fresh session. */
+static void
+test_build_argv_fork_needs_a_session(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "fork-session", TRUE, NULL);
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--fork"), ==, -1);
+	g_strfreev(g_steal_pointer(&argv));
+
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "ses_123");
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--fork"), >, 0);
+}
+
+/*
+ * The working directory reaches opencode as --dir as well as being the
+ * child's cwd: --dir is what tells opencode which project it is in, and
+ * therefore which session store to use.
+ */
+static void
+test_build_argv_working_directory(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--dir"), ==, -1);
+	g_strfreev(g_steal_pointer(&argv));
+
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/work");
+	argv = build_argv_for(client);
+	g_assert_cmpstr(argv_value_after(argv, "--dir"), ==, "/srv/work");
+}
+
+static void
+test_build_argv_attach_and_port(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "attach", "http://localhost:4096",
+	             "port", 4097,
+	             NULL);
+	argv = build_argv_for(client);
+
+	g_assert_cmpstr(argv_value_after(argv, "--attach"),
+	                ==, "http://localhost:4096");
+	g_assert_cmpstr(argv_value_after(argv, "--port"), ==, "4097");
+}
+
+/* Port 0 means "let opencode choose", not "--port 0". */
+static void
+test_build_argv_port_zero(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = build_argv_for(client);
+
+	g_assert_cmpint(argv_index_of(argv, "--port"), ==, -1);
+}
+
+static void
+test_build_argv_thinking_pure_logs(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client,
+	             "thinking", TRUE,
+	             "pure", TRUE,
+	             "print-logs", TRUE,
+	             "log-level", "DEBUG",
+	             NULL);
+	argv = build_argv_for(client);
+
+	g_assert_cmpint(argv_index_of(argv, "--thinking"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--pure"), >, 0);
+	g_assert_cmpint(argv_index_of(argv, "--print-logs"), >, 0);
+	g_assert_cmpstr(argv_value_after(argv, "--log-level"), ==, "DEBUG");
+}
+
+/*
+ * opencode rejects the whole invocation on a bad option value, printing
+ * its usage text, so an unknown log level is dropped with one clear
+ * warning instead.
+ */
+static void
+test_build_argv_log_level_invalid(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "log-level", "verbose", NULL);
+
+	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	                      "*unknown log level 'verbose'*");
+	argv = build_argv_for(client);
+	g_test_assert_expected_messages();
+
+	g_assert_cmpint(argv_index_of(argv, "--log-level"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "verbose"), ==, -1);
+}
+
+/* Log levels are upper-case in opencode's own vocabulary. */
+static void
+test_build_argv_log_level_case_sensitive(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	g_object_set(client, "log-level", "debug", NULL);
+
+	g_test_expect_message(NULL, G_LOG_LEVEL_WARNING,
+	                      "*unknown log level 'debug'*");
+	argv = build_argv_for(client);
+	g_test_assert_expected_messages();
+
+	g_assert_cmpint(argv_index_of(argv, "--log-level"), ==, -1);
+}
+
+/* Everything at once still produces one well-formed command. */
+static void
+test_build_argv_all_options(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "ses_1");
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/w");
+	ai_opencode_client_set_skip_permissions(client, TRUE);
+	g_object_set(client,
+	             "agent", "build",
+	             "title", "t",
+	             "files", "x.txt",
+	             "attach", "http://h:1",
+	             "log-level", "WARN",
+	             "port", 1234,
+	             "share", TRUE,
+	             "fork-session", TRUE,
+	             "thinking", TRUE,
+	             "pure", TRUE,
+	             "print-logs", TRUE,
+	             NULL);
+
+	argv = build_argv_for(client);
+
+	/* The invariants that must survive every combination. */
+	g_assert_cmpstr(argv[0], ==, "opencode");
+	g_assert_cmpstr(argv[1], ==, "run");
+	g_assert_cmpstr(argv_value_after(argv, "--format"), ==, "json");
+	g_assert_cmpint(argv_count(argv, "--model"), ==, 1);
+	g_assert_cmpint(argv_count(argv, "--session"), ==, 1);
+	/* No positional prompt: it is piped. */
+	g_assert_cmpint(argv_index_of(argv, "hi"), ==, -1);
+}
+
+/* Property plumbing: the GObject path bindings use. */
+static void
+test_opencode_property_round_trip(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autofree gchar *agent = NULL;
+	g_autofree gchar *title = NULL;
+	g_autofree gchar *files = NULL;
+	g_autofree gchar *attach = NULL;
+	g_autofree gchar *log_level = NULL;
+	gboolean share = FALSE, fork = FALSE, cont = FALSE;
+	gboolean thinking = FALSE, pure = FALSE, print_logs = FALSE;
+	gint port = 0;
+
+	g_object_set(client,
+	             "agent", "build",
+	             "title", "t",
+	             "files", "a.txt",
+	             "attach", "http://h:1",
+	             "log-level", "INFO",
+	             "port", 4096,
+	             "share", TRUE,
+	             "fork-session", TRUE,
+	             "continue-session", TRUE,
+	             "thinking", TRUE,
+	             "pure", TRUE,
+	             "print-logs", TRUE,
+	             NULL);
+
+	g_object_get(client,
+	             "agent", &agent,
+	             "title", &title,
+	             "files", &files,
+	             "attach", &attach,
+	             "log-level", &log_level,
+	             "port", &port,
+	             "share", &share,
+	             "fork-session", &fork,
+	             "continue-session", &cont,
+	             "thinking", &thinking,
+	             "pure", &pure,
+	             "print-logs", &print_logs,
+	             NULL);
+
+	g_assert_cmpstr(agent, ==, "build");
+	g_assert_cmpstr(title, ==, "t");
+	g_assert_cmpstr(files, ==, "a.txt");
+	g_assert_cmpstr(attach, ==, "http://h:1");
+	g_assert_cmpstr(log_level, ==, "INFO");
+	g_assert_cmpint(port, ==, 4096);
+	g_assert_true(share && fork && cont && thinking && pure && print_logs);
+}
+
 int
 main(
 	int   argc,
@@ -1213,6 +1615,23 @@ main(
 	g_test_add_func("/ai-glib/opencode-client/build-argv/with-session", test_build_argv_with_session);
 	g_test_add_func("/ai-glib/opencode-client/build-argv/no-session", test_build_argv_no_session);
 	g_test_add_func("/ai-glib/opencode-client/build-argv/basic-flags", test_build_argv_basic_flags);
+	g_test_add_func("/ai-glib/opencode-client/parse/error-nested-data", test_parse_error_nested_data_message);
+	g_test_add_func("/ai-glib/opencode-client/parse/error-flat-shapes", test_parse_error_flat_shapes);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/auto", test_build_argv_auto);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/agent", test_build_argv_agent);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/title-and-share", test_build_argv_title_and_share);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/share-defaults-off", test_build_argv_share_defaults_off);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/files", test_build_argv_files);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/continue-vs-session", test_build_argv_continue_vs_session);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/fork-needs-session", test_build_argv_fork_needs_a_session);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/working-directory", test_build_argv_working_directory);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/attach-and-port", test_build_argv_attach_and_port);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/port-zero", test_build_argv_port_zero);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/thinking-pure-logs", test_build_argv_thinking_pure_logs);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/log-level-invalid", test_build_argv_log_level_invalid);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/log-level-case", test_build_argv_log_level_case_sensitive);
+	g_test_add_func("/ai-glib/opencode-client/build-argv/all-options", test_build_argv_all_options);
+	g_test_add_func("/ai-glib/opencode-client/property-round-trip", test_opencode_property_round_trip);
 
 	/* Finalize / cleanup */
 	g_test_add_func("/ai-glib/opencode-client/finalize/with-tool-summary", test_finalize_with_tool_summary);

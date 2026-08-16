@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "providers/ai-opencode-client.h"
+#include "providers/ai-opencode-client-internal.h"
 #include "core/ai-error.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
@@ -23,6 +24,23 @@ struct _AiOpenCodeClient
 
     gboolean skip_permissions;
 
+    /*
+     * The rest of `opencode run`. Each is emitted only when set, so an
+     * unconfigured client builds the same short command it always did.
+     */
+    gchar   *agent;
+    gchar   *title;
+    gchar   *files;          /* CSV -> repeated --file */
+    gchar   *attach;         /* URL of a running opencode server */
+    gchar   *log_level;
+    gint     port;           /* 0 means "unset" */
+    gboolean share;
+    gboolean fork_session;
+    gboolean continue_session;
+    gboolean thinking;
+    gboolean pure;
+    gboolean print_logs;
+
     /* Cached tool-call summary from the last response, used for
      * the re-prompt fallback when the AI produces no text. */
     gchar *last_tool_summary;
@@ -35,6 +53,18 @@ enum
 {
     PROP_0,
     PROP_SKIP_PERMISSIONS,
+    PROP_AGENT,
+    PROP_TITLE,
+    PROP_FILES,
+    PROP_ATTACH,
+    PROP_LOG_LEVEL,
+    PROP_PORT,
+    PROP_SHARE,
+    PROP_FORK_SESSION,
+    PROP_CONTINUE_SESSION,
+    PROP_THINKING,
+    PROP_PURE,
+    PROP_PRINT_LOGS,
     N_PROPS
 };
 
@@ -73,6 +103,42 @@ ai_opencode_client_get_property(
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
+        case PROP_AGENT:
+            g_value_set_string(value, self->agent);
+            break;
+        case PROP_TITLE:
+            g_value_set_string(value, self->title);
+            break;
+        case PROP_FILES:
+            g_value_set_string(value, self->files);
+            break;
+        case PROP_ATTACH:
+            g_value_set_string(value, self->attach);
+            break;
+        case PROP_LOG_LEVEL:
+            g_value_set_string(value, self->log_level);
+            break;
+        case PROP_PORT:
+            g_value_set_int(value, self->port);
+            break;
+        case PROP_SHARE:
+            g_value_set_boolean(value, self->share);
+            break;
+        case PROP_FORK_SESSION:
+            g_value_set_boolean(value, self->fork_session);
+            break;
+        case PROP_CONTINUE_SESSION:
+            g_value_set_boolean(value, self->continue_session);
+            break;
+        case PROP_THINKING:
+            g_value_set_boolean(value, self->thinking);
+            break;
+        case PROP_PURE:
+            g_value_set_boolean(value, self->pure);
+            break;
+        case PROP_PRINT_LOGS:
+            g_value_set_boolean(value, self->print_logs);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -93,6 +159,47 @@ ai_opencode_client_set_property(
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
+        case PROP_AGENT:
+            g_free(self->agent);
+            self->agent = g_value_dup_string(value);
+            break;
+        case PROP_TITLE:
+            g_free(self->title);
+            self->title = g_value_dup_string(value);
+            break;
+        case PROP_FILES:
+            g_free(self->files);
+            self->files = g_value_dup_string(value);
+            break;
+        case PROP_ATTACH:
+            g_free(self->attach);
+            self->attach = g_value_dup_string(value);
+            break;
+        case PROP_LOG_LEVEL:
+            g_free(self->log_level);
+            self->log_level = g_value_dup_string(value);
+            break;
+        case PROP_PORT:
+            self->port = g_value_get_int(value);
+            break;
+        case PROP_SHARE:
+            self->share = g_value_get_boolean(value);
+            break;
+        case PROP_FORK_SESSION:
+            self->fork_session = g_value_get_boolean(value);
+            break;
+        case PROP_CONTINUE_SESSION:
+            self->continue_session = g_value_get_boolean(value);
+            break;
+        case PROP_THINKING:
+            self->thinking = g_value_get_boolean(value);
+            break;
+        case PROP_PURE:
+            self->pure = g_value_get_boolean(value);
+            break;
+        case PROP_PRINT_LOGS:
+            self->print_logs = g_value_get_boolean(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -100,10 +207,18 @@ ai_opencode_client_set_property(
 }
 
 /*
- * Spawn an opencode subprocess. When skip_permissions is enabled we must
- * use GSubprocessLauncher so we can inject the OPENCODE_PERMISSION env
- * var into the child environment. Otherwise we fall back to the simpler
- * g_subprocess_newv().
+ * Spawn an opencode subprocess.
+ *
+ * A launcher is used whenever either the working directory or the
+ * permission override is set. It used to be used only for the latter,
+ * which meant working-directory was accepted, stored, and silently had no
+ * effect unless skip-permissions happened to be on -- a caller that named
+ * a directory to bound what the CLI could reach got the directory the
+ * parent process was started in.
+ *
+ * OPENCODE_PERMISSION is set alongside --auto rather than instead of it:
+ * the flag is the documented mechanism, the variable covers opencode
+ * builds that predate it, and they agree.
  */
 static GSubprocess *
 ai_opencode_client_spawn(
@@ -112,20 +227,23 @@ ai_opencode_client_spawn(
     GSubprocessFlags        flags,
     GError                **error
 ){
-    if (self->skip_permissions)
+    const gchar *cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+
+    if (self->skip_permissions || (cwd != NULL && cwd[0] != '\0'))
     {
         g_autoptr(GSubprocessLauncher) launcher = NULL;
-        const gchar *cwd;
 
         launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_setenv(launcher,
-                                      "OPENCODE_PERMISSION",
-                                      OPENCODE_PERMISSION_ALLOW_ALL,
-                                      TRUE);
 
-        /* Honour the working directory if one was set on the base class */
-        cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
-        if (cwd != NULL)
+        if (self->skip_permissions)
+        {
+            g_subprocess_launcher_setenv(launcher,
+                                          "OPENCODE_PERMISSION",
+                                          OPENCODE_PERMISSION_ALLOW_ALL,
+                                          TRUE);
+        }
+
+        if (cwd != NULL && cwd[0] != '\0')
         {
             g_subprocess_launcher_set_cwd(launcher, cwd);
         }
@@ -134,6 +252,57 @@ ai_opencode_client_spawn(
     }
 
     return g_subprocess_newv(argv, flags, error);
+}
+
+/*
+ * The log levels the opencode CLI accepts. Validated here rather than
+ * passed straight through: opencode is strict about its options and
+ * rejects the whole invocation with its usage text, which is a much
+ * worse error than one clear warning.
+ */
+static const gchar *AI_OPENCODE_LOG_LEVELS[] = {
+    "DEBUG", "INFO", "WARN", "ERROR", NULL
+};
+
+static gboolean
+log_level_is_valid(const gchar *level)
+{
+    gsize i;
+
+    for (i = 0; AI_OPENCODE_LOG_LEVELS[i] != NULL; i++)
+    {
+        if (g_strcmp0(level, AI_OPENCODE_LOG_LEVELS[i]) == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Append a comma-separated value as the flag repeated once per item.
+ * Empty items are dropped; an all-empty list emits nothing at all rather
+ * than a dangling flag.
+ */
+static void
+emit_repeated_flag(GPtrArray *args, const gchar *flag, const gchar *csv)
+{
+    g_auto(GStrv) parts = NULL;
+    gsize i;
+
+    if (csv == NULL || csv[0] == '\0')
+        return;
+
+    parts = g_strsplit(csv, ",", -1);
+
+    for (i = 0; parts[i] != NULL; i++)
+    {
+        g_strstrip(parts[i]);
+        if (parts[i][0] == '\0')
+            continue;
+
+        g_ptr_array_add(args, g_strdup(flag));
+        g_ptr_array_add(args, g_strdup(parts[i]));
+    }
 }
 
 /*
@@ -159,12 +328,100 @@ ai_opencode_client_get_executable_path(AiCliClient *client)
 }
 
 /*
+ * Emit the flags that describe *how* opencode should run, as opposed to
+ * what this particular turn is.
+ *
+ * Shared with the re-prompt path so the follow-up runs in the same agent,
+ * the same directory, against the same server, with the same permission
+ * posture. A retry that quietly dropped --auto would sit waiting for an
+ * approval nobody is there to give.
+ */
+static void
+emit_execution_args(AiOpenCodeClient *self, GPtrArray *args)
+{
+    const gchar *cwd;
+
+    if (self->agent != NULL && self->agent[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--agent"));
+        g_ptr_array_add(args, g_strdup(self->agent));
+    }
+
+    /* Attach to a running server instead of starting one. */
+    if (self->attach != NULL && self->attach[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--attach"));
+        g_ptr_array_add(args, g_strdup(self->attach));
+    }
+
+    /*
+     * Working directory. The spawn already makes this the child's cwd;
+     * --dir additionally tells opencode which project it is in, which is
+     * what decides the session store it uses. When attaching, this is a
+     * path on the remote server.
+     */
+    cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+    if (cwd != NULL && cwd[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--dir"));
+        g_ptr_array_add(args, g_strdup(cwd));
+    }
+
+    if (self->port > 0)
+    {
+        g_ptr_array_add(args, g_strdup("--port"));
+        g_ptr_array_add(args, g_strdup_printf("%d", self->port));
+    }
+
+    if (self->thinking)
+    {
+        g_ptr_array_add(args, g_strdup("--thinking"));
+    }
+
+    /*
+     * Tool access. --auto is opencode's equivalent of Claude Code's
+     * --dangerously-skip-permissions: it auto-approves everything not
+     * explicitly denied.
+     */
+    if (self->skip_permissions)
+    {
+        g_ptr_array_add(args, g_strdup("--auto"));
+    }
+
+    /* Global opencode flags; accepted after the `run` subcommand. */
+    if (self->pure)
+    {
+        g_ptr_array_add(args, g_strdup("--pure"));
+    }
+
+    if (self->log_level != NULL && self->log_level[0] != '\0')
+    {
+        if (log_level_is_valid(self->log_level))
+        {
+            g_ptr_array_add(args, g_strdup("--log-level"));
+            g_ptr_array_add(args, g_strdup(self->log_level));
+        }
+        else
+        {
+            g_warning("opencode: unknown log level '%s'; omitting the flag. "
+                      "Valid levels: DEBUG, INFO, WARN, ERROR",
+                      self->log_level);
+        }
+    }
+
+    if (self->print_logs)
+    {
+        g_ptr_array_add(args, g_strdup("--print-logs"));
+    }
+}
+
+/*
  * Build command line arguments for the opencode CLI.
  *
- * Command: opencode run --format json --model <model>
+ * Command: opencode run --format json --model <model> [...]
  * Prompt is piped via stdin (build_stdin) to avoid ARG_MAX limits.
  */
-static gchar **
+gchar **
 ai_opencode_client_build_argv(
     AiCliClient *client,
     GList       *messages,
@@ -172,6 +429,7 @@ ai_opencode_client_build_argv(
     gint         max_tokens,
     gboolean     streaming
 ){
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
     GPtrArray *args;
     const gchar *model;
     const gchar *session_id;
@@ -208,6 +466,37 @@ ai_opencode_client_build_argv(
         g_ptr_array_add(args, g_strdup("--session"));
         g_ptr_array_add(args, g_strdup(session_id));
     }
+    else if (self->continue_session)
+    {
+        /*
+         * Only when there is no explicit id: --continue picks the last
+         * session, which would fight a --session that names a different
+         * one.
+         */
+        g_ptr_array_add(args, g_strdup("--continue"));
+    }
+
+    /* Fork the session being continued rather than appending to it. */
+    if (self->fork_session &&
+        ((session_id != NULL && session_id[0] != '\0') ||
+         self->continue_session))
+    {
+        g_ptr_array_add(args, g_strdup("--fork"));
+    }
+
+    if (self->share)
+    {
+        g_ptr_array_add(args, g_strdup("--share"));
+    }
+
+    if (self->title != NULL && self->title[0] != '\0')
+    {
+        g_ptr_array_add(args, g_strdup("--title"));
+        g_ptr_array_add(args, g_strdup(self->title));
+    }
+
+    /* File attachments, one --file per item. */
+    emit_repeated_flag(args, "--file", self->files);
 
     /* Variant (effort level) */
     {
@@ -218,6 +507,9 @@ ai_opencode_client_build_argv(
             g_ptr_array_add(args, g_strdup(effort));
         }
     }
+
+    /* Agent, server, directory, permissions and the global flags. */
+    emit_execution_args(self, args);
 
     /* NULL terminate — no positional prompt, stdin is used */
     g_ptr_array_add(args, NULL);
@@ -364,6 +656,40 @@ ai_opencode_client_parse_json_output(
                 if (err_msg == NULL)
                     err_msg = json_object_get_string_member_with_default(
                         err_obj, "error", NULL);
+                if (err_msg == NULL &&
+                    json_object_has_member(err_obj, "data"))
+                {
+                    /*
+                     * opencode's own errors nest one level deeper:
+                     * {"error":{"name":"UnknownError",
+                     *           "data":{"message":"..."}}}
+                     * Without this the whole object was serialised into
+                     * the message and the caller got raw JSON where a
+                     * sentence belonged.
+                     */
+                    JsonNode *data_node =
+                        json_object_get_member(err_obj, "data");
+
+                    if (data_node != NULL && JSON_NODE_HOLDS_OBJECT(data_node))
+                    {
+                        JsonObject *data_obj = json_node_get_object(data_node);
+                        const gchar *name;
+
+                        err_msg = json_object_get_string_member_with_default(
+                            data_obj, "message", NULL);
+
+                        /* Prefix the error class when there is one:
+                         * "UnknownError: ..." says more than "...". */
+                        name = json_object_get_string_member_with_default(
+                            err_obj, "name", NULL);
+                        if (err_msg != NULL && name != NULL)
+                        {
+                            err_msg_tmp = g_strdup_printf("%s: %s", name,
+                                                          err_msg);
+                            err_msg = err_msg_tmp;
+                        }
+                    }
+                }
                 if (err_msg == NULL)
                 {
                     /* Last resort: serialise the object so logs are useful */
@@ -626,6 +952,11 @@ ai_opencode_client_finalize(GObject *object)
     AiOpenCodeClient *self = AI_OPENCODE_CLIENT(object);
 
     g_free(self->last_tool_summary);
+    g_free(self->agent);
+    g_free(self->title);
+    g_free(self->files);
+    g_free(self->attach);
+    g_free(self->log_level);
 
     G_OBJECT_CLASS(ai_opencode_client_parent_class)->finalize(object);
 }
@@ -650,16 +981,188 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     /**
      * AiOpenCodeClient:skip-permissions:
      *
-     * Whether to set OPENCODE_PERMISSION to auto-approve all
-     * permission prompts. When enabled, the opencode subprocess
-     * inherits an environment variable that allows every operation
-     * (including external_directory access) without interactive
-     * approval, enabling fully autonomous headless operation.
+     * Whether to auto-approve every permission prompt, enabling fully
+     * autonomous headless operation.
+     *
+     * This passes `--auto` -- opencode's equivalent of Claude Code's
+     * `--dangerously-skip-permissions` -- and additionally sets
+     * OPENCODE_PERMISSION in the child environment, which covers opencode
+     * builds predating the flag. The two agree, so setting both is safe.
+     *
+     * As with every other provider, the working directory rather than this
+     * property is the boundary that matters. See
+     * #AiCliClient:working-directory.
      */
     oc_properties[PROP_SKIP_PERMISSIONS] =
         g_param_spec_boolean("skip-permissions",
                              "Skip Permissions",
                              "Whether to auto-approve all opencode permission prompts",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:agent:
+     *
+     * The agent to run as, passed as `--agent`.
+     */
+    oc_properties[PROP_AGENT] =
+        g_param_spec_string("agent",
+                            "Agent",
+                            "Agent to use (--agent)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:title:
+     *
+     * A title for the session, passed as `--title`. Without one opencode
+     * derives a title from the prompt, which for a piped prompt means the
+     * first line of whatever the caller assembled.
+     */
+    oc_properties[PROP_TITLE] =
+        g_param_spec_string("title",
+                            "Title",
+                            "Title for the session (--title)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:files:
+     *
+     * Comma-separated paths to attach to the message. Each becomes its own
+     * `--file <path>` pair.
+     */
+    oc_properties[PROP_FILES] =
+        g_param_spec_string("files",
+                            "Files",
+                            "Comma-separated file attachments (--file)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:attach:
+     *
+     * URL of a running opencode server to attach to, e.g.
+     * "http://localhost:4096", passed as `--attach`. When set,
+     * #AiCliClient:working-directory names a path on that server rather
+     * than a local one.
+     *
+     * Credentials for a password-protected server are deliberately not
+     * exposed as properties: an argv is visible to every process on the
+     * machine. opencode reads OPENCODE_SERVER_USERNAME and
+     * OPENCODE_SERVER_PASSWORD from the environment instead.
+     */
+    oc_properties[PROP_ATTACH] =
+        g_param_spec_string("attach",
+                            "Attach",
+                            "URL of a running opencode server (--attach)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:log-level:
+     *
+     * One of "DEBUG", "INFO", "WARN" or "ERROR", passed as `--log-level`.
+     * Anything else is dropped with a warning, because opencode rejects an
+     * invalid value by refusing the whole invocation.
+     */
+    oc_properties[PROP_LOG_LEVEL] =
+        g_param_spec_string("log-level",
+                            "Log Level",
+                            "CLI --log-level (DEBUG, INFO, WARN, ERROR)",
+                            NULL,
+                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:port:
+     *
+     * Port for the local opencode server, passed as `--port`. Zero, the
+     * default, omits the flag and lets opencode pick one.
+     */
+    oc_properties[PROP_PORT] =
+        g_param_spec_int("port",
+                         "Port",
+                         "Port for the local server (--port); 0 to omit",
+                         0, 65535, 0,
+                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:share:
+     *
+     * Whether to pass `--share`, publishing a shareable link to the
+     * session. Off by default: a session can contain anything the prompt
+     * and the repository did.
+     */
+    oc_properties[PROP_SHARE] =
+        g_param_spec_boolean("share",
+                             "Share",
+                             "Whether to share the session (--share)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:fork-session:
+     *
+     * Whether to pass `--fork`, branching the continued session instead of
+     * appending to it. Only emitted when there is a session to fork.
+     */
+    oc_properties[PROP_FORK_SESSION] =
+        g_param_spec_boolean("fork-session",
+                             "Fork Session",
+                             "Whether to fork the continued session (--fork)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:continue-session:
+     *
+     * Whether to pass `--continue`, resuming the most recent session when
+     * no #AiCliClient:session-id is known. An explicit session id wins.
+     */
+    oc_properties[PROP_CONTINUE_SESSION] =
+        g_param_spec_boolean("continue-session",
+                             "Continue Session",
+                             "Whether to continue the last session (--continue)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:thinking:
+     *
+     * Whether to pass `--thinking`, making opencode emit reasoning blocks.
+     */
+    oc_properties[PROP_THINKING] =
+        g_param_spec_boolean("thinking",
+                             "Thinking",
+                             "Whether to show thinking blocks (--thinking)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:pure:
+     *
+     * Whether to pass `--pure`, running without external plugins. Useful
+     * when a run has to be reproducible regardless of what the host has
+     * installed.
+     */
+    oc_properties[PROP_PURE] =
+        g_param_spec_boolean("pure",
+                             "Pure",
+                             "Whether to run without external plugins (--pure)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiOpenCodeClient:print-logs:
+     *
+     * Whether to pass `--print-logs`, sending opencode's logs to stderr.
+     * They do not disturb the parsed output, which is read from stdout,
+     * and they are included in the error message when a run fails.
+     */
+    oc_properties[PROP_PRINT_LOGS] =
+        g_param_spec_boolean("print-logs",
+                             "Print Logs",
+                             "Whether to print logs to stderr (--print-logs)",
                              FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
@@ -838,6 +1341,9 @@ attempt_text_retry(
         g_ptr_array_add(rargs, g_strdup("--session"));
         g_ptr_array_add(rargs, g_strdup(sid));
     }
+    /* Same agent, directory, server and permission posture as the turn
+     * being retried. */
+    emit_execution_args(client, rargs);
     g_ptr_array_add(rargs, NULL);
 
     rproc = ai_opencode_client_spawn(
@@ -889,33 +1395,53 @@ on_chat_communicate_complete(
         return;
     }
 
-    /* Check exit status */
-    if (!g_subprocess_get_successful(data->subprocess))
+    /*
+     * Parse before judging the exit status.
+     *
+     * A failing opencode run exits non-zero *and* prints a structured
+     * error event on stdout, with stderr empty:
+     *
+     *   {"type":"error","error":{"name":"UnknownError",
+     *                            "data":{"message":"..."}}}
+     *
+     * Reporting the status first meant reporting an empty stderr, or the
+     * raw JSON, instead of the sentence inside it. The parser turns that
+     * event into a real message, so it gets first refusal; the status is
+     * only consulted when there is nothing parseable to report.
+     */
+    if (stdout_data != NULL && stdout_data[0] != '\0')
     {
-        gint exit_status = g_subprocess_get_exit_status(data->subprocess);
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_EXECUTION,
-                                "CLI exited with status %d: %s",
-                                exit_status,
-                                stderr_data != NULL ? stderr_data : "Unknown error");
-        chat_async_data_free(data);
-        return;
+        klass = AI_CLI_CLIENT_GET_CLASS(data->client);
+        response = klass->parse_json_output(AI_CLI_CLIENT(data->client),
+                                            stdout_data, &error);
+
+        if (response == NULL)
+        {
+            g_task_return_error(data->task, g_steal_pointer(&error));
+            chat_async_data_free(data);
+            return;
+        }
     }
-
-    /* Parse output */
-    if (stdout_data == NULL || stdout_data[0] == '\0')
+    else
     {
-        g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
-                                "CLI produced no output");
-        chat_async_data_free(data);
-        return;
-    }
+        if (!g_subprocess_get_successful(data->subprocess))
+        {
+            g_task_return_new_error(data->task, AI_ERROR,
+                                    AI_ERROR_CLI_EXECUTION,
+                                    "CLI exited with status %d: %s",
+                                    g_subprocess_get_exit_status(
+                                        data->subprocess),
+                                    (stderr_data != NULL &&
+                                     stderr_data[0] != '\0')
+                                    ? stderr_data : "Unknown error");
+        }
+        else
+        {
+            g_task_return_new_error(data->task, AI_ERROR,
+                                    AI_ERROR_CLI_PARSE_ERROR,
+                                    "CLI produced no output");
+        }
 
-    klass = AI_CLI_CLIENT_GET_CLASS(data->client);
-    response = klass->parse_json_output(AI_CLI_CLIENT(data->client), stdout_data, &error);
-
-    if (response == NULL)
-    {
-        g_task_return_error(data->task, g_steal_pointer(&error));
         chat_async_data_free(data);
         return;
     }
