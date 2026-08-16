@@ -239,6 +239,7 @@ ai-glib/
 | Claude Code (tmux) | `CLAUDE_CODE_PATH`, `TMUX_PATH`, `OLLAMA_PATH` |
 | OpenCode | `OPENCODE_PATH` (override `opencode` path) |
 | Grok Build | `GROK_PATH` (override `grok` path) |
+| ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
 
 ## CLI provider options
 

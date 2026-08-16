@@ -68,9 +68,11 @@ one that refuses to start.
 ** Keys
 | Key              | Does                                              |
 |------------------+---------------------------------------------------|
-| =Enter=          | Send                                              |
+| =Enter=          | New line --- or take the completion, if one is open |
+| =C-d=            | Send. On an empty line, quit                      |
+| =Alt-Enter=      | Send                                              |
+| =C-g=            | Edit the prompt in =$EDITOR=                      |
 | =C-c=            | Stop the turn in flight --- never the program     |
-| =C-d=            | Quit, on an empty input line                      |
 | =Up= / =Down=    | Walk the input history, or the completion menu     |
 | =Left= / =Right= | Move the cursor                                   |
 | =C-a= / =C-e=    | Start / end of line                               |
@@ -83,7 +85,46 @@ one that refuses to start.
 
 =C-c= cancels the turn rather than killing the process, because in a harness
 "stop what you are doing" is what you almost always mean. Quitting is =C-d=
-or =/quit=.
+on an empty line, or =/quit=.
+
+*** Why =Enter= is not send
+A prompt worth writing is usually more than one line, and a chat box that
+sends on =Enter= makes writing one an exercise in not pressing the wrong
+key.
+
+The obvious alternative --- =Enter= sends, =Shift-Enter= inserts --- is not
+available: a terminal sends one carriage return for both, and the
+harnesses that bind them differently ship a terminal-configuration step
+to make the two distinguishable. Rather than require that, the common key
+does the common thing and sending is =C-d=, which has meant "that is all
+my input" in every shell there has ever been. =Alt-Enter= sends too, for
+the muscle memory.
+
+While the input has anything in it, the status bar says so.
+
+The input grows as you type, up to ten rows, and continuation rows carry
+a =│= marker so a wrapped prompt reads as one thing. Past ten rows it
+scrolls rather than eating the screen --- at which point =C-g= is the
+better tool.
+
+*** =C-g=: write it in your editor
+Writes the current prompt to a temporary =.md= file, hands the terminal
+to =$VISUAL= or =$EDITOR=, and takes back whatever was saved. =VISUAL=
+wins because that is what the two mean: it is the full-screen one, and
+this needs a screen. Both are parsed as command lines, so =EDITOR="emacs
+-nw"= works.
+
+*Quitting the editor without saving leaves the prompt alone.* A non-zero
+exit is how somebody says they changed their mind, and the file on disk
+may be a half-finished draft --- reading it back anyway would make the
+cancel do the opposite of cancelling.
+
+One trailing newline is stripped, since every editor that ends a file
+properly adds one. Interior blank lines are kept exactly as written.
+
+The turn keeps running while the editor is open. Nothing repaints ---
+this process is blocked --- but callbacks queue up and are dispatched the
+moment the editor exits.
 
 Scrolling away from the bottom stops the view following new output; the
 status bar says =[scrolled]= while that is so. Sending, or scrolling back
@@ -100,7 +141,7 @@ an =@= anywhere lists paths.
 | =PgUp= / =PgDn=    | Move it a page at a time                        |
 | =Tab=              | Take what is on offer, or step to the next      |
 | =Shift-Tab=        | Step back                                       |
-| =Enter=            | Accept the highlighted candidate (does not send) |
+| =Enter=            | Accept the highlighted candidate                |
 | =Escape=           | Dismiss, until the line changes again           |
 
 The arrows, =PgUp= and =PgDn= belong to the menu while it is showing and

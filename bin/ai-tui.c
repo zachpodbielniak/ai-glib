@@ -555,10 +555,22 @@ draw_status(App *app)
     }
     else
     {
-        line = g_strdup_printf(" %s%s%s   ready%s",
+        /*
+         * Say how to send while there is something to send.
+         *
+         * Enter inserting a newline is the right default for a prompt
+         * worth writing, and a surprise for the first ten seconds of
+         * anybody who has used a chat box. The line already exists and is
+         * already being read; the reminder costs nothing and appears
+         * exactly when it is wanted.
+         */
+        line = g_strdup_printf(" %s%s%s   %s%s",
                                ai_provider_get_name(AI_PROVIDER(provider)),
                                model != NULL ? " / " : "",
                                model != NULL ? model : "",
+                               app->input->len > 0
+                                   ? "^D or Alt-Enter to send · ^G to edit"
+                                   : "ready",
                                app->follow ? "" : "   [scrolled]");
     }
 
@@ -581,92 +593,278 @@ draw_status(App *app)
     wnoutrefresh(app->status_win);
 }
 
+/*
+ * Laying the input line out, one character at a time.
+ *
+ * The input used to be one row, and drawing it was three calls to
+ * mvwaddnstr. Since Enter inserts a newline it can be any number of
+ * rows, and two questions now have to be answered about the same text:
+ * how tall is it, and where does the cursor land. Answering them in two
+ * places is how they come to disagree, so this walks the text once and
+ * either draws or merely measures depending on whether it was given a
+ * window.
+ */
+typedef struct
+{
+    WINDOW  *win;         /* NULL to measure without drawing */
+    gint     width;       /* usable columns, after the gutter */
+    gint     max_rows;    /* stop drawing past this; measuring is unbounded */
+    gint     row;
+    gint     col;
+
+    gsize    consumed;    /* bytes emitted so far */
+    gsize    cursor;      /* the byte offset we want a position for */
+    gint     cursor_row;
+    gint     cursor_col;
+    gboolean cursor_set;
+} InputPen;
+
+/* Two columns for "> " on the first row, and the same indent on the rest
+ * so a wrapped line stays under the one it continues. */
+#define INPUT_GUTTER (2)
+
+/* Rows the input may occupy before it starts scrolling instead of
+ * growing. A prompt long enough to fill the screen has stopped being a
+ * prompt and become a document --- which is what ^G is for. */
+#define INPUT_MAX_ROWS (10)
+
+static void
+pen_note_cursor(InputPen *pen)
+{
+    if (pen->cursor_set || pen->consumed != pen->cursor)
+    {
+        return;
+    }
+
+    pen->cursor_row = pen->row;
+    pen->cursor_col = pen->col;
+    pen->cursor_set = TRUE;
+}
+
+static void
+pen_emit(
+    InputPen    *pen,
+    const gchar *text,
+    gsize        nbytes,
+    attr_t       attr
+){
+    const gchar *p = text;
+    const gchar *end = text + nbytes;
+
+    while (p < end)
+    {
+        const gchar *next = g_utf8_next_char(p);
+        gunichar     c = g_utf8_get_char(p);
+        gint         w;
+
+        if (next > end)
+        {
+            break;
+        }
+
+        pen_note_cursor(pen);
+
+        if (c == '\n')
+        {
+            pen->row++;
+            pen->col = 0;
+            pen->consumed += (gsize)(next - p);
+            p = next;
+            continue;
+        }
+
+        /* Terminal columns, not characters --- the same rule the view
+         * layer wraps by. */
+        w = g_unichar_iswide(c) ? 2 : 1;
+
+        if (pen->col + w > pen->width && pen->width > 0)
+        {
+            pen->row++;
+            pen->col = 0;
+        }
+
+        if (pen->win != NULL && pen->row < pen->max_rows)
+        {
+            wattrset(pen->win, attr);
+            mvwaddnstr(pen->win, pen->row, pen->col + INPUT_GUTTER, p,
+                       (gint)(next - p));
+        }
+
+        pen->col += w;
+        pen->consumed += (gsize)(next - p);
+        p = next;
+    }
+
+    pen_note_cursor(pen);
+}
+
+/*
+ * Walk the whole input, styling it as the pipeline sees it.
+ *
+ * The highlighting is the same scan the pipeline runs, so a mention that
+ * will not resolve still lights up: it is a candidate, and the user can
+ * see it was noticed.
+ */
+static void
+input_walk(App *app, InputPen *pen)
+{
+    GList       *mentions = ai_mention_scan(app->input->str);
+    GList       *iter;
+    const gchar *text = app->input->str;
+    gsize        offset = 0;
+    gboolean     is_command = ai_command_set_is_command_line(app->input->str);
+
+    if (is_command)
+    {
+        /* The command name, up to the first space or newline. */
+        gsize name_len = strcspn(text, " \n");
+
+        pen_emit(pen, text, name_len, attr_for_tag(AI_STYLE_COMMAND));
+        offset = name_len;
+    }
+
+    for (iter = mentions; iter != NULL; iter = iter->next)
+    {
+        const AiMention *mention = iter->data;
+
+        if (mention->start < offset)
+        {
+            continue;   /* inside the command name already drawn */
+        }
+
+        pen_emit(pen, text + offset, mention->start - offset, A_NORMAL);
+        pen_emit(pen, text + mention->start, mention->len,
+                 attr_for_tag(AI_STYLE_MENTION));
+
+        offset = mention->start + mention->len;
+    }
+
+    g_list_free_full(mentions, (GDestroyNotify)ai_mention_free);
+
+    pen_emit(pen, text + offset, strlen(text) - offset, A_NORMAL);
+}
+
+/* How many rows the input needs at WIDTH. */
+static gint
+input_rows_for(App *app, gint width)
+{
+    InputPen pen = { 0 };
+
+    pen.width = MAX(1, width - INPUT_GUTTER);
+    pen.max_rows = G_MAXINT;
+    pen.cursor = app->cursor;
+
+    input_walk(app, &pen);
+
+    return CLAMP(pen.row + 1, 1, INPUT_MAX_ROWS);
+}
+
 static void
 draw_input(App *app)
 {
-    gint width = getmaxx(app->input_win);
-    gint cursor_col;
+    gint     width = getmaxx(app->input_win);
+    gint     rows = getmaxy(app->input_win);
+    InputPen pen = { 0 };
+    gint     i;
 
     werase(app->input_win);
+
     wattrset(app->input_win, A_BOLD);
     mvwaddstr(app->input_win, 0, 0, "> ");
     wattrset(app->input_win, A_NORMAL);
 
+    pen.win = app->input_win;
+    pen.width = MAX(1, width - INPUT_GUTTER);
+    pen.max_rows = rows;
+    pen.cursor = app->cursor;
+
+    input_walk(app, &pen);
+
     /*
-     * Highlight what the pipeline will act on, using the same scanner it
-     * uses. A mention that will not resolve still lights up, which is
-     * honest: it is a candidate, and the user can see it was noticed.
+     * A continuation marker on every row after the first, so a wrapped
+     * prompt reads as one thing rather than as several. Drawn after the
+     * text because the gutter is outside the text's columns.
      */
+    wattrset(app->input_win, attr_for_tag(AI_STYLE_DIM));
+
+    for (i = 1; i < rows; i++)
     {
-        GList       *mentions = ai_mention_scan(app->input->str);
-        GList       *iter;
-        const gchar *text = app->input->str;
-        gsize        offset = 0;
-        gint         column = 2;
-        gboolean     is_command =
-            ai_command_set_is_command_line(app->input->str);
-
-        for (iter = mentions; iter != NULL; iter = iter->next)
-        {
-            const AiMention  *mention = iter->data;
-            g_autofree gchar *before =
-                g_strndup(text + offset, mention->start - offset);
-            g_autofree gchar *span =
-                g_strndup(text + mention->start, mention->len);
-
-            wattrset(app->input_win, A_NORMAL);
-            mvwaddnstr(app->input_win, 0, column, before,
-                       MAX(0, width - column));
-            column += (gint)ai_style_text_width(before);
-
-            wattrset(app->input_win, attr_for_tag(AI_STYLE_MENTION));
-            mvwaddnstr(app->input_win, 0, column, span,
-                       MAX(0, width - column));
-            column += (gint)ai_style_text_width(span);
-
-            offset = mention->start + mention->len;
-        }
-
-        g_list_free_full(mentions, (GDestroyNotify)ai_mention_free);
-
-        if (is_command && offset == 0)
-        {
-            /* The command name, up to the first space. */
-            const gchar      *space = strchr(text, ' ');
-            gsize             name_len =
-                (space != NULL) ? (gsize)(space - text) : strlen(text);
-            g_autofree gchar *name = g_strndup(text, name_len);
-
-            wattrset(app->input_win, attr_for_tag(AI_STYLE_COMMAND));
-            mvwaddnstr(app->input_win, 0, column, name,
-                       MAX(0, width - column));
-            column += (gint)ai_style_text_width(name);
-            offset = name_len;
-        }
-
-        wattrset(app->input_win, A_NORMAL);
-        mvwaddnstr(app->input_win, 0, column, text + offset,
-                   MAX(0, width - column));
+        mvwaddstr(app->input_win, i, 0, "\342\224\202 ");   /* │ */
     }
 
-    {
-        g_autofree gchar *before = g_strndup(app->input->str, app->cursor);
+    wattrset(app->input_win, A_NORMAL);
 
-        cursor_col = 2 + (gint)ai_style_text_width(before);
-    }
-
-    wmove(app->input_win, 0, MIN(cursor_col, width - 1));
+    /*
+     * The cursor may sit past the last row when the prompt has outgrown
+     * INPUT_MAX_ROWS. Pinning it to the last visible row keeps it on
+     * screen; the text above simply scrolls out of view, which is the
+     * point at which ^G is the better tool anyway.
+     */
+    wmove(app->input_win,
+          CLAMP(pen.cursor_row, 0, rows - 1),
+          MIN(pen.cursor_col + INPUT_GUTTER, width - 1));
     wnoutrefresh(app->input_win);
+}
+
+/*
+ * Give the input the rows it needs and let the transcript have the rest.
+ *
+ * Called before every draw rather than only on resize, because the input
+ * changes height as it is typed into.
+ */
+static void
+app_layout(App *app)
+{
+    gint height;
+    gint width;
+    gint rows;
+    gint was;
+
+    getmaxyx(stdscr, height, width);
+
+    rows = input_rows_for(app, width);
+    rows = CLAMP(rows, 1, MAX(1, height - 2));
+    was = getmaxy(app->input_win);
+
+    /* Anchored at the top, so shrinking it is always valid --- and
+     * shrinking is what frees the rows the others are about to take. */
+    wresize(app->transcript_win, MAX(1, height - 1 - rows), width);
+
+    /*
+     * A window may not extend past the bottom of the screen, not even
+     * for the instant between two calls. So growing means moving up
+     * before resizing, and shrinking means resizing before moving down.
+     */
+    if (rows >= was)
+    {
+        mvwin(app->input_win, MAX(0, height - rows), 0);
+        wresize(app->input_win, rows, width);
+    }
+    else
+    {
+        wresize(app->input_win, rows, width);
+        mvwin(app->input_win, MAX(0, height - rows), 0);
+    }
+
+    wresize(app->status_win, 1, width);
+    mvwin(app->status_win, MAX(0, height - 1 - rows), 0);
 }
 
 static void
 app_redraw(App *app)
 {
     g_autoptr(GPtrArray) rows = NULL;
-    gint height = getmaxy(app->transcript_win);
-    gint width = getmaxx(app->transcript_win);
+    gint height;
+    gint width;
     gint first;
     gint i;
+
+    /* The input decides how much room is left, so its height is settled
+     * before anything is measured against the transcript window. */
+    app_layout(app);
+
+    height = getmaxy(app->transcript_win);
+    width = getmaxx(app->transcript_win);
 
     if (width <= 0 || height <= 0)
     {
@@ -1034,11 +1232,17 @@ show_help(App *app)
 
     g_string_append(out,
                     "\nKeys\n"
+                    "  Enter      a new line; the prompt keeps growing\n"
+                    "  ^D         send it (or quit, on an empty line)\n"
+                    "  Alt-Enter  send it\n"
+                    "  ^G         edit the prompt in $EDITOR\n"
                     "  Tab        complete /command or @path\n"
                     "  ^N         cycle tool and thinking blocks\n"
                     "  ^B         expand or collapse the selected block\n"
                     "  ^C         stop the current turn\n"
-                    "  ^D         quit\n");
+                    "  ^U         clear the line\n");
+
+    say(app, "%s", out->str);
 
     say(app, "%s", out->str);
 }
@@ -1441,6 +1645,179 @@ handle_builtin(App *app, AiCommandResult *result)
     app_schedule_redraw(app);
 }
 
+/*
+ * Which editor, and how to run it.
+ *
+ * $VISUAL before $EDITOR because that is what the two mean: VISUAL is the
+ * full-screen one, EDITOR the line editor of last resort, and this needs
+ * a screen. Parsed as a command line rather than a bare path, since both
+ * are routinely set to something with arguments --- `emacs -nw`, `code
+ * -w`, `emacsclient -t`.
+ */
+static gchar **
+resolve_editor(GError **error)
+{
+    const gchar *spec;
+    gchar      **argv = NULL;
+
+    spec = g_getenv("VISUAL");
+
+    if (spec == NULL || spec[0] == '\0')
+    {
+        spec = g_getenv("EDITOR");
+    }
+
+    if (spec == NULL || spec[0] == '\0')
+    {
+        spec = "vi";
+    }
+
+    if (!g_shell_parse_argv(spec, NULL, &argv, error))
+    {
+        return NULL;
+    }
+
+    return argv;
+}
+
+/*
+ * Write the prompt to a file, hand the terminal to $EDITOR, take it back.
+ *
+ * A prompt worth more than a line or two wants a real editor: paragraphs,
+ * a paste that keeps its shape, the keybindings already in somebody's
+ * fingers. Rather than grow a text editor inside this one, the file goes
+ * out and comes back.
+ *
+ * The turn keeps running while the editor is open --- the spawn blocks
+ * this thread, so nothing repaints, but callbacks queue up and are
+ * dispatched the moment the main loop turns again.
+ */
+static void
+edit_in_editor(App *app)
+{
+    g_autoptr(GError)  error = NULL;
+    g_auto(GStrv)      editor = NULL;
+    g_autoptr(GPtrArray) argv = NULL;
+    g_autofree gchar  *path = NULL;
+    g_autofree gchar  *edited = NULL;
+    gint               fd;
+    gint               status = 0;
+    guint              i;
+
+    editor = resolve_editor(&error);
+
+    if (editor == NULL)
+    {
+        say(app, "Cannot read $VISUAL/$EDITOR: %s", error->message);
+        return;
+    }
+
+    /* .md so an editor picks a prose mode: soft wrap and a spell checker
+     * beat C indentation for something that is going to a model. */
+    fd = g_file_open_tmp("ai-tui-prompt-XXXXXX.md", &path, &error);
+
+    if (fd < 0)
+    {
+        say(app, "Cannot make a temporary file: %s", error->message);
+        return;
+    }
+
+    close(fd);
+
+    if (!g_file_set_contents(path, app->input->str, (gssize)app->input->len,
+                             &error))
+    {
+        say(app, "Cannot write %s: %s", path, error->message);
+        g_unlink(path);
+        return;
+    }
+
+    argv = g_ptr_array_new();
+
+    for (i = 0; editor[i] != NULL; i++)
+    {
+        g_ptr_array_add(argv, editor[i]);
+    }
+
+    g_ptr_array_add(argv, path);
+    g_ptr_array_add(argv, NULL);
+
+    /*
+     * Hand the terminal over. def_prog_mode() remembers this program's
+     * settings so reset_prog_mode() can put them back --- an editor
+     * leaves the terminal however it likes, and without this ai-tui
+     * comes back to a screen it no longer controls.
+     */
+    def_prog_mode();
+    endwin();
+
+    if (!g_spawn_sync(NULL, (gchar **)argv->pdata, NULL,
+                      G_SPAWN_SEARCH_PATH | G_SPAWN_CHILD_INHERITS_STDIN,
+                      NULL, NULL, NULL, NULL, &status, &error))
+    {
+        reset_prog_mode();
+        clearok(curscr, TRUE);
+        app_schedule_redraw(app);
+
+        say(app, "Cannot run %s: %s", editor[0], error->message);
+        g_unlink(path);
+        return;
+    }
+
+    reset_prog_mode();
+
+    /* The editor painted over everything; nothing ncurses believes about
+     * the screen is true any more. */
+    clearok(curscr, TRUE);
+
+    /*
+     * A non-zero exit is taken as "leave it alone".
+     *
+     * Quitting an editor without saving is how somebody says they
+     * changed their mind, and the file on disk may be a half-finished
+     * draft rather than a prompt. Reading it back anyway would make the
+     * cancel do the opposite of cancelling.
+     */
+    if (!g_spawn_check_wait_status(status, NULL))
+    {
+        say(app, "%s exited without saving; the prompt is unchanged.",
+            editor[0]);
+        g_unlink(path);
+        app_schedule_redraw(app);
+        return;
+    }
+
+    if (!g_file_get_contents(path, &edited, NULL, &error))
+    {
+        say(app, "Cannot read %s back: %s", path, error->message);
+        g_unlink(path);
+        app_schedule_redraw(app);
+        return;
+    }
+
+    g_unlink(path);
+
+    /*
+     * One trailing newline is an artefact of every editor that ends a
+     * file properly, not something the user typed. Interior blank lines
+     * are left exactly as written.
+     */
+    {
+        gsize len = strlen(edited);
+
+        while (len > 0 && edited[len - 1] == '\n')
+        {
+            edited[--len] = '\0';
+        }
+
+        g_string_assign(app->input, edited);
+        app->cursor = (guint)app->input->len;
+    }
+
+    app->completion_dismissed = FALSE;
+    app_schedule_redraw(app);
+}
+
 static gboolean
 drain_keys(App *app)
 {
@@ -1453,14 +1830,28 @@ drain_keys(App *app)
             case '\n':
             case '\r':
             case KEY_ENTER:
-                /* A visible menu means Enter is a choice, not a send. */
+                /* A visible menu means Enter is a choice, not an edit. */
                 if (app->candidates != NULL)
                 {
                     completion_accept(app);
                     break;
                 }
 
-                app_send(app);
+                /*
+                 * Enter is a newline, not a send.
+                 *
+                 * A terminal cannot tell Shift+Enter from Enter --- both
+                 * are one carriage return on the wire, which is why
+                 * harnesses that bind the two differently ship a
+                 * terminal-configuration step. Rather than require one,
+                 * the common key does the common thing and sending is
+                 * ^D, which already means "that is all my input" in
+                 * every shell there has ever been. Alt+Enter sends too,
+                 * for the muscle memory.
+                 */
+                input_insert(app, "\n");
+                app->completion_dismissed = FALSE;
+                completion_refresh(app);
                 break;
 
             case KEY_BACKSPACE:
@@ -1546,10 +1937,36 @@ drain_keys(App *app)
                 select_next_tool_block(app);
                 break;
 
-            case 27:  /* Escape: dismiss until the line changes */
+            case 27:
+            {
+                /*
+                 * Escape, or the lead byte of Alt+<key>.
+                 *
+                 * ncurses assembles the sequences it knows into KEY_*
+                 * codes, but Alt+Enter is not one of them --- it arrives
+                 * as ESC followed by a carriage return in the same read
+                 * burst. One peek separates the two, and anything else
+                 * goes back on the queue to be handled as itself.
+                 */
+                gint next = wgetch(app->input_win);
+
+                if (next == '\r' || next == '\n' || next == KEY_ENTER)
+                {
+                    completion_close(app);
+                    app_send(app);
+                    break;
+                }
+
+                if (next != ERR)
+                {
+                    ungetch(next);
+                }
+
+                /* A real Escape: dismiss the menu until the line changes. */
                 app->completion_dismissed = TRUE;
                 completion_close(app);
                 break;
+            }
 
             case 2:   /* ^B: toggle the selected block */
                 completion_close(app);
@@ -1560,13 +1977,21 @@ drain_keys(App *app)
                 ai_conversation_cancel(app->conversation);
                 break;
 
-            case 4:   /* ^D */
+            case 4:   /* ^D: send, or quit on an empty line */
                 if (app->input->len == 0)
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
                     return G_SOURCE_REMOVE;
                 }
+
+                completion_close(app);
+                app_send(app);
+                break;
+
+            case 7:   /* ^G: hand the prompt to $EDITOR */
+                completion_close(app);
+                edit_in_editor(app);
                 break;
 
             default:
@@ -1643,11 +2068,10 @@ on_resize(gpointer user_data)
     refresh();
     getmaxyx(stdscr, height, width);
 
-    wresize(app->transcript_win, MAX(1, height - 2), width);
-    wresize(app->status_win, 1, width);
-    mvwin(app->status_win, MAX(0, height - 2), 0);
-    wresize(app->input_win, 1, width);
-    mvwin(app->input_win, MAX(0, height - 1), 0);
+    (void)height;
+    (void)width;
+
+    app_layout(app);
 
     /*
      * Every block re-wraps to the new width. The library caches per width,

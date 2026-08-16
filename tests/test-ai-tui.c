@@ -196,6 +196,156 @@ stub_new(const gchar *ndjson)
 	return stub;
 }
 
+/* ----------------------------------------------------------------
+ * Driving the real terminal
+ * ----------------------------------------------------------------
+ *
+ * --dump covers everything that happens after a line is submitted, and
+ * nothing about how a line is typed. Since Enter stopped meaning "send",
+ * that gap is exactly where a regression would live: a build where ^D
+ * quit instead of sending, or where Escape got eaten by the Alt-Enter
+ * peek, would pass every test above.
+ *
+ * So these run ai-tui under tmux, which gives it a real pty and real
+ * ncurses, send keys at it, and read the screen back. Skipped when tmux
+ * is not installed rather than failed --- it is a test dependency, not a
+ * library one.
+ */
+
+static gboolean
+tmux_available(void)
+{
+	g_autofree gchar *path = g_find_program_in_path("tmux");
+
+	return path != NULL;
+}
+
+/* Run a tmux subcommand, returning its stdout. */
+static gchar *
+tmux_run(const gchar * const *args)
+{
+	g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(GError)    error = NULL;
+	gchar               *out = NULL;
+	gsize                i;
+
+	g_ptr_array_add(argv, g_strdup("tmux"));
+
+	for (i = 0; args[i] != NULL; i++)
+	{
+		g_ptr_array_add(argv, g_strdup(args[i]));
+	}
+
+	g_ptr_array_add(argv, NULL);
+
+	g_spawn_sync(NULL, (gchar **)argv->pdata, NULL,
+	             G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
+	             NULL, NULL, &out, NULL, NULL, &error);
+	g_assert_no_error(error);
+
+	return out;
+}
+
+static void
+tmux_kill(const gchar *session)
+{
+	const gchar *args[] = { "kill-session", "-t", session, NULL };
+	g_autofree gchar *out = tmux_run(args);
+}
+
+static void
+tmux_send(const gchar *session, const gchar *keys)
+{
+	const gchar *args[] = { "send-keys", "-t", session, keys, NULL };
+	g_autofree gchar *out = tmux_run(args);
+}
+
+static gchar *
+tmux_capture(const gchar *session)
+{
+	const gchar *args[] = { "capture-pane", "-t", session, "-p", NULL };
+
+	return tmux_run(args);
+}
+
+/*
+ * Wait for @needle to appear on the pane.
+ *
+ * Polling rather than sleeping: a fixed sleep is either too short on a
+ * loaded machine or wasted time on an idle one, and the failure mode of
+ * "too short" is a flaky test that blames the wrong thing.
+ */
+static gboolean
+tmux_wait_for(const gchar *session, const gchar *needle)
+{
+	gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+	while (g_get_monotonic_time() < deadline)
+	{
+		g_autofree gchar *pane = tmux_capture(session);
+
+		if (pane != NULL && strstr(pane, needle) != NULL)
+		{
+			return TRUE;
+		}
+
+		g_usleep(100 * 1000);
+	}
+
+	return FALSE;
+}
+
+/*
+ * Start ai-tui in a detached tmux session against a stub `grok`.
+ *
+ * VISUAL is cleared because it beats EDITOR, and a developer with one
+ * set would otherwise have their real editor opened by the ^G test ---
+ * which is exactly what happened the first time this was tried by hand.
+ */
+static void
+tmux_start_tui(const gchar *session, const gchar *stub_dir,
+               const gchar *editor)
+{
+	g_autofree gchar *grok = g_build_filename(stub_dir, "grok", NULL);
+	g_autofree gchar *command = NULL;
+	const gchar      *args[] = {
+		"new-session", "-d", "-s", session, "-x", "100", "-y", "24",
+		NULL, NULL
+	};
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *libdir = g_path_get_dirname(tui_binary);
+	g_autofree gchar *libs = g_path_get_dirname(libdir);
+
+	tmux_kill(session);
+
+	command = g_strdup_printf(
+		"env -u VISUAL LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
+		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' '%s' -p grok-build",
+		libs, grok, stub_dir, stub_dir,
+		editor != NULL ? editor : "true", tui_binary);
+
+	args[8] = command;
+	out = tmux_run(args);
+
+	/* The prompt marker is the first thing drawn, so its arrival is the
+	 * signal that ncurses is up and reading keys. */
+	g_assert_true(tmux_wait_for(session, ">"));
+}
+
+/* Write an executable stand-in for $EDITOR into @dir. */
+static gchar *
+editor_stub(const gchar *dir, const gchar *name, const gchar *body)
+{
+	gchar            *path = g_build_filename(dir, name, NULL);
+	g_autoptr(GError) error = NULL;
+
+	g_file_set_contents(path, body, -1, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(g_chmod(path, 0700), ==, 0);
+
+	return path;
+}
+
 static void
 stub_free(Stub *stub)
 {
@@ -762,6 +912,239 @@ test_no_expand_leaves_a_command_alone(void)
 	sandbox_free(box);
 }
 
+/* ----------------------------------------------------------------
+ * Keys, under a real terminal
+ * ---------------------------------------------------------------- */
+
+#define TUI_SESSION "ai-glib-tui-test"
+
+/*
+ * The reply the stub grok gives, so a send is visible on the pane.
+ *
+ * ai-tui streams by default, and grok's streaming format is
+ * Anthropic-shaped rather than its own camelCase result envelope --- so
+ * this is the delta shape, not `{"text": ...}`.
+ */
+#define STUB_REPLY \
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\"," \
+	"\"delta\":{\"type\":\"text_delta\",\"text\":\"the reply\"}}}\n" \
+	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
+
+static void
+test_enter_inserts_a_newline(void)
+{
+	g_autofree gchar  *pane = NULL;
+	Stub              *stub;
+	gchar             *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "alpha");
+	tmux_send(TUI_SESSION, "Enter");
+	tmux_send(TUI_SESSION, "beta");
+
+	/*
+	 * Both halves on screen at once is the whole claim: Enter did not
+	 * send the first line away, it opened a second.
+	 */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "beta"));
+
+	pane = tmux_capture(TUI_SESSION);
+
+	g_assert_nonnull(strstr(pane, "alpha"));
+	g_assert_nonnull(strstr(pane, "beta"));
+
+	/* And the second row carries the continuation marker, which only
+	 * exists when the input grew past one row. */
+	g_assert_nonnull(strstr(pane, "\342\224\202"));   /* │ */
+
+	/* Nothing was sent: the stub's reply is nowhere. */
+	g_assert_null(strstr(pane, "the reply"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+static void
+test_ctrl_d_sends_the_prompt(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "ask something");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "ask something"));
+
+	tmux_send(TUI_SESSION, "C-d");
+
+	/* The stub's answer arriving proves the turn actually went. */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
+ * Escape survived the Alt-Enter peek.
+ *
+ * Alt-Enter arrives as ESC followed by a carriage return, so the handler
+ * reads one key ahead to tell it from a bare Escape. Get that wrong and
+ * Escape either stops working or swallows whatever was typed after it.
+ */
+static void
+test_escape_still_dismisses_the_menu(void)
+{
+	g_autofree gchar  *pane = NULL;
+	Stub              *stub;
+	gchar             *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	sandbox_write(box, ".claude/commands/deploy.md",
+	              "---\ndescription: Ship it\n---\nDeploy.\n");
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "/dep");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "/dep"));
+
+	tmux_send(TUI_SESSION, "Escape");
+	g_usleep(500 * 1000);
+
+	pane = tmux_capture(TUI_SESSION);
+
+	/* The line is untouched --- Escape dismissed a menu, not the text. */
+	g_assert_nonnull(strstr(pane, "/dep"));
+
+	/* And a key typed after it still lands, which is what a swallowed
+	 * peek would break. */
+	tmux_send(TUI_SESSION, "loy");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "/deploy"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+static void
+test_ctrl_g_round_trips_through_the_editor(void)
+{
+	g_autofree gchar  *pane = NULL;
+	Stub              *stub;
+	gchar             *box;
+	g_autofree gchar  *editor = NULL;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	editor = editor_stub(box, "editor.sh",
+	                     "#!/bin/sh\n"
+	                     "printf 'from the editor\\nand a second line\\n' "
+	                     "> \"$1\"\n");
+
+	tmux_start_tui(TUI_SESSION, stub->dir, editor);
+
+	tmux_send(TUI_SESSION, "typed by hand");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "typed by hand"));
+
+	tmux_send(TUI_SESSION, "C-g");
+
+	g_assert_true(tmux_wait_for(TUI_SESSION, "from the editor"));
+
+	pane = tmux_capture(TUI_SESSION);
+
+	/* What the editor wrote replaced what was typed, newlines and all. */
+	g_assert_nonnull(strstr(pane, "and a second line"));
+	g_assert_null(strstr(pane, "typed by hand"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
+ * Quitting the editor without saving leaves the prompt alone.
+ *
+ * A non-zero exit is how somebody says they changed their mind, and the
+ * file on disk may be a half-finished draft. Reading it back anyway
+ * would make the cancel do the opposite of cancelling --- so the stub
+ * here writes something *and* fails, and the something must not appear.
+ */
+static void
+test_an_aborted_edit_keeps_the_prompt(void)
+{
+	g_autofree gchar  *pane = NULL;
+	Stub              *stub;
+	gchar             *box;
+	g_autofree gchar  *editor = NULL;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	editor = editor_stub(box, "abort.sh",
+	                     "#!/bin/sh\n"
+	                     "printf 'must be ignored\\n' > \"$1\"\n"
+	                     "exit 1\n");
+
+	tmux_start_tui(TUI_SESSION, stub->dir, editor);
+
+	tmux_send(TUI_SESSION, "keep me");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "keep me"));
+
+	tmux_send(TUI_SESSION, "C-g");
+
+	g_assert_true(tmux_wait_for(TUI_SESSION, "unchanged"));
+
+	pane = tmux_capture(TUI_SESSION);
+
+	g_assert_nonnull(strstr(pane, "keep me"));
+	g_assert_null(strstr(pane, "must be ignored"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -835,6 +1218,17 @@ main(int argc, char *argv[])
 	                test_unknown_builtin_free_line_reaches_the_child);
 	g_test_add_func("/ai-glib/ai-tui/no-expand",
 	                test_no_expand_leaves_a_command_alone);
+
+	g_test_add_func("/ai-glib/ai-tui/keys/enter-is-a-newline",
+	                test_enter_inserts_a_newline);
+	g_test_add_func("/ai-glib/ai-tui/keys/ctrl-d-sends",
+	                test_ctrl_d_sends_the_prompt);
+	g_test_add_func("/ai-glib/ai-tui/keys/escape-still-dismisses",
+	                test_escape_still_dismisses_the_menu);
+	g_test_add_func("/ai-glib/ai-tui/keys/editor-round-trip",
+	                test_ctrl_g_round_trips_through_the_editor);
+	g_test_add_func("/ai-glib/ai-tui/keys/editor-abort",
+	                test_an_aborted_edit_keeps_the_prompt);
 
 	return g_test_run();
 }
