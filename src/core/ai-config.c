@@ -717,6 +717,7 @@ static const struct {
     { "ollama",      AI_PROVIDER_OLLAMA },
     { "claude_code", AI_PROVIDER_CLAUDE_CODE },
     { "opencode",    AI_PROVIDER_OPENCODE },
+    { "grok_build",  AI_PROVIDER_GROK_BUILD },
     { NULL,          0 }
 };
 

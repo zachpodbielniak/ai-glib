@@ -69,6 +69,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-claude-code-client.h \
 	$(SRCDIR)/providers/ai-claude-tmux-client.h \
 	$(SRCDIR)/providers/ai-opencode-client.h \
+	$(SRCDIR)/providers/ai-grok-build-client.h \
 	$(SRCDIR)/convenience/ai-simple.h \
 	$(SRCDIR)/convenience/ai-search-provider.h \
 	$(SRCDIR)/convenience/ai-search-result.h \
@@ -125,6 +126,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-claude-code-client.c \
 	$(SRCDIR)/providers/ai-claude-tmux-client.c \
 	$(SRCDIR)/providers/ai-opencode-client.c \
+	$(SRCDIR)/providers/ai-grok-build-client.c \
 	$(SRCDIR)/convenience/ai-simple.c \
 	$(SRCDIR)/convenience/ai-search-provider.c \
 	$(SRCDIR)/convenience/ai-search-result.c \
@@ -231,8 +233,10 @@ $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in
 	     $< > $@
 
 # Tests
+# tests/test-ai-cli.c spawns the installed-shaped `ai` binary, so the test
+# run needs it built even when the caller only asked for tests.
 .PHONY: test
-test: $(TEST_BINARIES)
+test: $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."
 	@for test in $(TEST_BINARIES); do \
 		echo "Running $$test..."; \
@@ -242,7 +246,7 @@ test: $(TEST_BINARIES)
 	@echo "All tests passed!"
 
 .PHONY: test-verbose
-test-verbose: $(TEST_BINARIES)
+test-verbose: $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests (verbose)..."
 	@for test in $(TEST_BINARIES); do \
 		echo "Running $$test..."; \

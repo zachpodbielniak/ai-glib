@@ -30,6 +30,8 @@ G_BEGIN_DECLS
  * @AI_PROVIDER_CLAUDE_TMUX: Claude Code CLI driven via an ephemeral
  *   tmux session in interactive TUI mode (billed as normal
  *   subscription usage, bypassing the Agent SDK credit pool)
+ * @AI_PROVIDER_GROK_BUILD: Grok Build CLI wrapper (the `grok` binary in
+ *   headless mode)
  *
  * Enumeration of supported AI providers.
  */
@@ -42,7 +44,8 @@ typedef enum
     AI_PROVIDER_OLLAMA,
     AI_PROVIDER_CLAUDE_CODE,
     AI_PROVIDER_OPENCODE,
-    AI_PROVIDER_CLAUDE_TMUX
+    AI_PROVIDER_CLAUDE_TMUX,
+    AI_PROVIDER_GROK_BUILD
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);
@@ -154,7 +157,9 @@ ai_content_type_from_string(const gchar *str);
  * @AI_EFFORT_MAX: Maximum effort / deepest reasoning
  *
  * Enumeration of reasoning effort levels for AI providers.
- * Maps to --effort for Claude Code and --variant for OpenCode.
+ * Maps to --effort for Claude Code, --variant for OpenCode, and
+ * --reasoning-effort for Grok Build (which has no "max" — it is folded
+ * onto xhigh).
  *
  * Ordered low → max; XHIGH sits between HIGH and MAX so the numeric
  * ordering matches the semantic ordering.

@@ -94,6 +94,9 @@ typedef struct _AiClaudeTmuxClient  AiClaudeTmuxClient;
 typedef struct _AiOpenCodeClient  AiOpenCodeClient;
 /* AiOpenCodeClient is final */
 
+typedef struct _AiGrokBuildClient  AiGrokBuildClient;
+/* AiGrokBuildClient is final */
+
 /* Convenience types */
 typedef struct _AiSimple  AiSimple;
 /* AiSimple is final */

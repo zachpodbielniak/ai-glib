@@ -34,6 +34,7 @@
 /* Private seams: assert/print the exact argv, incl. the Ollama rewrite. */
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-tmux-client-internal.h"
+#include "providers/ai-grok-build-client-internal.h"
 #include "providers/ai-claude-launch.h"
 
 /* ---------------------------------------------------------------- */
@@ -53,6 +54,7 @@ static gboolean  opt_list_providers  = FALSE;
 static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
+static gchar   **opt_set             = NULL;
 
 /* Image mode.  Negative / NULL means "not given", so an untouched flag
  * leaves the corresponding request parameter unset. */
@@ -89,7 +91,8 @@ static gboolean  opt_image_strict       = FALSE;
 static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-	  "claude-tmux, opencode (default: $AI_PROVIDER or claude)", "NAME" },
+	  "claude-tmux, opencode, grok-build "
+	  "(default: $AI_PROVIDER or claude)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
 	  "Model id (default: provider default). For claude-code/claude-tmux, "
 	  "an \"ollama/<model>\" id routes via `ollama launch claude`.", "ID" },
@@ -104,7 +107,12 @@ static const GOptionEntry option_entries[] = {
 	{ "stream", 0, 0, G_OPTION_ARG_NONE, &opt_stream,
 	  "Stream the response as it arrives (when supported)", NULL },
 	{ "skip-permissions", 0, 0, G_OPTION_ARG_NONE, &opt_skip_perms,
-	  "Pass --dangerously-skip-permissions (claude-code/claude-tmux)", NULL },
+	  "Bypass tool-use approval (claude-code/claude-tmux/grok-build)", NULL },
+	{ "set", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_set,
+	  "Set any provider property, e.g. --set sandbox=workspace. "
+	  "Repeatable. A bare --set NAME sets a boolean property to true. "
+	  "Pass an unknown name to list what the provider accepts.",
+	  "PROP=VALUE" },
 	{ "dry-run", 0, 0, G_OPTION_ARG_NONE, &opt_dry_run,
 	  "Print the command that would be spawned, do not run it", NULL },
 	{ "list-providers", 0, 0, G_OPTION_ARG_NONE, &opt_list_providers,
@@ -244,6 +252,193 @@ print_argv(gchar **argv)
 	fputc('\n', stdout);
 }
 
+/* ---------------------------------------------------------------- */
+/* --set PROP=VALUE                                                  */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Print every property the provider will accept from --set.
+ *
+ * An unknown name is almost always a guess at a knob the user knows the
+ * provider has, so answering with the real list is more useful than
+ * repeating the name back.
+ */
+static void
+print_settable_properties(GObject *provider)
+{
+	g_autofree GParamSpec **pspecs = NULL;
+	guint n = 0, i;
+
+	pspecs = g_object_class_list_properties(G_OBJECT_GET_CLASS(provider), &n);
+
+	g_printerr("ai: %s accepts:\n", G_OBJECT_TYPE_NAME(provider));
+	for (i = 0; i < n; i++)
+	{
+		if ((pspecs[i]->flags & G_PARAM_WRITABLE) == 0)
+			continue;
+
+		g_printerr("  %-24s %s\n", g_param_spec_get_name(pspecs[i]),
+		           g_type_name(pspecs[i]->value_type));
+	}
+}
+
+/*
+ * Parse @text into @value according to @pspec's type.
+ *
+ * Deliberately strict: a mistyped value silently becoming 0 or FALSE is a
+ * worse outcome than an error, because the run still happens and the knob
+ * the user asked for just is not there.
+ */
+static gboolean
+value_from_string(GValue *value, GParamSpec *pspec, const gchar *text)
+{
+	GType type = G_PARAM_SPEC_VALUE_TYPE(pspec);
+	gchar *end = NULL;
+
+	g_value_init(value, type);
+
+	if (type == G_TYPE_STRING)
+	{
+		g_value_set_string(value, text);
+		return TRUE;
+	}
+
+	if (type == G_TYPE_BOOLEAN)
+	{
+		if (g_ascii_strcasecmp(text, "true") == 0 ||
+		    g_ascii_strcasecmp(text, "yes") == 0 ||
+		    g_ascii_strcasecmp(text, "on") == 0 ||
+		    g_strcmp0(text, "1") == 0)
+		{
+			g_value_set_boolean(value, TRUE);
+			return TRUE;
+		}
+		if (g_ascii_strcasecmp(text, "false") == 0 ||
+		    g_ascii_strcasecmp(text, "no") == 0 ||
+		    g_ascii_strcasecmp(text, "off") == 0 ||
+		    g_strcmp0(text, "0") == 0)
+		{
+			g_value_set_boolean(value, FALSE);
+			return TRUE;
+		}
+		return FALSE;
+	}
+
+	if (type == G_TYPE_INT || type == G_TYPE_UINT ||
+	    type == G_TYPE_INT64 || type == G_TYPE_UINT64)
+	{
+		gint64 parsed = g_ascii_strtoll(text, &end, 10);
+
+		if (end == text || *end != '\0')
+			return FALSE;
+
+		if (type == G_TYPE_INT)
+			g_value_set_int(value, (gint) parsed);
+		else if (type == G_TYPE_UINT)
+			g_value_set_uint(value, (guint) parsed);
+		else if (type == G_TYPE_INT64)
+			g_value_set_int64(value, parsed);
+		else
+			g_value_set_uint64(value, (guint64) parsed);
+		return TRUE;
+	}
+
+	if (type == G_TYPE_DOUBLE || type == G_TYPE_FLOAT)
+	{
+		gdouble parsed = g_ascii_strtod(text, &end);
+
+		if (end == text || *end != '\0')
+			return FALSE;
+
+		if (type == G_TYPE_DOUBLE)
+			g_value_set_double(value, parsed);
+		else
+			g_value_set_float(value, (gfloat) parsed);
+		return TRUE;
+	}
+
+	if (G_TYPE_IS_ENUM(type))
+	{
+		g_autoptr(GEnumClass) klass = g_type_class_ref(type);
+		GEnumValue *ev = g_enum_get_value_by_nick(klass, text);
+
+		if (ev == NULL)
+			ev = g_enum_get_value_by_name(klass, text);
+		if (ev == NULL)
+			return FALSE;
+
+		g_value_set_enum(value, ev->value);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+/*
+ * Apply every --set to @provider. Returns FALSE (having explained why) if
+ * any of them names a property the provider does not have, one it will not
+ * let us write, or a value that does not parse.
+ */
+static gboolean
+apply_property_overrides(GObject *provider)
+{
+	gsize i;
+
+	if (opt_set == NULL)
+		return TRUE;
+
+	for (i = 0; opt_set[i] != NULL; i++)
+	{
+		g_auto(GValue) value = G_VALUE_INIT;
+		g_autofree gchar *name = NULL;
+		const gchar *text;
+		const gchar *eq;
+		GParamSpec *pspec;
+
+		eq = strchr(opt_set[i], '=');
+		if (eq != NULL)
+		{
+			name = g_strndup(opt_set[i], (gsize)(eq - opt_set[i]));
+			text = eq + 1;
+		}
+		else
+		{
+			/* A bare `--set NAME` is a boolean switch. */
+			name = g_strdup(opt_set[i]);
+			text = "true";
+		}
+
+		g_strstrip(name);
+
+		pspec = g_object_class_find_property(G_OBJECT_GET_CLASS(provider),
+		                                     name);
+		if (pspec == NULL)
+		{
+			g_printerr("ai: no property '%s' on this provider\n", name);
+			print_settable_properties(provider);
+			return FALSE;
+		}
+
+		if ((pspec->flags & G_PARAM_WRITABLE) == 0)
+		{
+			g_printerr("ai: property '%s' is read-only\n", name);
+			return FALSE;
+		}
+
+		if (!value_from_string(&value, pspec, text))
+		{
+			g_printerr("ai: cannot read '%s' as a value for '%s' (%s)\n",
+			           text, name,
+			           g_type_name(G_PARAM_SPEC_VALUE_TYPE(pspec)));
+			return FALSE;
+		}
+
+		g_object_set_property(provider, name, &value);
+	}
+
+	return TRUE;
+}
+
 /*
  * Create the concrete provider object for @ptype using @config and apply
  * the common knobs (model, system prompt, max tokens, temperature, effort,
@@ -281,6 +476,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	case AI_PROVIDER_OPENCODE:
 		provider = G_OBJECT(ai_opencode_client_new_with_config(config));
 		break;
+	case AI_PROVIDER_GROK_BUILD:
+		provider = G_OBJECT(ai_grok_build_client_new_with_config(config));
+		break;
 	default:
 		return NULL;
 	}
@@ -315,6 +513,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_CLAUDE_TMUX_CLIENT(provider))
 		ai_claude_tmux_client_set_skip_permissions(
 			AI_CLAUDE_TMUX_CLIENT(provider), opt_skip_perms);
+	else if (AI_IS_GROK_BUILD_CLIENT(provider))
+		ai_grok_build_client_set_skip_permissions(
+			AI_GROK_BUILD_CLIENT(provider), opt_skip_perms);
 
 	return provider;
 }
@@ -329,7 +530,8 @@ list_providers(void)
 	static const AiProviderType all[] = {
 		AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI,
 		AI_PROVIDER_GROK, AI_PROVIDER_OLLAMA, AI_PROVIDER_CLAUDE_CODE,
-		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE
+		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE,
+		AI_PROVIDER_GROK_BUILD
 	};
 	gsize i;
 
@@ -348,6 +550,7 @@ list_providers(void)
 			note = "  (model \"ollama/<name>\" => ollama launch claude)";
 			break;
 		case AI_PROVIDER_OPENCODE:
+		case AI_PROVIDER_GROK_BUILD:
 			kind = "CLI";
 			break;
 		default:
@@ -364,9 +567,10 @@ list_providers(void)
 
 /*
  * Print the command that would be spawned. For the claude-code /
- * claude-tmux CLI providers this is the real argv (with the executable
- * resolved and the Ollama transport applied); for other providers it is a
- * short summary, since they do not spawn a CLI we can introspect.
+ * claude-tmux / grok-build CLI providers this is the real argv (with the
+ * executable resolved and, for the claude providers, the Ollama transport
+ * applied); for other providers it is a short summary, since they do not
+ * spawn a CLI we can introspect.
  */
 static int
 dry_run(GObject *provider, AiProviderType ptype, GList *messages)
@@ -378,6 +582,31 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 		g_autofree gchar *exe = NULL;
 
 		argv = ai_claude_code_client_build_argv(
+			AI_CLI_CLIENT(provider), messages, opt_system,
+			opt_max_tokens, opt_stream);
+		exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(provider),
+		                                       &error);
+		if (exe != NULL)
+		{
+			g_free(argv[0]);
+			argv[0] = g_steal_pointer(&exe);
+		}
+		else
+		{
+			g_printerr("note: %s (printing unresolved placeholder)\n",
+			           error->message);
+		}
+		print_argv(argv);
+		return 0;
+	}
+
+	if (ptype == AI_PROVIDER_GROK_BUILD)
+	{
+		g_autoptr(GError) error = NULL;
+		g_auto(GStrv) argv = NULL;
+		g_autofree gchar *exe = NULL;
+
+		argv = ai_grok_build_client_build_argv(
 			AI_CLI_CLIENT(provider), messages, opt_system,
 			opt_max_tokens, opt_stream);
 		exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(provider),
@@ -1128,6 +1357,16 @@ main(int argc, char *argv[])
 	if (provider == NULL)
 	{
 		g_printerr("ai: unknown provider '%s'\n", provider_name);
+		return 2;
+	}
+
+	/*
+	 * --set is applied after the dedicated flags so it can override them,
+	 * and before anything runs so --dry-run shows what --set produced.
+	 */
+	if (!apply_property_overrides(provider))
+	{
+		g_object_unref(provider);
 		return 2;
 	}
 
