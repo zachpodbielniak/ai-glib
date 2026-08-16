@@ -254,6 +254,14 @@ Per-CLI equivalents of the same idea:
 | Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` |
 | Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` |
 | Agent profile | `--agent` | `--agent` | `--agent` |
+| Continue latest | `--continue` | `--continue` | `--continue` |
+
+`continue-session` is spelled identically on all four providers, which is
+what lets `ai -c` apply it by property lookup instead of a branch per
+provider. claude-tmux is the odd one: it cannot pass `--continue`, because
+its whole flow is keyed by session id and that flag never says which
+session it chose — so it resolves the newest transcript for the cwd and
+resumes it by id. An explicit `session-id` always wins over it.
 
 ## Ollama-as-transport (`ollama/` models)
 

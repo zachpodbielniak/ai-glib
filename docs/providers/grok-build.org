@@ -73,6 +73,7 @@ Added by =AiGrokBuildClient=:
 | =rules=              | string  | NULL    | =--rules=                                           |
 | =disable-web-search= | boolean | FALSE   | =--disable-web-search=                              |
 | =verbatim=           | boolean | TRUE    | =--verbatim=                                        |
+| =continue-session=   | boolean | FALSE   | =--continue=, only when no session id is known      |
 | =total-cost=         | double  | 0.0     | Read-only; USD reported by the last response        |
 
 Every one is a real GObject property, so bindings get native syntax and =notify::= signals; the C accessors and =g_object_set()= are interchangeable.
@@ -170,6 +171,17 @@ const gchar *sid = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
 /* Or opt out entirely — every call starts fresh. */
 ai_cli_client_set_session_persistence(AI_CLI_CLIENT(client), FALSE);
 #+end_src
+
+To pick up the working directory's most recent session without knowing its
+id, set =continue-session=:
+
+#+begin_src C
+g_object_set(client, "continue-session", TRUE, NULL);
+#+end_src
+
+An explicit session id wins — the two name different sessions — and
+persistence being off suppresses it, since that asks for a fresh session
+every time. From the CLI this is =ai -p grok-build -c=.
 
 *** Streaming
 #+begin_src C

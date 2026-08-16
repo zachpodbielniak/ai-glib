@@ -145,6 +145,34 @@ Left alone, the picker swallows the pasted prompt as raw keystrokes. With =dismi
 
 If no picker is actually shown, the =2= lands as a literal character prepended to the pasted prompt --- an accepted cosmetic trade-off. The dismissal only runs on resumed sessions; fresh sessions never show the picker.
 
+*** Continuing a session
+=continue-session= picks up the working directory's most recent
+conversation, the way =claude --continue= does:
+
+#+begin_src C
+g_object_set(client, "continue-session", TRUE, NULL);
+#+end_src
+
+It does *not* pass =--continue=. Everything in this client is keyed by
+session id --- the transcript it watches to detect the accepted prompt and
+parse the reply is =<session-id>.jsonl= --- and =--continue= never reports
+which session it picked, so the client would sit watching a path that never
+appears. Instead it resolves the newest transcript in the directory's
+project folder and resumes that *by id*. Same semantics, and the id stays
+known.
+
+Consequences worth knowing:
+
+- An explicit =AiCliClient:session-id= wins, as with every other provider.
+- With nothing to continue, a fresh session starts rather than the call
+  failing.
+- Because the result is a resume, the resume-mode picker described above
+  applies, and =dismiss-resume-prompt= handles it.
+- The lookup honours =claude-project-dir=, so a test can point it at a
+  temporary tree.
+
+From the CLI this is =ai -p claude-tmux -c=.
+
 ** Usage
 *** Basic Usage
 #+begin_src C

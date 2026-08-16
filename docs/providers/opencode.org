@@ -175,7 +175,7 @@ real boundary — see below.
 | =title=              | =--title=      | Session title; otherwise derived from the piped prompt        |
 | =files=              | =--file=       | Comma-separated; one =--file= per item                        |
 | =share=              | =--share=      | Publishes a shareable link. Off by default                    |
-| =continue-session=   | =--continue=   | Resume the most recent session; an explicit session id wins   |
+| =continue-session=   | =--continue=   | Resume the most recent session; an explicit session id wins. =ai -p opencode -c= |
 | =fork-session=       | =--fork=       | Branch the continued session. Only emitted when there is one  |
 | =attach=             | =--attach=     | URL of a running opencode server                              |
 | =port=               | =--port=       | Local server port; 0 omits the flag                           |

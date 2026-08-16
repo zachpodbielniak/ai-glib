@@ -30,6 +30,7 @@ piping.
 | =--temperature F=       | Sampling temperature (HTTP providers)                             |
 | =--stream=              | Stream the response as it arrives (providers that support it)      |
 | =--skip-permissions=    | Bypass tool-use approval (every CLI provider)                      |
+| =-c=, =--continue=      | Continue this directory's most recent session (CLI providers)      |
 | =--set PROP=VALUE=      | Set any provider property; repeatable (see below)                  |
 | =--dry-run=             | Print the command that would be spawned; do not run it             |
 | =--list-providers=      | List known provider names and exit                                 |
@@ -76,6 +77,31 @@ $ ai -p grok-build -m grok-4.6 --effort low --dry-run "hi"
 
 The =grok-build= prompt never appears in argv: it is piped on stdin and
 read back through =--prompt-file /dev/stdin=.
+
+** Continuing a session (=--continue=)
+=-c= picks up where this directory left off, rather than starting a new
+session:
+
+#+begin_example
+$ ai -p claude-code "start refactoring the parser"
+$ ai -p claude-code -c "now update the tests"
+#+end_example
+
+It works for every CLI provider, each in its own spelling: =--continue= for
+claude-code, opencode and grok-build. claude-tmux resolves the directory's
+newest transcript and resumes it *by id* instead — everything in that
+provider is keyed by session id, and claude's own =--continue= never
+reports which session it picked.
+
+- A known session id wins over =--continue=: the two name different
+  sessions, and quietly preferring the wrong one is worse than either. Set
+  one with =--set session-id=<id>=.
+- =--set session-persistence=false= asks for a fresh session every time and
+  therefore suppresses it.
+- With nothing to continue, claude-tmux starts a fresh session rather than
+  failing; the other three leave that to the CLI.
+- HTTP providers have no sessions. They say so on stderr rather than
+  accepting the flag and ignoring it.
 
 ** Setting provider properties (=--set=)
 The flags above cover what every provider has in common. Everything else --- a

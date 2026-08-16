@@ -318,7 +318,8 @@ without a flag per knob.
 *** Sessions, streaming and diagnostics
 | Property                     | Flag                          | Notes                                             |
 |------------------------------+-------------------------------+---------------------------------------------------|
-| =fork-session=               | =--fork-session=              | Branch a resumed conversation. Only emitted alongside =--resume=, the only place claude accepts it |
+| =continue-session=           | =--continue=                  | Pick up the directory's most recent conversation when no session id is known. An explicit id wins; persistence off suppresses it |
+| =fork-session=               | =--fork-session=              | Branch a resumed conversation. Emitted alongside =--resume= or =--continue=, the only places claude accepts it |
 | =include-partial-messages=   | =--include-partial-messages=  | Streaming only; gated on the output format because claude rejects it elsewhere |
 | =include-hook-events=        | =--include-hook-events=       | Streaming only                                     |
 | =forward-subagent-text=      | =--forward-subagent-text=     | Streaming only                                     |
