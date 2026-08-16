@@ -1147,7 +1147,7 @@ cc_emit_content_block(
             : NULL;
 
         tool_use = ai_tool_use_new(id != NULL ? id : "", name,
-                                   input != NULL ? json_node_copy(input) : NULL);
+                                   input);
 
         g_ptr_array_add(out_events, ai_event_new_tool_started(tool_use));
     }

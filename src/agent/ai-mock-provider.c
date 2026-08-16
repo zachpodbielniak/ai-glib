@@ -8,6 +8,9 @@
  */
 
 #include "agent/ai-mock-provider.h"
+#include "core/ai-event.h"
+#include "core/ai-event-source.h"
+#include "core/ai-streamable.h"
 
 #include "core/ai-error.h"
 #include "model/ai-text-content.h"
@@ -34,14 +37,19 @@ struct _AiMockProvider
     GQueue *script;      /* Scripted* */
     gchar  *fallback;
     guint   call_count;
+    guint   stream_calls;   /* how many went down the streaming path */
     guint   delay_ms;
 };
 
 static void ai_mock_provider_provider_init (AiProviderInterface *iface);
+static void ai_mock_provider_streamable_init (AiStreamableInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE (AiMockProvider, ai_mock_provider, G_TYPE_OBJECT,
                          G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
-                                               ai_mock_provider_provider_init))
+                                               ai_mock_provider_provider_init)
+                         G_IMPLEMENT_INTERFACE (AI_TYPE_STREAMABLE,
+                                               ai_mock_provider_streamable_init)
+                         G_IMPLEMENT_INTERFACE (AI_TYPE_EVENT_SOURCE, NULL))
 
 static void
 scripted_free (gpointer data)
@@ -267,6 +275,113 @@ mock_chat_finish (AiProvider *provider, GAsyncResult *result, GError **error)
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
+/*
+ * AiStreamable, so the streaming half of AiToolExecutor can be tested
+ * without a network or a subprocess.
+ *
+ * The scripted reply is delivered whole rather than a character at a time:
+ * what the tests need is that the streaming *path* is taken and produces the
+ * same response the non-streaming one would, not a simulation of typing.
+ * Per-token behaviour belongs to the real providers and is covered against
+ * their own wire formats.
+ */
+static void
+mock_stream_deliver_events (AiMockProvider *self, AiResponse *response)
+{
+    g_autofree gchar *text = NULL;
+    GList *tool_uses;
+    GList *iter;
+
+    {
+        g_autoptr(AiEvent) event = ai_event_new (AI_EVENT_STREAM_START);
+        ai_event_source_emit (AI_EVENT_SOURCE (self), event);
+    }
+
+    text = ai_response_get_text (response);
+
+    if (text != NULL && text[0] != '\0')
+    {
+        g_autoptr(AiEvent) event = ai_event_new_text_delta (text);
+
+        g_signal_emit_by_name (self, "delta", text);
+        ai_event_source_emit (AI_EVENT_SOURCE (self), event);
+    }
+
+    tool_uses = ai_response_get_tool_uses (response);
+
+    for (iter = tool_uses; iter != NULL; iter = iter->next)
+    {
+        g_autoptr(AiEvent) event = ai_event_new_tool_started (iter->data);
+        ai_event_source_emit (AI_EVENT_SOURCE (self), event);
+    }
+
+    g_list_free (tool_uses);
+
+    {
+        g_autoptr(AiEvent) event = ai_event_new (AI_EVENT_STREAM_END);
+        ai_event_source_emit (AI_EVENT_SOURCE (self), event);
+    }
+}
+
+static void
+on_mock_stream_inner_done (
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    AiMockProvider *self = AI_MOCK_PROVIDER (source);
+    GTask *task = user_data;
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+
+    response = mock_chat_finish (AI_PROVIDER (self), result, &error);
+
+    if (response == NULL)
+    {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    self->stream_calls++;
+    mock_stream_deliver_events (self, response);
+
+    g_task_return_pointer (task, g_steal_pointer (&response), g_object_unref);
+    g_object_unref (task);
+}
+
+static void
+mock_chat_stream_async (AiStreamable *streamable, GList *messages,
+                        const gchar *system_prompt, gint max_tokens,
+                        GList *tools, GCancellable *cancellable,
+                        GAsyncReadyCallback callback, gpointer user_data)
+{
+    AiMockProvider *self = AI_MOCK_PROVIDER (streamable);
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+
+    /*
+     * Reuse the scripted reply machinery rather than duplicating it, so a
+     * script behaves identically whichever path a test drives it down.
+     */
+    mock_chat_async (AI_PROVIDER (self), messages, system_prompt, max_tokens,
+                     tools, cancellable, on_mock_stream_inner_done, task);
+}
+
+static AiResponse *
+mock_chat_stream_finish (AiStreamable *streamable, GAsyncResult *result,
+                         GError **error)
+{
+    (void)streamable;
+    return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+static void
+ai_mock_provider_streamable_init (AiStreamableInterface *iface)
+{
+    iface->chat_stream_async  = mock_chat_stream_async;
+    iface->chat_stream_finish = mock_chat_stream_finish;
+}
+
 static void
 ai_mock_provider_provider_init (AiProviderInterface *iface)
 {
@@ -275,4 +390,25 @@ ai_mock_provider_provider_init (AiProviderInterface *iface)
     iface->get_default_model = mock_get_default_model;
     iface->chat_async        = mock_chat_async;
     iface->chat_finish       = mock_chat_finish;
+}
+
+/**
+ * ai_mock_provider_get_stream_call_count:
+ * @self: an #AiMockProvider
+ *
+ * How many turns were driven through ai_streamable_chat_stream_async()
+ * rather than ai_provider_chat_async().
+ *
+ * This is what lets a test assert that a caller actually took the streaming
+ * path, rather than that it merely produced the right answer -- the two
+ * paths agree on the answer by design, so the answer alone proves nothing.
+ *
+ * Returns: the number of streamed turns
+ */
+guint
+ai_mock_provider_get_stream_call_count (AiMockProvider *self)
+{
+    g_return_val_if_fail (AI_IS_MOCK_PROVIDER (self), 0);
+
+    return self->stream_calls;
 }
