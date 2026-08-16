@@ -31,10 +31,13 @@
 
 #include "ai-glib.h"
 
-/* Private seams: assert/print the exact argv, incl. the Ollama rewrite. */
-#include "providers/ai-claude-code-client-internal.h"
+/*
+ * Private seam. Only the tmux provider needs one: it drives claude through
+ * a tmux session rather than the AiCliClient argv pipeline, so --dry-run
+ * cannot reach its command line through the vtable the way it does for
+ * every other CLI provider.
+ */
 #include "providers/ai-claude-tmux-client-internal.h"
-#include "providers/ai-grok-build-client-internal.h"
 #include "providers/ai-claude-launch.h"
 
 /* ---------------------------------------------------------------- */
@@ -516,6 +519,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_GROK_BUILD_CLIENT(provider))
 		ai_grok_build_client_set_skip_permissions(
 			AI_GROK_BUILD_CLIENT(provider), opt_skip_perms);
+	else if (AI_IS_OPENCODE_CLIENT(provider))
+		ai_opencode_client_set_skip_permissions(
+			AI_OPENCODE_CLIENT(provider), opt_skip_perms);
 
 	return provider;
 }
@@ -575,56 +581,6 @@ list_providers(void)
 static int
 dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 {
-	if (ptype == AI_PROVIDER_CLAUDE_CODE)
-	{
-		g_autoptr(GError) error = NULL;
-		g_auto(GStrv) argv = NULL;
-		g_autofree gchar *exe = NULL;
-
-		argv = ai_claude_code_client_build_argv(
-			AI_CLI_CLIENT(provider), messages, opt_system,
-			opt_max_tokens, opt_stream);
-		exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(provider),
-		                                       &error);
-		if (exe != NULL)
-		{
-			g_free(argv[0]);
-			argv[0] = g_steal_pointer(&exe);
-		}
-		else
-		{
-			g_printerr("note: %s (printing unresolved placeholder)\n",
-			           error->message);
-		}
-		print_argv(argv);
-		return 0;
-	}
-
-	if (ptype == AI_PROVIDER_GROK_BUILD)
-	{
-		g_autoptr(GError) error = NULL;
-		g_auto(GStrv) argv = NULL;
-		g_autofree gchar *exe = NULL;
-
-		argv = ai_grok_build_client_build_argv(
-			AI_CLI_CLIENT(provider), messages, opt_system,
-			opt_max_tokens, opt_stream);
-		exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(provider),
-		                                       &error);
-		if (exe != NULL)
-		{
-			g_free(argv[0]);
-			argv[0] = g_steal_pointer(&exe);
-		}
-		else
-		{
-			g_printerr("note: %s (printing unresolved placeholder)\n",
-			           error->message);
-		}
-		print_argv(argv);
-		return 0;
-	}
-
 	if (ptype == AI_PROVIDER_CLAUDE_TMUX)
 	{
 		g_autoptr(GError) error = NULL;
@@ -656,6 +612,45 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 				AI_CLAUDE_TMUX_CLIENT(provider)));
 		print_argv((gchar **) argv->pdata);
 		return 0;
+	}
+
+	/*
+	 * Every other CLI provider builds its argv through the AiCliClient
+	 * vtable, so one branch covers all of them -- claude-code, opencode,
+	 * grok-build, and anything added later, without this file needing to
+	 * know their names or pull in their private headers.
+	 */
+	if (AI_IS_CLI_CLIENT(provider))
+	{
+		AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(provider);
+		g_autoptr(GError) error = NULL;
+		g_auto(GStrv) argv = NULL;
+		g_autofree gchar *exe = NULL;
+
+		if (klass->build_argv == NULL)
+		{
+			g_printerr("note: this provider does not build an argv\n");
+		}
+		else
+		{
+			argv = klass->build_argv(AI_CLI_CLIENT(provider), messages,
+			                         opt_system, opt_max_tokens,
+			                         opt_stream);
+			exe = ai_cli_client_resolve_executable(
+				AI_CLI_CLIENT(provider), &error);
+			if (exe != NULL)
+			{
+				g_free(argv[0]);
+				argv[0] = g_steal_pointer(&exe);
+			}
+			else
+			{
+				g_printerr("note: %s (printing unresolved placeholder)\n",
+				           error->message);
+			}
+			print_argv(argv);
+			return 0;
+		}
 	}
 
 	printf("[dry-run] provider=%s model=%s (no CLI subprocess for this "

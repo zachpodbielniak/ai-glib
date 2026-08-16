@@ -465,6 +465,152 @@ test_cli_set_overrides_flag(void)
 }
 
 /* ----------------------------------------------------------------
+ * Other CLI providers
+ * ---------------------------------------------------------------- */
+
+/*
+ * --dry-run goes through the AiCliClient vtable rather than a branch per
+ * provider, so every CLI provider gets it. opencode had none before that
+ * change and fell through to the one-line summary.
+ */
+static void
+test_cli_dry_run_opencode(void)
+{
+	const gchar *args[] = { "-p", "opencode", "--dry-run", "hi", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "run");
+	assert_dry_run_contains(run.stdout_data, "--format json");
+	assert_dry_run_contains(run.stdout_data, "--model");
+	/* The summary line means the vtable branch did not fire. */
+	assert_dry_run_lacks(run.stdout_data, "no CLI subprocess");
+
+	run_clear(&run);
+}
+
+static void
+test_cli_dry_run_claude_code(void)
+{
+	const gchar *args[] = { "-p", "claude-code", "--dry-run", "hi", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--print");
+	assert_dry_run_contains(run.stdout_data, "--output-format json");
+
+	run_clear(&run);
+}
+
+/*
+ * --skip-permissions reaches opencode as --auto. The flag was accepted
+ * and silently ignored for this provider before: `ai` only applied it to
+ * the claude providers.
+ */
+static void
+test_cli_skip_permissions_opencode(void)
+{
+	const gchar *off[] = { "-p", "opencode", "--dry-run", "hi", NULL };
+	const gchar *on[] = {
+		"-p", "opencode", "--skip-permissions", "--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(off, NULL, &run);
+	assert_dry_run_lacks(run.stdout_data, "--auto");
+	run_clear(&run);
+
+	run_ai(on, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--auto");
+	run_clear(&run);
+}
+
+/* The opencode knobs with no dedicated flag are reachable through --set. */
+static void
+test_cli_set_opencode_properties(void)
+{
+	const gchar *args[] = {
+		"-p", "opencode",
+		"--set", "agent=build",
+		"--set", "title=nightly",
+		"--set", "port=4096",
+		"--set", "thinking",
+		"--set", "pure",
+		"--set", "log-level=WARN",
+		"--set", "files=a.txt,b.txt",
+		"--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--agent build");
+	assert_dry_run_contains(run.stdout_data, "--title nightly");
+	assert_dry_run_contains(run.stdout_data, "--port 4096");
+	assert_dry_run_contains(run.stdout_data, "--thinking");
+	assert_dry_run_contains(run.stdout_data, "--pure");
+	assert_dry_run_contains(run.stdout_data, "--log-level WARN");
+	assert_dry_run_contains(run.stdout_data, "--file a.txt");
+	assert_dry_run_contains(run.stdout_data, "--file b.txt");
+
+	run_clear(&run);
+}
+
+/* Same for the claude-code knobs. */
+static void
+test_cli_set_claude_code_properties(void)
+{
+	const gchar *args[] = {
+		"-p", "claude-code",
+		"--set", "agent=reviewer",
+		"--set", "max-budget-usd=1.25",
+		"--set", "tools=Bash,Read",
+		"--set", "bare",
+		"--set", "strict-mcp-config",
+		"--set", "fallback-model=haiku",
+		"--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--agent reviewer");
+	assert_dry_run_contains(run.stdout_data, "--max-budget-usd 1.25");
+	assert_dry_run_contains(run.stdout_data, "--tools Bash Read");
+	assert_dry_run_contains(run.stdout_data, "--bare");
+	assert_dry_run_contains(run.stdout_data, "--strict-mcp-config");
+	assert_dry_run_contains(run.stdout_data, "--fallback-model haiku");
+
+	run_clear(&run);
+}
+
+/* The property list in the error is the provider's own, not a fixed one. */
+static void
+test_cli_set_unknown_property_lists_provider(void)
+{
+	const gchar *args[] = {
+		"-p", "opencode", "--set", "sandbox=workspace", "--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	/* sandbox is a grok-build knob; opencode has no such property. */
+	g_assert_cmpint(run.exit_status, ==, 2);
+	g_assert_nonnull(strstr(run.stderr_data, "AiOpenCodeClient"));
+	g_assert_nonnull(strstr(run.stderr_data, "thinking"));
+
+	run_clear(&run);
+}
+
+/* ----------------------------------------------------------------
  * Real runs, against a stub grok
  * ---------------------------------------------------------------- */
 
@@ -665,6 +811,19 @@ main(
 	                test_cli_set_bad_value);
 	g_test_add_func("/ai-glib/ai-cli/set/overrides-flag",
 	                test_cli_set_overrides_flag);
+
+	g_test_add_func("/ai-glib/ai-cli/dry-run/opencode",
+	                test_cli_dry_run_opencode);
+	g_test_add_func("/ai-glib/ai-cli/dry-run/claude-code",
+	                test_cli_dry_run_claude_code);
+	g_test_add_func("/ai-glib/ai-cli/skip-permissions/opencode",
+	                test_cli_skip_permissions_opencode);
+	g_test_add_func("/ai-glib/ai-cli/set/opencode-properties",
+	                test_cli_set_opencode_properties);
+	g_test_add_func("/ai-glib/ai-cli/set/claude-code-properties",
+	                test_cli_set_claude_code_properties);
+	g_test_add_func("/ai-glib/ai-cli/set/unknown-lists-provider",
+	                test_cli_set_unknown_property_lists_provider);
 
 	g_test_add_func("/ai-glib/ai-cli/run/prints-answer",
 	                test_cli_run_prints_answer);
