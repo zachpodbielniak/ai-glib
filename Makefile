@@ -110,6 +110,7 @@ PUBLIC_HEADERS = \
 # Library source files
 LIB_SOURCES = \
 	$(SRCDIR)/core/ai-error.c \
+	$(SRCDIR)/core/ai-http-error.c \
 	$(SRCDIR)/core/ai-enums.c \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \

@@ -211,6 +211,30 @@ if (error != NULL)
 }
 #+end_src
 
+*** An HTTP failure carries the server's own message
+=src/core/ai-http-error.{c,h}= (private) maps a status onto an =AiError=, and every provider goes through it. It exists because the providers each used to map the status and *throw the response body away*, which made a broken model and a broken key look identical:
+
+#+begin_example
+  Request failed (HTTP 500)
+#+end_example
+
+The body is where the answer is. The same failure now reads:
+
+#+begin_example
+  Server error (HTTP 500): llama-server process has terminated:
+  GGML_ASSERT(a->ne[2] == b->ne[2]) failed
+#+end_example
+
+which names a model that crashes the inference server rather than implying the client is at fault --- that exact confusion is why this exists.
+
+Three rules hold it together:
+
+- *The status picks the code; the body only adds text.* Callers switch on =AI_ERROR_INVALID_API_KEY= to decide whether to re-prompt for a key, so a provider wording its 401 unusually must not change what the error /is/.
+- *Every shape the providers actually send is understood*, and anything else degrades rather than disappearing: =error.message= (OpenAI, Grok, Gemini, ollama's OpenAI-compatible endpoint), a bare =error= string (ollama's native endpoints), a top-level =message=, and a bounded raw excerpt when the body is not JSON at all --- an HTML page from a proxy still says =502 Bad Gateway=.
+- *An error body is untrusted input.* Members are read through type-checked accessors, never json-glib's =*_member_with_default()=, which emit a critical on a type mismatch: a provider answering =\{"error": \{"message": 500\}\}= must not be able to abort the process on the way to reporting its own error. Messages are bounded so a multi-kilobyte reply does not become the error string.
+
+The streaming paths use =ai_http_error_set_from_stream()=, which does a single bounded read rather than draining to EOF --- an error body is small and already complete by the time the status is known, and a drain would let a server that sends one byte and stalls block the path indefinitely. That path matters most in practice: a streamed chat is where a failing model actually reports itself.
+
 * The view layer
 Everything above produces an =AiResponse=. That is enough to print an
 answer, and not enough to show a session happening --- which is what a

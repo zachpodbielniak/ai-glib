@@ -13,6 +13,7 @@
 #include "providers/ai-openai-shared.h"
 #include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
+#include "core/ai-http-error.h"
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-image-generator.h"
@@ -393,20 +394,12 @@ on_openai_chat_response(
     {
         guint status = soup_message_get_status(msg);
 
-        if (status == 401 || status == 403)
         {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                                    "Authentication failed (HTTP %u)", status);
-        }
-        else if (status == 429)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
-                                    "Rate limited (HTTP %u)", status);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
-                                    "Request failed (HTTP %u)", status);
+            GError *http_error = NULL;
+
+            ai_http_error_set_from_bytes(&http_error, NULL, status,
+                                         response_bytes);
+            g_task_return_error(data->task, g_steal_pointer(&http_error));
         }
 
         openai_chat_async_data_free(data);
@@ -580,15 +573,12 @@ on_openai_list_models_response(
     {
         guint status = soup_message_get_status(data->msg);
 
-        if (status == 401 || status == 403)
         {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                                    "Authentication failed (HTTP %u)", status);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
-                                    "Model listing failed (HTTP %u)", status);
+            GError *http_error = NULL;
+
+            ai_http_error_set_from_bytes(&http_error, NULL, status,
+                                         response_bytes);
+            g_task_return_error(data->task, g_steal_pointer(&http_error));
         }
 
         openai_list_models_data_free(data);
@@ -1083,20 +1073,12 @@ on_openai_stream_ready(
     {
         guint status = soup_message_get_status(data->msg);
 
-        if (status == 401 || status == 403)
         {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                                    "Authentication failed (HTTP %u)", status);
-        }
-        else if (status == 429)
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_RATE_LIMITED,
-                                    "Rate limited (HTTP %u)", status);
-        }
-        else
-        {
-            g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_NETWORK_ERROR,
-                                    "Request failed (HTTP %u)", status);
+            GError *http_error = NULL;
+
+            ai_http_error_set_from_stream(&http_error, NULL, status,
+                                          data->input_stream, NULL);
+            g_task_return_error(data->task, g_steal_pointer(&http_error));
         }
         openai_stream_data_free(data);
         return;

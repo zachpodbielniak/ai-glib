@@ -11,6 +11,7 @@
 
 #include "core/ai-client.h"
 #include "core/ai-error.h"
+#include "core/ai-http-error.h"
 #include "core/ai-event-source.h"
 
 /*
@@ -556,26 +557,8 @@ ai_client_chat_sync(
     {
         guint status = soup_message_get_status(msg);
 
-        if (status == 401 || status == 403)
-        {
-            g_set_error(error, AI_ERROR, AI_ERROR_INVALID_API_KEY,
-                        "Authentication failed (HTTP %u)", status);
-        }
-        else if (status == 429)
-        {
-            g_set_error(error, AI_ERROR, AI_ERROR_RATE_LIMITED,
-                        "Rate limited (HTTP %u)", status);
-        }
-        else if (status >= 500)
-        {
-            g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR,
-                        "Server error (HTTP %u)", status);
-        }
-        else
-        {
-            g_set_error(error, AI_ERROR, AI_ERROR_NETWORK_ERROR,
-                        "Request failed (HTTP %u)", status);
-        }
+        ai_http_error_set_from_bytes(error, NULL, status,
+                                     response_bytes);
 
         return NULL;
     }
