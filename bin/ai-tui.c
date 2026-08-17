@@ -1477,6 +1477,65 @@ save_transcript(App *app, const gchar *path)
     say(app, "Wrote %s", path);
 }
 
+/*
+ * /export <format> [path]
+ *
+ * The path is optional because the format already implies an extension,
+ * and a session worth exporting is usually one you want to file rather
+ * than name. Omitting it writes ai-session-<pid>.<ext> in the working
+ * directory, which is somewhere the user can find it.
+ */
+static void
+export_transcript(App *app, const gchar *arguments)
+{
+    g_auto(GStrv) parts = NULL;
+    g_autofree gchar *text = NULL;
+    g_autofree gchar *chosen = NULL;
+    g_autoptr(GError) error = NULL;
+    AiExportFormat format;
+    const gchar *path;
+
+    if (arguments == NULL || arguments[0] == '\0')
+    {
+        say(app, "/export needs a format: text, markdown or org.");
+        return;
+    }
+
+    parts = g_strsplit(arguments, " ", 2);
+
+    if (!ai_export_format_from_string(parts[0], &format))
+    {
+        say(app, "Unknown format '%s'. Use text, markdown or org.",
+            parts[0]);
+        return;
+    }
+
+    path = (parts[1] != NULL && parts[1][0] != '\0') ? parts[1] : NULL;
+
+    if (path == NULL)
+    {
+        g_autofree gchar *name =
+            g_strdup_printf("ai-session-%d.%s", (int) getpid(),
+                            ai_export_format_extension(format));
+
+        chosen = g_build_filename(
+            ai_conversation_get_working_directory(app->conversation),
+            name, NULL);
+        path = chosen;
+    }
+
+    text = ai_transcript_export(
+        ai_conversation_get_transcript(app->conversation), format);
+
+    if (!g_file_set_contents(path, text, -1, &error))
+    {
+        say(app, "Could not write %s: %s", path, error->message);
+        return;
+    }
+
+    say(app, "Wrote %s", path);
+}
+
 static void
 change_directory(App *app, const gchar *path)
 {
@@ -1627,6 +1686,10 @@ handle_builtin(App *app, AiCommandResult *result)
     else if (g_strcmp0(name, "save") == 0)
     {
         save_transcript(app, arguments);
+    }
+    else if (g_strcmp0(name, "export") == 0)
+    {
+        export_transcript(app, arguments);
     }
     else if (g_strcmp0(name, "expand") == 0)
     {

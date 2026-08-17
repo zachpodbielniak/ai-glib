@@ -300,6 +300,7 @@ before a single file has been read.
 | =/todos=     |              | the current todo list                         |
 | =/expand=    | =<line>=     | what a line would send, without sending it    |
 | =/save=      | =<path>=     | write the transcript to a file                |
+| =/export=    | =<format> [path]= | write it as text, markdown or org        |
 
 A built-in always beats a file of the same name. That is not politeness:
 a stray =quit.md= in a scanned directory must not be able to take away

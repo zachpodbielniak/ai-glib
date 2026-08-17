@@ -288,6 +288,52 @@ The =›= marker is a span like any other, so binding a key to
 =AiGlib-view-block-set-expanded= on the block under point gives you
 collapse/expand with no further work.
 
+** Exporting a session
+=ai_transcript_export()= writes the whole transcript as a document:
+
+#+begin_src C
+g_autofree gchar *doc = ai_transcript_export(transcript,
+                                             AI_EXPORT_FORMAT_ORG);
+#+end_src
+
+| Format                       | Name         | Extension | Folds with        |
+|------------------------------+--------------+-----------+-------------------|
+| =AI_EXPORT_FORMAT_TEXT=      | ="text"=     | =txt=     | ---               |
+| =AI_EXPORT_FORMAT_MARKDOWN=  | ="markdown"= | =md=      | =<details>=       |
+| =AI_EXPORT_FORMAT_ORG=       | ="org"=      | =org=     | an outline heading |
+
+=AI_EXPORT_FORMAT_TEXT= is exactly =ai_transcript_to_text (t, 0)=, so a
+frontend has one entry point rather than a special case for the format it
+started with. =ai_export_format_from_string()= parses a name
+case-insensitively and accepts ="md"= and ="org-mode"=; it returns =FALSE=
+on anything else rather than defaulting, so =/export mardkown= says so
+instead of quietly writing the wrong format.
+
+Three decisions in here are worth knowing, because each is a way an
+exporter can be subtly wrong:
+
+- *Blocks export expanded, whatever the display shows.*
+  =ai_view_block_render_expanded()= renders a block as though its expand
+  flag were set, without setting it and without emitting
+  =::block-changed=. A collapsed tool group renders as one summary line,
+  and a file that recorded "Edited 3 files" without saying which is not a
+  record of anything --- while an exporter that flipped the flag instead
+  would make every attached frontend redraw because somebody saved a file.
+- *The rendering is not the content.* A turn renders with a leading
+  ="> "=, a thinking block with ="✳ thinking ⌄"=. Those orient a reader on
+  a screen; in a file the heading above already says which is which, and
+  in org ="> "= is not syntax at all. So the four text-bearing kinds are
+  read through their own getters, and only tool, todo and agent blocks ---
+  whose markers *are* the information --- go through the renderer.
+- *Prose is passed through; output is fenced.* Models already write
+  markdown, so escaping assistant prose would ruin every code fence in the
+  answer. Tool output is the opposite: it is whatever a command printed,
+  and a diff line beginning with =#= must not become a heading.
+
+The =/export= built-in carries the same thing to a user:
+=/export org ~/notes/session.org=. The path is optional --- the format
+already implies an extension.
+
 ** Testing a frontend
 =ai_transcript_to_text (transcript, width)= renders the whole thing as plain
 text, which is what =ai-tui --dump= prints and what

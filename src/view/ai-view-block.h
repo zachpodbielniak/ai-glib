@@ -100,6 +100,12 @@ ai_view_block_render(
     guint        width
 );
 
+AiRenderedText *
+ai_view_block_render_expanded(
+    AiViewBlock *self,
+    guint        width
+);
+
 gchar *
 ai_view_block_render_text(
     AiViewBlock *self,

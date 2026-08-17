@@ -58,6 +58,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "expand",   "Show what a line would send, without sending it",
       "<line>" },
     { "save",     "Write the transcript to a file",             "<path>" },
+    { "export",   "Write the transcript as markdown or org",
+      "<text|markdown|org> [path]" },
     { NULL, NULL, NULL }
 };
 

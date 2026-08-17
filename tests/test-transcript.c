@@ -12,6 +12,8 @@
  * and more narration.
  */
 
+#include <string.h>
+
 #include <ai-glib.h>
 
 /* ----------------------------------------------------------------
@@ -248,6 +250,193 @@ test_to_text_empty(void)
 	g_autofree gchar *out = ai_transcript_to_text(t, 0);
 
 	g_assert_cmpstr(out, ==, "");
+}
+
+/* ----------------------------------------------------------------
+ * Export
+ * ---------------------------------------------------------------- */
+
+static void
+test_export_text_matches_to_text(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) turn = ai_view_turn_block_new("hi");
+	g_autofree gchar *plain = NULL;
+	g_autofree gchar *exported = NULL;
+
+	ai_transcript_append(t, turn);
+
+	/* One export entry point, so a frontend does not special-case the
+	 * format it started with. */
+	plain = ai_transcript_to_text(t, 0);
+	exported = ai_transcript_export(t, AI_EXPORT_FORMAT_TEXT);
+
+	g_assert_cmpstr(plain, ==, exported);
+}
+
+static void
+test_export_markdown_has_headings(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) turn = ai_view_turn_block_new("hi");
+	g_autoptr(AiViewBlock) text = ai_view_text_block_new();
+	g_autofree gchar *out = NULL;
+
+	ai_view_text_block_append(AI_VIEW_TEXT_BLOCK(text), "hello back");
+	ai_transcript_append(t, turn);
+	ai_transcript_append(t, text);
+
+	out = ai_transcript_export(t, AI_EXPORT_FORMAT_MARKDOWN);
+
+	g_assert_nonnull(strstr(out, "## You"));
+	g_assert_nonnull(strstr(out, "## Assistant"));
+	g_assert_nonnull(strstr(out, "hello back"));
+}
+
+static void
+test_export_org_has_headings(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) turn = ai_view_turn_block_new("hi");
+	g_autofree gchar *out = NULL;
+
+	ai_transcript_append(t, turn);
+
+	out = ai_transcript_export(t, AI_EXPORT_FORMAT_ORG);
+
+	g_assert_nonnull(strstr(out, "** You"));
+	/* Not markdown's: an org file with `##` headings is a plain-text
+	 * file with the wrong extension. */
+	g_assert_null(strstr(out, "## You"));
+}
+
+/*
+ * The reason ai_view_block_render_expanded() exists.
+ *
+ * A thinking block is collapsed by default, which on screen is right and
+ * in a file is a document that quietly omits the reasoning it claims to
+ * record. Asserting the *content* rather than the absence of a marker,
+ * because a summary line would also contain the word "Thinking".
+ */
+static void
+test_export_includes_collapsed_content(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) thinking = ai_view_thinking_block_new();
+	g_autofree gchar *out = NULL;
+
+	ai_view_thinking_block_append(AI_VIEW_THINKING_BLOCK(thinking),
+	                              "weighing the options");
+	ai_view_block_set_expanded(thinking, FALSE);
+	ai_transcript_append(t, thinking);
+
+	out = ai_transcript_export(t, AI_EXPORT_FORMAT_MARKDOWN);
+
+	g_assert_nonnull(strstr(out, "weighing the options"));
+}
+
+/*
+ * Exporting is a read. If it flipped the flag -- or emitted ::block-changed
+ * on the way past -- every frontend attached to a live session would redraw
+ * the whole transcript because somebody saved a file.
+ */
+static void
+test_export_does_not_disturb_the_display(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) thinking = ai_view_thinking_block_new();
+	g_autofree gchar *out = NULL;
+	Watch w = { 0 };
+
+	ai_view_thinking_block_append(AI_VIEW_THINKING_BLOCK(thinking), "mm");
+	ai_view_block_set_expanded(thinking, FALSE);
+	ai_transcript_append(t, thinking);
+
+	g_signal_connect(t, "block-changed",
+	                 G_CALLBACK(on_block_changed), &w);
+
+	out = ai_transcript_export(t, AI_EXPORT_FORMAT_MARKDOWN);
+
+	g_assert_false(ai_view_block_get_expanded(thinking));
+	g_assert_cmpuint(w.block_changed, ==, 0);
+}
+
+/*
+ * The rendering is not the content.
+ *
+ * A turn renders with a leading "> " and a status with "✖" -- orientation
+ * for someone reading a screen, noise in a file whose heading already says
+ * which is which, and in org actively wrong: "> " is not org syntax, it is
+ * two literal characters at the start of every quoted line.
+ *
+ * Caught by exporting a real session and reading it, which is the only way
+ * this class of bug shows up -- every assertion about substrings being
+ * *present* passed the whole time.
+ */
+static void
+test_export_carries_content_not_chrome(void)
+{
+	g_autoptr(AiTranscript) t = ai_transcript_new();
+	g_autoptr(AiViewBlock) turn = ai_view_turn_block_new("summarise");
+	g_autoptr(AiViewBlock) think = ai_view_thinking_block_new();
+	g_autofree gchar *md = NULL;
+	g_autofree gchar *org = NULL;
+
+	ai_view_thinking_block_append(AI_VIEW_THINKING_BLOCK(think), "hm");
+	ai_transcript_append(t, turn);
+	ai_transcript_append(t, think);
+
+	md = ai_transcript_export(t, AI_EXPORT_FORMAT_MARKDOWN);
+	org = ai_transcript_export(t, AI_EXPORT_FORMAT_ORG);
+
+	/* The words survive ... */
+	g_assert_nonnull(strstr(md, "summarise"));
+	g_assert_nonnull(strstr(org, "summarise"));
+
+	/* ... and the display's markers do not. */
+	g_assert_null(strstr(md, "> summarise"));
+	g_assert_null(strstr(org, "> summarise"));
+	g_assert_null(strstr(md, "thinking ⌄"));
+	g_assert_null(strstr(org, "thinking ⌄"));
+}
+
+static void
+test_export_format_names_round_trip(void)
+{
+	AiExportFormat format;
+
+	g_assert_true(ai_export_format_from_string("markdown", &format));
+	g_assert_cmpint(format, ==, AI_EXPORT_FORMAT_MARKDOWN);
+
+	/* The spelling a user reaches for is not always the canonical one. */
+	g_assert_true(ai_export_format_from_string("md", &format));
+	g_assert_cmpint(format, ==, AI_EXPORT_FORMAT_MARKDOWN);
+
+	g_assert_true(ai_export_format_from_string("ORG", &format));
+	g_assert_cmpint(format, ==, AI_EXPORT_FORMAT_ORG);
+
+	g_assert_cmpstr(ai_export_format_to_string(AI_EXPORT_FORMAT_ORG),
+	                ==, "org");
+	g_assert_cmpstr(ai_export_format_extension(AI_EXPORT_FORMAT_MARKDOWN),
+	                ==, "md");
+}
+
+/*
+ * A typo must not silently produce a format the user did not ask for:
+ * `/export mardkown` writing plain text into a .md would be discovered
+ * later, by somebody else.
+ */
+static void
+test_export_format_rejects_a_typo(void)
+{
+	AiExportFormat format = AI_EXPORT_FORMAT_ORG;
+
+	g_assert_false(ai_export_format_from_string("mardkown", &format));
+	g_assert_false(ai_export_format_from_string("", &format));
+	g_assert_false(ai_export_format_from_string(NULL, &format));
+
+	/* Untouched on failure. */
+	g_assert_cmpint(format, ==, AI_EXPORT_FORMAT_ORG);
 }
 
 static void
@@ -1077,6 +1266,21 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/fold/unpriced", test_unpriced_usage_omits_cost);
 	g_test_add_func("/ai-glib/fold/stream-end", test_stream_end_completes_blocks);
 	g_test_add_func("/ai-glib/fold/input-delta", test_input_delta_is_not_folded);
+
+	g_test_add_func("/ai-glib/export/text-matches-to-text",
+	                test_export_text_matches_to_text);
+	g_test_add_func("/ai-glib/export/markdown", test_export_markdown_has_headings);
+	g_test_add_func("/ai-glib/export/org", test_export_org_has_headings);
+	g_test_add_func("/ai-glib/export/collapsed-content",
+	                test_export_includes_collapsed_content);
+	g_test_add_func("/ai-glib/export/does-not-disturb-display",
+	                test_export_does_not_disturb_the_display);
+	g_test_add_func("/ai-glib/export/content-not-chrome",
+	                test_export_carries_content_not_chrome);
+	g_test_add_func("/ai-glib/export/format-names",
+	                test_export_format_names_round_trip);
+	g_test_add_func("/ai-glib/export/format-typo",
+	                test_export_format_rejects_a_typo);
 
 	g_test_add_func("/ai-glib/conversation/defaults", test_conversation_defaults);
 	g_test_add_func("/ai-glib/conversation/local-tools-cli",

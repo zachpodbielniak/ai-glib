@@ -201,6 +201,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/kill ID\vert all=      | Stop a background agent, or every one             |
 | =/expand LINE=      | What a line would send, without sending it        |
 | =/save PATH=        | Write the transcript to a file                    |
+| =/export FMT [PATH]= | Write it as =text=, =markdown= or =org=         |
 
 =/agents= and =/running= are different things: the first lists agent
 *definitions* found on disk, the second lists agents actually running.

@@ -326,6 +326,65 @@ ai_view_block_render(
 }
 
 /**
+ * ai_view_block_render_expanded:
+ * @self: an #AiViewBlock
+ * @width: the width to wrap to in terminal columns, or 0 for no wrapping
+ *
+ * Renders the block as though it were expanded, whatever its expand flag
+ * says, and without disturbing that flag.
+ *
+ * For an export, not for a display. A thinking block and a tool group both
+ * collapse to one summary line by default --- which is right on screen and
+ * wrong in a file, where the whole point is to keep the record. Rendering a
+ * collapsed transcript would produce a document that silently omits every
+ * tool call it made.
+ *
+ * The obvious alternative --- set the flag, render, set it back --- emits
+ * #AiViewBlock::changed twice per block, so exporting a live session would
+ * make every attached frontend redraw the whole transcript. This neither
+ * emits nor caches: the display cache stays keyed to what the display is
+ * actually showing.
+ *
+ * Returns: (transfer full): the rendering
+ */
+AiRenderedText *
+ai_view_block_render_expanded(
+    AiViewBlock *self,
+    guint        width
+){
+    AiViewBlockClass *klass;
+    AiViewBlockPrivate *priv;
+    g_autoptr(AiRenderedText) raw = NULL;
+    gboolean saved;
+
+    g_return_val_if_fail(AI_IS_VIEW_BLOCK(self), NULL);
+
+    klass = AI_VIEW_BLOCK_GET_CLASS(self);
+
+    if (klass->render == NULL)
+    {
+        return ai_rendered_text_new();
+    }
+
+    priv = ai_view_block_get_instance_private(self);
+
+    /* Swapped around the vfunc rather than passed into it: the flag is
+     * read by every subclass's render, and threading an override through
+     * the vtable would change a signature four subclasses implement. */
+    saved = priv->expanded;
+    priv->expanded = TRUE;
+    raw = klass->render(self);
+    priv->expanded = saved;
+
+    if (raw == NULL)
+    {
+        raw = ai_rendered_text_new();
+    }
+
+    return ai_rendered_text_wrap(raw, width);
+}
+
+/**
  * ai_view_block_render_text:
  * @self: an #AiViewBlock
  * @width: the width to wrap to, or 0 for no wrapping

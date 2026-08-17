@@ -29,6 +29,14 @@ void     ai_transcript_clear        (AiTranscript *self);
 
 /* The whole thing as plain text, one blank line between blocks. */
 gchar   *ai_transcript_to_text      (AiTranscript *self, guint width);
+
+/* The whole thing as a document: text, markdown or org. */
+gchar   *ai_transcript_export       (AiTranscript *self, AiExportFormat format);
+
+const gchar *ai_export_format_to_string  (AiExportFormat format);
+const gchar *ai_export_format_extension  (AiExportFormat format);
+gboolean     ai_export_format_from_string(const gchar *name,
+                                          AiExportFormat *out_format);
 #+end_src
 
 ** Signals
@@ -73,6 +81,25 @@ Renders everything at @width (0 for no wrapping) with a blank line between
 blocks. This is what =ai-tui --dump= prints, what
 =tests/test-ai-tui.c= asserts against, and the cheapest way to check what a
 session produced without driving a display.
+
+** ai_transcript_export()
+#+begin_src C
+g_autofree gchar *doc = ai_transcript_export (transcript,
+                                              AI_EXPORT_FORMAT_ORG);
+#+end_src
+
+Renders the transcript as a document. =AI_EXPORT_FORMAT_TEXT= is exactly
+=ai_transcript_to_text (t, 0)=, so a caller needs one entry point rather
+than a special case for the format it started with.
+
+Blocks export *expanded* whatever the display shows, via
+=ai_view_block_render_expanded()= --- which neither sets the flag nor emits
+=::block-changed=, so exporting a live session does not make every attached
+frontend redraw. Prose blocks are read through their own text getters
+rather than rendered, because the ="> "= and ="✳ ⌄"= markers are display
+chrome and are not even syntax in org.
+
+See [[file:../transcript.org][The transcript]] for the full rationale.
 
 ** See also
 - [[file:../transcript.org][The transcript]] --- the layer, and the Emacs recipe
