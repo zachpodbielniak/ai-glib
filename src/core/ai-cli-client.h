@@ -18,6 +18,8 @@
 #include <json-glib/json-glib.h>
 
 #include "core/ai-config.h"
+#include "core/ai-tool-endpoint.h"
+#include "core/ai-tool-endpoint-consumer.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
 #include "model/ai-message.h"
@@ -42,6 +44,9 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  * @parse_stream_events: parses a single NDJSON line into #AiEvent values
  * @spawn: launches the CLI, so a subclass can add environment or other
  *   launcher setup
+ * @endpoint_applied: delivers an already-validated tool endpoint the way
+ *   this particular CLI takes one
+ * @endpoint_kinds: the #AiAgentEndpoint kinds this class accepts
  * @_reserved: reserved for future expansion
  *
  * Class structure for #AiCliClient.
@@ -106,8 +111,31 @@ struct _AiCliClientClass
                                          GSubprocessFlags      flags,
                                          GError              **error);
 
+    /*
+     * Per-CLI delivery of a tool endpoint the base has already validated
+     * against @endpoint_kinds and stored.  @endpoint is %NULL when the
+     * endpoint is being revoked, and an implementation MUST undo there
+     * exactly what it did on apply -- a temporary directory removed, an
+     * environment variable unset -- or a revoked credential outlives the
+     * run that owned it.
+     *
+     * Leave NULL for a CLI whose only delivery is the environment: the
+     * base applies AiAgentEndpoint.env at spawn for every subclass.
+     */
+    gboolean      (*endpoint_applied)   (AiCliClient           *self,
+                                         const AiAgentEndpoint *endpoint,
+                                         GError               **error);
+
+    /*
+     * Static, NULL-terminated, and must list AI_ENDPOINT_KIND_ENV.  A
+     * class datum rather than a vfunc because the answer is a
+     * compile-time constant per class; GtkWidgetClass:css_name is the
+     * same shape.  NULL means environment delivery only.
+     */
+    const gchar * const *endpoint_kinds;
+
     /* Reserved for future expansion */
-    gpointer _reserved[4];
+    gpointer _reserved[2];
 };
 
 AiConfig *
@@ -139,6 +167,43 @@ ai_cli_client_set_system_prompt(
     AiCliClient *self,
     const gchar *system_prompt
 );
+
+void
+ai_cli_client_set_env(
+    AiCliClient *self,
+    const gchar *key,
+    const gchar *value
+);
+
+void
+ai_cli_client_unset_env(
+    AiCliClient *self,
+    const gchar *key
+);
+
+const gchar *
+ai_cli_client_get_env(
+    AiCliClient *self,
+    const gchar *key
+);
+
+GHashTable *
+ai_cli_client_get_environment(AiCliClient *self);
+
+void
+ai_cli_client_set_environment(
+    AiCliClient *self,
+    GHashTable  *env
+);
+
+GSubprocessLauncher *
+ai_cli_client_create_launcher(
+    AiCliClient      *self,
+    GSubprocessFlags  flags
+);
+
+const AiAgentEndpoint *
+ai_cli_client_get_tool_endpoint(AiCliClient *self);
 
 const gchar *
 ai_cli_client_get_executable_path(AiCliClient *self);

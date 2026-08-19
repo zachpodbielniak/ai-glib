@@ -49,6 +49,8 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-image-generator.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
+	$(SRCDIR)/core/ai-tool-endpoint.h \
+	$(SRCDIR)/core/ai-tool-endpoint-consumer.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
 	$(SRCDIR)/view/ai-style.h \
 	$(SRCDIR)/view/ai-tool-call.h \
@@ -122,6 +124,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
+	$(SRCDIR)/core/ai-tool-endpoint.c \
+	$(SRCDIR)/core/ai-tool-endpoint-consumer.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
 	$(SRCDIR)/view/ai-style.c \
 	$(SRCDIR)/view/ai-tool-call.c \
@@ -157,6 +161,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-claude-tmux-client.c \
 	$(SRCDIR)/providers/ai-opencode-client.c \
 	$(SRCDIR)/providers/ai-grok-build-client.c \
+	$(SRCDIR)/providers/ai-grok-home-overlay.c \
 	$(SRCDIR)/convenience/ai-simple.c \
 	$(SRCDIR)/convenience/ai-search-provider.c \
 	$(SRCDIR)/convenience/ai-search-result.c \

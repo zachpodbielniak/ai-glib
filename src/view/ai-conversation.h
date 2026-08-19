@@ -144,6 +144,16 @@ ai_conversation_set_working_directory(
 const gchar *
 ai_conversation_get_working_directory(AiConversation *self);
 
+gboolean
+ai_conversation_set_tool_endpoint(
+    AiConversation        *self,
+    const AiAgentEndpoint *endpoint,
+    GError               **error
+);
+
+const AiAgentEndpoint *
+ai_conversation_get_tool_endpoint(AiConversation *self);
+
 void
 ai_conversation_set_passthrough_commands(
     AiConversation *self,

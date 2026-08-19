@@ -1137,6 +1137,52 @@ ai_opencode_client_finalize(GObject *object)
     G_OBJECT_CLASS(ai_opencode_client_parent_class)->finalize(object);
 }
 
+/*
+ * opencode has no --mcp-config flag; verified against 1.18.18, whose
+ * `run --help` lists none.  What it does honour is OPENCODE_CONFIG,
+ * naming a JSON file merged after the global config and before the
+ * project one -- additive, and deferential to the user's own
+ * opencode.json, which is the same posture as claude's --mcp-config
+ * without --strict-mcp-config.
+ *
+ * The schema in that file is opencode's, not claude's, which is exactly
+ * why the kind is distinct: the host writes the dialect, this client
+ * only decides how it is carried.
+ *
+ * OPENCODE_CONFIG_CONTENT would take the JSON inline, but it merges at
+ * "local" scope and so beats the user's project config -- too much
+ * authority for a tool injection, and a large blob in the environment
+ * adds an E2BIG failure mode for nothing.
+ */
+static const gchar * const opencode_endpoint_kinds[] = {
+    AI_ENDPOINT_KIND_ENV,
+    AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE,
+    NULL
+};
+
+static gboolean
+ai_opencode_client_endpoint_applied(
+    AiCliClient            *client,
+    const AiAgentEndpoint  *endpoint,
+    GError                **error
+){
+    (void)error;
+
+    if (endpoint != NULL
+        && g_strcmp0(endpoint->kind,
+                     AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE) == 0)
+    {
+        ai_cli_client_set_env(client, "OPENCODE_CONFIG", endpoint->value);
+    }
+    else
+    {
+        /* Revoke must undo exactly what apply did. */
+        ai_cli_client_unset_env(client, "OPENCODE_CONFIG");
+    }
+
+    return TRUE;
+}
+
 static void
 ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
 {
@@ -1149,6 +1195,8 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_opencode_client_get_executable_path;
+    cli_class->endpoint_applied = ai_opencode_client_endpoint_applied;
+    cli_class->endpoint_kinds = opencode_endpoint_kinds;
     cli_class->build_argv = ai_opencode_client_build_argv;
     cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;

@@ -79,6 +79,7 @@ struct _AiConversation
      * transcript gets. */
     AiCommandSet   *command_set;
     gchar          *working_directory;
+    AiAgentEndpoint *tool_endpoint;   /* owned, may be NULL */
     gboolean        passthrough_set;      /* has the caller decided? */
     gboolean        passthrough;
 
@@ -1217,6 +1218,7 @@ ai_conversation_finalize(GObject *object)
     g_clear_object(&self->command_set);
     g_clear_pointer(&self->system_prompt, g_free);
     g_clear_pointer(&self->working_directory, g_free);
+    g_clear_pointer(&self->tool_endpoint, ai_agent_endpoint_free);
     g_clear_pointer(&self->activity, g_free);
     g_list_free_full(self->messages, g_object_unref);
 
@@ -1957,6 +1959,79 @@ ai_conversation_set_working_directory(
 
     g_object_notify_by_pspec(G_OBJECT(self),
                              properties[PROP_WORKING_DIRECTORY]);
+}
+
+
+/**
+ * ai_conversation_set_tool_endpoint:
+ * @self: an #AiConversation
+ * @endpoint: (nullable): where the extra tools live, or %NULL to revoke
+ * @error: return location for a #GError
+ *
+ * Points the provider at tools it does not host itself.
+ *
+ * This is the CLI half of giving a conversation tools, and it is a
+ * separate mechanism from #AiConversation:local-tools rather than an
+ * alternative spelling of it.  A CLI wrapper runs its own tools in its
+ * own process and ignores the tools argument entirely, which is why
+ * set_local_tools refuses one; what it does take is a config file, an
+ * environment variable or a directory saying where to find more.
+ *
+ * A provider that is not an #AiToolEndpointConsumer -- every HTTP client
+ * -- fails with %AI_ERROR_INVALID_REQUEST rather than succeeding
+ * quietly, because a caller that believes it granted tools and did not
+ * is the failure this whole path exists to prevent.
+ *
+ * Returns: %TRUE on success
+ */
+gboolean
+ai_conversation_set_tool_endpoint(
+    AiConversation        *self,
+    const AiAgentEndpoint *endpoint,
+    GError               **error
+){
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+    g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+    if (self->provider == NULL
+        || !AI_IS_TOOL_ENDPOINT_CONSUMER(self->provider))
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                    "%s cannot be handed a tool endpoint; it runs no "
+                    "tools of its own",
+                    self->provider != NULL
+                        ? G_OBJECT_TYPE_NAME(self->provider)
+                        : "this conversation");
+        return FALSE;
+    }
+
+    if (!ai_tool_endpoint_consumer_apply(
+            AI_TOOL_ENDPOINT_CONSUMER(self->provider), endpoint, error))
+    {
+        return FALSE;
+    }
+
+    g_clear_pointer(&self->tool_endpoint, ai_agent_endpoint_free);
+    if (endpoint != NULL)
+    {
+        self->tool_endpoint = ai_agent_endpoint_copy(endpoint);
+    }
+
+    return TRUE;
+}
+
+/**
+ * ai_conversation_get_tool_endpoint:
+ * @self: an #AiConversation
+ *
+ * Returns: (transfer none) (nullable): the endpoint in force, or %NULL
+ */
+const AiAgentEndpoint *
+ai_conversation_get_tool_endpoint(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    return self->tool_endpoint;
 }
 
 /**

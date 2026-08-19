@@ -1513,6 +1513,42 @@ ai_claude_code_client_finalize(GObject *object)
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
 
+/*
+ * claude-code takes extra MCP servers as a config file named by
+ * --mcp-config, so delivery is the existing property.  The interface is
+ * a second door onto the same state rather than a parallel path.
+ */
+static const gchar * const claude_code_endpoint_kinds[] = {
+    AI_ENDPOINT_KIND_ENV,
+    AI_ENDPOINT_KIND_MCP_CONFIG,
+    NULL
+};
+
+static gboolean
+ai_claude_code_client_endpoint_applied(
+    AiCliClient            *client,
+    const AiAgentEndpoint  *endpoint,
+    GError                **error
+){
+    AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
+
+    (void)error;
+
+    if (endpoint != NULL
+        && g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG) == 0)
+    {
+        ai_claude_code_client_set_mcp_config_path(self, endpoint->value);
+    }
+    else
+    {
+        /* Revoked, or environment-only: drop the path so a later run
+         * does not point at a file that has been deleted. */
+        ai_claude_code_client_set_mcp_config_path(self, NULL);
+    }
+
+    return TRUE;
+}
+
 static void
 ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
 {
@@ -1525,6 +1561,8 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_claude_code_client_get_executable_path;
+    cli_class->endpoint_applied = ai_claude_code_client_endpoint_applied;
+    cli_class->endpoint_kinds = claude_code_endpoint_kinds;
     cli_class->build_argv = ai_claude_code_client_build_argv;
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;

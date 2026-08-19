@@ -476,3 +476,57 @@ listings) still run locally, because the wrapped tool has no opinion
 about this program's transcript.
 
 See [[file:../harness.org::*Passthrough][the harness layer]].
+
+* Extra MCP servers, and why not =grok agent=
+
+grok has no per-invocation flag for extra MCP servers on the code path this
+client drives. Delivery is an *overlay =GROK_HOME=*.
+
+** Why an overlay
+
+grok's config discovery is =$GROK_HOME= (else =~/.grok=), then
+=<repo>/.grok/config.toml=, then =<cwd>/.grok/config.toml=, plus the
+claude-compatible =~/.claude.json= and =.mcp.json=.
+
+Everything except =GROK_HOME= is a file inside the user's home or repository.
+Writing a tool config there is wrong twice over: it is not ours to edit, and it
+*outlives the process whose socket it names*, so every later =grok= the user
+runs by hand starts by failing to reach a server that died with the editor.
+
+=GROK_HOME= is per-invocation, but pointing it at an empty directory would also
+relocate auth, sessions and plugins. The overlay keeps them: a temporary
+directory of symlinks back to the real home, with =config.toml= replaced by the
+user's own plus the appended fragment. Directory symlinks are followed on path
+resolution, so new session files still land in the real =sessions/= and an
+=auth.json= write still reaches the real file.
+
+Appending a fragment that begins with a =[table]= header is always syntactically
+safe, because a table header ends whatever table preceded it. The one hazard is
+a duplicate table name --- name the server with a nonce.
+
+Revoking removes the overlay. =ai_grok_home_overlay_destroy()= refuses any path
+without the stamp file it writes, and unlinks entries rather than descending, so
+it can never damage the real home through a symlink.
+
+** =grok agent --plugin-dir= is a trap
+
+=grok agent --help= documents =--plugin-dir= as *"Highest-priority plugin scope;
+always trusted --- hooks and MCP servers activate without a prompt. Used by the
+Agent SDKs to inject per-connection plugins."* That reads like exactly the right
+answer. It is not, for two reasons:
+
+1. Top-level =grok= *rejects* the flag (=error: unexpected argument
+   '--plugin-dir' found=), and top-level =grok= is what this client invokes.
+2. =grok agent= has *no* =--prompt-file=, =--output-format=, =--resume=,
+   =--continue=, =--permission-mode=, =--sandbox= or =--max-turns=. Its
+   subcommands are =stdio=, =headless=, =serve= and =leader=: it is the
+   Agent-SDK/ACP transport, a different wire format with a different lifecycle.
+
+Moving argv there would discard the argv builder, session resume, permission
+modes, effort, sandbox and the entire streaming parser --- in exchange for one
+flag. =tests/test-tool-endpoint.c= asserts that argv contains neither =agent=
+nor =--plugin-dir=, so this decision fails loudly if someone revisits it after
+reading only the help text.
+
+=grok mcp add= is rejected for the same reason as writing =.mcp.json=: it
+persists config naming a socket that dies with the process.

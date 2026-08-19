@@ -331,3 +331,16 @@ listings) still run locally, because the wrapped tool has no opinion
 about this program's transcript.
 
 See [[file:../harness.org::*Passthrough][the harness layer]].
+
+* Extra MCP servers through the endpoint interface
+
+This client implements =AiToolEndpointConsumer=, so a host can hand it tools
+without knowing which CLI it is. For an =AI_ENDPOINT_KIND_MCP_CONFIG= endpoint
+delivery is the =mcp-config-path= property documented above --- the interface is
+a second door onto the same state, not a parallel path that could disagree with
+it.
+
+Revoking (=ai_tool_endpoint_consumer_clear()=) clears the path, so a later run
+cannot point at a config file that has since been deleted.
+
+See [[file:../tools.org][Tools]] for the dialect/delivery split.

@@ -1514,6 +1514,39 @@ ai_claude_tmux_client_get_executable_path(AiCliClient *client)
     return g_strdup("claude");
 }
 
+/*
+ * Same delivery as claude-code: --mcp-config, via the property this
+ * client already carries.
+ */
+static const gchar * const claude_tmux_endpoint_kinds[] = {
+    AI_ENDPOINT_KIND_ENV,
+    AI_ENDPOINT_KIND_MCP_CONFIG,
+    NULL
+};
+
+static gboolean
+ai_claude_tmux_client_endpoint_applied(
+    AiCliClient            *client,
+    const AiAgentEndpoint  *endpoint,
+    GError                **error
+){
+    AiClaudeTmuxClient *self = AI_CLAUDE_TMUX_CLIENT(client);
+
+    (void)error;
+
+    if (endpoint != NULL
+        && g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG) == 0)
+    {
+        ai_claude_tmux_client_set_mcp_config_path(self, endpoint->value);
+    }
+    else
+    {
+        ai_claude_tmux_client_set_mcp_config_path(self, NULL);
+    }
+
+    return TRUE;
+}
+
 static void
 ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 {
@@ -1526,6 +1559,8 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 
     cli_class->chat_sync           = ai_claude_tmux_client_chat_sync_vfunc;
     cli_class->get_executable_path = ai_claude_tmux_client_get_executable_path;
+    cli_class->endpoint_applied = ai_claude_tmux_client_endpoint_applied;
+    cli_class->endpoint_kinds = claude_tmux_endpoint_kinds;
 
     properties[PROP_TMUX_PATH] = g_param_spec_string(
         "tmux-path", "Tmux Path",

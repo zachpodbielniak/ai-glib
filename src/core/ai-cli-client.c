@@ -27,6 +27,14 @@ typedef struct
     gchar    *session_id;
     gchar    *working_directory;
     gchar    *effort_level;
+    /*
+     * Two tables, not one.  Caller env and endpoint env stay separate so
+     * that revoking an endpoint cannot strip a variable the caller set;
+     * they are merged only at spawn, endpoint last, so a scoped
+     * credential wins over a general setting of the same name.
+     */
+    GHashTable      *environment;      /* utf8 -> utf8, caller's */
+    AiAgentEndpoint *tool_endpoint;    /* owned, may be NULL */
     gint      max_tokens;
     gint      process_timeout_ms;
     gboolean  session_persistence;
@@ -37,9 +45,14 @@ typedef struct
  * wrapper, so a subclass gets the ::event signal for free and only has to
  * translate its own wire format.  There are no vfuncs to fill in.
  */
+static void ai_cli_client_endpoint_consumer_init(
+    AiToolEndpointConsumerInterface *iface);
+
 G_DEFINE_TYPE_WITH_CODE(AiCliClient, ai_cli_client, G_TYPE_OBJECT,
                         G_ADD_PRIVATE(AiCliClient)
-                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_TOOL_ENDPOINT_CONSUMER,
+                                              ai_cli_client_endpoint_consumer_init))
 
 /*
  * Property IDs.
@@ -57,6 +70,8 @@ enum
     PROP_WORKING_DIRECTORY,
     PROP_EFFORT_LEVEL,
     PROP_PROCESS_TIMEOUT_MS,
+    PROP_ENVIRONMENT,
+    PROP_TOOL_ENDPOINT,
     N_PROPS
 };
 
@@ -106,6 +121,8 @@ ai_cli_client_finalize(GObject *object)
     g_clear_pointer(&priv->session_id, g_free);
     g_clear_pointer(&priv->working_directory, g_free);
     g_clear_pointer(&priv->effort_level, g_free);
+    g_clear_pointer(&priv->environment, g_hash_table_destroy);
+    g_clear_pointer(&priv->tool_endpoint, ai_agent_endpoint_free);
 
     G_OBJECT_CLASS(ai_cli_client_parent_class)->finalize(object);
 }
@@ -151,6 +168,12 @@ ai_cli_client_get_property(
             break;
         case PROP_PROCESS_TIMEOUT_MS:
             g_value_set_int(value, priv->process_timeout_ms);
+            break;
+        case PROP_ENVIRONMENT:
+            g_value_set_boxed(value, priv->environment);
+            break;
+        case PROP_TOOL_ENDPOINT:
+            g_value_set_boxed(value, priv->tool_endpoint);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -206,6 +229,10 @@ ai_cli_client_set_property(
             break;
         case PROP_PROCESS_TIMEOUT_MS:
             priv->process_timeout_ms = g_value_get_int(value);
+            break;
+        case PROP_ENVIRONMENT:
+            ai_cli_client_set_environment(AI_CLI_CLIENT(object),
+                                          g_value_get_boxed(value));
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -376,6 +403,44 @@ ai_cli_client_class_init(AiCliClientClass *klass)
      *
      * Since: 0.23.3
      */
+    /**
+     * AiCliClient:environment:
+     *
+     * Variables to set for the CLI subprocess.
+     *
+     * Kept apart from an #AiAgentEndpoint's own environment so that
+     * revoking an endpoint cannot strip a variable the caller set; the
+     * two are merged at spawn, endpoint last.
+     *
+     * Since: 0.24.0
+     */
+    properties[PROP_ENVIRONMENT] =
+        g_param_spec_boxed("environment",
+                           "Environment",
+                           "Variables to set for the CLI subprocess",
+                           G_TYPE_HASH_TABLE,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiCliClient:tool-endpoint:
+     *
+     * The #AiAgentEndpoint in force, or %NULL.
+     *
+     * Read-only on purpose: applying can fail -- an unsupported kind, a
+     * temporary directory that could not be created -- and a property
+     * setter has nowhere to put a #GError.  Use
+     * ai_tool_endpoint_consumer_apply(); `notify::tool-endpoint` is the
+     * change signal, which is why no bespoke signal exists for this.
+     *
+     * Since: 0.24.0
+     */
+    properties[PROP_TOOL_ENDPOINT] =
+        g_param_spec_boxed("tool-endpoint",
+                           "Tool Endpoint",
+                           "Where this client's extra tools live",
+                           AI_TYPE_AGENT_ENDPOINT,
+                           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_PROCESS_TIMEOUT_MS] =
         g_param_spec_int("process-timeout-ms",
                          "Process Timeout (ms)",
@@ -1164,13 +1229,79 @@ ai_cli_client_chat_sync(
     return response;
 }
 
-/*
- * Default spawn: honour "working-directory" and nothing else.
+/**
+ * ai_cli_client_create_launcher:
+ * @self: an #AiCliClient
+ * @flags: the subprocess flags
  *
- * A subclass overrides this only to add something to the launcher --- see
- * AiOpenCodeClient, which sets OPENCODE_PERMISSION alongside --auto. Before
- * this vfunc existed each wrapper carried its own near-identical copy, and
- * the base's own chat_sync carried a fourth.
+ * A #GSubprocessLauncher with the working directory, the caller's
+ * environment and the tool endpoint's environment already applied.
+ *
+ * Every spawn path must go through this, including a subclass override.
+ * Hand-rolling a launcher is how the working directory came to be
+ * silently ignored unless skip-permissions happened to be on: the
+ * default built one only when cwd was set, an override reproduced that
+ * logic, and the two drifted.  One place to apply everything means a
+ * new setting cannot be dropped by three of four wrappers.
+ *
+ * Endpoint variables are applied last, so a scoped credential wins over
+ * a caller's general setting of the same name.
+ *
+ * Returns: (transfer full): a launcher
+ */
+GSubprocessLauncher *
+ai_cli_client_create_launcher(
+    AiCliClient      *self,
+    GSubprocessFlags  flags
+){
+    AiCliClientPrivate *priv;
+    GSubprocessLauncher *launcher;
+    const gchar *cwd;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    launcher = g_subprocess_launcher_new(flags);
+
+    cwd = priv->working_directory;
+    if (cwd != NULL && cwd[0] != '\0')
+    {
+        g_subprocess_launcher_set_cwd(launcher, cwd);
+    }
+
+    if (priv->environment != NULL)
+    {
+        GHashTableIter iter;
+        gpointer k, v;
+
+        g_hash_table_iter_init(&iter, priv->environment);
+        while (g_hash_table_iter_next(&iter, &k, &v))
+        {
+            g_subprocess_launcher_setenv(launcher, k, v, TRUE);
+        }
+    }
+
+    if (priv->tool_endpoint != NULL && priv->tool_endpoint->env != NULL)
+    {
+        GHashTableIter iter;
+        gpointer k, v;
+
+        g_hash_table_iter_init(&iter, priv->tool_endpoint->env);
+        while (g_hash_table_iter_next(&iter, &k, &v))
+        {
+            g_subprocess_launcher_setenv(launcher, k, v, TRUE);
+        }
+    }
+
+    return launcher;
+}
+
+/*
+ * Default spawn: the launcher, and nothing else.
+ *
+ * A subclass overrides this only to add something the launcher factory
+ * cannot know about; it must still build its launcher with
+ * ai_cli_client_create_launcher().
  */
 static GSubprocess *
 ai_cli_client_real_spawn(
@@ -1179,21 +1310,261 @@ ai_cli_client_real_spawn(
     GSubprocessFlags      flags,
     GError              **error
 ){
-    const gchar *cwd;
+    g_autoptr(GSubprocessLauncher) launcher = NULL;
 
-    cwd = ai_cli_client_get_working_directory(self);
+    launcher = ai_cli_client_create_launcher(self, flags);
 
-    if (cwd != NULL && cwd[0] != '\0')
+    return g_subprocess_launcher_spawnv(launcher, argv, error);
+}
+
+/* ── Environment ─────────────────────────────────────────────────── */
+
+static GHashTable *
+cli_client_environment(AiCliClientPrivate *priv)
+{
+    if (priv->environment == NULL)
     {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-        g_subprocess_launcher_set_cwd(launcher, cwd);
-
-        return g_subprocess_launcher_spawnv(launcher, argv, error);
+        priv->environment = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                  g_free, g_free);
     }
 
-    return g_subprocess_newv(argv, flags, error);
+    return priv->environment;
+}
+
+/**
+ * ai_cli_client_set_env:
+ * @self: an #AiCliClient
+ * @key: the variable name
+ * @value: the value
+ *
+ * Sets an environment variable for the CLI subprocess.
+ *
+ * Separate from an endpoint's own environment: revoking an endpoint must
+ * not strip a variable the caller set.
+ */
+void
+ai_cli_client_set_env(
+    AiCliClient *self,
+    const gchar *key,
+    const gchar *value
+){
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+    g_return_if_fail(key != NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    g_hash_table_replace(cli_client_environment(priv), g_strdup(key),
+                         g_strdup(value));
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_ENVIRONMENT]);
+}
+
+/**
+ * ai_cli_client_unset_env:
+ * @self: an #AiCliClient
+ * @key: the variable name
+ *
+ * Removes a variable set with ai_cli_client_set_env().
+ */
+void
+ai_cli_client_unset_env(
+    AiCliClient *self,
+    const gchar *key
+){
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+    g_return_if_fail(key != NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    if (priv->environment != NULL
+        && g_hash_table_remove(priv->environment, key))
+    {
+        g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_ENVIRONMENT]);
+    }
+}
+
+/**
+ * ai_cli_client_get_env:
+ * @self: an #AiCliClient
+ * @key: the variable name
+ *
+ * Returns: (nullable): the value, or %NULL if unset
+ */
+const gchar *
+ai_cli_client_get_env(
+    AiCliClient *self,
+    const gchar *key
+){
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+    g_return_val_if_fail(key != NULL, NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    if (priv->environment == NULL)
+    {
+        return NULL;
+    }
+
+    return g_hash_table_lookup(priv->environment, key);
+}
+
+/**
+ * ai_cli_client_get_environment:
+ * @self: an #AiCliClient
+ *
+ * The caller-set variables, not including an endpoint's own.
+ *
+ * Returns: (transfer none) (element-type utf8 utf8): the table
+ */
+GHashTable *
+ai_cli_client_get_environment(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+
+    return cli_client_environment(priv);
+}
+
+/**
+ * ai_cli_client_set_environment:
+ * @self: an #AiCliClient
+ * @env: (nullable) (element-type utf8 utf8): the variables, copied
+ *
+ * Replaces the caller-set environment wholesale.
+ */
+void
+ai_cli_client_set_environment(
+    AiCliClient *self,
+    GHashTable  *env
+){
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    priv = ai_cli_client_get_instance_private(self);
+    g_clear_pointer(&priv->environment, g_hash_table_destroy);
+
+    if (env != NULL)
+    {
+        GHashTableIter iter;
+        gpointer k, v;
+
+        g_hash_table_iter_init(&iter, env);
+        while (g_hash_table_iter_next(&iter, &k, &v))
+        {
+            g_hash_table_replace(cli_client_environment(priv), g_strdup(k),
+                                 g_strdup(v));
+        }
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_ENVIRONMENT]);
+}
+
+/* ── AiToolEndpointConsumer ──────────────────────────────────────── */
+
+/**
+ * ai_cli_client_get_tool_endpoint:
+ * @self: an #AiCliClient
+ *
+ * Returns: (transfer none) (nullable): the endpoint in force, or %NULL
+ */
+const AiAgentEndpoint *
+ai_cli_client_get_tool_endpoint(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+
+    return priv->tool_endpoint;
+}
+
+static const gchar * const *
+ai_cli_client_endpoint_kinds(AiToolEndpointConsumer *consumer)
+{
+    /*
+     * Every CLI client accepts the environment kind whether or not its
+     * class named one: the base applies AiAgentEndpoint.env at spawn for
+     * all of them, so refusing it would be a lie.
+     */
+    static const gchar * const env_only[] = { AI_ENDPOINT_KIND_ENV, NULL };
+    AiCliClientClass *klass;
+
+    klass = AI_CLI_CLIENT_GET_CLASS(consumer);
+
+    if (klass->endpoint_kinds != NULL)
+    {
+        return klass->endpoint_kinds;
+    }
+
+    return env_only;
+}
+
+static const AiAgentEndpoint *
+ai_cli_client_endpoint_get(AiToolEndpointConsumer *consumer)
+{
+    return ai_cli_client_get_tool_endpoint(AI_CLI_CLIENT(consumer));
+}
+
+static gboolean
+ai_cli_client_endpoint_apply(
+    AiToolEndpointConsumer *consumer,
+    const AiAgentEndpoint  *endpoint,
+    GError                **error
+){
+    AiCliClient *self = AI_CLI_CLIENT(consumer);
+    AiCliClientPrivate *priv = ai_cli_client_get_instance_private(self);
+    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
+
+    if (endpoint != NULL
+        && !ai_tool_endpoint_consumer_supports_kind(consumer, endpoint->kind))
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                    "%s does not take a '%s' tool endpoint",
+                    G_OBJECT_TYPE_NAME(self),
+                    endpoint->kind != NULL ? endpoint->kind : "(none)");
+        return FALSE;
+    }
+
+    /*
+     * Store before delivering, so that endpoint_applied can read the new
+     * state back -- and so the environment the launcher applies is in
+     * place whether or not a subclass has anything else to do.
+     */
+    g_clear_pointer(&priv->tool_endpoint, ai_agent_endpoint_free);
+    if (endpoint != NULL)
+    {
+        priv->tool_endpoint = ai_agent_endpoint_copy(endpoint);
+    }
+
+    if (klass->endpoint_applied != NULL
+        && !klass->endpoint_applied(self, priv->tool_endpoint, error))
+    {
+        /* A half-applied endpoint is worse than none: drop it rather
+         * than leave the caller believing a failed grant took. */
+        g_clear_pointer(&priv->tool_endpoint, ai_agent_endpoint_free);
+        g_object_notify_by_pspec(G_OBJECT(self),
+                                 properties[PROP_TOOL_ENDPOINT]);
+        return FALSE;
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_TOOL_ENDPOINT]);
+
+    return TRUE;
+}
+
+static void
+ai_cli_client_endpoint_consumer_init(AiToolEndpointConsumerInterface *iface)
+{
+    iface->get_supported_kinds = ai_cli_client_endpoint_kinds;
+    iface->apply_endpoint      = ai_cli_client_endpoint_apply;
+    iface->get_endpoint        = ai_cli_client_endpoint_get;
 }
 
 /**

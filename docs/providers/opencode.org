@@ -352,3 +352,35 @@ listings) still run locally, because the wrapped tool has no opinion
 about this program's transcript.
 
 See [[file:../harness.org::*Passthrough][the harness layer]].
+
+* Extra MCP servers
+
+opencode has *no* =--mcp-config= flag --- verified against 1.18.18, whose
+=run --help= lists none. What it honours is the =OPENCODE_CONFIG= environment
+variable naming a JSON file, merged after the global config and before the
+project one. That makes it additive and deferential to the user's own
+=opencode.json=, the same posture as claude's =--mcp-config= without
+=--strict-mcp-config=.
+
+Delivery is therefore an environment variable, which the client sets when it is
+handed an =AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE= endpoint:
+
+#+begin_src c
+g_autoptr (AiAgentEndpoint) ep =
+  ai_agent_endpoint_new (AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE, path);
+
+ai_tool_endpoint_consumer_apply (AI_TOOL_ENDPOINT_CONSUMER (client), ep, NULL);
+#+end_src
+
+The kind is distinct from =AI_ENDPOINT_KIND_MCP_CONFIG= because the *schema*
+differs, not merely the delivery. opencode nests servers under =mcp= and spells
+one =\{"type": "local", "command": [...], "environment": \{...\}\}=; a claude-shaped
+file handed to opencode is silently ignored. The client refuses the claude kind
+rather than accept a file it knows opencode cannot read.
+
+=OPENCODE_CONFIG_CONTENT= would take the JSON inline and is deliberately not
+used: it merges at ="local"= scope and so *beats* the user's project config,
+which is more authority than a tool injection should take, and a large blob in
+the environment adds an =E2BIG= failure mode for nothing.
+
+See [[file:../tools.org][Tools]] for the contract.

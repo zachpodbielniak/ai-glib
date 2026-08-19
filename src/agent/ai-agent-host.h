@@ -16,6 +16,8 @@
 #include <glib-object.h>
 #include <gio/gio.h>
 
+#include "core/ai-tool-endpoint.h"
+
 G_BEGIN_DECLS
 
 #define AI_TYPE_AGENT_HOST (ai_agent_host_get_type())
@@ -24,39 +26,6 @@ G_DECLARE_INTERFACE (AiAgentHost, ai_agent_host, AI, AGENT_HOST, GObject)
 
 typedef struct _AiAgent AiAgent;
 
-/**
- * AiAgentEndpoint:
- * @kind: how to reach the tools -- "mcp-config", "http-url", "stdio"
- * @value: the path, URL or command line, interpreted per @kind
- * @env: (nullable) (element-type utf8 utf8): variables the worker must
- *   set, typically carrying a credential
- * @ttl_seconds: 0 for no expiry
- *
- * An opaque description of where an agent's tools live.
- *
- * ai-glib does not interpret this beyond handing it to a worker.  That
- * is the point: the library must not learn what MCP is, so the host
- * describes the arrangement and ai-glib passes it along.
- */
-typedef struct
-{
-    gchar      *kind;
-    gchar      *value;
-    GHashTable *env;
-    gint64      ttl_seconds;
-} AiAgentEndpoint;
-
-#define AI_TYPE_AGENT_ENDPOINT (ai_agent_endpoint_get_type())
-GType ai_agent_endpoint_get_type (void) G_GNUC_CONST;
-
-AiAgentEndpoint *ai_agent_endpoint_new  (const gchar *kind, const gchar *value);
-AiAgentEndpoint *ai_agent_endpoint_copy (const AiAgentEndpoint *self);
-void             ai_agent_endpoint_free (AiAgentEndpoint *self);
-void             ai_agent_endpoint_set_env (AiAgentEndpoint *self,
-                                            const gchar *key,
-                                            const gchar *value);
-
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (AiAgentEndpoint, ai_agent_endpoint_free)
 
 /**
  * AiAgentHostInterface:

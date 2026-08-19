@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "providers/ai-grok-build-client.h"
+#include "providers/ai-grok-home-overlay.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -58,6 +59,10 @@ struct _AiGrokBuildClient
     /* Cached summary for the re-prompt fallback when the model produces
      * no text (empty "text" with tool use only). */
     gchar   *last_tool_summary;
+
+    /* Temporary GROK_HOME standing in for the user's, so an endpoint can
+     * add MCP servers without writing to their home or repository. */
+    gchar   *home_overlay;
 };
 
 /*
@@ -1276,7 +1281,66 @@ ai_grok_build_client_finalize(GObject *object)
     g_free(self->agent);
     g_free(self->rules);
 
+    /* An overlay outliving the client would leak a directory per run. */
+    if (self->home_overlay != NULL)
+    {
+        ai_grok_home_overlay_destroy(self->home_overlay);
+        g_clear_pointer(&self->home_overlay, g_free);
+    }
+
     G_OBJECT_CLASS(ai_grok_build_client_parent_class)->finalize(object);
+}
+
+/*
+ * grok has no per-invocation flag for extra MCP servers on the code path
+ * this client drives.  `grok agent --plugin-dir` exists and is
+ * documented as the Agent-SDK injection point, but it lives on the
+ * `agent` subcommand, which has no --prompt-file, no --output-format,
+ * no --resume and no --permission-mode: it is the ACP transport, a
+ * different protocol.  Moving there would discard the argv builder, the
+ * session handling and the whole streaming parser in exchange for one
+ * flag, so delivery is an overlay GROK_HOME instead.  See
+ * ai-grok-home-overlay.c for why that keeps auth and sessions working.
+ */
+static const gchar * const grok_build_endpoint_kinds[] = {
+    AI_ENDPOINT_KIND_ENV,
+    AI_ENDPOINT_KIND_MCP_CONFIG_GROK,
+    NULL
+};
+
+static gboolean
+ai_grok_build_client_endpoint_applied(
+    AiCliClient            *client,
+    const AiAgentEndpoint  *endpoint,
+    GError                **error
+){
+    AiGrokBuildClient *self = AI_GROK_BUILD_CLIENT(client);
+
+    /* Revoke first, and unconditionally: an apply that replaces an
+     * earlier endpoint must not leak the previous overlay. */
+    if (self->home_overlay != NULL)
+    {
+        ai_grok_home_overlay_destroy(self->home_overlay);
+        g_clear_pointer(&self->home_overlay, g_free);
+        ai_cli_client_unset_env(client, "GROK_HOME");
+    }
+
+    if (endpoint == NULL
+        || g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG_GROK) != 0)
+    {
+        return TRUE;
+    }
+
+    self->home_overlay = ai_grok_home_overlay_create(NULL, endpoint->value,
+                                                     error);
+    if (self->home_overlay == NULL)
+    {
+        return FALSE;
+    }
+
+    ai_cli_client_set_env(client, "GROK_HOME", self->home_overlay);
+
+    return TRUE;
 }
 
 static void
@@ -1291,6 +1355,8 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_grok_build_client_get_executable_path;
+    cli_class->endpoint_applied    = ai_grok_build_client_endpoint_applied;
+    cli_class->endpoint_kinds      = grok_build_endpoint_kinds;
     cli_class->build_argv          = ai_grok_build_client_build_argv;
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;

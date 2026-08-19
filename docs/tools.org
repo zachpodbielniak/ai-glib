@@ -382,3 +382,109 @@ untrusted input in exactly the sense subprocess stdout is.
 - [[file:harness.org][The harness layer]] --- where =task= and =skill= find their files
 - [[file:web-search.org][Web search]] --- =web_search= and its backends
 - [[file:transcript.org][The transcript]] --- how tool calls are grouped and summarised
+
+* Tools a provider does not host: =AiToolEndpointConsumer=
+
+Everything above concerns tools this process runs. A CLI wrapper --- claude-code,
+claude-tmux, opencode, grok-build --- runs its own tools in its own process and
+ignores the =tools= argument entirely, which is why =AiConversation= refuses
+=local-tools= for one. What such a provider *does* take is a pointer to more
+tools: a config file, an environment variable, or a directory.
+
+=AiToolEndpointConsumer= is that contract, and =AiAgentEndpoint= is what travels
+over it.
+
+** Dialect and delivery
+
+The split is the whole design.
+
+- *Dialect* --- the bytes that describe a tool server. Claude's =.mcp.json=
+  nests under =mcpServers=; opencode's nests under =mcp= and spells a server
+  ={"type": "local", "command": [...], "environment": {...}}=; grok's is TOML
+  with =[mcp_servers.NAME]= tables. This belongs to the *host*, because the host
+  owns the server it is publishing.
+- *Delivery* --- which flag, environment variable or directory carries those
+  bytes. This belongs to the *provider*, because it is that CLI's mechanism.
+
+=AiAgentEndpoint.kind= is the entire negotiation between the two. A consumer
+advertises the kinds it accepts; the host mints the one that was asked for.
+Neither side learns the other's business, and in particular *ai-glib never
+parses an MCP config* --- the invariant =AiAgentHost= was declared to protect.
+
+#+begin_src c
+if (ai_tool_endpoint_consumer_supports_kind (consumer,
+                                             AI_ENDPOINT_KIND_MCP_CONFIG))
+  {
+    g_autoptr (AiAgentEndpoint) ep =
+      ai_agent_endpoint_new (AI_ENDPOINT_KIND_MCP_CONFIG, path);
+
+    ai_agent_endpoint_set_env (ep, "MY_TOKEN", token);
+    ai_tool_endpoint_consumer_apply (consumer, ep, &error);
+  }
+#+end_src
+
+Ask before you mint. A credential created for a provider that cannot receive it
+is a live secret with no purpose.
+
+** The kinds
+
+| Kind                                   | =value= is                          |
+|----------------------------------------+-------------------------------------|
+| =AI_ENDPOINT_KIND_ENV=                   | unused; everything is in =env=        |
+| =AI_ENDPOINT_KIND_MCP_CONFIG=            | a path, Claude Code's JSON schema   |
+| =AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE=   | a path, opencode's JSON schema      |
+| =AI_ENDPOINT_KIND_MCP_CONFIG_GROK=       | a path to a TOML fragment           |
+| =AI_ENDPOINT_KIND_HTTP_URL=              | a URL                               |
+| =AI_ENDPOINT_KIND_STDIO=                 | a command line                      |
+
+Every =AiCliClient= accepts =env= whether or not its class names it: the base
+applies =AiAgentEndpoint.env= at spawn for all of them, so refusing it would be
+a lie. That makes =env= the escape hatch for a host that needs to set a variable
+this library has never heard of.
+
+Credentials belong in =env=, not in =value= and never in argv:
+=/proc/PID/cmdline= is world-readable, =/proc/PID/environ= is 0400.
+
+** Why an interface, and a class vfunc underneath
+
+Callers hold a =GObject= --- =AiConversation:provider= is constrained only by
+=AI_IS_PROVIDER= --- so a class vfunc would force an =AI_IS_CLI_CLIENT= check at
+every call site, which is exactly the per-provider branching this exists to
+delete. Every other cross-cutting provider capability here is already an
+interface (=AiProvider=, =AiStreamable=, =AiEventSource=). And the capability is
+not =AiCliClient='s to monopolise: a remote-agent bridge is a legitimate
+consumer and subclasses nothing.
+
+=AiCliClient= then implements it *once* for all four wrappers, with the per-CLI
+step as an =AiCliClientClass.endpoint_applied= vfunc plus an =endpoint_kinds=
+class datum. A subclass writes one function instead of a =G_IMPLEMENT_INTERFACE=
+block, validation and storage and notification happen in one place, and nobody
+has to do interface-parent chaining.
+
+There is no =::endpoint-applied= signal, deliberately. =notify::tool-endpoint=
+carries everything such a signal would, composes with =g_object_bind_property=,
+and is introspectable. A =::tools-changed= signal would be worse than
+redundant --- it would be a lie, since ai-glib never learns how many tools sit
+behind an endpoint.
+
+The property is read-only for a reason too: applying can fail --- an unsupported
+kind, a temporary directory that could not be created --- and a property setter
+has nowhere to put a =GError=.
+
+** Adding a consumer
+
+Two lines in =class_init= and one function:
+
+#+begin_src c
+static const gchar * const my_kinds[] = {
+    AI_ENDPOINT_KIND_ENV, AI_ENDPOINT_KIND_MCP_CONFIG, NULL
+};
+
+cli_class->endpoint_kinds   = my_kinds;
+cli_class->endpoint_applied = my_client_endpoint_applied;
+#+end_src
+
+*=endpoint_applied (NULL)= must undo exactly what =endpoint_applied (endpoint)=
+did.* A revoke that leaves a temporary directory behind, or an environment
+variable set, outlives the run that owned it --- and what it outlives is usually
+a credential.

@@ -31,6 +31,8 @@
 #include "core/ai-image-capabilities.h"
 #include "core/ai-image-generator.h"
 #include "core/ai-client.h"
+#include "core/ai-tool-endpoint.h"
+#include "core/ai-tool-endpoint-consumer.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-prompt-scorer.h"
 

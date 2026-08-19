@@ -291,3 +291,21 @@ happened.
 
 See [[file:tools.org::*task][the task tool]] and
 [[file:commands.org::*An agent][writing an agent file]].
+
+* The host contract has a consumer side
+
+=AiAgentHost= describes what an embedding application provides to agents:
+=provision=, =revoke=, =list_tools=, =request_approval=. =AiAgentEndpoint= is
+what =provision= hands back.
+
+Until now nothing consumed one. =AiToolEndpointConsumer= is the other half ---
+the interface a provider implements to *receive* an endpoint --- so a host that
+implements both from one allowlist gives an agent the same authority whichever
+way it runs: in-process agents get tools directly through =list_tools=, and a
+subprocess is pointed at an endpoint.
+
+=AiAgentEndpoint.env= was inert before this and is now applied: every
+=AiCliClient= merges it into the subprocess environment at spawn, after the
+caller's own variables so that a scoped credential wins.
+
+See [[file:tools.org][Tools]] for the dialect/delivery split and the kind vocabulary.
