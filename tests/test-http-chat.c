@@ -993,6 +993,137 @@ test_stream_cancelled_mid_request(void)
 	tserver_free(ts);
 }
 
+/*
+ * Cancelling *after the body has started flowing* is a different code path
+ * from cancelling during the request, and until this test existed nothing
+ * covered it.
+ *
+ * test_stream_cancelled_mid_request above cannot reach it: tserver stalls
+ * before soup_server_message_set_status, so its cancel always lands inside
+ * soup_session_send_async and is handled by on_*_stream_ready, which does
+ * complete the task.  The read loop is only entered once headers and body
+ * are on the wire, and only there can g_data_input_stream_read_line_finish
+ * fail with G_IO_ERROR_CANCELLED.
+ *
+ * Cancelling from the first ::delta is what makes that deterministic: the
+ * signal is emitted from inside the read loop, so the very next read is
+ * guaranteed to be the cancelled one.  A timeout would be a race.
+ *
+ * The failure this guards against is a hang, not a wrong value: the
+ * handlers used to return without completing the GTask, so on_stream_done
+ * never ran and g_main_loop_run never returned.  Hence the watchdog and
+ * the assertion on `done` -- the point is that the callback happened at
+ * all, and what it reports is secondary.
+ */
+
+typedef struct
+{
+	Turn         *turn;
+	GCancellable *cancellable;
+} CancelOnDelta;
+
+static void
+on_delta_cancel(GObject *s, const gchar *text, gpointer d)
+{
+	CancelOnDelta *c = d;
+
+	(void)s;
+	g_string_append(c->turn->deltas, text);
+	g_cancellable_cancel(c->cancellable);
+}
+
+typedef struct
+{
+	GMainLoop *loop;
+	gboolean   fired;
+} Watchdog;
+
+static gboolean
+watchdog_quit(gpointer user_data)
+{
+	Watchdog *w = user_data;
+
+	w->fired = TRUE;
+	g_main_loop_quit(w->loop);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void
+stream_cancel_on_first_delta(gpointer client, const gchar *content_type,
+                             const gchar *body, TServer *ts)
+{
+	Turn *turn = turn_new();
+	g_autoptr(GCancellable) cancellable = g_cancellable_new();
+	g_autoptr(AiMessage) msg = ai_message_new_user("hello");
+	GList *messages = g_list_append(NULL, msg);
+	CancelOnDelta ctx = { turn, cancellable };
+	Watchdog watchdog = { turn->loop, FALSE };
+	guint watchdog_id;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, content_type, body);
+	tserver_set_delay(ts, 0);
+
+	g_signal_connect(client, "delta", G_CALLBACK(on_delta_cancel), &ctx);
+
+	ai_streamable_chat_stream_async(AI_STREAMABLE(client), messages,
+	                                "be brief", 64, NULL, cancellable,
+	                                on_stream_done, turn);
+
+	/* Bounds the failure: without the fix the loop would never quit.
+	 * Removing an already-fired source is itself a CRITICAL, which would
+	 * bury the assertion below under an unrelated message. */
+	watchdog_id = g_timeout_add(4000, watchdog_quit, &watchdog);
+	g_main_loop_run(turn->loop);
+	if (!watchdog.fired)
+	{
+		g_source_remove(watchdog_id);
+	}
+
+	g_signal_handlers_disconnect_by_data(client, &ctx);
+	g_list_free(messages);
+
+	/* The completion callback ran: the task was returned, not abandoned.
+	 * This is the whole assertion -- what the task returned matters less
+	 * than that it returned at all. */
+	g_assert_false(watchdog.fired);
+	g_assert_true(turn->done);
+
+	turn_free(turn);
+}
+
+static void
+test_stream_cancelled_after_first_delta(void)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiOpenAIClient) openai = NULL;
+	g_autoptr(AiClaudeClient) claude = NULL;
+	g_autoptr(AiGrokClient) grok = NULL;
+	g_autoptr(AiGeminiClient) gemini = NULL;
+	g_autoptr(AiOllamaClient) ollama = NULL;
+
+	openai = make_openai(ts);
+	claude = make_claude(ts);
+	grok = make_grok(ts);
+	gemini = make_gemini(ts);
+	ollama = make_ollama(ts);
+
+	/* Every streaming provider carries its own copy of the same handler,
+	 * so every one of them needs its own pass. */
+	stream_cancel_on_first_delta(openai, "text/event-stream",
+	                             openai_sse_body, ts);
+	stream_cancel_on_first_delta(claude, "text/event-stream",
+	                             claude_sse_body, ts);
+	stream_cancel_on_first_delta(grok, "text/event-stream",
+	                             grok_sse_body, ts);
+	stream_cancel_on_first_delta(gemini, "text/event-stream",
+	                             gemini_sse_body, ts);
+	stream_cancel_on_first_delta(ollama, "application/x-ndjson",
+	                             ollama_ndjson_body, ts);
+
+	tserver_free(ts);
+}
+
 static void
 test_chat_cancelled_before_start(void)
 {
@@ -1298,6 +1429,8 @@ main(int argc, char *argv[])
 	                test_chat_cancelled_mid_request);
 	g_test_add_func("/ai-glib/http-chat/cancel/stream",
 	                test_stream_cancelled_mid_request);
+	g_test_add_func("/ai-glib/http-chat/cancel/stream-after-delta",
+	                test_stream_cancelled_after_first_delta);
 	g_test_add_func("/ai-glib/http-chat/cancel/before-start",
 	                test_chat_cancelled_before_start);
 

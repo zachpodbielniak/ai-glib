@@ -943,11 +943,19 @@ on_ollama_line_read(
 
     if (error != NULL)
     {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-            g_task_return_error(data->task, g_steal_pointer(&error));
-            ollama_stream_data_free(data);
-        }
+        /* A cancelled read must still complete the task.  ai-glib calls
+         * neither g_task_set_return_on_cancel nor
+         * g_task_set_check_cancellable anywhere, so a handler that
+         * returns without completing leaves the GTask pending for the
+         * life of the process: the caller's callback never runs, an
+         * AiConversation never clears :busy, and every later turn is
+         * refused by a conversation that looks permanently in flight.
+         *
+         * Returning the G_IO_ERROR_CANCELLED is what the caller expects
+         * -- g_task_return_error completes even on a cancelled
+         * cancellable, and ai_*_finish reports the cancellation. */
+        g_task_return_error(data->task, g_steal_pointer(&error));
+        ollama_stream_data_free(data);
         return;
     }
 
