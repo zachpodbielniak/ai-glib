@@ -543,6 +543,54 @@ test_working_directory_reaches_the_executor(void)
 }
 
 static void
+test_working_directory_reaches_the_cli_provider(void)
+{
+	g_autoptr(AiGrokBuildClient) cli = ai_grok_build_client_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(cli));
+
+	/*
+	 * The executor hop above is not enough for a CLI provider and never
+	 * could be: set_local_tools refuses local tools for one, so the
+	 * executor it configures is never consulted.  What decides the
+	 * child's cwd is the client's own property, and until this test the
+	 * conversation never wrote it -- so an agent asked to run in a
+	 * project ran in whatever directory the embedding process started
+	 * in, which for a daemon is $HOME.
+	 */
+	ai_conversation_set_working_directory(conversation, sandbox);
+
+	g_assert_cmpstr(ai_cli_client_get_working_directory(AI_CLI_CLIENT(cli)),
+	                ==, sandbox);
+}
+
+static void
+test_moving_the_working_directory_drops_the_session(void)
+{
+	g_autoptr(AiGrokBuildClient) cli = ai_grok_build_client_new();
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(cli));
+
+	/*
+	 * A CLI session is keyed to its directory, so an id carried across a
+	 * move resumes a transcript filed under the old project -- claude
+	 * would open a fresh empty one while the frontend still showed the
+	 * old turns.
+	 */
+	ai_conversation_set_working_directory(conversation, sandbox);
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(cli), "sess-1");
+
+	/* First set was NULL -> path, which is not a move: an id pinned
+	 * before the directory was known must survive it. */
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(cli)), ==,
+	                "sess-1");
+
+	ai_conversation_set_working_directory(conversation, g_get_tmp_dir());
+
+	g_assert_null(ai_cli_client_get_session_id(AI_CLI_CLIENT(cli)));
+}
+
+static void
 test_clear_empties_the_todo_list(void)
 {
 	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
@@ -830,6 +878,10 @@ main(int argc, char *argv[])
 	                test_command_set_hands_the_registry_to_the_executor);
 	g_test_add_func("/ai-glib/input/cwd-shared",
 	                test_working_directory_reaches_the_executor);
+	g_test_add_func("/ai-glib/input/cwd-reaches-cli",
+	                test_working_directory_reaches_the_cli_provider);
+	g_test_add_func("/ai-glib/input/cwd-move-drops-session",
+	                test_moving_the_working_directory_drops_the_session);
 	g_test_add_func("/ai-glib/input/clear-todos",
 	                test_clear_empties_the_todo_list);
 	g_test_add_func("/ai-glib/input/todo-one-block",

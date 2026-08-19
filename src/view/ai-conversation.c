@@ -128,6 +128,9 @@ enum
 static guint signals[N_SIGNALS];
 
 static void conversation_finish_turn(AiConversation *self, GError *error);
+static void push_working_directory_to_provider(AiConversation *self,
+                                               const gchar    *path,
+                                               gboolean        moved);
 
 /* ================================================================
  * Folding events into blocks
@@ -1551,6 +1554,17 @@ ai_conversation_new(GObject *provider)
     self = g_object_new(AI_TYPE_CONVERSATION, NULL);
     self->provider = g_object_ref(provider);
 
+    /* A construct-time "working-directory" property runs through the
+     * setter before there is a provider to push it to, so re-push it
+     * here.  Not a move: this is the first time the provider has heard
+     * a directory at all, and clearing a session id the caller set
+     * alongside it would be a surprise. */
+    if (self->working_directory != NULL)
+    {
+        push_working_directory_to_provider(self, self->working_directory,
+                                           FALSE);
+    }
+
     if (AI_IS_EVENT_SOURCE(provider))
     {
         self->event_id = g_signal_connect(provider, "event",
@@ -1851,6 +1865,51 @@ ai_conversation_get_command_set(AiConversation *self)
     return self->command_set;
 }
 
+/*
+ * push_working_directory_to_provider: @self, @path, and @moved -- whether
+ * this replaces a directory that was already set.  A plain comment, not
+ * gtk-doc: the function is static, and g-ir-scanner reads a doc-comment
+ * block even here, then warns about parameters on a symbol it cannot
+ * find.  Opening this one with two stars fails the GIR-clean gate.
+ *
+ * A CLI provider runs in its own process, and that process's cwd comes
+ * from the client's own property -- ai_cli_client_real_spawn feeds it to
+ * g_subprocess_launcher_set_cwd, and claude-tmux's resolve_session_cwd
+ * falls back to g_get_current_dir() without it.  Setting the executor
+ * and the registry alone leaves the agent running wherever the embedding
+ * process happened to start, which for a daemon is $HOME.
+ *
+ * The executor hop is not a substitute: ai_conversation_set_local_tools
+ * refuses local tools for a CLI provider, so it is inert for exactly the
+ * providers whose cwd matters.
+ *
+ * A CLI session is keyed to its directory -- claude-tmux derives
+ * ~/.claude/projects/<encoded-cwd>/<id>.jsonl from it and claude-code's
+ * --resume is cwd-relative -- so carrying a session id across a move
+ * would resume a transcript that lives under the old project.  Hence
+ * @moved: clear the id when the directory actually changes, but not on
+ * the first NULL -> path set, which would discard an id the embedder
+ * deliberately pinned before the directory was known.
+ */
+static void
+push_working_directory_to_provider(
+    AiConversation *self,
+    const gchar    *path,
+    gboolean        moved
+){
+    if (self->provider == NULL || !AI_IS_CLI_CLIENT(self->provider))
+    {
+        return;
+    }
+
+    ai_cli_client_set_working_directory(AI_CLI_CLIENT(self->provider), path);
+
+    if (moved)
+    {
+        ai_cli_client_set_session_id(AI_CLI_CLIENT(self->provider), NULL);
+    }
+}
+
 /**
  * ai_conversation_set_working_directory:
  * @self: an #AiConversation
@@ -1863,12 +1922,17 @@ ai_conversation_set_working_directory(
     AiConversation *self,
     const gchar    *path
 ){
+    gboolean moved;
+
     g_return_if_fail(AI_IS_CONVERSATION(self));
 
     if (g_strcmp0(self->working_directory, path) == 0)
     {
         return;
     }
+
+    moved = self->working_directory != NULL
+        && self->working_directory[0] != '\0';
 
     g_free(self->working_directory);
     self->working_directory = g_strdup(path);
@@ -1888,6 +1952,8 @@ ai_conversation_set_working_directory(
             ai_resource_registry_set_working_directory(registry, path);
         }
     }
+
+    push_working_directory_to_provider(self, path, moved);
 
     g_object_notify_by_pspec(G_OBJECT(self),
                              properties[PROP_WORKING_DIRECTORY]);
