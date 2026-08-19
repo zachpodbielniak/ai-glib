@@ -374,6 +374,206 @@ test_conversation_hands_a_cli_provider_its_endpoint(void)
 	g_assert_nonnull(ai_conversation_get_tool_endpoint(conversation));
 }
 
+static void
+test_endpoint_env_reaches_the_launcher(void)
+{
+	/*
+	 * The assertion that matters, and the one whose absence let a real
+	 * bug ship: ai_cli_client_get_env() returning the value only proves
+	 * the client stored it.  What decides whether the agent ever sees it
+	 * is the launcher -- and opencode overrode spawn with a hand-rolled
+	 * launcher that applied its own variable and nothing else, so
+	 * OPENCODE_CONFIG was set and then dropped on the way to the child.
+	 *
+	 * Checked through create_launcher for every CLI client, because the
+	 * failure is per-provider: a client that hand-rolls a launcher
+	 * passes every getter test and still delivers nothing.
+	 */
+	gpointer clients[3];
+	gsize i;
+	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
+	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
+	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
+
+	clients[0] = claude;
+	clients[1] = opencode;
+	clients[2] = grok;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		AiCliClient *cli = AI_CLI_CLIENT(clients[i]);
+		g_autoptr(AiAgentEndpoint) ep =
+			ai_agent_endpoint_new(AI_ENDPOINT_KIND_ENV, NULL);
+		g_autoptr(GSubprocessLauncher) launcher = NULL;
+		g_autoptr(GError) error = NULL;
+
+		ai_cli_client_set_env(cli, "FROM_CALLER", "caller");
+		ai_agent_endpoint_set_env(ep, "FROM_ENDPOINT", "endpoint");
+
+		g_assert_true(ai_tool_endpoint_consumer_apply(
+			AI_TOOL_ENDPOINT_CONSUMER(cli), ep, &error));
+		g_assert_no_error(error);
+
+		launcher = ai_cli_client_create_launcher(cli, G_SUBPROCESS_FLAGS_NONE);
+
+		g_assert_cmpstr(g_subprocess_launcher_getenv(launcher, "FROM_CALLER"),
+		                ==, "caller");
+		g_assert_cmpstr(g_subprocess_launcher_getenv(launcher,
+		                                             "FROM_ENDPOINT"),
+		                ==, "endpoint");
+	}
+}
+
+static void
+test_opencode_config_reaches_the_launcher(void)
+{
+	/* The specific delivery that was broken, end to end. */
+	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
+	g_autoptr(AiAgentEndpoint) ep =
+		ai_agent_endpoint_new(AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE,
+		                      "/tmp/oc.json");
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GError) error = NULL;
+
+	g_assert_true(ai_tool_endpoint_consumer_apply(
+		AI_TOOL_ENDPOINT_CONSUMER(opencode), ep, &error));
+
+	launcher = ai_cli_client_create_launcher(AI_CLI_CLIENT(opencode),
+	                                         G_SUBPROCESS_FLAGS_NONE);
+
+	g_assert_cmpstr(g_subprocess_launcher_getenv(launcher, "OPENCODE_CONFIG"),
+	                ==, "/tmp/oc.json");
+}
+
+static void
+test_working_directory_reaches_the_launcher(void)
+{
+	/*
+	 * The user-visible half of the same class of bug: a CLI agent whose
+	 * $PWD is the editor's rather than the project's.
+	 */
+	gpointer clients[3];
+	gsize i;
+	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
+	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
+	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
+
+	clients[0] = claude;
+	clients[1] = opencode;
+	clients[2] = grok;
+
+	for (i = 0; i < G_N_ELEMENTS(clients); i++)
+	{
+		AiCliClient *cli = AI_CLI_CLIENT(clients[i]);
+		g_autoptr(AiConversation) conversation =
+			ai_conversation_new(G_OBJECT(clients[i]));
+		g_autoptr(GSubprocessLauncher) launcher = NULL;
+
+		ai_conversation_set_working_directory(conversation, g_get_tmp_dir());
+
+		g_assert_cmpstr(ai_cli_client_get_working_directory(cli), ==,
+		                g_get_tmp_dir());
+
+		/* Constructing it must not throw the cwd away. */
+		launcher = ai_cli_client_create_launcher(cli,
+		                                         G_SUBPROCESS_FLAGS_NONE);
+		g_assert_nonnull(launcher);
+	}
+}
+
+/*
+ * The spawn path, through the vtable, against a real child.
+ *
+ * The create_launcher tests above are necessary and not sufficient, and
+ * the gap between them is where a real bug shipped: opencode overrides
+ * `spawn' and used to hand-roll its own launcher, so it applied its own
+ * variable and dropped everything the base had prepared.  Every
+ * getter-level and launcher-level assertion passed while OPENCODE_CONFIG
+ * -- the only way opencode receives an MCP config at all -- never
+ * reached the child.
+ *
+ * Only spawning proves delivery.  A provider that overrides `spawn' can
+ * always defeat the base, so the assertion has to be made on the far
+ * side of the fork.
+ */
+static void
+spawn_and_check(gpointer client, const gchar *label)
+{
+	AiCliClient *cli = AI_CLI_CLIENT(client);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *dir = NULL;
+	g_autofree gchar *stub = NULL;
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *recorded = NULL;
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(AiAgentEndpoint) ep = NULL;
+	const gchar *argv[2];
+
+	dir = g_dir_make_tmp("ai-glib-spawn-XXXXXX", &error);
+	g_assert_no_error(error);
+	stub = g_build_filename(dir, "stub.sh", NULL);
+	out = g_build_filename(dir, "recorded", NULL);
+
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"{ pwd; echo \"env=$FROM_ENDPOINT\"; } > %s\n", out);
+	g_assert_true(g_file_set_contents(stub, script, -1, &error));
+	g_assert_no_error(error);
+	g_assert_cmpint(g_chmod(stub, 0700), ==, 0);
+
+	ep = ai_agent_endpoint_new(AI_ENDPOINT_KIND_ENV, NULL);
+	ai_agent_endpoint_set_env(ep, "FROM_ENDPOINT", "delivered");
+
+	ai_cli_client_set_working_directory(cli, dir);
+	g_assert_true(ai_tool_endpoint_consumer_apply(
+		AI_TOOL_ENDPOINT_CONSUMER(cli), ep, &error));
+	g_assert_no_error(error);
+
+	argv[0] = stub;
+	argv[1] = NULL;
+
+	proc = ai_cli_client_spawn(cli, argv, G_SUBPROCESS_FLAGS_NONE, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(proc);
+	g_assert_true(g_subprocess_wait(proc, NULL, &error));
+	g_assert_no_error(error);
+
+	g_assert_true(g_file_get_contents(out, &recorded, NULL, &error));
+	g_assert_no_error(error);
+
+	/* The child ran where it was told ... */
+	if (strstr(recorded, dir) == NULL)
+	{
+		g_error("%s: child cwd was not %s; recorded:\n%s", label, dir,
+		        recorded);
+	}
+	/* ... and with the endpoint's environment. */
+	if (strstr(recorded, "env=delivered") == NULL)
+	{
+		g_error("%s: endpoint environment never reached the child; "
+		        "recorded:\n%s", label, recorded);
+	}
+
+	g_unlink(out);
+	g_unlink(stub);
+	g_rmdir(dir);
+}
+
+static void
+test_spawn_delivers_cwd_and_env(void)
+{
+	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
+	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
+	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
+
+	/* Once per client, because overriding `spawn' is per-client and so
+	 * is the way it can go wrong. */
+	spawn_and_check(claude, "claude-code");
+	spawn_and_check(opencode, "opencode");
+	spawn_and_check(grok, "grok-build");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -399,6 +599,14 @@ main(int argc, char *argv[])
 	                test_grok_argv_stays_on_the_top_level_command);
 	g_test_add_func("/ai-glib/tool-endpoint/env-tables-separate",
 	                test_endpoint_env_does_not_clobber_caller_env);
+	g_test_add_func("/ai-glib/tool-endpoint/env-reaches-launcher",
+	                test_endpoint_env_reaches_the_launcher);
+	g_test_add_func("/ai-glib/tool-endpoint/opencode-config-reaches-launcher",
+	                test_opencode_config_reaches_the_launcher);
+	g_test_add_func("/ai-glib/tool-endpoint/cwd-reaches-launcher",
+	                test_working_directory_reaches_the_launcher);
+	g_test_add_func("/ai-glib/tool-endpoint/spawn-delivers",
+	                test_spawn_delivers_cwd_and_env);
 	g_test_add_func("/ai-glib/tool-endpoint/notify",
 	                test_notify_fires_on_apply);
 	g_test_add_func("/ai-glib/tool-endpoint/conversation-refuses-http",

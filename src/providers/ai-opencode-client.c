@@ -230,31 +230,27 @@ ai_opencode_client_spawn(
     GError                **error
 ){
     AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
-    const gchar *cwd = ai_cli_client_get_working_directory(client);
+    g_autoptr(GSubprocessLauncher) launcher = NULL;
 
-    if (self->skip_permissions || (cwd != NULL && cwd[0] != '\0'))
+    /*
+     * Through the factory, never a hand-rolled launcher.  This override
+     * used to build its own and reproduce the base's cwd logic, and the
+     * copy is what made OPENCODE_CONFIG -- the only way opencode
+     * receives an MCP config at all -- get set on the client and then
+     * silently dropped on the way to the child.  Anything the base
+     * applies (working directory, caller environment, the tool
+     * endpoint's environment) arrives here for free; this method's only
+     * business is the one variable that is opencode's own.
+     */
+    launcher = ai_cli_client_create_launcher(client, flags);
+
+    if (self->skip_permissions)
     {
-        g_autoptr(GSubprocessLauncher) launcher = NULL;
-
-        launcher = g_subprocess_launcher_new(flags);
-
-        if (self->skip_permissions)
-        {
-            g_subprocess_launcher_setenv(launcher,
-                                          "OPENCODE_PERMISSION",
-                                          OPENCODE_PERMISSION_ALLOW_ALL,
-                                          TRUE);
-        }
-
-        if (cwd != NULL && cwd[0] != '\0')
-        {
-            g_subprocess_launcher_set_cwd(launcher, cwd);
-        }
-
-        return g_subprocess_launcher_spawnv(launcher, argv, error);
+        g_subprocess_launcher_setenv(launcher, "OPENCODE_PERMISSION",
+                                     OPENCODE_PERMISSION_ALLOW_ALL, TRUE);
     }
 
-    return g_subprocess_newv(argv, flags, error);
+    return g_subprocess_launcher_spawnv(launcher, argv, error);
 }
 
 /*
