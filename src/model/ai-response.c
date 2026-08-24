@@ -23,6 +23,7 @@ struct _AiResponse
     gchar        *model;
     AiStopReason  stop_reason;
     AiUsage      *usage;
+    gint64        cost_micros;    /* -1 when the provider reported none */
     GList        *content_blocks; /* List of AiContentBlock */
 };
 
@@ -167,6 +168,8 @@ ai_response_init(AiResponse *self)
     self->model = NULL;
     self->stop_reason = AI_STOP_REASON_NONE;
     self->usage = NULL;
+    /* -1 rather than 0: a turn nobody priced is unknown, not free. */
+    self->cost_micros = -1;
     self->content_blocks = NULL;
 }
 
@@ -293,6 +296,33 @@ ai_response_set_usage(
     {
         self->usage = ai_usage_copy(usage);
     }
+}
+
+/*
+ * The provider's own figure, kept apart from #AiUsage on purpose.
+ *
+ * Usage is token counts; this is money, and for a CLI backend the two do
+ * not determine each other -- cache reads are billed and are not in the
+ * token counts.  Keeping the cost here means a caller that wants the
+ * truth can have it, and one that only has tokens still gets -1 rather
+ * than a plausible wrong number.
+ */
+gint64
+ai_response_get_cost_micros(AiResponse *self)
+{
+    g_return_val_if_fail(AI_IS_RESPONSE(self), -1);
+
+    return self->cost_micros;
+}
+
+void
+ai_response_set_cost_micros(
+    AiResponse *self,
+    gint64      cost_micros
+){
+    g_return_if_fail(AI_IS_RESPONSE(self));
+
+    self->cost_micros = cost_micros;
 }
 
 /**

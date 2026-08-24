@@ -15,6 +15,8 @@
 #include "core/ai-streamable.h"
 #include "core/ai-config.h"
 #include "model/ai-message.h"
+#include "model/ai-response.h"
+#include "core/ai-event.h"
 
 /* ----------------------------------------------------------------
  * build_argv helpers (Ollama transport + regression locks)
@@ -811,6 +813,86 @@ test_cc_property_round_trip(void)
 	g_assert_true(bare);
 }
 
+
+/* ----------------------------------------------------------------
+ * result-event cost
+ * ---------------------------------------------------------------- */
+
+/*
+ * Feed one NDJSON line through the client's own stream parser.
+ *
+ * Through the vfunc rather than a copy of the parsing, so this asserts
+ * on what the CLI pipeline actually runs.
+ */
+static void
+parse_one_line(AiClaudeCodeClient *client, const gchar *line,
+               AiResponse *response)
+{
+	AiCliClientClass *cli_class = AI_CLI_CLIENT_GET_CLASS(client);
+	GPtrArray *events = g_ptr_array_new_with_free_func(
+		(GDestroyNotify)ai_event_unref);
+	GError *error = NULL;
+
+	g_assert_nonnull(cli_class->parse_stream_events);
+	cli_class->parse_stream_events(AI_CLI_CLIENT(client), line, response,
+	                               events, &error);
+	g_assert_no_error(error);
+	g_ptr_array_unref(events);
+}
+
+/*
+ * The CLI states what the turn cost; that figure reaches the response.
+ *
+ * It cannot be recomputed from the token counts beside it. Claude Code
+ * bills cache reads, which appear in neither input_tokens nor
+ * output_tokens -- the numbers below are a real shape, where 8 input
+ * tokens accompany a bill of two cents. Anything pricing 8 and 1555
+ * through a rate card lands nowhere near it.
+ */
+static void
+test_result_cost_is_the_cli_figure(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiResponse *response = ai_response_new("id", "sonnet");
+	const gchar *line =
+		"{\"type\":\"result\",\"result\":\"done\","
+		"\"session_id\":\"s1\",\"total_cost_usd\":0.0204,"
+		"\"usage\":{\"input_tokens\":8,\"output_tokens\":1555,"
+		"\"cache_read_input_tokens\":41233}}";
+
+	parse_one_line(client, line, response);
+
+	g_assert_cmpint(ai_response_get_cost_micros(response), ==, 20400);
+
+	g_object_unref(response);
+	g_object_unref(client);
+}
+
+/*
+ * A turn the provider did not price reads as unknown, not as free.
+ *
+ * Zero would be indistinguishable from a turn that genuinely cost
+ * nothing, and a caller summing costs would quietly report a fleet
+ * spending nothing at all.
+ */
+static void
+test_result_without_cost_is_unknown(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiResponse *response = ai_response_new("id", "sonnet");
+	const gchar *line =
+		"{\"type\":\"result\",\"result\":\"done\","
+		"\"usage\":{\"input_tokens\":8,\"output_tokens\":12}}";
+
+	parse_one_line(client, line, response);
+
+	g_assert_cmpint(ai_response_get_cost_micros(response), ==, -1);
+
+	g_object_unref(response);
+	g_object_unref(client);
+}
+
+
 int
 main(
 	int   argc,
@@ -881,6 +963,10 @@ main(
 	                test_claude_code_parse_stream_flat_text);
 	g_test_add_func("/ai-glib/claude-code-client/parse-stream-no-text-block",
 	                test_claude_code_parse_stream_no_text_block);
+	g_test_add_func("/ai-glib/claude-code-client/result-cost-is-the-cli-figure",
+	                test_result_cost_is_the_cli_figure);
+	g_test_add_func("/ai-glib/claude-code-client/result-without-cost-is-unknown",
+	                test_result_without_cost_is_unknown);
 
 	return g_test_run();
 }

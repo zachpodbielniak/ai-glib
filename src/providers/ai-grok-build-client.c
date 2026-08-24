@@ -1244,6 +1244,12 @@ ai_grok_build_client_parse_stream_events(
             g_ptr_array_add(out_events,
                 ai_event_new_usage(usage,
                                    cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
+
+            /* Same reasoning as the claude-code backend: the CLI's own
+             * total is the one that accounts for everything it billed. */
+            if (cost >= 0.0)
+                ai_response_set_cost_micros(response,
+                                            (gint64)(cost * 1000000.0));
         }
 
         /*

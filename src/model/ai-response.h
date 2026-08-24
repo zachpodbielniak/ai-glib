@@ -56,6 +56,36 @@ ai_response_set_usage(
     AiUsage    *usage
 );
 
+/**
+ * ai_response_get_cost_micros:
+ * @self: an #AiResponse
+ *
+ * The cost of this turn in millionths of a US dollar, as reported by the
+ * provider itself, or -1 when it did not report one.
+ *
+ * This is not derivable from #AiUsage.  A CLI backend bills for cache
+ * reads and cache writes as well as for the input and output tokens it
+ * reports, so a cost recomputed from a price table over those two
+ * numbers understates the real one -- by a factor that grows with the
+ * size of the context, which is exactly the case anybody watching a bill
+ * cares about.  When the provider states a figure, it is the figure.
+ *
+ * Returns: the cost in micro-dollars, or -1 if unknown
+ */
+gint64
+ai_response_get_cost_micros(AiResponse *self);
+
+/**
+ * ai_response_set_cost_micros:
+ * @self: an #AiResponse
+ * @cost_micros: cost in millionths of a US dollar, or -1 for unknown
+ */
+void
+ai_response_set_cost_micros(
+    AiResponse *self,
+    gint64      cost_micros
+);
+
 GList *
 ai_response_get_content_blocks(AiResponse *self);
 

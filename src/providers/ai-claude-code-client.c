@@ -1441,6 +1441,18 @@ ai_claude_code_client_parse_stream_events(
                     cost >= 0.0 ? (gint64)(cost * 1000000.0) : -1));
         }
 
+        /*
+         * The CLI's own total, set whether or not it reported a usage
+         * object.  It is the only figure that accounts for cache reads,
+         * which dominate a Claude Code turn: recomputing from the two
+         * token counts above understates the bill several times over.
+         *
+         * Outside the usage branch on purpose -- a turn can report a
+         * cost with no usage object, and that cost is still the truth.
+         */
+        if (cost >= 0.0)
+            ai_response_set_cost_micros(response, (gint64)(cost * 1000000.0));
+
         /* Store total cost */
         if (cost >= 0.0)
         {
