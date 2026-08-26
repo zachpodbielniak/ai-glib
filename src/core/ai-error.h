@@ -52,6 +52,9 @@ G_BEGIN_DECLS
  * @AI_ERROR_CLI_EXECUTION: CLI execution failed.
  * @AI_ERROR_CLI_PARSE_ERROR: Failed to parse CLI output.
  * @AI_ERROR_UNKNOWN: An unknown error occurred.
+ * @AI_ERROR_SESSION_LIMIT: The account's session usage limit is reached;
+ *   the request was refused without reaching the model, and will keep
+ *   being refused until the limit resets.
  *
  * Error codes for ai-glib operations.
  */
@@ -79,7 +82,13 @@ typedef enum
     AI_ERROR_CLI_NOT_FOUND,
     AI_ERROR_CLI_EXECUTION,
     AI_ERROR_CLI_PARSE_ERROR,
-    AI_ERROR_UNKNOWN
+    AI_ERROR_UNKNOWN,
+    /*
+     * Appended after UNKNOWN on purpose: inserting it above would
+     * renumber every code after it, and these values are registered as
+     * a GEnum whose nicks appear in logs and configuration.
+     */
+    AI_ERROR_SESSION_LIMIT
 } AiError;
 
 GQuark

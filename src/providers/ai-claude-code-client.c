@@ -15,6 +15,7 @@
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-launch.h"
 #include "core/ai-error.h"
+#include "core/ai-session-limit.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
@@ -31,6 +32,23 @@ struct _AiClaudeCodeClient
     gboolean skip_permissions;
     gchar   *mcp_config_path;    /* nullable: --mcp-config <path> */
     gint     last_input_tokens;  /* tracks input tokens for compaction detection */
+
+    /*
+     * The account's session limit, seen in this run's output.
+     *
+     * A usage limit is not a failed request: the CLI never contacts the
+     * API, writes one assistant message of its own naming no model, and
+     * exits non-zero.  From the exit status alone that is
+     * indistinguishable from any other failure, so it was retried at
+     * once and every retry hit the same wall -- for a limit whose own
+     * message said it would not clear for hours.
+     *
+     * Recorded as the output is parsed and read when the exit is
+     * handled, because those are two different places and only the
+     * first one can see it.
+     */
+    gboolean session_limited;
+    gint64   session_limit_reset;   /* Unix seconds, or 0 if not stated */
 
     /*
      * Tool access short of --dangerously-skip-permissions. Each is emitted
@@ -1228,6 +1246,155 @@ cc_emit_message_content(
 }
 
 /*
+ * The first text block of a message, borrowed.
+ *
+ * A limit message carries exactly one, but the shape is a content array
+ * like any other, so this walks rather than assuming index zero.
+ */
+static const gchar *
+cc_first_text(JsonObject *message)
+{
+    JsonArray *blocks;
+    guint n;
+    guint i;
+
+    blocks = cc_get_array(message, "content");
+
+    if (blocks == NULL)
+        return NULL;
+
+    n = json_array_get_length(blocks);
+
+    for (i = 0; i < n; i++)
+    {
+        JsonNode *bn = json_array_get_element(blocks, i);
+        JsonObject *block;
+
+        if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn))
+            continue;
+
+        block = json_node_get_object(bn);
+
+        if (g_strcmp0(cc_get_string(block, "type"), "text") == 0)
+            return cc_get_string(block, "text");
+    }
+
+    return NULL;
+}
+
+/*
+ * Notices the account's session limit in an assistant message.
+ *
+ * The CLI answers a limit without reaching the API: it writes one
+ * message naming AI_SESSION_LIMIT_SYNTHETIC_MODEL, reports every token
+ * counter as zero, and exits non-zero.  The exit status alone says only
+ * that something went wrong, which is why this was retried immediately
+ * and indefinitely against a wall that would not move for hours.
+ *
+ * The reset time is in the text, so it is parsed here while the text is
+ * in hand.  ai-glib owns both halves so that the agent and the
+ * supervisor above it read the same answer rather than each writing
+ * their own matcher against a sentence somebody may reword.
+ */
+static gboolean
+cc_message_is_session_limit(JsonObject *msg_obj, gint64 now, gint64 *reset_out)
+{
+    JsonObject *usage_obj;
+    const gchar *model;
+    gint64 input_tokens = 0;
+    gint64 output_tokens = 0;
+    gint64 cache_creation = 0;
+    gint64 cache_read = 0;
+
+    if (msg_obj == NULL)
+        return FALSE;
+
+    model = cc_get_string(msg_obj, "model");
+    usage_obj = cc_get_object(msg_obj, "usage");
+
+    if (usage_obj != NULL)
+    {
+        input_tokens = cc_get_int(usage_obj, "input_tokens", 0);
+        output_tokens = cc_get_int(usage_obj, "output_tokens", 0);
+        cache_creation = cc_get_int(usage_obj, "cache_creation_input_tokens", 0);
+        cache_read = cc_get_int(usage_obj, "cache_read_input_tokens", 0);
+    }
+
+    if (!ai_session_limit_looks_synthetic(model, input_tokens, output_tokens,
+                                          cache_creation, cache_read))
+        return FALSE;
+
+    /*
+     * A limit with no stated reset is still a limit.  The reset stays 0
+     * and every layer above treats that as "unknown", which is a
+     * different thing from "no limit" and must not be confused with it.
+     */
+    if (reset_out != NULL)
+    {
+        const gchar *text = cc_first_text(msg_obj);
+        gint64 reset = 0;
+
+        if (text != NULL &&
+            ai_session_limit_parse_reset(text, now, &reset))
+            *reset_out = reset;
+        else
+            *reset_out = 0;
+    }
+
+    return TRUE;
+}
+
+gboolean
+ai_claude_code_line_is_session_limit(
+    const gchar *line,
+    gint64       now,
+    gint64      *reset_out
+){
+    g_autoptr(JsonParser) parser = NULL;
+    JsonNode *root;
+    JsonObject *obj;
+    JsonObject *msg_obj;
+
+    if (line == NULL || line[0] == '\0')
+        return FALSE;
+
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, line, -1, NULL))
+        return FALSE;
+
+    root = json_parser_get_root(parser);
+
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        return FALSE;
+
+    obj = json_node_get_object(root);
+
+    if (g_strcmp0(cc_get_string(obj, "type"), "assistant") != 0)
+        return FALSE;
+
+    msg_obj = cc_get_object(obj, "message");
+
+    return cc_message_is_session_limit(msg_obj, now, reset_out);
+}
+
+static void
+cc_note_session_limit(AiClaudeCodeClient *self, JsonObject *msg_obj)
+{
+    gint64 reset = 0;
+
+    if (self == NULL || msg_obj == NULL)
+        return;
+
+    if (!cc_message_is_session_limit(
+            msg_obj, g_get_real_time() / G_USEC_PER_SEC, &reset))
+        return;
+
+    self->session_limited = TRUE;
+    self->session_limit_reset = reset;
+}
+
+/*
  * Parse a single NDJSON line from `claude --print --output-format stream-json`
  * into events.
  *
@@ -1322,6 +1489,8 @@ ai_claude_code_client_parse_stream_events(
 
         if (msg_obj == NULL)
             return TRUE;
+
+        cc_note_session_limit(self, msg_obj);
 
         msg_type = cc_get_string(msg_obj, "type");
 
@@ -2327,6 +2496,42 @@ on_chat_communicate_complete(
         gint exit_status = g_subprocess_get_exit_status(data->subprocess);
         gint error_code = AI_ERROR_CLI_EXECUTION;
 
+        /*
+         * A session limit first.  It is not a failure of this request --
+         * nothing was asked and nothing was billed -- and retrying it
+         * before the stated reset cannot succeed, so it must be
+         * distinguishable from every other non-zero exit before anything
+         * upstream decides whether to try again.
+         *
+         * Reported with the reset time in the message, from
+         * ai_session_limit_format() rather than a sentence of this
+         * file's own: three layers describe this condition and three
+         * descriptions of one fact reads to an operator like three
+         * problems.
+         */
+        if (data->client != NULL && data->client->session_limited)
+        {
+            g_autofree gchar *why =
+                ai_session_limit_format(data->client->session_limit_reset);
+            g_autofree gchar *notice =
+                ai_session_limit_notice_new(data->client->session_limit_reset);
+
+            /*
+             * One string for two audiences: the sentence a person reads
+             * and the notice a supervisor matches.  Composed here so
+             * that whatever logs this error carries both without having
+             * to know it should -- the alternative was re-deriving the
+             * reset from the prose further up, which silently produced
+             * "no reset" because the sentence reads "resets at 18:50"
+             * and the time parser expects a clock after "resets".
+             */
+            g_task_return_new_error(data->task, AI_ERROR,
+                                    AI_ERROR_SESSION_LIMIT, "%s %s",
+                                    why, notice);
+            chat_async_data_free(data);
+            return;
+        }
+
         /* Check if this is a context-window-full error */
         if (stderr_data != NULL &&
             (strstr(stderr_data, "context") != NULL ||
@@ -2469,6 +2674,17 @@ ai_claude_code_client_chat_async(
         g_object_unref(task);
         return;
     }
+
+    /*
+     * A limit belongs to the run that hit it.
+     *
+     * Cleared here rather than left standing, because a client is
+     * reused: without this the first limit would make every later run
+     * report one, including the ones after the reset had passed, and
+     * the agent would never be allowed to work again.
+     */
+    self->session_limited = FALSE;
+    self->session_limit_reset = 0;
 
     /* Set up callback data */
     data = g_slice_new0(ChatAsyncData);

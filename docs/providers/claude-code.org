@@ -392,3 +392,62 @@ Revoking (=ai_tool_endpoint_consumer_clear()=) clears the path, so a later run
 cannot point at a config file that has since been deleted.
 
 See [[file:../tools.org][Tools]] for the dialect/delivery split.
+
+** The account's session usage limit
+
+A usage limit is not a failed request. The CLI never contacts the API at
+all: it writes one assistant message of its own and exits non-zero. That
+message names ~<synthetic>~ as its model and reports every token counter
+as zero --- a shape a real completion never produces.
+
+From the exit status alone it is indistinguishable from any other
+failure, which is why it used to be retried at once and indefinitely
+against a wall that would not move for hours. Measured on a real fleet:
+33 attempts in 3 minutes 45 seconds, a median 3.4 seconds apart, every
+one of them free of API cost and free of progress.
+
+It is now reported as ~AI_ERROR_SESSION_LIMIT~, and the message carries
+the reset time.
+
+*** How it is recognised
+
+~ai_session_limit_looks_synthetic()~ takes the model name and all four
+token counters. Both halves are required: the model name alone would
+misread anything else a CLI ever labels synthetically, and zero usage
+alone is reachable by a completion cut off before it billed. Every cache
+counter is included because a turn served from cache reports zero input
+and output and has really run --- reading only those two would park a
+working agent until a reset that is not coming.
+
+*** The reset time
+
+The text says "resets 6:50pm (America/New_York)": a wall-clock time and
+an IANA zone, with *no date*. ~ai_session_limit_parse_reset()~ therefore
+returns the next occurrence of that time in that zone, and takes the
+current time as a parameter rather than reading the clock --- a function
+that reads the clock cannot be tested across a day boundary, and the day
+boundary is the case that matters. A limit hit at 23:00 that resets at
+06:50 is tomorrow; read as today it would be hours in the past, which
+every layer above treats as "already expired".
+
+An unknown zone falls back to local rather than failing. Being an hour
+out is a much better answer than reporting no reset, which downstream
+reads as a limit that cannot be waited out.
+
+*** Two audiences, one string
+
+The error message carries both a sentence a person reads and a machine
+notice a supervisor matches, composed by ai-glib so that whatever logs
+the error carries both without having to know it should.
+
+The prose is deliberately *not* machine-readable, and there is a test
+saying so. The first version recovered the reset by re-reading the
+sentence --- which says "resets *at* 18:50", so the time parser found
+the word "at" and returned no reset at all. A supervisor would have seen
+"paused" with no time and waited for ever, and nothing would have
+reported a fault.
+
+~ai_session_limit_notice_new()~ and ~ai_session_limit_notice_parse()~
+are the two halves of the machine format, tested as a round trip,
+because halves written apart drift until the watcher silently stops
+matching.

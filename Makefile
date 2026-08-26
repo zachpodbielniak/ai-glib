@@ -39,6 +39,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/ai-glib.h \
 	$(SRCDIR)/ai-types.h \
 	$(SRCDIR)/core/ai-error.h \
+	$(SRCDIR)/core/ai-session-limit.h \
 	$(SRCDIR)/core/ai-enums.h \
 	$(SRCDIR)/core/ai-config.h \
 	$(SRCDIR)/core/ai-provider.h \
@@ -112,6 +113,7 @@ PUBLIC_HEADERS = \
 # Library source files
 LIB_SOURCES = \
 	$(SRCDIR)/core/ai-error.c \
+	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
 	$(SRCDIR)/core/ai-enums.c \
 	$(SRCDIR)/core/ai-config.c \

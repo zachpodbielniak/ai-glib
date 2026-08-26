@@ -68,6 +68,7 @@ ai_error_get_type(void)
             { AI_ERROR_CLI_EXECUTION, "AI_ERROR_CLI_EXECUTION", "cli-execution" },
             { AI_ERROR_CLI_PARSE_ERROR, "AI_ERROR_CLI_PARSE_ERROR", "cli-parse-error" },
             { AI_ERROR_UNKNOWN, "AI_ERROR_UNKNOWN", "unknown" },
+            { AI_ERROR_SESSION_LIMIT, "AI_ERROR_SESSION_LIMIT", "session-limit" },
             { 0, NULL, NULL }
         };
 

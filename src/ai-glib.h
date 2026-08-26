@@ -22,6 +22,7 @@
 
 /* Core infrastructure */
 #include "core/ai-error.h"
+#include "core/ai-session-limit.h"
 #include "core/ai-enums.h"
 #include "core/ai-config.h"
 #include "core/ai-provider.h"

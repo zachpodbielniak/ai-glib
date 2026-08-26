@@ -48,4 +48,30 @@ ai_claude_code_client_build_argv(
     gboolean     streaming
 );
 
+/*
+ * ai_claude_code_line_is_session_limit:
+ * @line: one NDJSON line of `claude --print --output-format stream-json`
+ * @now: the current time, as Unix seconds, for resolving the reset
+ * @reset_out: (out) (optional): when the limit resets, or 0 if the
+ *   message did not say
+ *
+ * Whether this line is the CLI answering that the account's session
+ * limit is reached.
+ *
+ * Exposed so the classification can be asserted against a real
+ * transcript line without spawning a CLI or reaching a network -- the
+ * same reason build_argv() above is reachable.  The whole defect this
+ * guards against was a condition nothing could distinguish, so a test
+ * that could only observe it through a subprocess would be testing
+ * everything except the thing that was wrong.
+ *
+ * Returns: %TRUE if @line is a session-limit message
+ */
+gboolean
+ai_claude_code_line_is_session_limit(
+    const gchar *line,
+    gint64       now,
+    gint64      *reset_out
+);
+
 G_END_DECLS
