@@ -6,6 +6,7 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <locale.h>
 #include <string.h>
 
@@ -141,9 +142,17 @@ test_claude_code_build_argv_ollama_skip_and_system(void)
 	g_assert_cmpint(dd, ==, 5);
 	g_assert_cmpint(argv_index_of(argv, "--dangerously-skip-permissions"),
 	                >, dd);
-	si = argv_index_of(argv, "--system-prompt");
+	/*
+	 * The prompt rides after the -- as a file, not as its own argv
+	 * word -- see build-argv/no-word-reaches-the-arg-limit for why.
+	 * Its contents are not read back here: build_argv_for_model()
+	 * drops the client before returning, and the client takes its
+	 * spill files with it.
+	 */
+	si = argv_index_of(argv, "--system-prompt-file");
 	g_assert_cmpint(si, >, dd);
-	g_assert_cmpstr(argv[si + 1], ==, "SYS");
+	g_assert_nonnull(argv[si + 1]);
+	g_assert_cmpint(argv_index_of(argv, "--system-prompt"), ==, -1);
 	g_assert_cmpint(argv_count(argv, "--model"), ==, 1);
 }
 
@@ -474,14 +483,221 @@ test_cc_argv_append_system_prompt(void)
 	GList *messages = g_list_append(NULL, msg);
 	g_auto(GStrv) argv = NULL;
 
+	g_autofree gchar *system_read = NULL;
+	g_autofree gchar *append_read = NULL;
+
 	g_object_set(client, "append-system-prompt", "Be terse.", NULL);
 	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
 	                                        "You are helpful.", 4096, FALSE);
 
-	g_assert_cmpstr(argv_value_after(argv, "--system-prompt"),
-	                ==, "You are helpful.");
-	g_assert_cmpstr(argv_value_after(argv, "--append-system-prompt"),
-	                ==, "Be terse.");
+	/*
+	 * Both go in files rather than in argv, and they are still two
+	 * separate flags -- which is the thing this test exists to hold.
+	 */
+	g_assert_true(g_file_get_contents(
+		argv_value_after(argv, "--system-prompt-file"),
+		&system_read, NULL, NULL));
+	g_assert_cmpstr(system_read, ==, "You are helpful.");
+
+	g_assert_true(g_file_get_contents(
+		argv_value_after(argv, "--append-system-prompt-file"),
+		&append_read, NULL, NULL));
+	g_assert_cmpstr(append_read, ==, "Be terse.");
+
+	g_list_free_full(messages, g_object_unref);
+}
+
+/* ----------------------------------------------------------------
+ * The kernel's per-argument limit
+ * ---------------------------------------------------------------- */
+
+/*
+ * MAX_ARG_STRLEN: the kernel caps a *single* argv word at 32 pages.
+ *
+ * It is not ARG_MAX (the total, megabytes here) and no headroom in the
+ * total helps: execve refuses with E2BIG on the one long word. Linux
+ * has hard-coded 32 * PAGE_SIZE since 2.6.23 and exports it to
+ * userspace nowhere, so it is written out here rather than included.
+ */
+#define AI_TEST_MAX_ARG_STRLEN (32 * 4096)
+
+/*
+ * Comfortably past it, and past it by more than a rounding error, so a
+ * fixture that stopped being oversized would be obvious rather than
+ * marginal.
+ */
+#define AI_TEST_HUGE_PROMPT_BYTES (200 * 1024)
+
+static gchar *
+huge_prompt(gchar fill)
+{
+	GString *s = g_string_sized_new(AI_TEST_HUGE_PROMPT_BYTES + 1);
+
+	/*
+	 * Not a single repeated byte: the point is to read it back and
+	 * know it is the prompt that was asked for, and a run of one
+	 * character compares equal to a differently-truncated run of the
+	 * same character.
+	 */
+	g_string_append_printf(s, "%c-BEGIN ", fill);
+	while (s->len < AI_TEST_HUGE_PROMPT_BYTES)
+		g_string_append_c(s, fill);
+	g_string_append_printf(s, " END-%c", fill);
+
+	return g_string_free(s, FALSE);
+}
+
+/*
+ * No argv word may reach the kernel's per-argument limit -- and this
+ * fixture has to reach it, or the test is vacuous.
+ *
+ * The bug: build_argv() emitted the system prompt as `--system-prompt
+ * <text>`, one argv word. An agent's system prompt is assembled by
+ * concatenating its identity files, so it grows with the product's own
+ * output, and past 131,072 bytes g_subprocess fails E2BIG before claude
+ * runs. The agent replies "Failed to execute child process (Argument
+ * list too long)" and nothing else, for ever.
+ *
+ * The user prompt was moved to stdin for exactly this reason and the
+ * comment saying so sits nine lines below where this one was: the rule
+ * had been applied to the call site somebody noticed rather than to the
+ * function.
+ *
+ * The first assertion is the one that matters. A fixture with a short
+ * prompt passes the loop below in a build with the bug still in it, so
+ * asserting that the prompts are genuinely oversized is what makes the
+ * rest evidence.
+ */
+static void
+test_cc_argv_no_word_reaches_the_arg_limit(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autofree gchar *system = huge_prompt('S');
+	g_autofree gchar *append = huge_prompt('A');
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	g_auto(GStrv) argv = NULL;
+	const gchar *system_path;
+	const gchar *append_path;
+	g_autofree gchar *system_read = NULL;
+	g_autofree gchar *append_read = NULL;
+	GStatBuf st;
+	gint i;
+
+	/* The fixture reaches the limit. Without this the loop proves nothing. */
+	g_assert_cmpuint(strlen(system), >=, AI_TEST_MAX_ARG_STRLEN);
+	g_assert_cmpuint(strlen(append), >=, AI_TEST_MAX_ARG_STRLEN);
+
+	g_object_set(client, "append-system-prompt", append, NULL);
+	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                        system, 4096, FALSE);
+	g_assert_nonnull(argv);
+
+	for (i = 0; argv[i] != NULL; i++) {
+		if (strlen(argv[i]) >= AI_TEST_MAX_ARG_STRLEN)
+			g_error("argv[%d] is %" G_GSIZE_FORMAT " bytes, at or "
+			        "over the kernel's %d-byte limit for one "
+			        "argument", i, strlen(argv[i]),
+			        AI_TEST_MAX_ARG_STRLEN);
+	}
+
+	/*
+	 * And the prompt still reaches claude. Staying under the limit by
+	 * dropping the prompt would pass the loop above and start every
+	 * agent with no identity at all, which is worse than not starting.
+	 */
+	g_assert_cmpint(argv_index_of(argv, "--system-prompt"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--append-system-prompt"), ==, -1);
+
+	system_path = argv_value_after(argv, "--system-prompt-file");
+	append_path = argv_value_after(argv, "--append-system-prompt-file");
+	g_assert_nonnull(system_path);
+	g_assert_nonnull(append_path);
+
+	g_assert_true(g_file_get_contents(system_path, &system_read, NULL, NULL));
+	g_assert_cmpstr(system_read, ==, system);
+	g_assert_true(g_file_get_contents(append_path, &append_read, NULL, NULL));
+	g_assert_cmpstr(append_read, ==, append);
+
+	/*
+	 * Readable by its owner and nobody else. It holds the agent's whole
+	 * identity, and it sits in a world-readable directory.
+	 */
+	g_assert_cmpint(g_stat(system_path, &st), ==, 0);
+	g_assert_cmpint(st.st_mode & 0777, ==, 0600);
+	g_assert_cmpint(g_stat(append_path, &st), ==, 0);
+	g_assert_cmpint(st.st_mode & 0777, ==, 0600);
+
+	g_list_free_full(messages, g_object_unref);
+}
+
+/*
+ * The spill files do not outlive the client that made them.
+ *
+ * They hold the agent's identity and they live in the temporary
+ * directory, so a daemon running a fleet for weeks must not leave one
+ * behind per agent per restart.
+ */
+static void
+test_cc_argv_prompt_files_go_with_the_client(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	g_auto(GStrv) argv = NULL;
+	g_autofree gchar *system_path = NULL;
+	g_autofree gchar *append_path = NULL;
+
+	g_object_set(client, "append-system-prompt", "Be terse.", NULL);
+	argv = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                        "You are helpful.", 4096, FALSE);
+
+	system_path = g_strdup(argv_value_after(argv, "--system-prompt-file"));
+	append_path = g_strdup(argv_value_after(argv,
+	                                        "--append-system-prompt-file"));
+	g_assert_nonnull(system_path);
+	g_assert_nonnull(append_path);
+
+	/* Present while the client is: the positive half of the assertion. */
+	g_assert_true(g_file_test(system_path, G_FILE_TEST_EXISTS));
+	g_assert_true(g_file_test(append_path, G_FILE_TEST_EXISTS));
+
+	g_object_unref(client);
+
+	g_assert_false(g_file_test(system_path, G_FILE_TEST_EXISTS));
+	g_assert_false(g_file_test(append_path, G_FILE_TEST_EXISTS));
+
+	g_list_free_full(messages, g_object_unref);
+}
+
+/*
+ * A second turn does not leave the first turn's file behind.
+ *
+ * One client serves an agent for its whole life, so "cleaned up at
+ * finalize" alone would accumulate one file per turn on a process that
+ * never exits -- which is every daemon this library is used from.
+ */
+static void
+test_cc_argv_prompt_files_do_not_accumulate(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	AiMessage *msg = ai_message_new_user("hi");
+	GList *messages = g_list_append(NULL, msg);
+	g_auto(GStrv) first = NULL;
+	g_auto(GStrv) second = NULL;
+	g_autofree gchar *first_path = NULL;
+
+	first = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                         "One.", 4096, FALSE);
+	first_path = g_strdup(argv_value_after(first, "--system-prompt-file"));
+	g_assert_nonnull(first_path);
+	g_assert_true(g_file_test(first_path, G_FILE_TEST_EXISTS));
+
+	second = ai_claude_code_client_build_argv(AI_CLI_CLIENT(client), messages,
+	                                          "Two.", 4096, FALSE);
+	g_assert_nonnull(argv_value_after(second, "--system-prompt-file"));
+
+	g_assert_false(g_file_test(first_path, G_FILE_TEST_EXISTS));
 
 	g_list_free_full(messages, g_object_unref);
 }
@@ -924,6 +1140,12 @@ main(
 	                test_cc_argv_agent_and_agents);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/append-system-prompt",
 	                test_cc_argv_append_system_prompt);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/no-word-reaches-the-arg-limit",
+	                test_cc_argv_no_word_reaches_the_arg_limit);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/prompt-files-go-with-the-client",
+	                test_cc_argv_prompt_files_go_with_the_client);
+	g_test_add_func("/ai-glib/claude-code-client/build-argv/prompt-files-do-not-accumulate",
+	                test_cc_argv_prompt_files_do_not_accumulate);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/fallback-and-schema",
 	                test_cc_argv_fallback_and_schema);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/max-budget-locale",

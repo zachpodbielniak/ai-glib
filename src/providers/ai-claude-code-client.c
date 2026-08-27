@@ -9,7 +9,11 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <glib/gstdio.h>
 
 #include "providers/ai-claude-code-client.h"
 #include "providers/ai-claude-code-client-internal.h"
@@ -94,6 +98,18 @@ struct _AiClaudeCodeClient
     /* Cached summary for the re-prompt fallback when the AI
      * produces no text (empty "result" with tool use only). */
     gchar *last_tool_summary;
+
+    /*
+     * Where the two system prompts were spilled for the turn being
+     * built, so they can be removed again.
+     *
+     * The client owns them rather than the turn: the re-prompt path
+     * builds a second command line from the same client and re-emits
+     * --append-system-prompt-file, so a file freed with the first
+     * turn's data would be named to a process that had not read it yet.
+     */
+    gchar *system_prompt_path;
+    gchar *append_system_prompt_path;
 };
 
 /*
@@ -544,6 +560,139 @@ emit_repeated_flag(GPtrArray *args, const gchar *flag, const gchar *csv)
 }
 
 /*
+ * Remove whatever was spilled for the previous turn.
+ *
+ * Called before each spill and again at finalize, so at most one pair of
+ * files exists per client at any moment and none survives it.  A daemon
+ * runs one client per agent for weeks; "cleaned up when the process
+ * exits" would be one file per agent per turn in /tmp until it did.
+ */
+static void
+clear_prompt_spills(AiClaudeCodeClient *self)
+{
+    if (self->system_prompt_path != NULL)
+    {
+        g_unlink(self->system_prompt_path);
+        g_clear_pointer(&self->system_prompt_path, g_free);
+    }
+
+    if (self->append_system_prompt_path != NULL)
+    {
+        g_unlink(self->append_system_prompt_path);
+        g_clear_pointer(&self->append_system_prompt_path, g_free);
+    }
+}
+
+/*
+ * Write @text to a private temporary file and return its path.
+ *
+ * g_file_open_tmp() creates with 0600 and O_EXCL, which is what this
+ * needs: the text is the agent's whole system prompt -- its identity,
+ * its instructions and whatever the operator put in them -- and it is
+ * being put in a directory every user on the machine can list.
+ *
+ * The caller owns the returned path *through* @slot; it is stored there
+ * so clear_prompt_spills() can find it again.
+ */
+static const gchar *
+spill_prompt(gchar **slot, const gchar *template, const gchar *text,
+             GError **error)
+{
+    g_autofree gchar *path = NULL;
+    gint fd;
+
+    fd = g_file_open_tmp(template, &path, error);
+
+    if (fd < 0)
+        return NULL;
+
+    /*
+     * Written through the descriptor g_file_open_tmp() already opened,
+     * rather than by path with g_file_set_contents(): that one writes a
+     * second temporary and renames it, so the file claude reads would
+     * be one this function never chose the mode of.
+     */
+    {
+        gsize remaining = strlen(text);
+        const gchar *at = text;
+
+        while (remaining > 0)
+        {
+            gssize written = write(fd, at, remaining);
+
+            if (written < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+
+                g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+                            "could not write the system prompt to %s: %s",
+                            path, g_strerror(errno));
+                close(fd);
+                g_unlink(path);
+                return NULL;
+            }
+
+            at += written;
+            remaining -= (gsize)written;
+        }
+    }
+
+    if (close(fd) != 0)
+    {
+        g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+                    "could not close %s: %s", path, g_strerror(errno));
+        g_unlink(path);
+        return NULL;
+    }
+
+    *slot = g_steal_pointer(&path);
+
+    return *slot;
+}
+
+/*
+ * Emit a system prompt as `<flag>-file <path>` rather than as its own
+ * argv word.
+ *
+ * The kernel caps a *single* argument at MAX_ARG_STRLEN -- 32 pages,
+ * 131,072 bytes -- which is not ARG_MAX and which no headroom in the
+ * total will buy back.  A system prompt is assembled by concatenating
+ * an agent's identity files, so it grows with what the product itself
+ * writes, and past that figure execve refuses with E2BIG: the agent
+ * answers "Failed to execute child process (Argument list too long)"
+ * and can never start again.  The user prompt was moved to stdin for
+ * this exact reason and the comment saying so is at the bottom of
+ * build_argv(); the rule had been applied to one of the two.
+ *
+ * Unconditionally, not above a size threshold.  A branch that only runs
+ * past 128KB is exercised by nobody until the day it breaks, which is
+ * how the inline form survived this long -- one path means an
+ * unsupported flag or an unwritable temporary directory surfaces on the
+ * first turn instead of at scale.
+ */
+static gboolean
+emit_prompt_file_flag(GPtrArray *args, const gchar *flag, gchar **slot,
+                      const gchar *template, const gchar *text,
+                      GError **error)
+{
+    const gchar *path;
+
+    if (text == NULL || text[0] == '\0')
+        return TRUE;
+
+    path = spill_prompt(slot, template, text, error);
+
+    if (path == NULL)
+        return FALSE;
+
+    g_ptr_array_add(args, g_strdup(flag));
+    g_ptr_array_add(args, g_strdup(path));
+
+    return TRUE;
+}
+
+/*
  * Emit a flag with a value, when the value is set.
  */
 static void
@@ -564,12 +713,18 @@ emit_value_flag(GPtrArray *args, const gchar *flag, const gchar *value)
  * Shared with the re-prompt path, so a follow-up runs under the same
  * settings, budget and plugin set as the turn it is summarising.
  */
-static void
-emit_session_args(AiClaudeCodeClient *self, GPtrArray *args)
+static gboolean
+emit_session_args(AiClaudeCodeClient *self, GPtrArray *args, GError **error)
 {
     emit_value_flag(args, "--agent", self->agent);
     emit_value_flag(args, "--agents", self->agents_json);
-    emit_value_flag(args, "--append-system-prompt", self->append_system_prompt);
+
+    if (!emit_prompt_file_flag(args, "--append-system-prompt-file",
+                               &self->append_system_prompt_path,
+                               "ai-glib-append-system-prompt-XXXXXX",
+                               self->append_system_prompt, error))
+        return FALSE;
+
     emit_value_flag(args, "--fallback-model", self->fallback_model);
     emit_value_flag(args, "--json-schema", self->json_schema);
     emit_value_flag(args, "--settings", self->settings);
@@ -625,6 +780,8 @@ emit_session_args(AiClaudeCodeClient *self, GPtrArray *args)
     }
 
     emit_value_flag(args, "--debug-file", self->debug_file);
+
+    return TRUE;
 }
 
 /*
@@ -662,10 +819,18 @@ ai_claude_code_client_build_argv(
     const gchar *session_id;
     gboolean persist;
     g_autofree gchar *program = NULL;
+    g_autoptr(GError) spill_error = NULL;
 
     (void)max_tokens;  /* Claude Code CLI doesn't have a max tokens flag */
 
     model = ai_cli_client_get_model(client);
+
+    /*
+     * The previous turn's spills go before this one's are written, so a
+     * client that has run a thousand turns is holding two files rather
+     * than two thousand.
+     */
+    clear_prompt_spills(self);
 
     args = g_ptr_array_new();
 
@@ -720,7 +885,13 @@ ai_claude_code_client_build_argv(
     }
 
     /* Agent, settings, plugins, budget and diagnostics. */
-    emit_session_args(self, args);
+    if (!emit_session_args(self, args, &spill_error))
+    {
+        g_warning("claude-code: %s", spill_error->message);
+        g_ptr_array_add(args, NULL);
+        g_strfreev((gchar **)g_ptr_array_free(args, FALSE));
+        return NULL;
+    }
 
     /*
      * Model. Omitted in Ollama mode -- there the model is carried solely
@@ -774,10 +945,15 @@ ai_claude_code_client_build_argv(
          * New session — pass the system prompt to prime it.
          * Only sent on the first call; subsequent calls use --resume.
          */
-        if (system_prompt != NULL && system_prompt[0] != '\0')
+        if (!emit_prompt_file_flag(args, "--system-prompt-file",
+                                   &self->system_prompt_path,
+                                   "ai-glib-system-prompt-XXXXXX",
+                                   system_prompt, &spill_error))
         {
-            g_ptr_array_add(args, g_strdup("--system-prompt"));
-            g_ptr_array_add(args, g_strdup(system_prompt));
+            g_warning("claude-code: %s", spill_error->message);
+            g_ptr_array_add(args, NULL);
+            g_strfreev((gchar **)g_ptr_array_free(args, FALSE));
+            return NULL;
         }
     }
     if (!persist)
@@ -1691,6 +1867,14 @@ ai_claude_code_client_finalize(GObject *object)
     g_free(self->debug_filter);
     g_free(self->debug_file);
 
+    /*
+     * Last chance to take the two system prompts out of the temporary
+     * directory.  Every ordinary path already removed them at the start
+     * of the next turn; this is the client that ran one turn and was
+     * dropped, which is every short-lived tool built on this library.
+     */
+    clear_prompt_spills(self);
+
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
 
@@ -2435,7 +2619,11 @@ attempt_text_retry(
             g_strdup(model ? model : AI_CLAUDE_CODE_DEFAULT_MODEL));
     }
     /* Same agent, settings, plugins and budget as the turn being retried. */
-    emit_session_args(client, rargs);
+    if (!emit_session_args(client, rargs, &err))
+    {
+        g_warning("claude-code: %s", err->message);
+        return FALSE;
+    }
     g_ptr_array_add(rargs, g_strdup("--resume"));
     g_ptr_array_add(rargs, g_strdup(sid));
     g_ptr_array_add(rargs, NULL);
