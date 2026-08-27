@@ -281,7 +281,13 @@ $(LIB_OBJECTS): $(OUTDIR)/config.h $(OUTDIR)/ai-version.h $(YAML_GLIB_STATIC)
 
 # pkg-config file (stays at project root — moving it under $(OUTDIR) would
 # silently break consumers that run `pkg-config --variable pcfiledir`).
-$(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in
+# config.mk is a prerequisite because PREFIX lives there: without it a
+# .pc generated once at the default prefix stays newer than its only
+# prerequisite for ever, so `make install PREFIX=elsewhere` ships a file
+# naming the old one.  The `pkgconfig` target below forces the rebuild
+# for the case no prerequisite can see -- PREFIX arriving on the command
+# line, which changes no file at all.
+$(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in config.mk
 	@echo "Generating pkg-config file..."
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	     -e 's|@LIBDIR@|$(LIBDIR)|g' \
@@ -293,7 +299,32 @@ $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in
 # tests/test-ai-cli.c spawns the installed-shaped `ai` binary, so the test
 # run needs it built even when the caller only asked for tests.
 .PHONY: test
-test: $(TEST_BINARIES) $(BIN_BINARIES)
+# Every header <ai-glib.h> includes is in PUBLIC_HEADERS.
+#
+# PUBLIC_HEADERS is what `install` ships and what the GIR scanner reads,
+# so a header the umbrella includes and that list omits is one an
+# installed ai-glib cannot compile through -- which is exactly what
+# happened to view/ and harness/.  The install derives its directories
+# from PUBLIC_HEADERS now, so this is the one seam left that can drift,
+# and it drifts silently: an in-tree build reads src/ directly and never
+# notices.
+.PHONY: check-headers
+check-headers:
+	@missing=0; \
+	for inc in $$(sed -n 's|^\#include "\(.*\)"|\1|p' $(SRCDIR)/ai-glib.h); do \
+		case "$$inc" in ai-version.h) continue ;; esac; \
+		echo "$(PUBLIC_HEADERS)" | tr ' ' '\n' \
+			| grep -qx "$(SRCDIR)/$$inc" || { \
+			echo "check-headers: <ai-glib.h> includes $$inc, which is not in PUBLIC_HEADERS"; \
+			missing=1; }; \
+	done; \
+	if [ $$missing -ne 0 ]; then \
+		echo "check-headers: an installed ai-glib would not compile through its own umbrella header"; \
+		exit 1; \
+	fi; \
+	echo "check-headers: OK"
+
+test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."
 	@for test in $(TEST_BINARIES); do \
 		echo "Running $$test..."; \
@@ -409,7 +440,16 @@ endif
 
 # Installation
 .PHONY: install
-install: all install-gir
+# Forces the .pc to be regenerated for this PREFIX before it is copied.
+# PREFIX usually arrives on the command line, which changes no file, so
+# no prerequisite can notice it -- and the .pc that is already on disk
+# is newer than everything it depends on.
+.PHONY: pkgconfig
+pkgconfig:
+	@rm -f $(PROJECT_NAME)-1.0.pc
+	@$(MAKE) --no-print-directory $(PROJECT_NAME)-1.0.pc
+
+install: all install-gir pkgconfig
 	@echo "Installing to $(PREFIX)..."
 	install -d $(DESTDIR)$(PREFIX)/bin
 	@for b in $(BIN_BINARIES); do \
@@ -418,24 +458,30 @@ install: all install-gir
 	done
 	install -d $(DESTDIR)$(LIBDIR)
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
-	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core
-	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model
-	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers
-	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience
-	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/agent
 	install -d $(DESTDIR)$(PKGCONFIGDIR)
 	install -m 644 $(LIB_SHARED) $(DESTDIR)$(LIBDIR)/
 	install -m 644 $(LIB_STATIC) $(DESTDIR)$(LIBDIR)/
 	cd $(DESTDIR)$(LIBDIR) && ln -sf $(notdir $(LIB_SHARED)) $(LIB_SONAME)
 	cd $(DESTDIR)$(LIBDIR) && ln -sf $(LIB_SONAME) $(LIB_NAME).so
-	install -m 644 $(SRCDIR)/ai-glib.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
-	install -m 644 $(SRCDIR)/ai-types.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
 	install -m 644 $(OUTDIR)/ai-version.h $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/
-	install -m 644 $(filter $(SRCDIR)/core/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/core/
-	install -m 644 $(filter $(SRCDIR)/model/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/model/
-	install -m 644 $(filter $(SRCDIR)/providers/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/providers/
-	install -m 644 $(filter $(SRCDIR)/convenience/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/convenience/
-	install -m 644 $(filter $(SRCDIR)/agent/%,$(PUBLIC_HEADERS)) $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/agent/
+#
+# Every header in PUBLIC_HEADERS, in the subdirectory it already names,
+# rather than a list of subdirectories written out beside it.
+#
+# That list was five long: core, model, providers, convenience and
+# agent.  PUBLIC_HEADERS names seven -- view and harness were missing --
+# and <ai-glib.h> includes all seven, so an installed ai-glib could not
+# compile through its own umbrella header.  It failed on
+# view/ai-style.h, which is only the *first* of the two; fixing the one
+# in the error message would have left harness to be found the same way
+# a second time.  Deriving the directories is what stops a third.
+#
+	@for header in $(PUBLIC_HEADERS); do \
+		dir=$$(dirname "$${header#$(SRCDIR)/}"); \
+		install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/$$dir; \
+		install -m 644 "$$header" \
+			$(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0/$$dir/; \
+	done
 	install -m 644 $(PROJECT_NAME)-1.0.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	@echo "Installation complete!"
 
