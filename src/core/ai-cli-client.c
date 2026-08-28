@@ -1647,6 +1647,74 @@ ai_cli_client_events_to_delta(GPtrArray *events)
  *
  * Returns: (transfer full) (nullable): the child, or %NULL on error
  */
+/*
+ * Refuse an argument the kernel will refuse, and say which one.
+ *
+ * `execve` caps a *single* argument at MAX_ARG_STRLEN -- 32 pages,
+ * 131072 bytes including the terminating NUL, so the longest that works
+ * is 131071.  That is not ARG_MAX, which is the total and is 2MB on an
+ * ordinary machine; headroom in the total buys nothing, which is what
+ * makes the failure read as impossible until you know the per-argument
+ * limit exists.  Measured, not recalled: 131071 bytes in one argument
+ * runs and 131072 is E2BIG.
+ *
+ * The kernel's own answer is `Argument list too long`, which names
+ * neither the argument, its size, nor the limit -- and GLib reports it as
+ * "Failed to execute child process", one layer further from the cause.
+ * A system prompt is assembled from an agent's identity files, so it
+ * grows with what the product itself writes, and the whole thing
+ * presents as a broken CLI or a bad install rather than as configuration
+ * that has outgrown a limit.
+ *
+ * The prompts no longer travel this way -- they are spilled to a file by
+ * emit_prompt_file_flag() -- but a backend with no file-taking flag has
+ * nowhere else to put one, and every future flag is a candidate.  So the
+ * check lives at the one place every backend spawns through, rather than
+ * beside any particular argument.
+ */
+static gboolean
+argv_fits_in_an_exec(const gchar * const *argv, GError **error)
+{
+    gsize i;
+
+    for (i = 0; argv[i] != NULL; i++)
+    {
+        g_autofree gchar *named = NULL;
+        gsize length = strlen(argv[i]);
+
+        if (length < AI_CLI_ARG_LIMIT)
+            continue;
+
+        /*
+         * The flag it belongs to rather than the value: the value is by
+         * definition too long to put in an error message, and the flag
+         * is the thing somebody can act on.
+         *
+         * Only when the word before it really is one, though.  Naming
+         * argv[i - 1] unconditionally reported the *program* for a long
+         * first argument -- "/bin/true is 131072 bytes" -- which sends
+         * whoever reads it to look at the wrong thing entirely.
+         */
+        if (i > 0 && argv[i - 1][0] == '-')
+            named = g_strdup(argv[i - 1]);
+        else
+            named = g_strdup_printf("argument %" G_GSIZE_FORMAT, i);
+
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                    "%s is %" G_GSIZE_FORMAT " bytes, over the "
+                    "%d-byte limit on a single command-line argument "
+                    "(MAX_ARG_STRLEN, which is not ARG_MAX -- room in the "
+                    "total does not help). The kernel refuses the whole "
+                    "call with \"Argument list too long\" and names none of "
+                    "this",
+                    named, length, AI_CLI_ARG_LIMIT);
+
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 GSubprocess *
 ai_cli_client_spawn(
     AiCliClient          *self,
@@ -1658,6 +1726,9 @@ ai_cli_client_spawn(
 
     g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
     g_return_val_if_fail(argv != NULL, NULL);
+
+    if (!argv_fits_in_an_exec(argv, error))
+        return NULL;
 
     klass = AI_CLI_CLIENT_GET_CLASS(self);
     g_return_val_if_fail(klass->spawn != NULL, NULL);

@@ -229,6 +229,17 @@ how the inline form survived as long as it did.  One path means an
 unwritable temporary directory surfaces on the first turn rather than at
 scale.
 
+There is a second line of defence, one layer down and shared by every CLI
+backend: =ai_cli_client_spawn()= measures each argv word against
+=AI_CLI_ARG_LIMIT= before spawning and refuses one that is over, naming
+the flag it belongs to, its size and the limit.  Nothing this client
+builds should ever reach it --- that is what the spill is for --- but a
+backend with no file-taking flag has nowhere else to put a long value,
+and every flag added later is a candidate.  The limit counts the
+terminating NUL, so 131,071 bytes in one word runs and 131,072 does not;
+=tests/test-claude-code-client.c= asserts both halves against the kernel
+rather than against our own arithmetic about a number the kernel owns.
+
 =--system-prompt-file= and =--append-system-prompt-file= are accepted by
 the CLI but are *not* in its =--help= flag list; they appear only inside
 a description paragraph.  Verified against Claude Code 2.1.247 by

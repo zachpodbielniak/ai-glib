@@ -17,7 +17,15 @@ ifneq ($(filter clean clean-all distclean,$(MAKECMDGOALS)),)
 ifneq ($(filter-out clean clean-all distclean,$(MAKECMDGOALS)),)
 
 .PHONY: $(MAKECMDGOALS) __serialize
-$(MAKECMDGOALS): __serialize ;
+#
+# `@:` rather than an empty `;` recipe.  make reports "Nothing to be done"
+# for a target whose recipe is empty, so `make clean tests` printed the
+# exact sentence that means nothing was compiled -- after compiling
+# everything.  A successful build that signs off with the words for a
+# failed one is worse than no message at all.
+#
+$(MAKECMDGOALS): __serialize
+	@:
 __serialize:
 	$(MAKE) --no-print-directory $(filter clean clean-all distclean,$(MAKECMDGOALS))
 	$(MAKE) --no-print-directory $(filter-out clean clean-all distclean,$(MAKECMDGOALS))
@@ -323,6 +331,18 @@ check-headers:
 		exit 1; \
 	fi; \
 	echo "check-headers: OK"
+
+#
+# Builds the suite without running it: the zero-warning check.
+#
+# There was no such target, so `make clean tests` answered "Nothing to be
+# done for 'tests'" and exited 0 -- a documented check for warnings that
+# compiled nothing and passed.  Same gap clawtilla found in its own
+# Makefile, one directory down.
+#
+.PHONY: tests
+tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
+	@:
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

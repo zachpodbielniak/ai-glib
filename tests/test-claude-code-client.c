@@ -18,6 +18,7 @@
 #include "core/ai-streamable.h"
 #include "core/ai-config.h"
 #include "model/ai-message.h"
+#include "core/ai-error.h"
 #include "model/ai-response.h"
 #include "core/ai-event.h"
 
@@ -704,6 +705,169 @@ test_the_kernel_refuses_the_old_shape(void)
 }
 
 /*
+ * The limit this codebase enforces is the limit the kernel enforces --
+ * on both sides of it.
+ *
+ * `AI_CLI_ARG_LIMIT` counts the terminating NUL, so the longest argument
+ * that works is one byte short of it.  A check written against the round
+ * number rather than the measured one is off by one in the direction
+ * that refuses a command line the kernel would have accepted, and
+ * nothing would ever have shown that: the only other thing that knows
+ * the number is `execve`, which is what this asks.
+ *
+ * Both halves matter.  Without the accepted case a check that refused
+ * everything would pass; without the refused case a check that refused
+ * nothing would.
+ */
+static void
+test_the_arg_limit_is_the_kernels(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autofree gchar *just_fits = g_strnfill(AI_CLI_ARG_LIMIT - 1, 'F');
+	g_autofree gchar *one_too_many = g_strnfill(AI_CLI_ARG_LIMIT, 'T');
+	g_autoptr(GError) fits_error = NULL;
+	g_autoptr(GError) over_error = NULL;
+	g_autoptr(GError) ours_fits_error = NULL;
+	g_autoptr(GError) ours_over_error = NULL;
+	g_autoptr(GSubprocess) fits = NULL;
+	g_autoptr(GSubprocess) over = NULL;
+	g_autoptr(GSubprocess) ours_fits = NULL;
+	g_autoptr(GSubprocess) ours_over = NULL;
+	const gchar *argv[] = { "/bin/true", NULL, NULL };
+	const GSubprocessFlags quiet = G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+	                               G_SUBPROCESS_FLAGS_STDERR_SILENCE;
+
+	/* What the kernel does. */
+	fits = g_subprocess_new(quiet, &fits_error, "/bin/true", just_fits, NULL);
+
+	g_assert_no_error(fits_error);
+	g_assert_nonnull(fits);
+	g_assert_true(g_subprocess_wait(fits, NULL, NULL));
+
+	over = g_subprocess_new(quiet, &over_error, "/bin/true", one_too_many,
+	                        NULL);
+
+	g_assert_null(over);
+	g_assert_nonnull(over_error);
+
+	/*
+	 * And what we do, on the same two values.
+	 *
+	 * The accepted half is the one that catches an off-by-one, and it
+	 * has to go through ai_cli_client_spawn() to do it: a version that
+	 * refused at AI_CLI_ARG_LIMIT - 1 would refuse a command line the
+	 * kernel had just accepted, and a test that only spawned directly
+	 * would pass while proving nothing about the check.
+	 */
+	argv[1] = just_fits;
+	ours_fits = ai_cli_client_spawn(AI_CLI_CLIENT(client), argv, quiet,
+	                                &ours_fits_error);
+
+	g_assert_no_error(ours_fits_error);
+	g_assert_nonnull(ours_fits);
+	g_assert_true(g_subprocess_wait(ours_fits, NULL, NULL));
+
+	argv[1] = one_too_many;
+	ours_over = ai_cli_client_spawn(AI_CLI_CLIENT(client), argv, quiet,
+	                                &ours_over_error);
+
+	g_assert_null(ours_over);
+	g_assert_error(ours_over_error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+}
+
+/*
+ * An argument the kernel would refuse is refused here first, and the
+ * refusal says what the kernel's does not.
+ *
+ * `execve`'s answer is `Argument list too long`, which names neither the
+ * argument, its size, nor the limit -- and GLib reports it as "Failed to
+ * execute child process", one layer further away again.  A system prompt
+ * is assembled from an agent's identity files, so it grows with what the
+ * product itself writes, and the whole thing presents as a broken CLI or
+ * a bad install rather than as configuration that has outgrown a limit.
+ *
+ * The prompts no longer travel as arguments, but a backend with no
+ * file-taking flag has nowhere else to put one -- grok-build's
+ * `--system-prompt-override` is exactly that -- so the check lives at the
+ * one place every backend spawns through.
+ */
+static void
+test_an_oversized_argument_is_refused_by_name(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autofree gchar *huge = huge_prompt('X');
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GSubprocess) spawned = NULL;
+	const gchar *argv[] = { "/bin/true", "--system-prompt-override", NULL,
+	                        NULL };
+
+	argv[2] = huge;
+
+	spawned = ai_cli_client_spawn(AI_CLI_CLIENT(client), argv,
+	                              G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+	                              G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+	                              &error);
+
+	g_assert_null(spawned);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+
+	/*
+	 * The flag, the size and the limit: the three things the kernel's
+	 * own error names none of.  And the reason the total is no help,
+	 * because ARG_MAX is what somebody checks first and it says the
+	 * command line is fine.
+	 */
+	g_assert_nonnull(strstr(error->message, "--system-prompt-override"));
+	g_assert_nonnull(strstr(error->message, "131072"));
+	g_assert_nonnull(strstr(error->message, "ARG_MAX"));
+
+	/*
+	 * And it does not name the *program* when the long word is the first
+	 * argument.  argv[i - 1] unconditionally reported "/bin/true is
+	 * 131072 bytes", which sends whoever reads it to look at the wrong
+	 * thing entirely.
+	 */
+	{
+		g_autoptr(GError) first = NULL;
+		g_autoptr(GSubprocess) none = NULL;
+		const gchar *bare[] = { "/bin/true", NULL, NULL };
+
+		bare[1] = huge;
+		none = ai_cli_client_spawn(AI_CLI_CLIENT(client), bare,
+		                           G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+		                           G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+		                           &first);
+
+		g_assert_null(none);
+		g_assert_nonnull(first);
+		g_assert_null(strstr(first->message, "/bin/true"));
+		g_assert_nonnull(strstr(first->message, "argument 1"));
+	}
+}
+
+/*
+ * And an ordinary command line still spawns.  A check at the choke point
+ * every backend goes through is a check that can break every backend.
+ */
+static void
+test_an_ordinary_argument_still_spawns(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GSubprocess) spawned = NULL;
+	const gchar *argv[] = { "/bin/true", "--model", "opus", NULL };
+
+	spawned = ai_cli_client_spawn(AI_CLI_CLIENT(client), argv,
+	                              G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+	                              G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+	                              &error);
+
+	g_assert_no_error(error);
+	g_assert_nonnull(spawned);
+	g_assert_true(g_subprocess_wait(spawned, NULL, NULL));
+}
+
+/*
  * The spill files do not outlive the client that made them.
  *
  * They hold the agent's identity and they live in the temporary
@@ -1216,6 +1380,12 @@ main(
 	                test_cc_argv_no_word_reaches_the_arg_limit);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/the-kernel-refuses-the-old-shape",
 	                test_the_kernel_refuses_the_old_shape);
+	g_test_add_func("/ai-glib/cli-client/arg-limit-is-the-kernels",
+	                test_the_arg_limit_is_the_kernels);
+	g_test_add_func("/ai-glib/cli-client/oversized-argument-is-named",
+	                test_an_oversized_argument_is_refused_by_name);
+	g_test_add_func("/ai-glib/cli-client/ordinary-argument-still-spawns",
+	                test_an_ordinary_argument_still_spawns);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/prompt-files-go-with-the-client",
 	                test_cc_argv_prompt_files_go_with_the_client);
 	g_test_add_func("/ai-glib/claude-code-client/build-argv/prompt-files-do-not-accumulate",

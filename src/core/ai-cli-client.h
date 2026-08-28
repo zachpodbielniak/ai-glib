@@ -27,6 +27,23 @@
 
 G_BEGIN_DECLS
 
+/**
+ * AI_CLI_ARG_LIMIT:
+ *
+ * How long a single `execve` argument may be, in bytes.
+ *
+ * `MAX_ARG_STRLEN`: 32 pages, and *not* `ARG_MAX`, which is the total and
+ * is 2MB on an ordinary machine.  Room in the total buys nothing -- the
+ * kernel refuses the whole call over one long word -- which is why the
+ * failure reads as impossible until you know the per-argument limit
+ * exists.
+ *
+ * The limit counts the terminating NUL, so the longest argument that
+ * works is one byte short of this.  Measured rather than recalled:
+ * 131071 bytes in one argument runs, 131072 is `E2BIG`.
+ */
+#define AI_CLI_ARG_LIMIT (131072)
+
 #define AI_TYPE_CLI_CLIENT (ai_cli_client_get_type())
 
 G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)

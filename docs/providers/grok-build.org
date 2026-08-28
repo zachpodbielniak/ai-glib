@@ -43,6 +43,29 @@ The prompt itself therefore never appears in argv. =--verbatim= is passed by def
 
 The conversation is flattened into that single prompt: user messages verbatim, assistant messages prefixed =Previous assistant response:=, joined with blank lines, and a trailing instruction to always produce a text summary rather than ending on tool calls. The system prompt is *not* part of it — that rides in argv as =--system-prompt-override=, and only on a fresh session.
 
+*** The system prompt is an argv word here, and that is a ceiling
+
+=grok-build= has no file-taking equivalent of =--system-prompt-override=,
+so unlike the Claude Code client this one cannot spill the prompt to a
+file. The ceiling is therefore real: the kernel caps a *single* argv word
+at =MAX_ARG_STRLEN= --- 32 pages, and 131,072 bytes counting the
+terminating NUL, so 131,071 is the longest that works. It is not
+=ARG_MAX=, which is megabytes, and headroom in the total buys nothing.
+
+What changes is the failure. =ai_cli_client_spawn()= --- which every
+backend goes through --- measures each word before handing it to
+=execve=, and refuses one that is over with the flag it belongs to, its
+size, and the limit. The kernel's own answer names none of those, and
+GLib reports it one layer further away again as *"Failed to execute child
+process"*, so a prompt that had simply grown too large presented as a
+broken CLI or a bad install.
+
+A system prompt is assembled by concatenating an agent's identity files,
+so it grows with what the calling product itself writes. There is no
+warning before the cliff from this layer --- the caller is the one that
+knows which files it concatenated, and it is the one that can say which
+to shorten.
+
 ** Property Reference
 Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 
