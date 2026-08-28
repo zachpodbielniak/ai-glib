@@ -28,15 +28,33 @@ $(OBJ_DIRS): | $(OBJDIR)
 # $(TEST_HEADERS) is a prerequisite of every test so that editing the shared
 # loopback-server harness rebuilds the tests that include it.  Without it a
 # change to test-server.h silently leaves stale binaries behind.
+#
+# $ORIGIN, not $(OUTDIR).
+#
+# $(OUTDIR) is a *relative* path -- build/debug -- so a runpath built
+# from it resolves against whatever directory the binary is run from.
+# Run a test from its own project it finds the library beside it; run it
+# from anywhere else and the loader falls through to the installed
+# libai-glib, so the binary tests whatever is on the machine rather than
+# what was just compiled.  Silently: the library has the same soname,
+# the tests run, and only an assertion about something recently changed
+# tells you the answer came from the wrong place.
+#
+# $ORIGIN is expanded by the loader to the directory of the binary
+# itself, so build/debug/tests/foo finds build/debug/ wherever it is
+# started from and wherever the tree is moved to.  Single-quoted so make
+# and the shell both pass it through to the linker unexpanded.
+#
 $(OUTDIR)/tests/%: $(TESTDIR)/%.c $(TEST_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
-	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(OUTDIR)
+	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(OUTDIR)/tests: | $(OUTDIR)
 	mkdir -p $@
 
 # Example compilation rule
+# $ORIGIN for the same reason as the test rule above.
 $(OUTDIR)/examples/%: $(EXAMPLEDIR)/%.c $(LIB_SHARED) | $(OUTDIR)/examples
-	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,$(OUTDIR)
+	$(CC) $(CFLAGS) -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(OUTDIR)/examples: | $(OUTDIR)
 	mkdir -p $@

@@ -192,10 +192,56 @@ ai_streamable_chat_stream_async(
 #+begin_src sh
 claude --print --output-format json \
     --model sonnet \
-    --system-prompt "..." \
+    --system-prompt-file /tmp/ai-glib-system-prompt-XXXXXX \
     --no-session-persistence \
     "user prompt"
 #+end_src
+
+*** Why the system prompt goes in a file
+
+Not =--system-prompt "..."=.  The kernel caps a *single* argv word at
+=MAX_ARG_STRLEN= --- 32 pages, 131,072 bytes.  That is not =ARG_MAX=,
+which is megabytes, and no headroom in the total buys it back: =execve=
+refuses the whole call with =E2BIG= over one long word.
+
+A system prompt is assembled by concatenating an agent's identity files,
+so it grows with what the calling product itself writes.  Past that
+figure the spawn fails before =claude= runs, and the only thing the
+caller sees is:
+
+#+begin_example
+Error: Failed to execute child process "…/claude" (Argument list too long)
+#+end_example
+
+The user prompt had been moved to stdin for exactly this reason years
+earlier.  The rule had been applied to one of the two.
+
+Both prompts are written to files created with =g_file_open_tmp()=, so
+mode 0600 and =O_EXCL=: the text is an agent's whole identity and it is
+being put in a directory every user on the machine can list.  The files
+are removed at the start of the next turn and again when the client is
+finalized, so a client that has run a thousand turns holds two files
+rather than two thousand.
+
+Unconditionally, not above a size threshold.  A branch that only runs
+past 128KB is exercised by nobody until the day it breaks --- which is
+how the inline form survived as long as it did.  One path means an
+unwritable temporary directory surfaces on the first turn rather than at
+scale.
+
+=--system-prompt-file= and =--append-system-prompt-file= are accepted by
+the CLI but are *not* in its =--help= flag list; they appear only inside
+a description paragraph.  Verified against Claude Code 2.1.247 by
+passing each and confirming it is not rejected the way an invented flag
+is:
+
+#+begin_example
+$ claude --definitely-not-a-flag x --resume <bogus-uuid> --print hi
+error: unknown option '--definitely-not-a-flag'
+
+$ claude --system-prompt-file /tmp/sp --resume <bogus-uuid> --print hi
+No conversation found with session ID: <bogus-uuid>
+#+end_example
 
 *** Streaming
 #+begin_src sh
@@ -291,7 +337,7 @@ without a flag per knob.
 |--------------------------+---------------------------+-----------------------------------------------------------|
 | =agent=                  | =--agent=                 | Agent for this session                                    |
 | =agents-json=            | =--agents=                | JSON object defining custom subagents                     |
-| =append-system-prompt=   | =--append-system-prompt=  | *Adds to* the default prompt, where =system-prompt= replaces it; sent every turn, not only on session creation |
+| =append-system-prompt=   | =--append-system-prompt-file= | *Adds to* the default prompt, where =system-prompt= replaces it; sent every turn, not only on session creation. Spilled to a file for the reason above |
 | =json-schema=            | =--json-schema=           | Constrains the reply to a JSON Schema                     |
 | =autocompact=            | =--autocompact=           | =auto=, or 100k–1M tokens. Governs when the compaction that #AiClaudeCodeClient::context-compacted reports happens |
 
