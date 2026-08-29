@@ -317,28 +317,143 @@ test_cursor_harness_roots(void)
 {
 	g_autoptr(AiResourceRegistry) registry = NULL;
 	AiResource *skill;
-	AiResource *bundled;
 
 	reset();
 	write_project(".cursor/skills/review/SKILL.md",
 	              "---\ndescription: review diffs\n---\nReview.\n");
-	write_home(".cursor/skills-cursor/shell/SKILL.md",
-	           "---\ndescription: bundled shell\n---\nShell.\n");
 
 	registry = fresh_registry();
 
 	skill = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "review");
 	g_assert_nonnull(skill);
 	g_assert_cmpstr(ai_resource_get_origin(skill), ==, "cursor");
-
-	bundled = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "shell");
-	g_assert_nonnull(bundled);
-	g_assert_cmpstr(ai_resource_get_origin(bundled), ==, "cursor");
 }
 
 /* ----------------------------------------------------------------
  * Precedence
  * ---------------------------------------------------------------- */
+
+
+/*
+ * Where each harness looks, asserted one harness at a time.
+ *
+ * This is the test the table needed and did not have. Every wrong row it
+ * carried -- grok with no skills directory at all, antigravity's user
+ * skills under a path that does not exist, commands directories invented
+ * for two harnesses that have no commands concept, a bundled cursor
+ * directory in no vendor documentation -- was invisible to a check that
+ * only asked whether *some* harness would find a file. Four of them were
+ * wrong for months and every test passed.
+ *
+ * The negative assertions matter more than the positive ones here: a
+ * missing path makes a caller install a skill somewhere nothing reads,
+ * and reports success while doing it.
+ */
+static gboolean
+paths_have_suffix(GStrv paths, const gchar *suffix)
+{
+	guint i;
+
+	for (i = 0; paths != NULL && paths[i] != NULL; i++)
+	{
+		if (g_str_has_suffix(paths[i], suffix))
+		{
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static void
+test_search_paths_per_origin(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+
+	reset();
+	registry = fresh_registry();
+
+	{
+		g_auto(GStrv) paths = ai_resource_registry_get_search_paths_for_origin(
+			registry, "claude", AI_RESOURCE_SKILL);
+
+		g_assert_true(paths_have_suffix(paths, "/.claude/skills"));
+	}
+
+	{
+		g_auto(GStrv) paths = ai_resource_registry_get_search_paths_for_origin(
+			registry, "opencode", AI_RESOURCE_SKILL);
+
+		/* Both spellings of the project directory are accepted. */
+		g_assert_true(paths_have_suffix(paths, "/.opencode/skill"));
+		g_assert_true(paths_have_suffix(paths, "/.opencode/skills"));
+
+		/* And the two directories it auto-loads from other harnesses. */
+		g_assert_true(paths_have_suffix(paths, "/.claude/skills"));
+		g_assert_true(paths_have_suffix(paths, "/.agents/skills"));
+
+		/* "NOT ~/.opencode/", in its own documentation's words. */
+		g_assert_false(paths_have_suffix(paths, "opencode/skills/"));
+	}
+
+	{
+		g_auto(GStrv) skills = ai_resource_registry_get_search_paths_for_origin(
+			registry, "grok", AI_RESOURCE_SKILL);
+		g_auto(GStrv) commands = ai_resource_registry_get_search_paths_for_origin(
+			registry, "grok", AI_RESOURCE_COMMAND);
+
+		g_assert_true(paths_have_suffix(skills, "/.grok/skills"));
+		g_assert_true(paths_have_suffix(skills, "/.claude/skills"));
+
+		/*
+		 * grok has no commands directory: a slash command there IS a
+		 * skill. Inventing one meant a caller writing a command file
+		 * grok would never read.
+		 */
+		g_assert_cmpint(g_strv_length(commands), ==, 0);
+	}
+
+	{
+		g_auto(GStrv) skills = ai_resource_registry_get_search_paths_for_origin(
+			registry, "antigravity", AI_RESOURCE_SKILL);
+		g_auto(GStrv) commands = ai_resource_registry_get_search_paths_for_origin(
+			registry, "antigravity", AI_RESOURCE_COMMAND);
+
+		g_assert_true(paths_have_suffix(skills, "/.agents/skills"));
+		g_assert_true(paths_have_suffix(skills, "/.gemini/config/skills"));
+
+		/* Not antigravity-cli, which is not where it keeps them. */
+		g_assert_false(paths_have_suffix(skills,
+		                                 "/.gemini/antigravity-cli/skills"));
+
+		/* Its customizations are rules, skills, plugins, hooks and MCP
+		 * servers. Commands are not among them. */
+		g_assert_cmpint(g_strv_length(commands), ==, 0);
+	}
+
+	{
+		g_auto(GStrv) paths = ai_resource_registry_get_search_paths_for_origin(
+			registry, "cursor", AI_RESOURCE_SKILL);
+
+		g_assert_true(paths_have_suffix(paths, "/.cursor/skills"));
+		g_assert_true(paths_have_suffix(paths, "/.agents/skills"));
+		g_assert_true(paths_have_suffix(paths, "/.claude/skills"));
+		g_assert_true(paths_have_suffix(paths, "/.codex/skills"));
+
+		/* In no vendor documentation. */
+		g_assert_false(paths_have_suffix(paths, "skills-cursor"));
+	}
+
+	{
+		/* A harness this build has never heard of is empty, not NULL --
+		 * a caller iterating the answer must not have to check first. */
+		g_auto(GStrv) paths = ai_resource_registry_get_search_paths_for_origin(
+			registry, "no-such-harness", AI_RESOURCE_SKILL);
+
+		g_assert_nonnull(paths);
+		g_assert_cmpint(g_strv_length(paths), ==, 0);
+	}
+}
 
 static void
 test_project_shadows_user(void)
@@ -418,25 +533,29 @@ static void
 test_opencode_home_and_xdg_skills(void)
 {
 	g_autoptr(AiResourceRegistry) registry = NULL;
-	AiResource                   *winner;
+	AiResource                   *found;
 
+	/*
+	 * ~/.opencode is NOT one of opencode's directories, whatever the
+	 * name suggests -- its own built-in customize-opencode skill says so
+	 * in as many words, and its configuration lives under XDG. A file
+	 * left there is found by nobody, and the point of this test is that
+	 * we do not pretend otherwise.
+	 */
 	reset();
-	write_home(".opencode/skills/dup.md", "---\ndescription: home\n---\nx\n");
-	write_home(".config/opencode/skills/dup.md",
+	write_home(".opencode/skills/stray.md",
+	           "---\ndescription: nowhere\n---\nx\n");
+	write_home(".config/opencode/skills/real.md",
 	           "---\ndescription: xdg\n---\nx\n");
 
 	registry = fresh_registry();
 
-	/* Both directories are searched; the XDG one is listed first. */
-	winner = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "dup");
-	g_assert_cmpstr(ai_resource_get_description(winner), ==, "xdg");
+	found = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "real");
+	g_assert_nonnull(found);
+	g_assert_cmpstr(ai_resource_get_description(found), ==, "xdg");
 
-	{
-		GList *shadowed = ai_resource_registry_list_shadowed(registry);
-
-		g_assert_cmpint(g_list_length(shadowed), ==, 1);
-		g_list_free(shadowed);
-	}
+	g_assert_null(ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL,
+	                                          "stray"));
 }
 
 /* ----------------------------------------------------------------
@@ -1094,6 +1213,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/registry/agents", test_agents_from_both_harnesses);
 	g_test_add_func("/ai-glib/registry/cursor-roots",
 	                test_cursor_harness_roots);
+	g_test_add_func("/ai-glib/registry/search-paths-per-origin",
+	                test_search_paths_per_origin);
 
 	g_test_add_func("/ai-glib/registry/project-shadows-user",
 	                test_project_shadows_user);

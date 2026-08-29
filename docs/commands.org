@@ -127,9 +127,22 @@ model reads when deciding whether a skill applies, so write it as a
 trigger --- "when creating a new test file for a GLib project" --- rather
 than as a title.
 
-Skills are found under =~/.claude/skills=, =~/.config/opencode/skills=,
-=~/.opencode/skills= and =~/.config/ai-glib/skills=, plus the
-project-local =.claude/skills= and =.opencode/skills=.
+Where skills are found depends on the harness, and the harnesses do not
+agree.  Ask ~ai_resource_registry_get_search_paths_for_origin()~ rather
+than writing a list down: this paragraph had one, and four of its entries
+were wrong for months.
+
+The shape of the disagreement is worth knowing, because the obvious guess
+is wrong in both directions.  =~/.claude/skills= is read by claude-code,
+grok, opencode and cursor -- four of the five.  =~/.agents/skills=, which
+the Agent Skills branding suggests is the universal one, is read by
+opencode, cursor and antigravity, and by neither claude-code nor grok.
+Neither path reaches everybody.
+
+Two harnesses have no commands directory at all: grok resolves =/name=
+against its skill registry, and antigravity's customizations are rules,
+skills, plugins, hooks and MCP servers with commands not among them.
+Writing a command file for either is writing a file nothing reads.
 
 ** An agent
 A persona with its own tools, run as a subagent through the =task= tool

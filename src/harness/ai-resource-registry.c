@@ -86,39 +86,60 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
     { "claude",   AI_RESOURCE_AGENT,   ".claude/agents",
       USER_BASE_HOME, ".claude/agents" },
 
-    /* opencode. Its user configuration lives under XDG, but it also
-     * keeps a bare ~/.opencode for skills, so both are listed. */
+    /* opencode. Its configuration lives under XDG -- its own built-in
+     * customize-opencode skill says "NOT ~/.opencode/" in as many
+     * words. It accepts both `skill` and `skills` for the project
+     * directory, and additionally auto-loads two directories belonging
+     * to other harnesses, which is why they appear here under its own
+     * origin as well as under theirs. */
     { "opencode", AI_RESOURCE_COMMAND, ".opencode/command",
       USER_BASE_XDG_CONFIG, "opencode/command" },
+    { "opencode", AI_RESOURCE_COMMAND, ".opencode/commands",
+      USER_BASE_XDG_CONFIG, "opencode/commands" },
+    { "opencode", AI_RESOURCE_SKILL,   ".opencode/skill",
+      USER_BASE_XDG_CONFIG, "opencode/skill" },
     { "opencode", AI_RESOURCE_SKILL,   ".opencode/skills",
       USER_BASE_XDG_CONFIG, "opencode/skills" },
     { "opencode", AI_RESOURCE_SKILL,   NULL,
-      USER_BASE_HOME, ".opencode/skills" },
+      USER_BASE_HOME, ".claude/skills" },
+    { "opencode", AI_RESOURCE_SKILL,   NULL,
+      USER_BASE_HOME, ".agents/skills" },
     { "opencode", AI_RESOURCE_AGENT,   ".opencode/agent",
       USER_BASE_XDG_CONFIG, "opencode/agents" },
 
-    /* grok. */
-    { "grok",     AI_RESOURCE_COMMAND, ".grok/commands",
-      USER_BASE_HOME, ".grok/commands" },
+    /* grok. Its slash commands ARE its skills -- there is no commands
+     * directory to look in -- and it reads ~/.claude/skills for
+     * compatibility as well as its own. */
+    { "grok",     AI_RESOURCE_SKILL,   ".grok/skills",
+      USER_BASE_HOME, ".grok/skills" },
+    { "grok",     AI_RESOURCE_SKILL,   NULL,
+      USER_BASE_HOME, ".claude/skills" },
     { "grok",     AI_RESOURCE_AGENT,   ".grok/agents",
       USER_BASE_HOME, ".grok/agents" },
 
-    /* antigravity / agy. Skills live under a customization root
-     * (`.agents/skills`); user-level copies sit next to the CLI's
-     * settings under ~/.gemini/antigravity-cli. */
+    /* antigravity / agy. Skills live under a customization root, of
+     * which `.agents` is the usual spelling; the global root is
+     * ~/.gemini/config. It has no commands concept at all -- its
+     * customization types are rules, skills, plugins, hooks and MCP
+     * servers, and nothing else. */
     { "antigravity", AI_RESOURCE_SKILL,   ".agents/skills",
-      USER_BASE_HOME, ".gemini/antigravity-cli/skills" },
-    { "antigravity", AI_RESOURCE_COMMAND, ".agents/commands",
-      USER_BASE_HOME, ".gemini/antigravity-cli/commands" },
+      USER_BASE_HOME, ".gemini/config/skills" },
     { "antigravity", AI_RESOURCE_AGENT,   ".agents/agents",
-      USER_BASE_HOME, ".gemini/antigravity-cli/agents" },
+      USER_BASE_HOME, ".gemini/config/agents" },
 
-    /* cursor / cursor-agent. Project skills live under .cursor/skills;
-     * the install also drops bundled skills at ~/.cursor/skills-cursor. */
+    /* cursor / cursor-agent. It reads its own root, the .agents root,
+     * and two other harnesses' directories for back-compatibility.
+     * Those last are listed so a caller asking where cursor looks is
+     * told the truth: a skill already linked for claude-code is one
+     * cursor can already see. */
     { "cursor",      AI_RESOURCE_SKILL,   ".cursor/skills",
       USER_BASE_HOME, ".cursor/skills" },
-    { "cursor",      AI_RESOURCE_SKILL,   NULL,
-      USER_BASE_HOME, ".cursor/skills-cursor" },
+    { "cursor",      AI_RESOURCE_SKILL,   ".agents/skills",
+      USER_BASE_HOME, ".agents/skills" },
+    { "cursor",      AI_RESOURCE_SKILL,   ".claude/skills",
+      USER_BASE_HOME, ".claude/skills" },
+    { "cursor",      AI_RESOURCE_SKILL,   ".codex/skills",
+      USER_BASE_HOME, ".codex/skills" },
     { "cursor",      AI_RESOURCE_COMMAND, ".cursor/commands",
       USER_BASE_HOME, ".cursor/commands" },
     { "cursor",      AI_RESOURCE_AGENT,   ".cursor/agents",
@@ -1107,6 +1128,85 @@ ai_resource_registry_get_search_paths(
         gchar *path;
 
         if (RESOURCE_SOURCES[i].kind != kind)
+        {
+            continue;
+        }
+
+        path = source_user_path(&RESOURCE_SOURCES[i]);
+
+        if (path != NULL)
+        {
+            g_ptr_array_add(paths, path);
+        }
+    }
+
+    g_ptr_array_add(paths, NULL);
+
+    return (gchar **)g_ptr_array_free(g_steal_pointer(&paths), FALSE);
+}
+
+/**
+ * ai_resource_registry_get_search_paths_for_origin:
+ * @self: an #AiResourceRegistry
+ * @origin: the harness to ask about, as spelled in #AiResource:origin
+ * @kind: which kind of resource
+ *
+ * Where one harness looks for one kind of resource, project directories
+ * first and then user ones, in the order it searches them.
+ *
+ * ai_resource_registry_get_search_paths() answers for every harness at
+ * once, which is the right question when the caller is going to read
+ * the directories. It is the wrong question when the caller is going to
+ * *write* one: a tool that installs a skill for an agent has to put it
+ * where that agent's own CLI will look, and nowhere else.
+ *
+ * The distinction is not academic. `~/.claude/skills` is read by four of
+ * the five harnesses and `~/.agents/skills` by three, but not the same
+ * three -- so neither is a universal answer, and a caller that guessed
+ * one would silently install nothing for the harnesses that do not read
+ * it.
+ *
+ * Returns: (transfer full) (array zero-terminated=1): the paths, or an
+ *   empty vector when @origin is not a harness this build knows
+ */
+gchar **
+ai_resource_registry_get_search_paths_for_origin(
+    AiResourceRegistry *self,
+    const gchar        *origin,
+    AiResourceKind      kind
+){
+    g_autoptr(GPtrArray) paths = NULL;
+    gsize                i;
+
+    g_return_val_if_fail(AI_IS_RESOURCE_REGISTRY(self), NULL);
+    g_return_val_if_fail(origin != NULL, NULL);
+
+    paths = g_ptr_array_new_with_free_func(g_free);
+
+    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
+    {
+        gchar *path;
+
+        if (RESOURCE_SOURCES[i].kind != kind ||
+            g_strcmp0(RESOURCE_SOURCES[i].origin, origin) != 0)
+        {
+            continue;
+        }
+
+        path = source_project_path(self, &RESOURCE_SOURCES[i]);
+
+        if (path != NULL)
+        {
+            g_ptr_array_add(paths, path);
+        }
+    }
+
+    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
+    {
+        gchar *path;
+
+        if (RESOURCE_SOURCES[i].kind != kind ||
+            g_strcmp0(RESOURCE_SOURCES[i].origin, origin) != 0)
         {
             continue;
         }

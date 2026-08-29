@@ -77,4 +77,12 @@ ai_resource_registry_get_search_paths(
     AiResourceKind      kind
 );
 
+gchar **
+ai_resource_registry_get_search_paths_for_origin(
+    AiResourceRegistry *self,
+    const gchar        *origin,
+    AiResourceKind      kind
+);
+
+
 G_END_DECLS
