@@ -241,7 +241,7 @@ include rules.mk
 # for the shared lib too — acceptable since yaml-glib is small.
 $(YAML_GLIB_STATIC):
 	@echo "Building yaml-glib..."
-	$(MAKE) -C $(YAML_GLIB_DIR) lib DEBUG=0
+	$(MAKE) -C $(YAML_GLIB_DIR) lib DEBUG=0 ASAN=0 UBSAN=0
 
 # Default target
 .PHONY: all

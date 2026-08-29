@@ -904,10 +904,13 @@ adding a provider or touching a send path, add a case here rather than
 relying on a unit test of the builder, and run:
 
 ```bash
-make clean && make test ASAN=1
+make test ASAN=1
 ```
 
-The clean is required: `ASAN=1` shares `build/release/` with a normal build.
+Sanitized and normal builds share the same release/debug tree, but the build
+records the effective compiler and linker flags and automatically rebuilds
+objects when those flags change. A manual clean is not required when toggling
+`ASAN`, `UBSAN`, or `DEBUG`.
 
 ## Common Patterns
 

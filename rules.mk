@@ -6,11 +6,36 @@
 # Object subdirectories (derived from source list)
 OBJ_DIRS := $(sort $(dir $(LIB_OBJECTS)))
 
+# Compiler and linker options are command-line inputs, not source-file
+# timestamps. Without a recorded signature, switching from ASAN=1 to a plain
+# build can leave instrumented objects and a shared library in place; the next
+# unsanitized test then fails to link on unresolved __asan_* symbols.
+#
+# FORCE runs the comparison on every invocation, but the stamp's timestamp
+# changes only when the effective flags do. Objects therefore rebuild exactly
+# when the build configuration changes, while repeated identical builds remain
+# incremental.
+.PHONY: FORCE
+FORCE:
+
+$(BUILD_FLAGS_STAMP): FORCE | $(OUTDIR)
+	@{ \
+		printf '%s\n' "CC=$(CC)" \
+			"CFLAGS=$(BUILD_CONFIG_CFLAGS)" \
+			"LDFLAGS=$(BUILD_CONFIG_LDFLAGS)" \
+			> $@.tmp; \
+		if test -r $@ && cmp -s $@.tmp $@; then \
+			rm -f $@.tmp; \
+		else \
+			mv -f $@.tmp $@; \
+		fi; \
+	}
+
 # Generic pattern rule for object files.
 # Order-only deps on $(OUTDIR)/config.h and $(OUTDIR)/ai-version.h prevent a
 # parallel-build race; the per-objects regular prereq in Makefile triggers
 # recompilation when either header changes.
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJ_DIRS) $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
+$(OBJDIR)/%.o: $(SRCDIR)/%.c $(BUILD_FLAGS_STAMP) | $(OBJ_DIRS) $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -75,14 +100,14 @@ $(OUTDIR)/bin: | $(OUTDIR)
 clean:
 	rm -rf $(OUTDIR)
 	rm -f $(PROJECT_NAME)-1.0.pc
-	$(MAKE) -C $(YAML_GLIB_DIR) clean 2>/dev/null || true
+	$(MAKE) -C $(YAML_GLIB_DIR) clean DEBUG=0 ASAN=0 UBSAN=0 2>/dev/null || true
 
 # Clean everything (both build types + deps)
 .PHONY: clean-all
 clean-all:
 	rm -rf $(BUILDDIR)
 	rm -f $(PROJECT_NAME)-1.0.pc
-	$(MAKE) -C $(YAML_GLIB_DIR) clean 2>/dev/null || true
+	$(MAKE) -C $(YAML_GLIB_DIR) clean-all DEBUG=0 ASAN=0 UBSAN=0 2>/dev/null || true
 
 # Distclean is an alias for clean-all
 .PHONY: distclean

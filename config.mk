@@ -72,6 +72,7 @@ endif
 
 OUTDIR := $(BUILDDIR)/$(BUILD_TYPE)
 OBJDIR := $(OUTDIR)/obj
+BUILD_FLAGS_STAMP := $(OUTDIR)/.build-flags
 
 # ---- Build options (opt-in toggles) ----
 
@@ -108,6 +109,12 @@ CFLAGS = $(CFLAGS_BASE) $(CFLAGS_OPT) $(CFLAGS_SAN) $(PKG_CFLAGS) \
          -I$(SRCDIR) -I$(OUTDIR)
 
 LDFLAGS = $(LDFLAGS_SAN) $(YAML_GLIB_LIBS) $(PKG_LIBS)
+
+# Freeze the build-wide values before any target-specific additions (ncurses
+# for ai-tui) are applied. These are what the incremental-build signature
+# records.
+BUILD_CONFIG_CFLAGS := $(CFLAGS)
+BUILD_CONFIG_LDFLAGS := $(LDFLAGS)
 
 # Library names
 LIB_NAME = lib$(PROJECT_NAME)-1.0
