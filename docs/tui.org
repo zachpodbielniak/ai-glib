@@ -189,7 +189,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/clear=            | Empty the transcript, the history and the todos   |
 | =/quit=             | Exit                                              |
 | =/model [NAME]=     | Show or switch the model without restarting       |
-| =/provider=         | Show the provider                                 |
+| =/provider [NAME]=  | Show or switch the provider, preserving context   |
 | =/tools=            | The tools the model can call                      |
 | =/commands=         | Commands from disk, and what shadows what         |
 | =/skills=           | Skills                                            |
@@ -213,6 +213,41 @@ Anything else is a command file: =/deploy staging= runs
 =/clear= empties the *local* view. A provider holding a session of its own
 --- the CLI wrappers do --- is not affected; clearing the transcript does
 not un-say what was already said to it.
+
+*** Switching providers
+With no argument, =/provider= reports the current provider. With a name, it
+changes the provider for the next turn and keeps the completed in-process
+conversation:
+
+#+begin_example
+> Remember the word amber.
+I will remember amber.
+
+> /provider openai
+Provider switched to OpenAI. Context preserved.
+
+> What word did I ask you to remember?
+amber
+#+end_example
+
+Use the same names as =-p=, including =claude-code=, =claude-tmux=,
+=opencode=, =grok-build=, =antigravity= / =agy= and =cursor=. The target uses
+its default model; use =/model NAME= afterwards to change it.
+
+The command runs only while no turn is in flight. A construction or migration
+failure says =Provider unchanged: ...= and leaves the old provider selected.
+The transcript, system prompt, working directory and completed message
+history survive. If the target is a CLI wrapper, local tools are turned off
+and the TUI says so.
+
+A switched-to CLI always starts a fresh native session: any target
+=session-id= and =continue-session= are cleared. Startup =-c= / =--continue=
+does not apply to a later =/provider= command, and neither do startup
+=--set= overrides. The portable history is projected into the CLI's text
+prompt; the CLI's older JSONL or session database is not imported.
+
+See [[file:provider-switching.org][Provider switching]] for the exact
+migration table and limits.
 
 *** When a command is not found
 =/commands= with nothing to show prints every directory it searched,
@@ -341,6 +376,7 @@ installed =ai-tui= has no runtime dependency on =libai-glib=.
   along the way. See the coverage matrix in [[file:events.org][the event stream]].
 
 ** See also
+- [[file:provider-switching.org][Provider switching]] --- =/provider NAME=, migration and native-session isolation
 - [[file:transcript.org][The transcript]] --- the layer this is a frontend for
 - [[file:events.org][The event stream]] --- what each provider can report
 - [[file:cli.org][The =ai= CLI]] --- one-shot prompts and scripting

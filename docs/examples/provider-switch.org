@@ -1,0 +1,148 @@
+* provider-switch --- one conversation, two providers
+=examples/provider-switch.c= sends a turn through one provider, switches the
+=AiConversation= in the completion callback, and sends a second turn through
+another. The second provider is asked for a code word from the first turn, so
+the continuity is visible rather than merely asserted.
+
+** Build and run
+The example is discovered by the examples wildcard:
+
+#+begin_src sh
+make examples
+#+end_src
+
+Configure both providers, then name them on the command line:
+
+#+begin_src sh
+export ANTHROPIC_API_KEY="..."
+export OPENAI_API_KEY="..."
+./build/release/examples/provider-switch claude openai
+#+end_src
+
+With no arguments it also defaults to =claude openai=. Any two names accepted
+by =ai_provider_factory_new_from_string()= may be used, including CLI wrappers:
+
+#+begin_src sh
+./build/release/examples/provider-switch ollama cursor
+#+end_src
+
+The providers still need their ordinary credentials, local server or
+installed CLI. Provider construction does not test authentication.
+
+** The state that must outlive both callbacks
+The main loop, conversation and target provider live in =main()= until both
+turns finish. The callback state borrows them:
+
+#+begin_src C
+typedef struct
+{
+	GMainLoop      *loop;
+	AiConversation *conversation;
+	GObject        *second_provider;
+	gint            status;
+} SwitchState;
+#+end_src
+
+The owning variables use =g_autoptr()=. This is safe because
+=g_main_loop_run()= does not return until the second callback quits it.
+
+** Finish before switching
+The first callback calls =ai_conversation_send_finish()= before changing
+provider:
+
+#+begin_src C
+if (!ai_conversation_send_finish(AI_CONVERSATION(source), result, &error))
+{
+	g_printerr("First turn failed: %s\n", error->message);
+	g_main_loop_quit(state->loop);
+	return;
+}
+
+if (!ai_conversation_set_provider(state->conversation,
+                                  state->second_provider, &error))
+{
+	g_printerr("Provider unchanged: %s\n", error->message);
+	g_main_loop_quit(state->loop);
+	return;
+}
+#+end_src
+
+That is the correct asynchronous contract: consume the first operation's
+result, then act on its success. Before the completion callback is dispatched
+the conversation is =busy=, and an attempted switch fails with
+=AI_ERROR_INVALID_REQUEST= rather than letting events from two providers
+interleave.
+
+The switch itself is synchronous. It changes the provider for future sends
+and migrates provider-independent settings; it does not perform network I/O
+or resend the first prompt.
+
+** The second send uses the same conversation
+No =GList<AiMessage>= is copied in the example:
+
+#+begin_src C
+ai_conversation_send_async(
+	state->conversation,
+	"What code word did I ask the previous provider to remember? "
+	"Answer with the word only.",
+	NULL,
+	on_second_sent,
+	state
+);
+#+end_src
+
+=AiConversation= already owns the first user message and completed assistant
+message. The target HTTP provider serializes those blocks in its own format.
+A target CLI gets the deterministic text projection, and starts a fresh native
+session even if its object had a session id or =continue-session= set.
+
+** Inspecting the result
+The final callback prints both views of continuity:
+
+#+begin_src C
+transcript = ai_transcript_to_text(
+	ai_conversation_get_transcript(state->conversation), 0);
+
+g_print("%s\n", transcript);
+g_print("%u messages\n",
+	g_list_length(ai_conversation_get_messages(state->conversation)));
+#+end_src
+
+The transcript is what a frontend renders. The message list is what the next
+provider receives. They are related, but they are not interchangeable.
+
+A typical run ends like:
+
+#+begin_example
+First provider: Claude
+Second provider: OpenAI
+
+First turn completed with Claude (2 messages).
+Switched to OpenAI; sending the next turn with shared context.
+
+--- shared transcript ---
+> Remember the code word amber. Confirm it in one short sentence.
+
+I will remember the code word amber.
+
+> What code word did I ask the previous provider to remember? Answer with the word only.
+
+amber
+
+Portable history now contains 4 messages.
+#+end_example
+
+Exact prose and usage status blocks vary by provider.
+
+** What this example does not do
+- It does not import JSONL, native session files or a provider's prior
+  =--continue= history.
+- It does not copy model ids, permissions or other provider-specific
+  properties. Configure =second_provider= before the switch when needed.
+- It does not demonstrate fallback. A failed first send exits; switching does
+  not automatically retry it.
+- It uses text-only turns. CLI projection preserves tool calls and results as
+  labelled text, but cannot carry binary image bytes.
+
+See [[file:../provider-switching.org][Switching providers without losing the
+conversation]] for the migration table, CLI projection and failure rules.

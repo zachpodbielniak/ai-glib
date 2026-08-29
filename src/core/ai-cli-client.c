@@ -10,10 +10,128 @@
 #include "config.h"
 
 #include "core/ai-cli-client.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event-source.h"
 #include "core/ai-subprocess-util.h"
+#include "model/ai-image-content.h"
 #include "model/ai-text-content.h"
+#include "model/ai-tool-result.h"
+#include "model/ai-tool-use.h"
+
+static void
+append_projected_part(GString *out, const gchar *part)
+{
+    if (part == NULL || part[0] == '\0')
+        return;
+
+    if (out->len > 0)
+        g_string_append_c(out, '\n');
+
+    g_string_append(out, part);
+}
+
+/*
+ * Render one canonical message for a CLI's stdin prompt.
+ *
+ * Text-only messages deliberately retain the historical spelling. Structured
+ * blocks gain explicit, deterministic markers so a CLI reached after a
+ * provider switch can see the tool exchange that produced the current state.
+ */
+gchar *
+ai_cli_client_project_message(AiMessage *message)
+{
+    g_autoptr(GString) body = NULL;
+    g_autoptr(GString) out = NULL;
+    GList *iter;
+    AiRole role;
+
+    g_return_val_if_fail(AI_IS_MESSAGE(message), NULL);
+
+    body = g_string_new(NULL);
+
+    for (iter = ai_message_get_content_blocks(message);
+         iter != NULL;
+         iter = iter->next)
+    {
+        AiContentBlock *block = iter->data;
+
+        if (AI_IS_TEXT_CONTENT(block))
+        {
+            append_projected_part(
+                body, ai_text_content_get_text(AI_TEXT_CONTENT(block)));
+        }
+        else if (AI_IS_TOOL_USE(block))
+        {
+            AiToolUse *tool_use = AI_TOOL_USE(block);
+            JsonNode *input = ai_tool_use_get_input(tool_use);
+            g_autofree gchar *input_json =
+                input != NULL ? json_to_string(input, FALSE) : g_strdup("{}");
+            g_autofree gchar *part = g_strdup_printf(
+                "[Tool call: %s; id=%s; arguments=%s]",
+                ai_tool_use_get_name(tool_use) != NULL
+                    ? ai_tool_use_get_name(tool_use) : "",
+                ai_tool_use_get_id(tool_use) != NULL
+                    ? ai_tool_use_get_id(tool_use) : "",
+                input_json != NULL ? input_json : "{}");
+
+            append_projected_part(body, part);
+        }
+        else if (AI_IS_TOOL_RESULT(block))
+        {
+            AiToolResult *tool_result = AI_TOOL_RESULT(block);
+            g_autofree gchar *part = g_strdup_printf(
+                "[Tool result: %s; id=%s; error=%s]\n%s\n[End tool result]",
+                ai_tool_result_get_tool_name(tool_result) != NULL
+                    ? ai_tool_result_get_tool_name(tool_result) : "",
+                ai_tool_result_get_tool_use_id(tool_result) != NULL
+                    ? ai_tool_result_get_tool_use_id(tool_result) : "",
+                ai_tool_result_get_is_error(tool_result) ? "true" : "false",
+                ai_tool_result_get_content(tool_result) != NULL
+                    ? ai_tool_result_get_content(tool_result) : "");
+
+            append_projected_part(body, part);
+        }
+        else if (AI_IS_IMAGE_CONTENT(block))
+        {
+            AiImage *image =
+                ai_image_content_get_image(AI_IMAGE_CONTENT(block));
+            g_autofree gchar *part = g_strdup_printf(
+                "[Image: mime=%s; bytes=%" G_GSIZE_FORMAT
+                "; binary content is not representable in a CLI stdin prompt]",
+                image != NULL && ai_image_get_mime_type(image) != NULL
+                    ? ai_image_get_mime_type(image) : "unknown",
+                image != NULL ? ai_image_get_size(image) : 0);
+
+            append_projected_part(body, part);
+        }
+    }
+
+    if (body->len == 0)
+        return NULL;
+
+    role = ai_message_get_role(message);
+    out = g_string_new(NULL);
+
+    switch (role)
+    {
+        case AI_ROLE_ASSISTANT:
+            g_string_append(out, "Previous assistant response: ");
+            break;
+        case AI_ROLE_SYSTEM:
+            g_string_append(out, "Previous system message: ");
+            break;
+        case AI_ROLE_TOOL:
+            g_string_append(out, "Previous tool message: ");
+            break;
+        case AI_ROLE_USER:
+        default:
+            break;
+    }
+
+    g_string_append_len(out, body->str, body->len);
+    return g_string_free(g_steal_pointer(&out), FALSE);
+}
 
 /*
  * Private data for AiCliClient.
@@ -38,6 +156,7 @@ typedef struct
     gint      max_tokens;
     gint      process_timeout_ms;
     gboolean  session_persistence;
+    gboolean  portable_context;
 } AiCliClientPrivate;
 
 /*
@@ -53,6 +172,45 @@ G_DEFINE_TYPE_WITH_CODE(AiCliClient, ai_cli_client, G_TYPE_OBJECT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_TOOL_ENDPOINT_CONSUMER,
                                               ai_cli_client_endpoint_consumer_init))
+
+void
+ai_cli_client_mark_portable_context(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    priv = ai_cli_client_get_instance_private(self);
+    priv->portable_context = TRUE;
+}
+
+GList *
+ai_cli_client_messages_for_prompt(
+    AiCliClient *self,
+    GList       *messages
+){
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), messages);
+
+    priv = ai_cli_client_get_instance_private(self);
+
+    /*
+     * The first turn after a provider switch has no session id and seeds the
+     * new native session with the full portable history. Once that CLI
+     * returns an id, its own store already contains the seed; send only the
+     * newly appended message instead of duplicating the whole conversation.
+     */
+    if (priv->portable_context
+        && priv->session_persistence
+        && priv->session_id != NULL
+        && priv->session_id[0] != '\0')
+    {
+        return g_list_last(messages);
+    }
+
+    return messages;
+}
 
 /*
  * Property IDs.

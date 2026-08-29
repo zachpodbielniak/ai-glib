@@ -136,6 +136,24 @@ const gchar *session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
 ai_cli_client_set_session_id(AI_CLI_CLIENT(client), "previous-session-id");
 #+end_src
 
+*** Entering from a provider switch
+When this client becomes the target of
+=ai_conversation_set_provider()=, its =session-id= and =continue-session=
+are cleared even if the object was preconfigured. The first Claude Code turn
+therefore starts a fresh native session and receives the conversation's
+completed =AiMessage= history on stdin. Tool calls and results are retained as
+labelled text in that projection.
+
+This deliberately does not run =claude --resume=, read Claude's JSONL, or
+merge a previous Claude Code conversation. After the switched turn captures a
+new id, ordinary persistence resumes from that new session. The
+conversation's working directory and compatible MCP tool endpoint are applied
+to the target; =AiConversation:local-tools= is disabled because Claude Code
+runs its own tools.
+
+See [[file:../provider-switching.org][Provider switching]] for the portable
+history and native-session boundary.
+
 *** Process Timeout
 /Since 0.23.3./ Synchronous chat calls (=ai_cli_client_chat_sync()=) are bounded by a wall-clock deadline, =process-timeout-ms= (default 30 minutes, =0= disables). On expiry the =claude= child process is killed and the call fails with =AI_ERROR_TIMEOUT= --- previously a CLI wedged on a dead network connection could block the calling thread forever. Cancelling the call's =GCancellable= now also kills the child instead of leaking it.
 

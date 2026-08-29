@@ -206,6 +206,22 @@ An explicit session id wins — the two name different sessions — and
 persistence being off suppresses it, since that asks for a fresh session
 every time. From the CLI this is =ai -p grok-build -c=.
 
+*** Entering from a provider switch
+When selected through =ai_conversation_set_provider()=, this client's
+=session-id= and =continue-session= are cleared. The switched turn therefore
+omits =--resume= / =--continue= and starts a fresh Grok session. The complete
+portable =AiMessage= history is projected onto stdin, including labelled tool
+calls and results.
+
+The switch never reads or merges =~/.grok/sessions=. After the new turn
+captures a session id, later turns follow the normal persistence rules above.
+The conversation's working directory and compatible tool endpoint are
+applied to the target. Local ai-glib tools are disabled because Grok Build
+runs its own tools.
+
+See [[file:../provider-switching.org][Provider switching]] for the migration
+table and projection limits.
+
 *** Streaming
 #+begin_src C
 g_signal_connect(client, "stream-start", G_CALLBACK(on_stream_start), NULL);

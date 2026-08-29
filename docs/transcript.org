@@ -36,6 +36,26 @@ Everything after that is rendering. =examples/transcript-render.c= is a
 complete frontend in a hundred lines, most of them a switch mapping style
 roles to ANSI colours; read it before writing your own.
 
+** The transcript survives a provider switch
+=ai_conversation_set_provider()= changes who handles the next turn without
+replacing the =AiTranscript=. Existing block ids, expanded state and rendered
+history remain valid, so an attached frontend keeps watching the same object.
+There is no detach/rebuild cycle.
+
+The transcript is not replayed to the new model. =AiConversation='s
+provider-neutral =AiMessage= history is the canonical context; rendered
+markers, wrapping and status blocks are presentation. Completed tool calls
+and results survive in the message content blocks even if their transcript
+group is collapsed.
+
+A switch is refused while =busy=, which also guarantees that an open
+streaming block cannot change owners halfway through. CLI targets start a
+fresh native session and receive a text projection of the message history;
+provider-owned JSONL and session stores are not imported.
+
+See [[file:provider-switching.org][Provider switching]] for the complete
+migration and failure rules.
+
 ** Blocks
 | Kind                     | Type                  | Carries                          |
 |--------------------------+-----------------------+----------------------------------|
@@ -342,6 +362,7 @@ a session produced what you expected without driving a display.
 
 ** See also
 - [[file:events.org][The event stream]] --- what fills a transcript, and which providers report what
+- [[file:provider-switching.org][Provider switching]] --- which context moves to the next provider
 - [[file:api-reference/ai-transcript.org][AiTranscript]] --- the buffer
 - [[file:api-reference/ai-view-block.org][AiViewBlock]] --- the blocks and the render contract
 - [[file:api-reference/ai-conversation.org][AiConversation]] --- the driver

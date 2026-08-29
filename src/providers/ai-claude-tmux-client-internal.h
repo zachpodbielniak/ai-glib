@@ -99,4 +99,7 @@ ai_claude_tmux_client_build_paste_argv(
     const gchar *session_name
 );
 
+gchar *
+ai_claude_tmux_client_build_prompt(GList *messages);
+
 G_END_DECLS

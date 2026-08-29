@@ -341,6 +341,9 @@ static void completion_close(App *app);
 static void on_input_sent(GObject *source, GAsyncResult *result,
                           gpointer user_data);
 static void say(App *app, const gchar *format, ...) G_GNUC_PRINTF(2, 3);
+static GObject *build_provider_named(const gchar *name,
+                                     gboolean     initial,
+                                     GError     **error);
 
 /* ---------------------------------------------------------------- */
 
@@ -1718,10 +1721,42 @@ handle_builtin(App *app, AiCommandResult *result)
     {
         GObject *provider = ai_conversation_get_provider(app->conversation);
 
-        /* Switching provider mid-conversation would need a new
-         * transcript and a new history; say so rather than half-doing it. */
-        say(app, "Provider: %s. Restart with -p to change it.",
-            G_OBJECT_TYPE_NAME(provider));
+        if (arguments == NULL || arguments[0] == '\0')
+        {
+            say(app, "Provider: %s",
+                ai_provider_get_name(AI_PROVIDER(provider)));
+        }
+        else
+        {
+            g_autofree gchar *requested = g_strdup(arguments);
+            g_autoptr(GObject) replacement = NULL;
+            g_autoptr(GError) error = NULL;
+            gboolean had_local_tools =
+                ai_conversation_get_local_tools(app->conversation);
+
+            g_strstrip(requested);
+            replacement = build_provider_named(requested, FALSE, &error);
+
+            if (replacement == NULL
+                || !ai_conversation_set_provider(app->conversation,
+                                                 replacement, &error))
+            {
+                say(app, "Provider unchanged: %s",
+                    error != NULL ? error->message : "switch failed");
+            }
+            else
+            {
+                say(app, "Provider switched to %s. Context preserved.",
+                    ai_provider_get_name(AI_PROVIDER(replacement)));
+
+                if (had_local_tools
+                    && !ai_conversation_get_local_tools(app->conversation))
+                {
+                    say(app, "Local tools disabled: CLI providers run "
+                        "their own tools.");
+                }
+            }
+        }
     }
     else
     {
@@ -2987,18 +3022,13 @@ apply_property_overrides(GObject *provider, GError **error)
 }
 
 static GObject *
-build_provider(GError **error)
-{
+build_provider_named(
+    const gchar *name,
+    gboolean     initial,
+    GError     **error
+){
     g_autoptr(AiConfig) config = ai_config_new();
-    const gchar *name;
     GObject *provider;
-
-    name = opt_provider != NULL ? opt_provider : g_getenv("AI_PROVIDER");
-
-    if (name == NULL)
-    {
-        name = "claude";
-    }
 
     provider = ai_provider_factory_new_from_string(name, config, error);
 
@@ -3011,25 +3041,30 @@ build_provider(GError **error)
     {
         AiClient *c = AI_CLIENT(provider);
 
-        if (opt_model != NULL)  ai_client_set_model(c, opt_model);
-        if (opt_system != NULL) ai_client_set_system_prompt(c, opt_system);
+        if (initial && opt_model != NULL) ai_client_set_model(c, opt_model);
+        if (initial && opt_system != NULL)
+            ai_client_set_system_prompt(c, opt_system);
         ai_client_set_max_tokens(c, opt_max_tokens);
     }
     else if (AI_IS_CLI_CLIENT(provider))
     {
         AiCliClient *c = AI_CLI_CLIENT(provider);
 
-        if (opt_model != NULL)  ai_cli_client_set_model(c, opt_model);
-        if (opt_system != NULL) ai_cli_client_set_system_prompt(c, opt_system);
-        if (opt_effort != NULL) ai_cli_client_set_effort_level(c, opt_effort);
+        if (initial && opt_model != NULL)
+            ai_cli_client_set_model(c, opt_model);
+        if (initial && opt_system != NULL)
+            ai_cli_client_set_system_prompt(c, opt_system);
+        if (opt_effort != NULL)
+            ai_cli_client_set_effort_level(c, opt_effort);
         ai_cli_client_set_max_tokens(c, opt_max_tokens);
     }
 
     /*
-     * By property name, so a provider that grows a knob needs no change
-     * here -- the same reason `ai` resolves --continue this way.
+     * A provider switch deliberately does not inherit a native session.
+     * ai_conversation_set_provider() clears one even if a caller supplied a
+     * preconfigured object; only startup honors --continue.
      */
-    if (opt_continue &&
+    if (initial && opt_continue &&
         g_object_class_find_property(G_OBJECT_GET_CLASS(provider),
                                      "continue-session") != NULL)
     {
@@ -3043,13 +3078,28 @@ build_provider(GError **error)
         g_object_set(provider, "skip-permissions", TRUE, NULL);
     }
 
-    if (!apply_property_overrides(provider, error))
+    if (initial && !apply_property_overrides(provider, error))
     {
         g_object_unref(provider);
         return NULL;
     }
 
     return provider;
+}
+
+static GObject *
+build_provider(GError **error)
+{
+    const gchar *name;
+
+    name = opt_provider != NULL ? opt_provider : g_getenv("AI_PROVIDER");
+
+    if (name == NULL)
+    {
+        name = "claude";
+    }
+
+    return build_provider_named(name, TRUE, error);
 }
 
 int

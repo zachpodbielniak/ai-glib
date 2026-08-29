@@ -11,6 +11,7 @@
 
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-opencode-client-internal.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -46,6 +47,7 @@ struct _AiOpenCodeClient
     /* Cached tool-call summary from the last response, used for
      * the re-prompt fallback when the AI produces no text. */
     gchar *last_tool_summary;
+    gchar *turn_system_prompt;
 };
 
 /*
@@ -435,7 +437,8 @@ ai_opencode_client_build_argv(
 
     (void)messages;       /* prompt goes via stdin */
     (void)max_tokens;     /* opencode has no max tokens flag */
-    (void)system_prompt;  /* handled in build_stdin */
+    g_free(self->turn_system_prompt);
+    self->turn_system_prompt = g_strdup(system_prompt);
 
     args = g_ptr_array_new();
 
@@ -527,39 +530,42 @@ ai_opencode_client_build_stdin(
     AiCliClient *client,
     GList       *messages
 ){
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
     GString *prompt;
     const gchar *sys_prompt;
     GList *l;
 
     prompt = g_string_new("");
+    messages = ai_cli_client_messages_for_prompt(client, messages);
 
-    /* Prepend system prompt if set */
-    sys_prompt = ai_cli_client_get_system_prompt(client);
-    if (sys_prompt != NULL && sys_prompt[0] != '\0')
+    /* A resumed native session already carries its system prompt. */
+    sys_prompt = self->turn_system_prompt;
+    if (sys_prompt == NULL || sys_prompt[0] == '\0')
+        sys_prompt = ai_cli_client_get_system_prompt(client);
+
+    if ((!ai_cli_client_get_session_persistence(client)
+         || ((ai_cli_client_get_session_id(client) == NULL
+              || ai_cli_client_get_session_id(client)[0] == '\0')
+             && !self->continue_session))
+        && sys_prompt != NULL && sys_prompt[0] != '\0')
     {
         g_string_append(prompt, "<system>\n");
         g_string_append(prompt, sys_prompt);
-        g_string_append(prompt, "\n</system>\n\n");
+        g_string_append(prompt, "\n</system>");
     }
 
     /* Concatenate user messages */
     for (l = messages; l != NULL; l = l->next)
     {
         AiMessage *msg = l->data;
-        g_autofree gchar *text = ai_message_get_text(msg);
-        AiRole role = ai_message_get_role(msg);
+        g_autofree gchar *projected = ai_cli_client_project_message(msg);
 
-        if (text != NULL && text[0] != '\0')
+        if (projected != NULL && projected[0] != '\0')
         {
-            if (role == AI_ROLE_USER)
-            {
-                g_string_append(prompt, text);
-            }
-            else if (role == AI_ROLE_ASSISTANT)
-            {
-                g_string_append_printf(prompt,
-                    "\n\nPrevious assistant response: %s", text);
-            }
+            if (prompt->len > 0)
+                g_string_append(prompt, "\n\n");
+
+            g_string_append(prompt, projected);
         }
     }
 
@@ -1129,6 +1135,7 @@ ai_opencode_client_finalize(GObject *object)
     g_free(self->files);
     g_free(self->attach);
     g_free(self->log_level);
+    g_free(self->turn_system_prompt);
 
     G_OBJECT_CLASS(ai_opencode_client_parent_class)->finalize(object);
 }

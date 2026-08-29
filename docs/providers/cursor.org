@@ -385,6 +385,18 @@ A session id captured from =session_id= is sent as =--resume <id>= on the
 next turn. =--continue= is only emitted when there is no id:
 =ai -p cursor -c=. An explicit session id always wins over it.
 
+*** Entering from a provider switch
+When an =AiConversation= switches into Cursor, it clears =session-id= and
+=continue-session= even if the target object was preconfigured. Cursor starts
+a fresh native session from the completed in-process messages, with tool
+calls/results projected as labelled text. No Cursor chat database is imported
+and =--resume= / =--continue= is not emitted on the switched turn.
+
+A new =session_id= captured from that turn may be resumed normally
+afterwards. The conversation working directory and a compatible tool endpoint
+are applied, and local ai-glib tools are disabled because Cursor Agent runs
+its own. See [[file:../provider-switching.org][Provider switching]].
+
 *** Model overrides
 #+begin_src C
 ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CURSOR_MODEL_COMPOSER_2_5);

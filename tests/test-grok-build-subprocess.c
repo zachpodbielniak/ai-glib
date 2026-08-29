@@ -27,6 +27,8 @@
 #include "core/ai-streamable.h"
 #include "core/ai-error.h"
 #include "model/ai-message.h"
+#include "view/ai-conversation.h"
+#include "agent/ai-mock-provider.h"
 
 /* ----------------------------------------------------------------
  * Stub harness
@@ -60,7 +62,8 @@ typedef struct
 	"echo \"$n\" > \"$d/count\"\n"                                       \
 	"printf '%%s\\n' \"$*\" >> \"$d/argv.log\"\n"                        \
 	"pwd -P >> \"$d/cwd.log\"\n"                                         \
-	"cat >> \"$d/stdin.log\"\n"                                          \
+	"cat > \"$d/stdin.$n\"\n"                                            \
+	"cat \"$d/stdin.$n\" >> \"$d/stdin.log\"\n"                          \
 	"if [ -f \"$d/sleep\" ]; then sleep \"$(cat \"$d/sleep\")\"; fi\n"    \
 	"if [ -f \"$d/stderr\" ]; then cat \"$d/stderr\" >&2; fi\n"          \
 	"if [ -f \"$d/stdout.$n\" ]; then cat \"$d/stdout.$n\"\n"            \
@@ -115,7 +118,8 @@ static void
 stub_free(Stub *stub)
 {
 	const gchar *names[] = {
-		"grok", "count", "argv.log", "cwd.log", "stdin.log", "sleep",
+		"grok", "count", "argv.log", "cwd.log", "stdin.log",
+		"stdin.1", "stdin.2", "stdin.3", "sleep",
 		"stderr", "stdout", "stdout.1", "stdout.2", "stdout.3", "exit",
 		NULL
 	};
@@ -161,6 +165,36 @@ static const gchar *STUB_JSON_OK =
 	"  \"usage\": {\"input_tokens\": 11, \"output_tokens\": 2},\n"
 	"  \"total_cost_usd\": 0.0004\n"
 	"}\n";
+
+typedef struct
+{
+	GMainLoop *loop;
+	gboolean   ok;
+	GError    *error;
+} ConversationRun;
+
+static void
+on_conversation_sent(GObject *source, GAsyncResult *result,
+                     gpointer user_data)
+{
+	ConversationRun *run = user_data;
+
+	run->ok = ai_conversation_send_finish(AI_CONVERSATION(source), result,
+	                                      &run->error);
+	g_main_loop_quit(run->loop);
+}
+
+static void
+conversation_send(AiConversation *conversation, const gchar *text,
+                  ConversationRun *run)
+{
+	run->loop = g_main_loop_new(NULL, FALSE);
+	ai_conversation_send_async(conversation, text, NULL,
+	                           on_conversation_sent, run);
+	g_main_loop_run(run->loop);
+	g_main_loop_unref(run->loop);
+	run->loop = NULL;
+}
 
 /* ----------------------------------------------------------------
  * Synchronous path
@@ -229,6 +263,66 @@ test_sync_prompt_reaches_child_stdin(void)
 	g_assert_nonnull(strstr(seen, "plain text response"));
 
 	g_list_free(messages);
+	stub_free(stub);
+}
+
+/*
+ * The cross-provider boundary: history captured from an in-process provider
+ * must be projected into the fresh CLI child's stdin, never into --resume.
+ */
+static void
+test_conversation_switch_replays_context_to_child(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiMockProvider) first = ai_mock_provider_new();
+	g_autoptr(AiGrokBuildClient) second = client_for(stub);
+	g_autoptr(AiConversation) conversation =
+		ai_conversation_new(G_OBJECT(first));
+	ConversationRun one = { NULL, FALSE, NULL };
+	ConversationRun two = { NULL, FALSE, NULL };
+	ConversationRun three = { NULL, FALSE, NULL };
+	g_autofree gchar *stdin_seen = NULL;
+	g_autofree gchar *delta_seen = NULL;
+	g_autofree gchar *argv_seen = NULL;
+	GError *error = NULL;
+
+	stub_set(stub, "stdout", STUB_JSON_OK);
+	ai_conversation_set_stream(conversation, FALSE);
+	ai_mock_provider_push_text(first, "Remembered reply: café.");
+	conversation_send(conversation, "First question.", &one);
+	g_assert_true(one.ok);
+	g_assert_no_error(one.error);
+
+	ai_cli_client_set_session_id(AI_CLI_CLIENT(second), "must-not-leak");
+	g_assert_true(ai_conversation_set_provider(
+		conversation, G_OBJECT(second), &error));
+	g_assert_no_error(error);
+	conversation_send(conversation, "Second question.", &two);
+	g_assert_true(two.ok);
+	g_assert_no_error(two.error);
+
+	stdin_seen = stub_read(stub, "stdin.log");
+	g_assert_nonnull(strstr(stdin_seen, "First question."));
+	g_assert_nonnull(strstr(stdin_seen,
+	                        "Previous assistant response: Remembered reply: café."));
+	g_assert_nonnull(strstr(stdin_seen, "Second question."));
+
+	argv_seen = stub_read(stub, "argv.log");
+	g_assert_null(strstr(argv_seen, "--resume"));
+	g_assert_null(strstr(argv_seen, "must-not-leak"));
+
+	conversation_send(conversation, "Third question.", &three);
+	g_assert_true(three.ok);
+	g_assert_no_error(three.error);
+	delta_seen = stub_read(stub, "stdin.2");
+	g_assert_nonnull(strstr(delta_seen, "Third question."));
+	g_assert_null(strstr(delta_seen, "First question."));
+	g_assert_null(strstr(delta_seen, "Remembered reply"));
+	g_assert_null(strstr(delta_seen, "Second question."));
+
+	g_clear_error(&one.error);
+	g_clear_error(&two.error);
+	g_clear_error(&three.error);
 	stub_free(stub);
 }
 
@@ -915,6 +1009,8 @@ main(
 	                test_sync_success);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/prompt-via-stdin",
 	                test_sync_prompt_reaches_child_stdin);
+	g_test_add_func("/ai-glib/grok-build-subprocess/conversation-switch",
+	                test_conversation_switch_replays_context_to_child);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/argv",
 	                test_sync_argv_reaches_child);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/working-directory",

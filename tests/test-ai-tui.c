@@ -839,6 +839,50 @@ test_expand_shows_a_resolved_command(void)
 }
 
 static void
+test_provider_command_shows_and_switches(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *show[] = {
+		"--dump", "/provider", "-p", "grok-build", NULL
+	};
+	const gchar *change[] = {
+		"--dump", "/provider cursor", "-p", "grok-build", NULL
+	};
+	Run *run;
+
+	run = run_tui_in(box, show);
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Provider: Grok Build"));
+	run_free(run);
+
+	run = run_tui_in(box, change);
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data,
+	                        "Provider switched to Cursor"));
+	g_assert_nonnull(strstr(run->stdout_data, "Context preserved"));
+	run_free(run);
+
+	sandbox_free(box);
+}
+
+static void
+test_provider_command_failure_keeps_current(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/provider not-real", "-p", "grok-build", NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Provider unchanged"));
+	g_assert_nonnull(strstr(run->stdout_data, "unknown provider"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+static void
 test_expand_inlines_a_mention(void)
 {
 	gchar *box = sandbox_new();
@@ -1382,6 +1426,10 @@ main(int argc, char *argv[])
 	                test_commands_listing_names_the_search_paths);
 	g_test_add_func("/ai-glib/ai-tui/expand-command",
 	                test_expand_shows_a_resolved_command);
+	g_test_add_func("/ai-glib/ai-tui/provider-command",
+	                test_provider_command_shows_and_switches);
+	g_test_add_func("/ai-glib/ai-tui/provider-command-error",
+	                test_provider_command_failure_keeps_current);
 	g_test_add_func("/ai-glib/ai-tui/expand-mention",
 	                test_expand_inlines_a_mention);
 	g_test_add_func("/ai-glib/ai-tui/expand-unknown",

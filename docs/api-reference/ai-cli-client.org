@@ -65,6 +65,25 @@ unbounded; pass a =GCancellable= if you need to be able to stop them.
 A zero default would mean an unbounded wait, which is the hang class that
 can pin a caller forever — hence the 30-minute default rather than none.
 
+*** Native sessions during =AiConversation= switching
+The =session-id= property is continuity inside one CLI, not the portable
+conversation format. When an =AiCliClient= becomes the target of
+=ai_conversation_set_provider()=, the conversation clears =session-id= and
+the subclass's writable =continue-session= property before the first turn.
+This is unconditional, including for a preconfigured target.
+
+The completed canonical =AiMessage= list is instead projected to the CLI's
+text prompt (stdin for the ordinary wrappers, an interactive paste for
+=claude-tmux=). Text retains its role, tool calls/results gain explicit
+labels and binary images become metadata-only markers. No CLI's JSONL or
+session store is imported. Once the fresh target session returns an id,
+ordinary =session-persistence= applies again; resumed turns send only the new
+message instead of duplicating the portable seed already stored by the CLI.
+
+The conversation also pushes its working directory and tool endpoint to the
+target, and disables local tools because a CLI runs tools in its own process.
+See [[file:../provider-switching.org][Provider switching]].
+
 ** Signals
 | Signal         | Arguments      | When                                |
 |----------------+----------------+-------------------------------------|

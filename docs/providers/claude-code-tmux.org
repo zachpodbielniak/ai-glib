@@ -173,6 +173,23 @@ Consequences worth knowing:
 
 From the CLI this is =ai -p claude-tmux -c=.
 
+*** Entering from a provider switch
+=ai_conversation_set_provider()= clears this target's session id and
+=continue-session= before selecting it. The tmux client consequently creates
+a new UUID and a fresh Claude session, then sends the completed portable
+=AiMessage= history as the prompt for its first turn.
+
+It does *not* inspect an older =<session-id>.jsonl= to recover context, choose
+the newest transcript, or import provider-owned tool events. The JSONL logic
+described above is used only to drive and read the new native session.
+Completed tool calls/results already present in =AiConversation= survive as
+labelled text in the CLI projection.
+
+The conversation working directory and compatible MCP endpoint are applied
+to the target. Local ai-glib tools are disabled because the interactive
+Claude process owns tool execution. See
+[[file:../provider-switching.org][Provider switching]] for the full contract.
+
 ** Usage
 *** Basic Usage
 #+begin_src C

@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "core/ai-error.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-provider.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-message.h"
@@ -1479,6 +1480,7 @@ static AiResponse *
 ai_claude_tmux_client_chat_sync_real(
     AiClaudeTmuxClient *self,
     GList              *messages,
+    const gchar        *system_prompt,
     GCancellable       *cancellable,
     GError            **error);
 
@@ -1490,7 +1492,8 @@ ai_claude_tmux_client_chat_sync_vfunc(
     GError       **error
 ){
     return ai_claude_tmux_client_chat_sync_real(
-        AI_CLAUDE_TMUX_CLIENT(client), messages, cancellable, error);
+        AI_CLAUDE_TMUX_CLIENT(client), messages,
+        ai_cli_client_get_system_prompt(client), cancellable, error);
 }
 
 /*
@@ -1742,8 +1745,8 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
  * newline separators, then append the standard "always include a
  * plain text response" instruction.
  */
-static gchar *
-build_prompt_text(GList *messages)
+gchar *
+ai_claude_tmux_client_build_prompt(GList *messages)
 {
     GString *out;
     GList   *l;
@@ -1752,10 +1755,9 @@ build_prompt_text(GList *messages)
     for (l = messages; l != NULL; l = l->next)
     {
         AiMessage *msg = l->data;
-        g_autofree gchar *text = ai_message_get_text(msg);
-        AiRole role = ai_message_get_role(msg);
+        g_autofree gchar *projected = ai_cli_client_project_message(msg);
 
-        if (text == NULL || text[0] == '\0')
+        if (projected == NULL || projected[0] == '\0')
         {
             continue;
         }
@@ -1763,15 +1765,7 @@ build_prompt_text(GList *messages)
         {
             g_string_append(out, "\n\n");
         }
-        if (role == AI_ROLE_USER)
-        {
-            g_string_append(out, text);
-        }
-        else if (role == AI_ROLE_ASSISTANT)
-        {
-            g_string_append_printf(out,
-                "Previous assistant response: %s", text);
-        }
+        g_string_append(out, projected);
     }
 
     g_string_append(out,
@@ -2056,6 +2050,7 @@ static AiResponse *
 ai_claude_tmux_client_chat_sync_real(
     AiClaudeTmuxClient *self,
     GList              *messages,
+    const gchar        *system_prompt,
     GCancellable       *cancellable,
     GError            **error
 ){
@@ -2208,7 +2203,19 @@ ai_claude_tmux_client_chat_sync_real(
     }
 
     /* ---------- write prompt file ---------- */
-    prompt_text = build_prompt_text(messages);
+    messages = ai_cli_client_messages_for_prompt(AI_CLI_CLIENT(self), messages);
+    prompt_text = ai_claude_tmux_client_build_prompt(messages);
+    if (!resuming_existing_session
+        && system_prompt != NULL
+        && system_prompt[0] != '\0')
+    {
+        gchar *with_system = g_strconcat(
+            "<system>\n", system_prompt, "\n</system>\n\n",
+            prompt_text, NULL);
+
+        g_free(g_steal_pointer(&prompt_text));
+        prompt_text = with_system;
+    }
     if (!write_prompt_file_atomic(prompt_path, prompt_text, error))
     {
         return NULL;
@@ -2863,6 +2870,7 @@ typedef struct
 {
     AiClaudeTmuxClient *client;
     GList              *messages;       /* owned (deep copy refs) */
+    gchar              *system_prompt;  /* owned */
     GCancellable       *cancellable;    /* owned */
 } TmuxChatTaskData;
 
@@ -2872,6 +2880,7 @@ tmux_chat_task_data_free(gpointer p)
     TmuxChatTaskData *d = p;
     g_clear_object(&d->client);
     g_list_free_full(d->messages, g_object_unref);
+    g_free(d->system_prompt);
     g_clear_object(&d->cancellable);
     g_slice_free(TmuxChatTaskData, d);
 }
@@ -2890,7 +2899,7 @@ tmux_chat_thread_func(
     (void)source;
 
     resp = ai_claude_tmux_client_chat_sync_real(
-        td->client, td->messages, cancellable, &error);
+        td->client, td->messages, td->system_prompt, cancellable, &error);
     if (resp == NULL)
     {
         g_task_return_error(task, g_steal_pointer(&error));
@@ -2918,7 +2927,6 @@ ai_claude_tmux_client_chat_async(
     GList *copy = NULL;
     GList *l;
 
-    (void)system_prompt;
     (void)max_tokens;
     (void)tools;
 
@@ -2933,6 +2941,7 @@ ai_claude_tmux_client_chat_async(
     td = g_slice_new0(TmuxChatTaskData);
     td->client = g_object_ref(self);
     td->messages = copy;
+    td->system_prompt = g_strdup(system_prompt);
     td->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 
     g_task_set_task_data(task, td, tmux_chat_task_data_free);

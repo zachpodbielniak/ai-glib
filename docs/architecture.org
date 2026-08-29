@@ -185,6 +185,30 @@ The in-memory model (=AiMessage=, =AiToolUse=, =AiToolResult=, =AiTextContent=) 
 
 This mirrors pi-mono's per-provider =convertMessages()= pattern. Adding a new provider means writing its own message walker; no central switch needs to know about it.
 
+*** Provider switching and the context boundary
+=AiConversation= can replace its provider between turns without replacing
+its transcript or canonical =AiMessage= list:
+
+#+begin_src C
+ai_conversation_set_provider(conversation, G_OBJECT(next_provider), &error);
+#+end_src
+
+That boundary is architectural, not cosmetic. Provider-neutral completed
+messages move; provider-owned sessions do not. An HTTP target serializes the
+same content blocks into its wire format. A CLI target receives a labelled
+text projection of them and starts a fresh native session, with its
+=session-id= and =continue-session= cleared. No provider's JSONL or session
+database is imported.
+
+The working directory and tool endpoint are applied to the candidate before
+the switch commits. Endpoint incompatibility leaves the old provider in
+place. A switch is also refused while a turn is in flight, so events from two
+providers cannot enter one response. Local tools are disabled on a CLI
+target because its tools run in the child process.
+
+See [[file:provider-switching.org][Switching providers without losing the
+conversation]] for the migration table, failure rules and CLI projection.
+
 ** Error Handling
 Errors use the GLib error domain system:
 

@@ -19,6 +19,7 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-grok-home-overlay.h"
 #include "providers/ai-grok-build-client-internal.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -538,33 +539,22 @@ ai_grok_build_client_build_stdin(
     GString *prompt;
     GList *l;
 
-    (void)client;
-
     prompt = g_string_new("");
+    messages = ai_cli_client_messages_for_prompt(client, messages);
 
     for (l = messages; l != NULL; l = l->next)
     {
         AiMessage *msg = l->data;
-        g_autofree gchar *text = ai_message_get_text(msg);
-        AiRole role = ai_message_get_role(msg);
+        g_autofree gchar *projected = ai_cli_client_project_message(msg);
 
-        if (text != NULL && text[0] != '\0')
+        if (projected != NULL && projected[0] != '\0')
         {
             if (prompt->len > 0)
             {
                 g_string_append(prompt, "\n\n");
             }
 
-            /* Add a role prefix for multi-message conversations */
-            if (role == AI_ROLE_USER)
-            {
-                g_string_append(prompt, text);
-            }
-            else if (role == AI_ROLE_ASSISTANT)
-            {
-                g_string_append_printf(prompt,
-                    "Previous assistant response: %s", text);
-            }
+            g_string_append(prompt, projected);
         }
     }
 

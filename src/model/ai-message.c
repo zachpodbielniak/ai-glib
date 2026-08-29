@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "model/ai-message.h"
+#include "model/ai-response.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
@@ -175,6 +176,41 @@ ai_message_new_assistant(const gchar *text)
     g_autoptr(AiTextContent) content = ai_text_content_new(text);
 
     ai_message_add_content_block(self, (AiContentBlock *)g_steal_pointer(&content));
+
+    return (AiMessage *)g_steal_pointer(&self);
+}
+
+/**
+ * ai_message_new_from_response:
+ * @response: an #AiResponse
+ *
+ * Copies a provider response into an assistant message.
+ *
+ * Unlike ai_response_get_text(), this keeps every structured content block,
+ * including tool calls. The returned message is suitable for appending to
+ * conversation history and sending through another provider's serializer.
+ *
+ * Returns: (transfer full): a new assistant #AiMessage
+ */
+AiMessage *
+ai_message_new_from_response(AiResponse *response)
+{
+    g_autoptr(AiMessage) self = NULL;
+    GList *iter;
+
+    g_return_val_if_fail(AI_IS_RESPONSE(response), NULL);
+
+    self = ai_message_new(AI_ROLE_ASSISTANT);
+
+    for (iter = ai_response_get_content_blocks(response);
+         iter != NULL;
+         iter = iter->next)
+    {
+        ai_message_add_content_block(
+            self,
+            (AiContentBlock *)g_object_ref(iter->data)
+        );
+    }
 
     return (AiMessage *)g_steal_pointer(&self);
 }

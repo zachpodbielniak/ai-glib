@@ -39,6 +39,13 @@ ai_conversation_get_executor(AiConversation *self);
 GObject *
 ai_conversation_get_provider(AiConversation *self);
 
+gboolean
+ai_conversation_set_provider(
+    AiConversation  *self,
+    GObject         *provider,
+    GError         **error
+);
+
 GList *
 ai_conversation_get_messages(AiConversation *self);
 

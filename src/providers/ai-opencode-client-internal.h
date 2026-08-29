@@ -32,8 +32,8 @@ G_BEGIN_DECLS
  *
  * @messages: (element-type AiMessage): conversation messages (used only
  *   for shape; the prompt itself is piped via stdin, not passed in argv).
- * @system_prompt: (nullable): ignored -- opencode has no system-prompt
- *   flag, so it is inlined into the piped prompt by build_stdin instead.
+ * @system_prompt: (nullable): retained for build_stdin -- opencode has no
+ *   system-prompt flag, so a fresh session inlines it into the piped prompt.
  * @streaming: ignored -- opencode's only machine-readable format is
  *   `--format json`, which streams as NDJSON either way.
  *

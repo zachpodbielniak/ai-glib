@@ -22,6 +22,7 @@
 
 #include "providers/ai-cursor-client.h"
 #include "providers/ai-cursor-client-internal.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -716,6 +717,7 @@ ai_cursor_client_build_stdin(
 	GList *l;
 
 	prompt = g_string_new("");
+	messages = ai_cli_client_messages_for_prompt(client, messages);
 
 	if (cursor_should_send_system_prompt(self, client))
 	{
@@ -734,26 +736,16 @@ ai_cursor_client_build_stdin(
 	for (l = messages; l != NULL; l = l->next)
 	{
 		AiMessage *msg = l->data;
-		g_autofree gchar *text = ai_message_get_text(msg);
-		AiRole role = ai_message_get_role(msg);
+		g_autofree gchar *projected =
+			ai_cli_client_project_message(msg);
 
-		if (text == NULL || text[0] == '\0')
+		if (projected == NULL || projected[0] == '\0')
 			continue;
 
-		if (prompt->len > 0 && role == AI_ROLE_USER)
+		if (prompt->len > 0)
 			g_string_append(prompt, "\n\n");
 
-		if (role == AI_ROLE_USER)
-		{
-			g_string_append(prompt, text);
-		}
-		else if (role == AI_ROLE_ASSISTANT)
-		{
-			if (prompt->len > 0)
-				g_string_append(prompt, "\n\n");
-			g_string_append_printf(prompt,
-				"Previous assistant response: %s", text);
-		}
+		g_string_append(prompt, projected);
 	}
 
 	g_string_append(prompt,

@@ -420,10 +420,31 @@ ai_tool_executor_run_async (
     gpointer             user_data
 );
 
+void
+ai_tool_executor_run_full_async (
+    AiToolExecutor      *self,
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    gint                 max_turns,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+);
+
 gchar *
 ai_tool_executor_run_finish (
     AiToolExecutor  *self,
     GAsyncResult    *result,
+    GError         **error
+);
+
+gchar *
+ai_tool_executor_run_full_finish (
+    AiToolExecutor  *self,
+    GAsyncResult    *result,
+    GList          **out_new_messages,
     GError         **error
 );
 

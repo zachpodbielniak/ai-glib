@@ -18,9 +18,61 @@ g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new ();
 g_autoptr(AiConversation) conversation = ai_conversation_new (G_OBJECT (client));
 #+end_src
 
+** Switching providers
+#+begin_src C
+gboolean ai_conversation_set_provider (AiConversation  *self,
+                                       GObject         *provider,
+                                       GError         **error);
+#+end_src
+
+Changes the provider used by subsequent turns. =provider= is borrowed; the
+conversation takes its own reference on success. Passing the current object
+again is a successful no-op.
+
+The operation is synchronous and transactional with respect to the selected
+provider. It succeeds only while the conversation is idle. It also applies
+the conversation's tool endpoint to the candidate first; an incompatible
+endpoint or application error returns %FALSE and leaves the current provider
+selected.
+
+On success these remain in the conversation:
+
+- the existing =AiTranscript= object and all of its blocks;
+- completed in-process =AiMessage= history, including tool calls and results;
+- system prompt, maximum tokens, streaming choice and working directory;
+- command set, executor, tool endpoint and brigade.
+
+Provider-specific state is not copied. The target keeps its own model,
+credentials, effort and permission settings. Configure those on =provider=
+before the call.
+
+For a CLI target, the conversation pushes its working directory, clears the
+target =session-id= and writable =continue-session= property, and disables
+=local-tools=. Clearing resume state is unconditional, even if the target
+object was preconfigured: native CLI history must not be combined with the
+canonical messages being migrated. The first switched turn projects those
+messages into the CLI's text prompt, including labelled tool-call/result
+text. Provider-owned JSONL and session databases are not imported.
+
+Command passthrough defaults are re-evaluated for the target type unless the
+caller explicitly set =passthrough-commands=. See
+[[file:../provider-switching.org][Provider switching]] for the projection,
+migration table and limits.
+
+*** Errors
+| Error | Cause |
+|-------+-------|
+| =AI_ERROR_INVALID_REQUEST= | A turn is in flight |
+| =AI_ERROR_INVALID_REQUEST= | The conversation has a tool endpoint but the target cannot consume one |
+| Provider-specific endpoint error | The target rejected or could not apply the endpoint |
+
+The in-flight case reports =cannot switch provider while a turn is in
+flight=. Finish or cancel the turn before trying again.
+
 ** Properties
 | Property         | Type      | Default | Means                                    |
 |------------------+-----------+---------+------------------------------------------|
+| =provider=       | object    | ---     | read-only; use =set_provider()= to change |
 | =system-prompt=  | string    | =NULL=  | sent with every turn                     |
 | =max-tokens=     | int       | 4096    | cap per response                         |
 | =stream=         | boolean   | =TRUE=  | stream when the provider supports it     |
@@ -71,6 +123,10 @@ GObject        *ai_conversation_get_provider   (AiConversation *self);
 GList          *ai_conversation_get_messages   (AiConversation *self);
 #+end_src
 
+The returned provider, transcript, executor and message list are borrowed.
+The =provider= property is read-only because switching can fail; use
+=ai_conversation_set_provider()= rather than =g_object_set()=.
+
 The executor is exposed so a host can restrict what the model may call ---
 =ai_tool_executor_unregister()=, or a fresh
 =ai_tool_executor_new_empty()= plus its own registrations.
@@ -106,6 +162,7 @@ its finished =AiResponse= is folded into blocks instead. That is the
 =claude-tmux= path, and it means every provider works here from the start.
 
 ** See also
+- [[file:../provider-switching.org][Provider switching]] --- continuity, CLI projection and native-session isolation
 - [[file:../transcript.org][The transcript]] --- the layer, and the Emacs recipe
 - [[file:ai-transcript.org][AiTranscript]] --- the buffer
 - [[file:../events.org][The event stream]] --- what fills it

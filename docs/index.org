@@ -33,6 +33,7 @@ see their provider pages.
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
+- [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
 - [[file:tui.org][ai-tui]] - The terminal agent harness
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 
@@ -89,6 +90,7 @@ see their provider pages.
 - [[file:examples/index.org][Examples Index]] - All examples
 - [[file:examples/simple-chat.org][Simple Chat]] - Basic chat completion
 - [[file:examples/multi-provider.org][Multi-Provider]] - Using multiple providers
+- [[file:examples/provider-switch.org][Provider Switch]] - Preserve context while changing provider
 - [[file:examples/streaming.org][Streaming]] - Streaming responses
 - [[file:examples/tool-use.org][Tool Use]] - Function calling
 - [[file:examples/web-search.org][Web Search]] - Search the web with a provider

@@ -249,9 +249,17 @@ typedef struct
     gint            max_turns;
     GCancellable   *cancellable;
     gint            turn_count;
+    guint           n_input;
+    gboolean        return_messages;
     gchar          *result;        /* final text (transfer full to caller) */
     GError         *error;         /* propagated to caller */
 } RunContext;
+
+typedef struct
+{
+    gchar *text;
+    GList *messages;               /* AiMessage, owned */
+} RunResult;
 
 static void run_context_finish (RunContext *ctx);
 static void executor_unwatch_provider (AiToolExecutor *self);
@@ -271,6 +279,44 @@ static gchar *executor_first_line (const gchar *text, glong max_chars);
 /* Forward declaration */
 static void run_context_send (RunContext *ctx);
 
+static void
+run_result_free (RunResult *result)
+{
+    if (result == NULL)
+        return;
+
+    g_free (result->text);
+    g_list_free_full (result->messages, g_object_unref);
+    g_free (result);
+}
+
+/*
+ * Detach everything appended after the caller's original messages.
+ *
+ * The context owns one reference to every message. Drop those corresponding
+ * to the borrowed input and transfer the rest to the returned list.
+ */
+static GList *
+run_context_take_new_messages (RunContext *ctx)
+{
+    GList *iter;
+    GList *tail = NULL;
+    guint  i = 0;
+
+    for (iter = ctx->messages; iter != NULL; iter = iter->next, i++)
+    {
+        if (i < ctx->n_input)
+            g_object_unref (iter->data);
+        else
+            tail = g_list_append (tail, iter->data);
+    }
+
+    g_list_free (ctx->messages);
+    ctx->messages = NULL;
+
+    return tail;
+}
+
 /* End the run.  In synchronous mode the blocked caller resumes and does
  * its own teardown; in asynchronous mode nobody is waiting on the stack,
  * so the context owns itself and must clean up here. */
@@ -285,6 +331,15 @@ run_context_finish (RunContext *ctx)
 
     if (ctx->error != NULL)
         g_task_return_error (ctx->task, g_steal_pointer (&ctx->error));
+    else if (ctx->return_messages)
+    {
+        RunResult *result = g_new0 (RunResult, 1);
+
+        result->text = g_steal_pointer (&ctx->result);
+        result->messages = run_context_take_new_messages (ctx);
+        g_task_return_pointer (ctx->task, result,
+                               (GDestroyNotify)run_result_free);
+    }
     else
         g_task_return_pointer (ctx->task, g_steal_pointer (&ctx->result),
                                g_free);
@@ -421,9 +476,9 @@ on_run_response_common (
          * missing from the replayed history, so the next turn reads as a
          * follow-up to a question the model never appeared to answer. */
         ctx->result = ai_response_get_text (response);
-        if (ctx->result != NULL)
+        if (ai_response_get_content_blocks (response) != NULL)
         {
-            AiMessage *final_msg = ai_message_new_assistant (ctx->result);
+            AiMessage *final_msg = ai_message_new_from_response (response);
             ctx->messages = g_list_append (ctx->messages, final_msg);
         }
 
@@ -461,19 +516,7 @@ on_run_response_common (
      * can match them with our tool_result messages on the next turn.
      */
     {
-        AiMessage *assistant_msg = ai_message_new (AI_ROLE_ASSISTANT);
-
-        for (iter = ai_response_get_content_blocks (response);
-             iter != NULL;
-             iter = iter->next)
-        {
-            AiContentBlock *block = iter->data;
-
-            ai_message_add_content_block (
-                assistant_msg,
-                (AiContentBlock *)g_object_ref (block)
-            );
-        }
+        AiMessage *assistant_msg = ai_message_new_from_response (response);
 
         ctx->messages = g_list_append (ctx->messages, assistant_msg);
     }
@@ -4777,8 +4820,6 @@ ai_tool_executor_run_full (
     RunContext  ctx;
     GList      *iter;
     gchar      *result;
-    guint       n_input;
-    guint       i;
 
     g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
     g_return_val_if_fail (AI_IS_PROVIDER (provider), NULL);
@@ -4804,6 +4845,8 @@ ai_tool_executor_run_full (
     ctx.max_turns     = MAX_TURNS;
     ctx.cancellable   = cancellable;
     ctx.turn_count    = 0;
+    ctx.n_input       = 0;
+    ctx.return_messages = FALSE;
     ctx.result        = NULL;
     ctx.error         = NULL;
 
@@ -4820,11 +4863,10 @@ ai_tool_executor_run_full (
     executor_watch_provider (self, provider);
 
     /* Shallow-copy the caller's messages so we can extend the list */
-    n_input = 0;
     for (iter = messages; iter != NULL; iter = iter->next)
     {
         ctx.messages = g_list_append (ctx.messages, g_object_ref (iter->data));
-        n_input++;
+        ctx.n_input++;
     }
 
     run_context_send (&ctx);
@@ -4842,18 +4884,7 @@ ai_tool_executor_run_full (
      * rather than dropped and re-taken. */
     if (out_new_messages != NULL)
     {
-        GList *tail = NULL;
-
-        i = 0;
-        for (iter = ctx.messages; iter != NULL; iter = iter->next, i++)
-        {
-            if (i < n_input)
-                g_object_unref (iter->data);
-            else
-                tail = g_list_append (tail, iter->data);
-        }
-        g_list_free (ctx.messages);
-        *out_new_messages = tail;
+        *out_new_messages = run_context_take_new_messages (&ctx);
     }
     else
     {
@@ -4889,6 +4920,62 @@ ai_tool_executor_run (
 ){
     return ai_tool_executor_run_full (self, provider, messages, system_prompt,
                                       max_tokens, cancellable, NULL, error);
+}
+
+static void
+ai_tool_executor_run_async_internal (
+    AiToolExecutor      *self,
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    gint                 max_turns,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data,
+    gboolean             return_messages
+){
+    RunContext *ctx;
+    GList      *iter;
+
+    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
+    g_return_if_fail (AI_IS_PROVIDER (provider));
+
+    ctx = g_new0 (RunContext, 1);
+    ctx->loop          = NULL;
+    ctx->task          = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_source_tag (
+        ctx->task,
+        return_messages
+            ? ai_tool_executor_run_full_async
+            : ai_tool_executor_run_async);
+    ctx->executor      = g_object_ref (self);
+    ctx->provider      = g_object_ref (provider);
+    ctx->messages      = NULL;
+    /* Owned here: the caller's string may not outlive an async run. */
+    ctx->system_prompt = g_strdup (system_prompt);
+    ctx->max_tokens    = (max_tokens > 0) ? max_tokens : DEFAULT_MAX_TOKENS;
+    ctx->max_turns     = (max_turns  > 0) ? max_turns  : MAX_TURNS;
+    ctx->cancellable   = cancellable ? g_object_ref (cancellable) : NULL;
+    ctx->return_messages = return_messages;
+
+    self->active_provider = provider;
+
+    /*
+     * Per-run state. ALLOW_ALWAYS is remembered for one run only: an
+     * answer given about this task is not consent for the next one.
+     */
+    self->denied_all = FALSE;
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+    executor_watch_provider (self, provider);
+
+    for (iter = messages; iter != NULL; iter = iter->next)
+    {
+        ctx->messages = g_list_append (ctx->messages, g_object_ref (iter->data));
+        ctx->n_input++;
+    }
+
+    run_context_send (ctx);
 }
 
 /**
@@ -4931,38 +5018,41 @@ ai_tool_executor_run_async (
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
-    RunContext *ctx;
-    GList      *iter;
+    ai_tool_executor_run_async_internal (
+        self, provider, messages, system_prompt, max_tokens, max_turns,
+        cancellable, callback, user_data, FALSE);
+}
 
-    g_return_if_fail (AI_IS_TOOL_EXECUTOR (self));
-    g_return_if_fail (AI_IS_PROVIDER (provider));
-
-    ctx = g_new0 (RunContext, 1);
-    ctx->loop          = NULL;
-    ctx->task          = g_task_new (self, cancellable, callback, user_data);
-    ctx->executor      = g_object_ref (self);
-    ctx->provider      = g_object_ref (provider);
-    ctx->messages      = NULL;
-    /* Owned here: the caller's string may not outlive an async run. */
-    ctx->system_prompt = g_strdup (system_prompt);
-    ctx->max_tokens    = (max_tokens > 0) ? max_tokens : DEFAULT_MAX_TOKENS;
-    ctx->max_turns     = (max_turns  > 0) ? max_turns  : MAX_TURNS;
-    ctx->cancellable   = cancellable ? g_object_ref (cancellable) : NULL;
-
-    self->active_provider = provider;
-
-    /*
-     * Per-run state. ALLOW_ALWAYS is remembered for one run only: an
-     * answer given about this task is not consent for the next one.
-     */
-    self->denied_all = FALSE;
-    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
-    executor_watch_provider (self, provider);
-
-    for (iter = messages; iter != NULL; iter = iter->next)
-        ctx->messages = g_list_append (ctx->messages, g_object_ref (iter->data));
-
-    run_context_send (ctx);
+/**
+ * ai_tool_executor_run_full_async:
+ * @self: an #AiToolExecutor
+ * @provider: the #AiProvider to send requests to
+ * @messages: (element-type AiMessage): initial conversation messages
+ * @system_prompt: (nullable): optional system prompt
+ * @max_tokens: maximum tokens per response, or 0 for the default
+ * @max_turns: maximum tool-use turns, or 0 for the default of 20
+ * @cancellable: (nullable): a #GCancellable
+ * @callback: (scope async): called when the loop finishes
+ * @user_data: data for @callback
+ *
+ * Asynchronously runs the tool loop while retaining the messages produced
+ * by it. Complete with ai_tool_executor_run_full_finish().
+ */
+void
+ai_tool_executor_run_full_async (
+    AiToolExecutor      *self,
+    AiProvider          *provider,
+    GList               *messages,
+    const gchar         *system_prompt,
+    gint                 max_tokens,
+    gint                 max_turns,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    ai_tool_executor_run_async_internal (
+        self, provider, messages, system_prompt, max_tokens, max_turns,
+        cancellable, callback, user_data, TRUE);
 }
 
 /**
@@ -4981,9 +5071,63 @@ ai_tool_executor_run_finish (
     GError         **error
 ){
     g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+    g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+    g_return_val_if_fail (
+        g_async_result_is_tagged (result, ai_tool_executor_run_async), NULL);
 
     self->active_provider = NULL;
     executor_unwatch_provider (self);
     g_clear_pointer (&self->always_allowed, g_hash_table_unref);
     return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+/**
+ * ai_tool_executor_run_full_finish:
+ * @self: an #AiToolExecutor
+ * @result: the #GAsyncResult
+ * @out_new_messages: (out) (optional) (nullable) (element-type AiMessage)
+ *   (transfer full): return location for messages produced during the run
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Finishes ai_tool_executor_run_full_async().
+ *
+ * No messages are returned when the run fails, because a partial tool
+ * exchange cannot safely be grafted onto a continuing conversation.
+ *
+ * Returns: (transfer full) (nullable): the final response text, or %NULL
+ *   on error.
+ */
+gchar *
+ai_tool_executor_run_full_finish (
+    AiToolExecutor  *self,
+    GAsyncResult    *result,
+    GList          **out_new_messages,
+    GError         **error
+){
+    RunResult *run_result;
+    gchar     *text;
+
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), NULL);
+    g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+    g_return_val_if_fail (
+        g_async_result_is_tagged (result, ai_tool_executor_run_full_async),
+        NULL);
+
+    if (out_new_messages != NULL)
+        *out_new_messages = NULL;
+
+    self->active_provider = NULL;
+    executor_unwatch_provider (self);
+    g_clear_pointer (&self->always_allowed, g_hash_table_unref);
+
+    run_result = g_task_propagate_pointer (G_TASK (result), error);
+    if (run_result == NULL)
+        return NULL;
+
+    text = g_steal_pointer (&run_result->text);
+    if (out_new_messages != NULL)
+        *out_new_messages = g_steal_pointer (&run_result->messages);
+
+    run_result_free (run_result);
+    return text;
 }

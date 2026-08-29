@@ -39,6 +39,7 @@ struct _AiMockProvider
     guint   call_count;
     guint   stream_calls;   /* how many went down the streaming path */
     guint   delay_ms;
+    GList  *last_messages;  /* AiMessage, owned snapshot */
 };
 
 static void ai_mock_provider_provider_init (AiProviderInterface *iface);
@@ -69,6 +70,7 @@ ai_mock_provider_finalize (GObject *object)
 
     g_queue_free_full(self->script, scripted_free);
     g_free(self->fallback);
+    g_list_free_full(self->last_messages, g_object_unref);
 
     G_OBJECT_CLASS(ai_mock_provider_parent_class)->finalize(object);
 }
@@ -248,10 +250,18 @@ mock_chat_async (AiProvider *provider, GList *messages,
 {
     AiMockProvider *self = AI_MOCK_PROVIDER(provider);
     DeferredReply *d;
+    GList *iter;
 
-    (void)messages; (void)system_prompt; (void)max_tokens; (void)tools;
+    (void)system_prompt; (void)max_tokens; (void)tools;
 
     self->call_count++;
+    g_list_free_full(self->last_messages, g_object_unref);
+    self->last_messages = NULL;
+    for (iter = messages; iter != NULL; iter = iter->next)
+    {
+        self->last_messages = g_list_append(
+            self->last_messages, g_object_ref(iter->data));
+    }
 
     d = g_new0(DeferredReply, 1);
     d->task     = g_task_new(self, cancellable, callback, user_data);
@@ -411,4 +421,23 @@ ai_mock_provider_get_stream_call_count (AiMockProvider *self)
     g_return_val_if_fail (AI_IS_MOCK_PROVIDER (self), 0);
 
     return self->stream_calls;
+}
+
+/**
+ * ai_mock_provider_get_last_messages:
+ * @self: an #AiMockProvider
+ *
+ * The canonical messages supplied to the most recent request.
+ *
+ * This makes context handoff and serializer tests observable without a
+ * network service. The snapshot is replaced by the next request.
+ *
+ * Returns: (transfer none) (element-type AiMessage): the last request
+ */
+GList *
+ai_mock_provider_get_last_messages (AiMockProvider *self)
+{
+    g_return_val_if_fail (AI_IS_MOCK_PROVIDER (self), NULL);
+
+    return self->last_messages;
 }

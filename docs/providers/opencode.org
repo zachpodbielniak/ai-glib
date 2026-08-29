@@ -99,8 +99,9 @@ int main(void)
 }
 #+end_src
 
-*** Switching Providers
-One of the key features of OpenCode is the ability to switch between providers easily:
+*** Switching models inside OpenCode
+OpenCode can route models from several upstream providers without replacing
+the =AiOpenCodeClient=:
 
 #+begin_src C
 g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
@@ -188,6 +189,22 @@ Credentials for a password-protected =--attach= server are deliberately
 *not* properties: an argv is visible to every process on the machine.
 opencode reads =OPENCODE_SERVER_USERNAME= and =OPENCODE_SERVER_PASSWORD=
 from the environment instead.
+
+*** Entering from an =AiConversation= provider switch
+Replacing the conversation provider with an =AiOpenCodeClient= is different
+from changing the OpenCode model above. The former preserves
+=AiConversation='s completed messages but clears this client's =session-id=
+and =continue-session=. OpenCode starts a fresh native session, receiving the
+portable history through its stdin projection; completed tool calls/results
+are labelled text rather than imported native events.
+
+No OpenCode session database is read or merged, and =--continue= is not
+emitted for the switched turn. A new session id captured from that turn may
+be resumed normally afterwards. The conversation working directory is
+applied as both cwd and =--dir=, a compatible MCP endpoint is delivered, and
+local ai-glib tools are disabled because OpenCode runs its own.
+
+See [[file:../provider-switching.org][Provider switching]] for details.
 
 *** Working directory
 #+begin_src C

@@ -213,6 +213,23 @@ g_object_set(client, "continue-session", TRUE, NULL);
 An explicit session id wins. Persistence being off suppresses both.
 From the CLI this is =ai -p antigravity -c= or =ai -p agy -c=.
 
+*** Entering from a provider switch
+An =AiAntigravityClient= selected by
+=ai_conversation_set_provider()= has its =session-id= and
+=continue-session= cleared. Its first switched turn starts a fresh agy
+conversation and receives the completed portable =AiMessage= history in the
+stdin user event. Tool calls and results in that history are projected as
+labelled text.
+
+The switch does not import agy's conversation store or combine it with
+=--continue=. A =conversation_id= captured from the new turn may be resumed
+normally afterwards. The conversation working directory and a compatible
+tool endpoint are applied; local ai-glib tools are disabled because agy runs
+its own tools.
+
+See [[file:../provider-switching.org][Provider switching]] for details and
+projection limits.
+
 ** Wire format
 Non-streaming and streaming both request =--output-format stream-json=,
 because =--input-format stream-json= requires it. =parse_json_output=

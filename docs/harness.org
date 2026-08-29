@@ -298,7 +298,7 @@ before a single file has been read.
 | =/clear=     |              | empty the transcript, the history and the todos |
 | =/quit=      |              | leave                                         |
 | =/model=     | =[model]=    | show or change the model                      |
-| =/provider=  | =[provider]= | show the provider                             |
+| =/provider=  | =[provider]= | show or switch provider, preserving context   |
 | =/tools=     |              | the tools the model can call                  |
 | =/commands=  |              | commands, and what shadows what               |
 | =/skills=    |              | skills                                        |
@@ -485,6 +485,28 @@ Override it in either direction when you mean to:
 ai_conversation_set_passthrough_commands (conversation, FALSE);
 #+end_src
 
+*** Passthrough after a provider switch
+=ai_conversation_set_provider()= re-evaluates the default when moving between
+HTTP and CLI providers. Thus a conversation switched from =claude= to
+=claude-code= begins passing unknown slash commands and =@= mentions through,
+while the reverse move resumes local expansion.
+
+An explicit =ai_conversation_set_passthrough_commands()= choice is sticky and
+does not change. This distinction lets a frontend follow sensible provider
+defaults without taking control away from an embedder that deliberately
+chose one pipeline.
+
+The command set, resource registry and conversation working directory remain
+attached across the switch. The working directory is also pushed to a CLI
+target, so its native command/skill discovery and ai-glib's completion keep
+describing the same project.
+
+The built-in =/provider [NAME]= is resolved locally; it is never passed to a
+wrapped CLI. The frontend constructs the target and calls
+=ai_conversation_set_provider()=. See
+[[file:provider-switching.org][Provider switching]] for the migration and
+failure contract.
+
 ** Driving it from Emacs
 This is the argument for putting any of it in the library. Everything
 below goes through GObject Introspection; nothing is C-only.
@@ -588,6 +610,7 @@ layouts, the precedence, the completion and the =/help= listing all come
 from the table.
 
 ** See also
+- [[file:provider-switching.org][Provider switching]] --- how context and input policy move
 - [[file:commands.org][Authoring commands, skills and agents]] --- the file formats, with worked examples
 - [[file:tools.org][The built-in tools]] --- including =task= and =skill=, which reach the same registry
 - [[file:tui.org][ai-tui]] --- the frontend this was built for

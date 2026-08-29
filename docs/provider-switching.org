@@ -1,0 +1,247 @@
+* Switching providers without losing the conversation
+=AiConversation= can move an in-progress conversation from one provider to
+another. The transcript stays on screen, and the next provider receives the
+completed in-process message history:
+
+#+begin_src C
+g_autoptr(GError) error = NULL;
+
+if (!ai_conversation_set_provider(conversation, G_OBJECT(openai), &error))
+{
+    g_printerr("Provider unchanged: %s\n", error->message);
+}
+#+end_src
+
+This is a change of transport for subsequent turns, not a new conversation
+and not an import of either provider's private session store.
+
+** The two kinds of context
+There are two sources of continuity, and keeping them separate is the main
+rule.
+
+*** Portable conversation history
+=AiConversation= owns a =GList<AiMessage>=. It records user messages and
+completed assistant messages in provider-neutral content blocks. When local
+tools are enabled, that includes the assistant's =AiToolUse= blocks and the
+corresponding =AiToolResult= messages.
+
+This list is the canonical context during a provider switch. HTTP providers
+serialize it into their own wire formats; CLI providers receive a text
+projection described below.
+
+The =AiTranscript= is preserved too, but it is a view, not the source sent to
+the model. Styled blocks, status lines and collapsed tool summaries are for
+frontends. The new provider sees =AiMessage= history, not rendered transcript
+text.
+
+*** Provider-owned native sessions
+The CLI wrappers also keep session state in the wrapped program:
+=claude --resume=, =opencode --session=, =grok --resume=,
+=agy --conversation= and =cursor-agent --resume=. Claude Code (tmux) reads
+Claude's JSONL transcript by session id.
+
+Those stores are provider-private. ai-glib does not parse one provider's
+JSONL or session database and translate it into another provider. Importing,
+merging or mapping native session ids is explicitly outside the switching
+contract.
+
+On a switch *to any CLI provider*, =ai_conversation_set_provider()= clears the
+target object's =session-id= and, where it exists, =continue-session=. This
+applies even if the caller preconfigured either value. The target therefore
+starts a fresh native session seeded from the portable =AiMessage= history,
+rather than combining that history with an unrelated or overlapping native
+conversation.
+
+After the switched turn, the CLI may capture a new session id and use its
+ordinary persistence rules for later turns. That new id belongs only to that
+CLI client.
+
+** What moves, and what does not
+| State | After a successful switch |
+|-------+---------------------------|
+| Completed =AiMessage= history | Preserved and sent on the next turn |
+| =AiTranscript= blocks | Preserved |
+| System prompt | Preserved |
+| Maximum tokens and streaming choice | Preserved |
+| Working directory | Preserved; pushed onto a CLI target |
+| Command set, tool endpoint and background-agent wiring | Preserved |
+| Local tool executor registrations | Preserved |
+| =local-tools= | Preserved for HTTP; forced off for a CLI target |
+| Default command passthrough | Recomputed for HTTP versus CLI |
+| Explicit =passthrough-commands= override | Preserved |
+| Target model, effort, credentials and permission properties | Taken from the target object; not copied |
+| Target CLI =session-id= / =continue-session= | Cleared |
+| Old provider's native history | Not imported or merged |
+
+Configure provider-specific properties before switching:
+
+#+begin_src C
+g_autoptr(AiCursorClient) cursor = ai_cursor_client_new();
+g_autoptr(GError) error = NULL;
+
+ai_cli_client_set_model(AI_CLI_CLIENT(cursor), AI_CURSOR_MODEL_COMPOSER_2_5);
+ai_cursor_client_set_skip_permissions(cursor, TRUE);
+
+if (!ai_conversation_set_provider(conversation, G_OBJECT(cursor), &error))
+{
+    g_printerr("Provider unchanged: %s\n", error->message);
+}
+#+end_src
+
+The model does not migrate because model ids are provider-specific. Nor do
+permission modes: copying ="acceptEdits"= from one CLI to another would assign
+meaning to a string the target may interpret differently.
+
+** CLI projection
+A CLI wrapper cannot receive a provider-neutral content-block array. On the
+first turn after a switch, ai-glib projects the canonical messages into
+deterministic text. Most wrappers pipe that prompt on stdin; =claude-tmux=
+pastes the same text into the interactive TUI.
+
+That first prompt seeds the fresh native session. Once the CLI returns a new
+session id, later resumed turns send only the newly appended user message;
+replaying the whole seed would duplicate context already stored by the CLI.
+
+Ordinary user text stays ordinary text. Assistant, system and tool-role
+messages are labelled:
+
+#+begin_example
+Previous assistant response: I inspected the parser.
+Previous system message: Keep answers concise.
+Previous tool message: ...
+#+end_example
+
+Structured tool blocks retain their name, call id, arguments, result text and
+error state:
+
+#+begin_example
+[Tool call: read_file; id=call-7; arguments={"path":"src/parser.c"}]
+
+[Tool result: read_file; id=call-7; error=false]
+...file contents...
+[End tool result]
+#+end_example
+
+This is deliberately a projection, not a lossless wire-format conversion.
+The text and tool exchange survive well enough for the CLI model to reason
+about what happened, but they are no longer native tool events. Binary image
+content cannot be represented in the text prompt; its MIME type and byte
+count are recorded in a marker instead. Use an HTTP target when a later turn
+must receive the actual image.
+
+** Working directory, tools and commands
+The conversation working directory is copied to a CLI target before it runs.
+That controls the child process's cwd, project discovery and, for agentic
+CLIs, the filesystem from which their own tools operate.
+
+If the conversation carries an =AiAgentEndpoint=, the endpoint is applied to
+the candidate provider before the switch commits. A provider that does not
+implement =AiToolEndpointConsumer=, rejects the endpoint kind, or cannot apply
+it causes the switch to fail. The current provider remains selected.
+
+Local tools are different. HTTP providers can receive tools advertised by
+=AiToolExecutor= and ask ai-glib to execute them. CLI wrappers run their own
+tools in their own process and ignore that executor, so switching to a CLI
+forces =local-tools= to %FALSE. Switching back to HTTP does not turn it on
+again; the host must make that security decision explicitly.
+
+Command passthrough follows the target unless the caller explicitly set it.
+The default is %FALSE for HTTP, where ai-glib expands commands and =@=
+mentions, and %TRUE for CLI wrappers, which already understand their own
+slash commands, mentions and skills.
+
+** Failure and atomicity
+A switch is allowed only while the conversation is idle. Calling it during a
+send returns =AI_ERROR_INVALID_REQUEST=:
+
+#+begin_example
+cannot switch provider while a turn is in flight
+#+end_example
+
+Cancel or finish the turn first. This rule prevents half of one provider's
+events from being folded into a response completed by another.
+
+Endpoint incompatibility or endpoint-application failure also leaves the
+current provider selected. An unknown provider name fails earlier, while
+constructing the replacement with
+=ai_provider_factory_new_from_string()=. Passing the already-selected object
+is a successful no-op.
+
+=ai_conversation_set_provider()= does not resend the last prompt, retry a
+failed turn, clear the transcript, or append model text. It only decides
+which provider handles the next send. The caller remains responsible for
+reporting the switch and choosing the next prompt.
+
+** A complete asynchronous example
+[[file:examples/provider-switch.org][provider-switch]] sends one turn, changes
+provider in the completion callback, and asks the second provider to use the
+first turn's context. It also prints the final transcript and the portable
+message count.
+
+The essential sequence is:
+
+#+begin_src C
+ai_conversation_send_async(conversation, first_prompt, NULL,
+                           on_first_sent, &state);
+
+/* In on_first_sent(), after send_finish() succeeds: */
+if (ai_conversation_set_provider(conversation, second_provider, &error))
+{
+    ai_conversation_send_async(conversation, second_prompt, NULL,
+                               on_second_sent, &state);
+}
+#+end_src
+
+Do not switch immediately after starting the first send: =busy= remains true
+until its completion callback.
+
+** In =ai-tui=
+Use =/provider= with no argument to inspect the current provider, or pass a
+provider name to switch:
+
+#+begin_example
+> Give this design a short review and remember the word amber.
+
+The interface is small, but the failure path needs to remain atomic.
+
+> /provider openai
+Provider switched to OpenAI. Context preserved.
+
+> What word did the previous provider ask you to remember?
+
+amber
+#+end_example
+
+Names are the same ones accepted by =-p=: =claude=, =openai=, =gemini=,
+=grok=, =ollama=, =claude-code=, =claude-tmux=, =opencode=,
+=grok-build=, =antigravity= (or =agy=), and =cursor=.
+
+A failed construction or migration prints =Provider unchanged: ...=. The
+command is refused while a turn is running. Switching to a CLI may also print
+that local tools were disabled.
+
+Only startup honours =-c= / =--continue= and startup =--set= overrides.
+=/provider NAME= creates a new target with its provider defaults (plus
+applicable process-wide TUI choices such as =--skip-permissions=); it does not
+resume that provider's most recent native session. Use =/model NAME= after the
+switch when the target's default model is not the one you want.
+
+** Limits
+- Only completed in-process =AiMessage= history is portable. A turn in flight
+  cannot be switched.
+- History that exists only in a provider's native session is not imported.
+  Starting =ai-tui -c= can resume that provider, but a later =/provider= does
+  not extract the resumed backlog for migration.
+- CLI projection is text. Tool structure is labelled; image bytes and other
+  provider-only details are not transferable through that prompt.
+- Provider-specific state is not inferred or translated. Configure the target
+  model, credentials, sandbox, permissions and other knobs on the target.
+- Context-window limits still apply. Switching does not compact or truncate
+  the canonical history on its own; the target may reject an oversized turn.
+
+** See also
+- [[file:api-reference/ai-conversation.org][AiConversation API]]
+- [[file:transcript.org][The transcript]]
+- [[file:harness.org][The harness layer]]
+- [[file:tui.org][ai-tui]]
+- [[file:examples/provider-switch.org][provider-switch example]]

@@ -25,6 +25,8 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE(AiMessage, ai_message, AI, MESSAGE, GObject)
 
+typedef struct _AiResponse AiResponse;
+
 AiMessage *
 ai_message_new(AiRole role);
 
@@ -33,6 +35,9 @@ ai_message_new_user(const gchar *text);
 
 AiMessage *
 ai_message_new_assistant(const gchar *text);
+
+AiMessage *
+ai_message_new_from_response(AiResponse *response);
 
 AiMessage *
 ai_message_new_tool_result(

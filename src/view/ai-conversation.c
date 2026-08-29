@@ -26,6 +26,7 @@
 #include "view/ai-view-tool-block.h"
 #include "view/ai-tool-style.h"
 #include "core/ai-cli-client.h"
+#include "core/ai-cli-client-private.h"
 #include "core/ai-client.h"
 #include "core/ai-error.h"
 #include "core/ai-event-source.h"
@@ -103,6 +104,7 @@ G_DEFINE_TYPE(AiConversation, ai_conversation, G_TYPE_OBJECT)
 enum
 {
     PROP_0,
+    PROP_PROVIDER,
     PROP_SYSTEM_PROMPT,
     PROP_MAX_TOKENS,
     PROP_STREAM,
@@ -573,9 +575,10 @@ on_executor_done(
     AiConversation *self = user_data;
     g_autofree gchar *answer = NULL;
     g_autoptr(GError) error = NULL;
+    GList *new_messages = NULL;
 
-    answer = ai_tool_executor_run_finish(AI_TOOL_EXECUTOR(source), result,
-                                         &error);
+    answer = ai_tool_executor_run_full_finish(AI_TOOL_EXECUTOR(source), result,
+                                              &new_messages, &error);
 
     if (answer == NULL && error != NULL)
     {
@@ -602,11 +605,7 @@ on_executor_done(
         ai_view_text_block_append(AI_VIEW_TEXT_BLOCK(block), answer);
     }
 
-    if (answer != NULL)
-    {
-        self->messages = g_list_append(self->messages,
-                                       ai_message_new_assistant(answer));
-    }
+    self->messages = g_list_concat(self->messages, new_messages);
 
     conversation_finish_turn(self, NULL);
 }
@@ -659,14 +658,11 @@ on_provider_done(
         fold_response(self, response);
     }
 
+    if (ai_response_get_content_blocks(response) != NULL)
     {
-        g_autofree gchar *text = ai_response_get_text(response);
-
-        if (text != NULL)
-        {
-            self->messages = g_list_append(self->messages,
-                                           ai_message_new_assistant(text));
-        }
+        self->messages = g_list_append(
+            self->messages,
+            ai_message_new_from_response(response));
     }
 
     conversation_finish_turn(self, NULL);
@@ -794,15 +790,15 @@ ai_conversation_send_full_async(
     if (self->local_tools)
     {
         ai_tool_executor_set_stream(self->executor, self->stream);
-        ai_tool_executor_run_async(self->executor,
-                                   AI_PROVIDER(self->provider),
-                                   self->messages,
-                                   self->system_prompt,
-                                   self->max_tokens,
-                                   0,   /* the executor's own default */
-                                   self->cancellable,
-                                   on_executor_done,
-                                   self);
+        ai_tool_executor_run_full_async(self->executor,
+                                        AI_PROVIDER(self->provider),
+                                        self->messages,
+                                        self->system_prompt,
+                                        self->max_tokens,
+                                        0,   /* the executor's own default */
+                                        self->cancellable,
+                                        on_executor_done,
+                                        self);
         return;
     }
 
@@ -1236,6 +1232,9 @@ ai_conversation_get_property(
 
     switch (prop_id)
     {
+        case PROP_PROVIDER:
+            g_value_set_object(value, self->provider);
+            break;
         case PROP_SYSTEM_PROMPT:
             g_value_set_string(value, self->system_prompt);
             break;
@@ -1347,6 +1346,21 @@ ai_conversation_class_init(AiConversationClass *klass)
     object_class->finalize = ai_conversation_finalize;
     object_class->get_property = ai_conversation_get_property;
     object_class->set_property = ai_conversation_set_property;
+
+    /**
+     * AiConversation:provider:
+     *
+     * The provider used for the next turn.
+     *
+     * Read-only as a property because changing it can fail while a turn is in
+     * flight or while applying a tool endpoint. Use
+     * ai_conversation_set_provider() to switch it.
+     */
+    properties[PROP_PROVIDER] =
+        g_param_spec_object("provider", "Provider",
+                            "The provider used for the next turn",
+                            G_TYPE_OBJECT,
+                            G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_SYSTEM_PROMPT] =
         g_param_spec_string("system-prompt", "System Prompt",
@@ -1622,6 +1636,124 @@ ai_conversation_get_provider(AiConversation *self)
     g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
 
     return self->provider;
+}
+
+/**
+ * ai_conversation_set_provider:
+ * @self: an #AiConversation
+ * @provider: (transfer none): an #AiProvider implementation
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Switches the provider used by subsequent turns without clearing history.
+ *
+ * The transcript, completed #AiMessage history, system prompt, working
+ * directory, and other conversation settings stay in place. A CLI target
+ * starts a fresh native session: its session ID and `continue-session`
+ * property are cleared so provider-private history cannot duplicate or
+ * contradict the canonical in-process messages.
+ *
+ * A switch is refused while a turn is in flight. If the conversation has a
+ * tool endpoint, @provider must accept it; failure leaves the current provider
+ * untouched. Local tools are disabled when the target is a CLI wrapper,
+ * because those providers run tools in their own process.
+ *
+ * Returns: %TRUE on success
+ */
+gboolean
+ai_conversation_set_provider(
+    AiConversation  *self,
+    GObject         *provider,
+    GError         **error
+){
+    gboolean old_passthrough;
+    gboolean new_passthrough;
+
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+    g_return_val_if_fail(G_IS_OBJECT(provider), FALSE);
+    g_return_val_if_fail(AI_IS_PROVIDER(provider), FALSE);
+    g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+    if (self->busy)
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                    "cannot switch provider while a turn is in flight");
+        return FALSE;
+    }
+
+    if (self->provider == provider)
+    {
+        return TRUE;
+    }
+
+    if (self->tool_endpoint != NULL)
+    {
+        if (!AI_IS_TOOL_ENDPOINT_CONSUMER(provider))
+        {
+            g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                        "%s cannot use the conversation's tool endpoint",
+                        G_OBJECT_TYPE_NAME(provider));
+            return FALSE;
+        }
+
+        if (!ai_tool_endpoint_consumer_apply(
+                AI_TOOL_ENDPOINT_CONSUMER(provider),
+                self->tool_endpoint,
+                error))
+        {
+            return FALSE;
+        }
+    }
+
+    if (AI_IS_CLI_CLIENT(provider))
+    {
+        GParamSpec *continue_spec;
+
+        ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider),
+                                            self->working_directory);
+        ai_cli_client_set_session_id(AI_CLI_CLIENT(provider), NULL);
+        ai_cli_client_mark_portable_context(AI_CLI_CLIENT(provider));
+
+        continue_spec = g_object_class_find_property(
+            G_OBJECT_GET_CLASS(provider), "continue-session");
+        if (continue_spec != NULL
+            && (continue_spec->flags & G_PARAM_WRITABLE) != 0)
+        {
+            g_object_set(provider, "continue-session", FALSE, NULL);
+        }
+    }
+
+    old_passthrough = ai_conversation_get_passthrough_commands(self);
+
+    if (self->event_id != 0)
+    {
+        g_signal_handler_disconnect(self->provider, self->event_id);
+        self->event_id = 0;
+    }
+
+    g_set_object(&self->provider, provider);
+
+    if (AI_IS_EVENT_SOURCE(provider))
+    {
+        self->event_id = g_signal_connect(provider, "event",
+                                          G_CALLBACK(on_event), self);
+    }
+
+    if (self->local_tools && AI_IS_CLI_CLIENT(provider))
+    {
+        self->local_tools = FALSE;
+        g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_LOCAL_TOOLS]);
+    }
+
+    new_passthrough = ai_conversation_get_passthrough_commands(self);
+    if (!self->passthrough_set && old_passthrough != new_passthrough)
+    {
+        g_object_notify_by_pspec(
+            G_OBJECT(self), properties[PROP_PASSTHROUGH_COMMANDS]);
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PROVIDER]);
+
+    return TRUE;
 }
 
 /**
