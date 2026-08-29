@@ -32,6 +32,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_OPENCODE, "AI_PROVIDER_OPENCODE", "opencode" },
             { AI_PROVIDER_CLAUDE_TMUX, "AI_PROVIDER_CLAUDE_TMUX", "claude-tmux" },
             { AI_PROVIDER_GROK_BUILD, "AI_PROVIDER_GROK_BUILD", "grok-build" },
+            { AI_PROVIDER_ANTIGRAVITY, "AI_PROVIDER_ANTIGRAVITY", "antigravity" },
             { 0, NULL, NULL }
         };
 
@@ -293,6 +294,8 @@ ai_provider_type_to_string(AiProviderType provider)
             return "claude-tmux";
         case AI_PROVIDER_GROK_BUILD:
             return "grok-build";
+        case AI_PROVIDER_ANTIGRAVITY:
+            return "antigravity";
         default:
             return "unknown";
     }
@@ -362,6 +365,11 @@ ai_provider_type_from_string(const gchar *str)
              g_ascii_strcasecmp(str, "claude_code_tmux") == 0)
     {
         return AI_PROVIDER_CLAUDE_TMUX;
+    }
+    else if (g_ascii_strcasecmp(str, "antigravity") == 0 ||
+             g_ascii_strcasecmp(str, "agy") == 0)
+    {
+        return AI_PROVIDER_ANTIGRAVITY;
     }
 
     return AI_PROVIDER_CLAUDE;

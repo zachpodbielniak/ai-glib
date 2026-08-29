@@ -162,6 +162,8 @@ test_cli_list_providers(void)
 	g_assert_cmpint(run.exit_status, ==, 0);
 	g_assert_nonnull(strstr(run.stdout_data, "grok-build"));
 	g_assert_nonnull(strstr(run.stdout_data, "grok-build     CLI"));
+	g_assert_nonnull(strstr(run.stdout_data, "antigravity"));
+	g_assert_nonnull(strstr(run.stdout_data, "antigravity    CLI"));
 	/* And the HTTP one is still distinct. */
 	g_assert_nonnull(strstr(run.stdout_data, "grok           HTTP"));
 
@@ -179,6 +181,7 @@ test_cli_help_mentions_provider(void)
 
 	g_assert_cmpint(run.exit_status, ==, 0);
 	g_assert_nonnull(strstr(run.stdout_data, "grok-build"));
+	g_assert_nonnull(strstr(run.stdout_data, "antigravity"));
 	g_assert_nonnull(strstr(run.stdout_data, "--set"));
 
 	run_clear(&run);
@@ -506,6 +509,53 @@ test_cli_dry_run_claude_code(void)
 	run_clear(&run);
 }
 
+static void
+test_cli_dry_run_antigravity(void)
+{
+	const gchar *hyphen[] = { "-p", "antigravity", "--dry-run", "hello", NULL };
+	const gchar *alias[] = { "-p", "agy", "--dry-run", "hello", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(hyphen, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--input-format stream-json");
+	assert_dry_run_contains(run.stdout_data, "--output-format stream-json");
+	assert_dry_run_contains(run.stdout_data, "--disable-slash-commands");
+	assert_dry_run_lacks(run.stdout_data, "hello");
+	/* --print would consume the next argv word; we never emit it.
+	 * Cannot strstr for "--print" itself: it is a prefix of
+	 * --print-timeout, which we do emit. */
+	assert_dry_run_lacks(run.stdout_data, "--print ");
+	assert_dry_run_lacks(run.stdout_data, "no CLI subprocess");
+
+	run_clear(&run);
+
+	run_ai(alias, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--input-format stream-json");
+	run_clear(&run);
+}
+
+static void
+test_cli_skip_permissions_antigravity(void)
+{
+	const gchar *off[] = { "-p", "antigravity", "--dry-run", "hi", NULL };
+	const gchar *on[] = {
+		"-p", "antigravity", "--skip-permissions", "--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(off, NULL, &run);
+	assert_dry_run_lacks(run.stdout_data, "--dangerously-skip-permissions");
+	run_clear(&run);
+
+	run_ai(on, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--dangerously-skip-permissions");
+	run_clear(&run);
+}
+
 /*
  * --skip-permissions reaches opencode as --auto. The flag was accepted
  * and silently ignored for this provider before: `ai` only applied it to
@@ -603,6 +653,8 @@ test_cli_continue_flag(void)
 		{ "grok-build",  "--continue" },
 		{ "claude-code", "--continue" },
 		{ "opencode",    "--continue" },
+		{ "antigravity", "--continue" },
+		{ "agy",         "--continue" },
 	};
 	gsize i;
 
@@ -1060,6 +1112,10 @@ main(
 	                test_cli_dry_run_opencode);
 	g_test_add_func("/ai-glib/ai-cli/dry-run/claude-code",
 	                test_cli_dry_run_claude_code);
+	g_test_add_func("/ai-glib/ai-cli/dry-run/antigravity",
+	                test_cli_dry_run_antigravity);
+	g_test_add_func("/ai-glib/ai-cli/skip-permissions/antigravity",
+	                test_cli_skip_permissions_antigravity);
 	g_test_add_func("/ai-glib/ai-cli/skip-permissions/opencode",
 	                test_cli_skip_permissions_opencode);
 	g_test_add_func("/ai-glib/ai-cli/set/opencode-properties",

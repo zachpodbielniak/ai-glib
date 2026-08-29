@@ -31,6 +31,7 @@ test_provider_type_to_string(void)
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_OPENCODE), ==, "opencode");
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_CLAUDE_TMUX), ==, "claude-tmux");
 	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_GROK_BUILD), ==, "grok-build");
+	g_assert_cmpstr(ai_provider_type_to_string(AI_PROVIDER_ANTIGRAVITY), ==, "antigravity");
 }
 
 static void
@@ -52,6 +53,9 @@ test_provider_type_from_string(void)
 	g_assert_cmpint(ai_provider_type_from_string("grok-build"), ==, AI_PROVIDER_GROK_BUILD);
 	g_assert_cmpint(ai_provider_type_from_string("grok_build"), ==, AI_PROVIDER_GROK_BUILD);
 	g_assert_cmpint(ai_provider_type_from_string("GROK-BUILD"), ==, AI_PROVIDER_GROK_BUILD);
+	g_assert_cmpint(ai_provider_type_from_string("antigravity"), ==, AI_PROVIDER_ANTIGRAVITY);
+	g_assert_cmpint(ai_provider_type_from_string("agy"), ==, AI_PROVIDER_ANTIGRAVITY);
+	g_assert_cmpint(ai_provider_type_from_string("AGY"), ==, AI_PROVIDER_ANTIGRAVITY);
 	g_assert_cmpint(ai_provider_type_from_string(NULL), ==, AI_PROVIDER_CLAUDE);
 }
 

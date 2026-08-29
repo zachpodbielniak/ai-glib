@@ -2,7 +2,7 @@
 A GLib/GObject-based C library for interacting with AI providers.
 
 ** Features
-- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build
+- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=)
 - *Ollama transport*: route the Claude Code providers through =ollama launch claude= with an =ollama/<model>= model id
 - *GObject-based*: Full GObject type system integration
 - *Async Support*: Non-blocking operations via GAsyncResult/GTask
@@ -19,7 +19,7 @@ A GLib/GObject-based C library for interacting with AI providers.
   and summarises tool calls once, for any frontend to draw (see
   [[file:docs/transcript.org][docs/transcript.org]])
 - *Reads your existing harness files*: the commands, skills and agents already
-  in =~/.claude=, =.opencode= and =.grok= become =/= commands, with =@path=
+  in =~/.claude=, =.opencode=, =.grok= and =.agents= become =/= commands, with =@path=
   mentions and completion --- all of it library API, so an Emacs frontend gets
   the same behaviour (see [[file:docs/harness.org][docs/harness.org]])
 - *Agent tools*: =todo_write=, =multi_edit=, =task= (run an agent file as a

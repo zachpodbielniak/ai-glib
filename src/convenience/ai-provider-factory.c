@@ -20,6 +20,7 @@
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
+#include "providers/ai-antigravity-client.h"
 
 /**
  * ai_provider_factory_new:
@@ -82,6 +83,8 @@ ai_provider_factory_new(
             return G_OBJECT(ai_opencode_client_new_with_config(config));
         case AI_PROVIDER_GROK_BUILD:
             return G_OBJECT(ai_grok_build_client_new_with_config(config));
+        case AI_PROVIDER_ANTIGRAVITY:
+            return G_OBJECT(ai_antigravity_client_new_with_config(config));
         default:
             break;
     }

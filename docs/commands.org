@@ -245,7 +245,7 @@ A skill in =skills/foo/SKILL.md= is =/foo=, not =/SKILL=. A command in
 =name:= overrides both.
 
 *** You are driving a CLI provider
-claude-code, opencode and grok resolve slash commands themselves, so
+claude-code, opencode, grok and antigravity resolve slash commands themselves, so
 ai-glib passes the line straight through to them and your file is never
 consulted --- theirs is. That is deliberate; see
 [[file:harness.org::*Passthrough][Passthrough]]. Use =/expand= to see

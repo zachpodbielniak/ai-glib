@@ -157,6 +157,28 @@ def main():
     assert AiGlib.provider_type_to_string(
         AiGlib.ProviderType.GROK_BUILD) == "grok-build"
 
+    agy = AiGlib.AntigravityClient.new()
+    assert isinstance(agy, AiGlib.AntigravityClient)
+    assert isinstance(agy, AiGlib.CliClient)
+    assert agy.props.model == "gemini-3.7-flash-high"
+    agy.props.skip_permissions = True
+    agy.props.mode = "plan"
+    agy.props.sandbox = True
+    assert agy.props.skip_permissions is True
+    assert agy.props.mode == "plan"
+    assert agy.props.sandbox is True
+    assert agy.props.disable_slash_commands is True
+    assert isinstance(agy, AiGlib.Provider)
+    assert isinstance(agy, AiGlib.Streamable)
+    assert agy.get_provider_type() == AiGlib.ProviderType.ANTIGRAVITY
+    assert agy.get_name() == "Antigravity"
+    assert AiGlib.provider_type_from_string("antigravity") == \
+        AiGlib.ProviderType.ANTIGRAVITY
+    assert AiGlib.provider_type_from_string("agy") == \
+        AiGlib.ProviderType.ANTIGRAVITY
+    assert AiGlib.provider_type_to_string(
+        AiGlib.ProviderType.ANTIGRAVITY) == "antigravity"
+
     # ----- Boxed type roundtrip -----
     usage = AiGlib.Usage.new(100, 50)
     assert usage.get_input_tokens() == 100

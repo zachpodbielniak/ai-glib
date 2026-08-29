@@ -909,7 +909,8 @@ ai_cli_client_get_effort_level(AiCliClient *self)
  *   (low/medium/high/xhigh/max), or %NULL to reset to default (medium)
  *
  * Sets the reasoning effort level. Maps to --effort for Claude Code
- * and --variant for OpenCode.
+ * and Antigravity, --variant for OpenCode, and --reasoning-effort for
+ * Grok Build.
  */
 void
 ai_cli_client_set_effort_level(

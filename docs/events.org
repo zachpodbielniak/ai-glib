@@ -39,6 +39,7 @@ That is the whole integration. Swap =ai_claude_code_client_new()= for
 | =claude-code=   | yes  | yes      | yes        | yes       | yes         | yes   | yes  |
 | =opencode=      | yes  | ---      | yes        | ---       | yes         | yes   | ---  |
 | =grok-build=    | yes  | yes      | yes        | yes       | ---         | yes   | yes  |
+| =antigravity=   | yes  | yes      | yes        | ---       | yes         | yes   | ---  |
 | =claude-tmux=   | ---  | ---      | ---        | ---       | ---         | ---   | ---  |
 
 Three things that table is really saying:

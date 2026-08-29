@@ -75,6 +75,7 @@
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
+#include "providers/ai-antigravity-client.h"
 
 /* Convenience API */
 #include "convenience/ai-simple.h"

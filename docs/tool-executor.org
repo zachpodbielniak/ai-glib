@@ -380,7 +380,7 @@ on_approval (AiToolExecutor *exec, AiToolUse *tool_use, gpointer data)
 =bin/ai-tui.c= is a worked example.
 
 ** This never fires for the CLI wrappers
-claude-code, opencode and grok-build run their own tools inside their own
+claude-code, opencode, grok-build and antigravity run their own tools inside their own
 processes; ai-glib never sees those calls, so it cannot offer them for
 approval. Their equivalent is =--skip-permissions= and the per-provider
 =permission-mode= and =allowed-tools= properties. That is also why

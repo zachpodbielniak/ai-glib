@@ -386,7 +386,7 @@ untrusted input in exactly the sense subprocess stdout is.
 * Tools a provider does not host: =AiToolEndpointConsumer=
 
 Everything above concerns tools this process runs. A CLI wrapper --- claude-code,
-claude-tmux, opencode, grok-build --- runs its own tools in its own process and
+claude-tmux, opencode, grok-build, antigravity --- runs its own tools in its own process and
 ignores the =tools= argument entirely, which is why =AiConversation= refuses
 =local-tools= for one. What such a provider *does* take is a pointer to more
 tools: a config file, an environment variable, or a directory.

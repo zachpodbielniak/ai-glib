@@ -16,6 +16,7 @@
 #include "core/ai-cli-client.h"
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-grok-build-client.h"
+#include "providers/ai-antigravity-client.h"
 #include "convenience/ai-simple.h"
 #undef AI_GLIB_INSIDE
 
@@ -233,6 +234,24 @@ test_simple_grok_build_provider(void)
                     ==, "grok-4.5");
 }
 
+static void
+test_simple_antigravity_provider(void)
+{
+    g_autoptr(AiSimple) simple = NULL;
+    AiProvider *provider;
+
+    simple = ai_simple_new_with_provider(AI_PROVIDER_ANTIGRAVITY,
+                                         "claude-sonnet-4-6");
+    g_assert_nonnull(simple);
+
+    provider = ai_simple_get_provider(simple);
+    g_assert_nonnull(provider);
+    g_assert_true(AI_IS_ANTIGRAVITY_CLIENT(provider));
+    g_assert_true(AI_IS_CLI_CLIENT(provider));
+    g_assert_cmpstr(ai_cli_client_get_model(AI_CLI_CLIENT(provider)),
+                    ==, "claude-sonnet-4-6");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -243,6 +262,8 @@ main(int argc, char *argv[])
                     test_simple_claude_tmux_provider);
     g_test_add_func("/simple/grok-build-provider",
                     test_simple_grok_build_provider);
+    g_test_add_func("/simple/antigravity-provider",
+                    test_simple_antigravity_provider);
     g_test_add_func("/simple/new-with-provider", test_simple_new_with_provider);
     g_test_add_func("/simple/new-with-config", test_simple_new_with_config);
     g_test_add_func("/simple/system-prompt", test_simple_system_prompt);

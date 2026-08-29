@@ -97,6 +97,9 @@ typedef struct _AiOpenCodeClient  AiOpenCodeClient;
 typedef struct _AiGrokBuildClient  AiGrokBuildClient;
 /* AiGrokBuildClient is final */
 
+typedef struct _AiAntigravityClient  AiAntigravityClient;
+/* AiAntigravityClient is final */
+
 /* Convenience types */
 typedef struct _AiSimple  AiSimple;
 /* AiSimple is final */

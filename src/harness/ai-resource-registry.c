@@ -101,7 +101,17 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
     { "grok",     AI_RESOURCE_COMMAND, ".grok/commands",
       USER_BASE_HOME, ".grok/commands" },
     { "grok",     AI_RESOURCE_AGENT,   ".grok/agents",
-      USER_BASE_HOME, ".grok/agents" }
+      USER_BASE_HOME, ".grok/agents" },
+
+    /* antigravity / agy. Skills live under a customization root
+     * (`.agents/skills`); user-level copies sit next to the CLI's
+     * settings under ~/.gemini/antigravity-cli. */
+    { "antigravity", AI_RESOURCE_SKILL,   ".agents/skills",
+      USER_BASE_HOME, ".gemini/antigravity-cli/skills" },
+    { "antigravity", AI_RESOURCE_COMMAND, ".agents/commands",
+      USER_BASE_HOME, ".gemini/antigravity-cli/commands" },
+    { "antigravity", AI_RESOURCE_AGENT,   ".agents/agents",
+      USER_BASE_HOME, ".gemini/antigravity-cli/agents" }
 };
 
 /* ================================================================

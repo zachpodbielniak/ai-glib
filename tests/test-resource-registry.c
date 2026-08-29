@@ -49,10 +49,16 @@ reset(void)
 			g_build_filename(sandbox_home, ".opencode", NULL);
 		g_autofree gchar *grok =
 			g_build_filename(sandbox_home, ".grok", NULL);
+		g_autofree gchar *agents =
+			g_build_filename(sandbox_home, ".agents", NULL);
+		g_autofree gchar *gemini =
+			g_build_filename(sandbox_home, ".gemini", NULL);
 
 		rm_rf(claude);
 		rm_rf(opencode);
 		rm_rf(grok);
+		rm_rf(agents);
+		rm_rf(gemini);
 	}
 
 	rm_rf(config);

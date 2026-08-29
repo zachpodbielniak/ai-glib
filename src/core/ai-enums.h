@@ -32,6 +32,8 @@ G_BEGIN_DECLS
  *   subscription usage, bypassing the Agent SDK credit pool)
  * @AI_PROVIDER_GROK_BUILD: Grok Build CLI wrapper (the `grok` binary in
  *   headless mode)
+ * @AI_PROVIDER_ANTIGRAVITY: Google Antigravity CLI wrapper (the `agy`
+ *   binary in print / stream-json mode)
  *
  * Enumeration of supported AI providers.
  */
@@ -45,7 +47,8 @@ typedef enum
     AI_PROVIDER_CLAUDE_CODE,
     AI_PROVIDER_OPENCODE,
     AI_PROVIDER_CLAUDE_TMUX,
-    AI_PROVIDER_GROK_BUILD
+    AI_PROVIDER_GROK_BUILD,
+    AI_PROVIDER_ANTIGRAVITY
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);
@@ -157,9 +160,10 @@ ai_content_type_from_string(const gchar *str);
  * @AI_EFFORT_MAX: Maximum effort / deepest reasoning
  *
  * Enumeration of reasoning effort levels for AI providers.
- * Maps to --effort for Claude Code, --variant for OpenCode, and
- * --reasoning-effort for Grok Build (which has no "max" — it is folded
- * onto xhigh).
+ * Maps to --effort for Claude Code and Antigravity, --variant for
+ * OpenCode, and --reasoning-effort for Grok Build (which has no "max" —
+ * it is folded onto xhigh). Antigravity accepts only low|medium|high;
+ * xhigh and max fold onto high.
  *
  * Ordered low → max; XHIGH sits between HIGH and MAX so the numeric
  * ordering matches the semantic ordering.

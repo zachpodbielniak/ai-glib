@@ -5,7 +5,8 @@ Instructions for Claude Code when working on this project.
 ## Project Overview
 
 ai-glib is a GLib/GObject-based C library for interacting with AI providers
-(Claude, OpenAI, Gemini, Grok, Ollama). It follows GObject conventions and
+(Claude, OpenAI, Gemini, Grok, Ollama, plus CLI wrappers for Claude Code,
+OpenCode, Grok Build and Antigravity). It follows GObject conventions and
 provides both sync and async APIs.
 
 ## Build Commands
@@ -206,7 +207,8 @@ ai-glib/
 │       ├── ai-openai-client.h/.c
 │       ├── ai-gemini-client.h/.c
 │       ├── ai-grok-client.h/.c
-│       └── ai-ollama-client.h/.c
+│       ├── ai-ollama-client.h/.c
+│       └── ai-antigravity-client.h/.c
 ├── tests/                     # GTest unit tests
 ├── bin/                       # Installable CLI binaries
 │   ├── ai.c                   # `ai` command-line front-end
@@ -239,6 +241,7 @@ ai-glib/
 | Claude Code (tmux) | `CLAUDE_CODE_PATH`, `TMUX_PATH`, `OLLAMA_PATH` |
 | OpenCode | `OPENCODE_PATH` (override `opencode` path) |
 | Grok Build | `GROK_PATH` (override `grok` path) |
+| Antigravity | `AGY_PATH` (override `agy` path) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
 
 ## CLI provider options
@@ -255,21 +258,22 @@ Two conventions worth keeping:
   streaming and `--fork-session` only alongside `--resume`, because claude
   rejects them otherwise.
 - **Shared "how to run" flags live in one helper** (`emit_session_args` for
-  claude-code, `emit_execution_args` for opencode and grok-build) called by
+  claude-code and antigravity, `emit_execution_args` for opencode and grok-build) called by
   both `build_argv` and the no-text re-prompt path. A retry that silently
   dropped `--auto` would sit waiting for an approval nobody is there to
   give.
 
 Per-CLI equivalents of the same idea:
 
-| Concept | claude-code | opencode | grok-build |
-|---|---|---|---|
-| Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` |
-| Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` |
-| Agent profile | `--agent` | `--agent` | `--agent` |
-| Continue latest | `--continue` | `--continue` | `--continue` |
+| Concept | claude-code | opencode | grok-build | antigravity |
+|---|---|---|---|---|
+| Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` | `--dangerously-skip-permissions` |
+| Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` | `--effort` (low\|medium\|high; xhigh/max → high) |
+| Agent profile | `--agent` | `--agent` | `--agent` | `--agent` |
+| Continue latest | `--continue` | `--continue` | `--continue` | `--continue` (`--conversation` for an id) |
 
-`continue-session` is spelled identically on all four providers, which is
+`continue-session` is spelled identically on all four CLI wrappers plus
+antigravity, which is
 what lets `ai -c` apply it by property lookup instead of a branch per
 provider. claude-tmux is the odd one: it cannot pass `--continue`, because
 its whole flow is keyed by session id and that flag never says which
@@ -329,6 +333,31 @@ Tests live in two files and both are load-bearing:
   empty prompt. Configure the stub by staging files in its directory
   (`stdout`, `stdout.<n>` for the Nth call, `stderr`, `exit`, `sleep`).
 
+## Antigravity (`agy`)
+
+`AiAntigravityClient` wraps Google's `agy` CLI in print mode. Three things
+about it are load-bearing:
+
+1. **Do not pass `--print`.** That flag consumes the next argv word as the
+   prompt, so `agy --print --model X` sends `"--model"` as the prompt.
+   The prompt is piped as one `--input-format stream-json` user event;
+   `--output-format stream-json` is required alongside it. That is also
+   what keeps long conversations under `MAX_ARG_STRLEN`.
+2. **`--print-timeout` must be emitted.** agy defaults to 5m, which is
+   shorter than the library's 30-minute process bound. Format
+   `process-timeout-ms` (1800000 → `30m`) unless the `print-timeout`
+   property is set.
+3. **`status != SUCCESS` is an error even when the process exits 0.**
+   Parse stdout first. Session resume is `--conversation <id>`;
+   `--continue` only when there is no id. Effort is `low|medium|high`;
+   `xhigh` and `max` fold onto `high`. `--disable-slash-commands` defaults
+   on so a library prompt is text.
+
+Inspect the command with `ai -p agy --dry-run "hi"` (or `-p antigravity`).
+
+Tests: `tests/test-antigravity-client.c` and
+`tests/test-antigravity-subprocess.c`, same split as grok-build.
+
 ## CLI binary (`ai`)
 
 `bin/ai.c` builds a small `ai` front-end (provider/model/system/stream/
@@ -381,6 +410,9 @@ ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_DEEPSEEK_R1_14B);
 /* Grok Build (CLI) — note the AI_GROK_BUILD_ prefix; the AI_GROK_MODEL_*
    defines above are xAI API ids and are NOT valid `grok --model` values */
 ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_6);
+
+/* Antigravity (CLI) — `agy --model` ids, not Gemini HTTP ids */
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH);
 ```
 
 See `src/providers/ai-*-client.h` for complete model lists.
