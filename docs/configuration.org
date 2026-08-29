@@ -91,6 +91,9 @@ CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=, =
 | OpenCode           | =OPENCODE_PATH=      | Override path to =opencode= executable   |
 | Grok Build         | =GROK_PATH=          | Override path to =grok= executable       |
 | Antigravity        | =AGY_PATH=           | Override path to =agy= executable        |
+| Cursor             | =CURSOR_AGENT_PATH=  | Override path to =cursor-agent= (wins)   |
+| Cursor             | =CURSOR_PATH=        | Fallback override if =CURSOR_AGENT_PATH= is unset |
+| Cursor             | =CURSOR_API_KEY=     | Optional API key for the Cursor Agent CLI |
 
 For the Claude Code (=claude-code=) and Claude Code tmux (=claude-tmux=)
 providers, a model name beginning with =ollama/= routes the turn through
@@ -108,7 +111,7 @@ The default provider and model can be set via environment variables, which overr
 
 | Variable                   | Description           | Example                                                                   |
 |----------------------------+-----------------------+---------------------------------------------------------------------------|
-| =AI_GLIB_DEFAULT_PROVIDER= | Default provider name | =ollama=, =claude=, =openai=, =gemini=, =grok=, =claude-code=, =claude-tmux=, =opencode=, =grok-build=, =antigravity= / =agy= |
+| =AI_GLIB_DEFAULT_PROVIDER= | Default provider name | =ollama=, =claude=, =openai=, =gemini=, =grok=, =claude-code=, =claude-tmux=, =opencode=, =grok-build=, =antigravity= / =agy=, =cursor= |
 | =AI_GLIB_DEFAULT_MODEL=    | Default model name    | =qwen2.5:7b=, =claude-sonnet-5=                                  |
 
 #+begin_src sh

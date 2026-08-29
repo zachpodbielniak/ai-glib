@@ -208,7 +208,8 @@ ai-glib/
 │       ├── ai-gemini-client.h/.c
 │       ├── ai-grok-client.h/.c
 │       ├── ai-ollama-client.h/.c
-│       └── ai-antigravity-client.h/.c
+│       ├── ai-antigravity-client.h/.c
+│       └── ai-cursor-client.h/.c
 ├── tests/                     # GTest unit tests
 ├── bin/                       # Installable CLI binaries
 │   ├── ai.c                   # `ai` command-line front-end
@@ -242,6 +243,7 @@ ai-glib/
 | OpenCode | `OPENCODE_PATH` (override `opencode` path) |
 | Grok Build | `GROK_PATH` (override `grok` path) |
 | Antigravity | `AGY_PATH` (override `agy` path) |
+| Cursor | `CURSOR_AGENT_PATH` then `CURSOR_PATH` (override `cursor-agent` path), `CURSOR_API_KEY` (optional) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
 
 ## CLI provider options
@@ -258,22 +260,22 @@ Two conventions worth keeping:
   streaming and `--fork-session` only alongside `--resume`, because claude
   rejects them otherwise.
 - **Shared "how to run" flags live in one helper** (`emit_session_args` for
-  claude-code and antigravity, `emit_execution_args` for opencode and grok-build) called by
+  claude-code, antigravity and cursor, `emit_execution_args` for opencode and grok-build) called by
   both `build_argv` and the no-text re-prompt path. A retry that silently
   dropped `--auto` would sit waiting for an approval nobody is there to
   give.
 
 Per-CLI equivalents of the same idea:
 
-| Concept | claude-code | opencode | grok-build | antigravity |
-|---|---|---|---|---|
-| Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` | `--dangerously-skip-permissions` |
-| Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` | `--effort` (low\|medium\|high; xhigh/max → high) |
-| Agent profile | `--agent` | `--agent` | `--agent` | `--agent` |
-| Continue latest | `--continue` | `--continue` | `--continue` | `--continue` (`--conversation` for an id) |
+| Concept | claude-code | opencode | grok-build | antigravity | cursor |
+|---|---|---|---|---|---|
+| Bypass approval | `--dangerously-skip-permissions` | `--auto` | `--permission-mode bypassPermissions` | `--dangerously-skip-permissions` | `--force` |
+| Reasoning effort | `--effort` | `--variant` | `--reasoning-effort` | `--effort` (low\|medium\|high; xhigh/max → high) | baked into the model id; `model-params` for `[...]` |
+| Agent profile | `--agent` | `--agent` | `--agent` | `--agent` | — |
+| Continue latest | `--continue` | `--continue` | `--continue` | `--continue` (`--conversation` for an id) | `--continue` (`--resume <id>` for an id) |
 
-`continue-session` is spelled identically on all four CLI wrappers plus
-antigravity, which is
+`continue-session` is spelled identically on the CLI wrappers including
+cursor, which is
 what lets `ai -c` apply it by property lookup instead of a branch per
 provider. claude-tmux is the odd one: it cannot pass `--continue`, because
 its whole flow is keyed by session id and that flag never says which
@@ -358,6 +360,32 @@ Inspect the command with `ai -p agy --dry-run "hi"` (or `-p antigravity`).
 Tests: `tests/test-antigravity-client.c` and
 `tests/test-antigravity-subprocess.c`, same split as grok-build.
 
+## Cursor (`cursor-agent`)
+
+`AiCursorClient` wraps Cursor's `cursor-agent` CLI in `--print` mode.
+Three things about it are load-bearing:
+
+1. **Default binary is `cursor-agent`, not `agent`.** grok also ships an
+   `agent` on PATH, and the Cursor install provides both names. Override
+   with `CURSOR_AGENT_PATH`, then `CURSOR_PATH`.
+2. **`--print` is a boolean.** Unlike `agy --print`, it does not consume
+   the next argv word. The prompt is still piped on stdin so a long
+   conversation never hits `MAX_ARG_STRLEN`. Non-stream uses
+   `--output-format json`; stream uses `--output-format stream-json`
+   plus `--stream-partial-output`. With that last flag, only assistant
+   events that carry `timestamp_ms` and no `model_call_id` are new text.
+3. **`is_error` is an error even when the process exits 0.** Parse stdout
+   first. JSON is `{type:"result", is_error, result, session_id}`. Resume
+   is `--resume <id>`; `--continue` only when there is no id. Effort is
+   baked into the model id; `model-params` appends `[...]` overrides.
+   `--force` is skip-permissions (`--yolo` is not emitted). The `api-key`
+   property becomes `CURSOR_API_KEY` on the child, never an argv word.
+
+Inspect the command with `ai -p cursor --dry-run "hi"`.
+
+Tests: `tests/test-cursor-client.c` and
+`tests/test-cursor-subprocess.c`, same split as grok-build.
+
 ## CLI binary (`ai`)
 
 `bin/ai.c` builds a small `ai` front-end (provider/model/system/stream/
@@ -413,6 +441,10 @@ ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_6);
 
 /* Antigravity (CLI) — `agy --model` ids, not Gemini HTTP ids */
 ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH);
+
+/* Cursor (CLI) — `cursor-agent --model` ids */
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CURSOR_MODEL_AUTO);
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CURSOR_MODEL_COMPOSER_2_5);
 ```
 
 See `src/providers/ai-*-client.h` for complete model lists.

@@ -49,11 +49,12 @@ The library includes simple chat examples for each provider:
 | =simple-chat-opencode.c=   | OpenCode   | =opencode= CLI, configured    |
 | =simple-chat-grok-build.c= | Grok Build | =grok= CLI, authenticated     |
 | =simple-chat-antigravity.c= | Antigravity | =agy= CLI, authenticated    |
+| =simple-chat-cursor.c=      | Cursor      | =cursor-agent= CLI, authenticated |
 
 These spawn the corresponding CLI rather than talking HTTP, so they need
 the tool installed (in =$PATH=, or named via =OPENCODE_PATH= / =GROK_PATH= /
-=AGY_PATH=) rather than an API key. See [[file:../providers/grok-build.org][Grok Build]] and
-[[file:../providers/antigravity.org][Antigravity]].
+=AGY_PATH= / =CURSOR_AGENT_PATH=) rather than an API key. See [[file:../providers/grok-build.org][Grok Build]],
+[[file:../providers/antigravity.org][Antigravity]] and [[file:../providers/cursor.org][Cursor]].
 
 ** Image Generation Examples
 | File                 | Provider           | Requires         |

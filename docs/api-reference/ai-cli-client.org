@@ -1,7 +1,7 @@
 * AiCliClient
 =AiCliClient= is the derivable base class behind every provider that wraps a
 command-line coding agent: [[../providers/claude-code.org][Claude Code]], [[../providers/claude-code-tmux.org][Claude Code (tmux)]], [[../providers/opencode.org][OpenCode]],
-[[../providers/grok-build.org][Grok Build]] and [[../providers/antigravity.org][Antigravity]]. It is the CLI-side counterpart to [[file:ai-client.org][=AiClient=]], which is the base
+[[../providers/grok-build.org][Grok Build]], [[../providers/antigravity.org][Antigravity]] and [[../providers/cursor.org][Cursor]]. It is the CLI-side counterpart to [[file:ai-client.org][=AiClient=]], which is the base
 for the HTTP providers.
 
 A subclass says *what command to run and how to read its output*; the base
@@ -55,6 +55,7 @@ One property, three spellings:
 | opencode    | =--variant=          | provider-specific (e.g. high, max, minimal) |
 | grok-build  | =--reasoning-effort= | low, medium, high, xhigh (=max= folds onto =xhigh=) |
 | antigravity | =--effort=           | low, medium, high (=xhigh= and =max= fold onto =high=) |
+| cursor      | (none)               | Effort is baked into the model id; =model-params= holds bracket overrides |
 
 *** Timeouts
 =process-timeout-ms= bounds =ai_cli_client_chat_sync()= only. The async and

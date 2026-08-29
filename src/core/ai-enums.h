@@ -34,6 +34,8 @@ G_BEGIN_DECLS
  *   headless mode)
  * @AI_PROVIDER_ANTIGRAVITY: Google Antigravity CLI wrapper (the `agy`
  *   binary in print / stream-json mode)
+ * @AI_PROVIDER_CURSOR: Cursor Agent CLI wrapper (the `cursor-agent`
+ *   binary in `--print` mode)
  *
  * Enumeration of supported AI providers.
  */
@@ -48,7 +50,8 @@ typedef enum
     AI_PROVIDER_OPENCODE,
     AI_PROVIDER_CLAUDE_TMUX,
     AI_PROVIDER_GROK_BUILD,
-    AI_PROVIDER_ANTIGRAVITY
+    AI_PROVIDER_ANTIGRAVITY,
+    AI_PROVIDER_CURSOR
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);

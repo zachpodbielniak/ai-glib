@@ -51,7 +51,7 @@ static gboolean  opt_license = FALSE;
 static const GOptionEntry option_entries[] = {
     { "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
       "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-      "claude-tmux, opencode, grok-build, antigravity (agy)", "NAME" },
+      "claude-tmux, opencode, grok-build, antigravity (agy), cursor", "NAME" },
     { "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
       "Model id", "MODEL" },
     { "system", 's', 0, G_OPTION_ARG_STRING, &opt_system,

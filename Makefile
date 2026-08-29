@@ -93,6 +93,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-opencode-client.h \
 	$(SRCDIR)/providers/ai-grok-build-client.h \
 	$(SRCDIR)/providers/ai-antigravity-client.h \
+	$(SRCDIR)/providers/ai-cursor-client.h \
 	$(SRCDIR)/convenience/ai-simple.h \
 	$(SRCDIR)/convenience/ai-search-provider.h \
 	$(SRCDIR)/convenience/ai-search-result.h \
@@ -173,6 +174,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-opencode-client.c \
 	$(SRCDIR)/providers/ai-grok-build-client.c \
 	$(SRCDIR)/providers/ai-antigravity-client.c \
+	$(SRCDIR)/providers/ai-cursor-client.c \
 	$(SRCDIR)/providers/ai-grok-home-overlay.c \
 	$(SRCDIR)/convenience/ai-simple.c \
 	$(SRCDIR)/convenience/ai-search-provider.c \

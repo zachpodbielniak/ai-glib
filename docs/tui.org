@@ -220,7 +220,7 @@ which is the answer to the question you are about to ask. If a file is
 there but another one won, the same listing prints the winner's path.
 
 *** CLI providers handle their own
-claude-code, opencode, grok and antigravity resolve =@=, =/= and their own skills
+claude-code, opencode, grok, antigravity and cursor resolve =@=, =/= and their own skills
 themselves, so with one of those selected a line reaches the child
 exactly as typed and =/compact= still means what it means to them. The
 built-ins above still run locally --- the wrapped tool has no opinion
@@ -288,7 +288,7 @@ answer of =a= is remembered for that run only: consent given about one task
 is not consent for the next.
 
 *This never appears for the CLI wrapper providers.* claude-code, opencode,
-grok-build and antigravity run their own tools inside their own processes, and their
+grok-build, antigravity and cursor run their own tools inside their own processes, and their
 approval is =--skip-permissions= and the per-provider =permission-mode= and
 =allowed-tools= properties, not this. =--local-tools= is refused for them,
 with a note saying so, rather than silently doing nothing.

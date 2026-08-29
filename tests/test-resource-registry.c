@@ -53,12 +53,15 @@ reset(void)
 			g_build_filename(sandbox_home, ".agents", NULL);
 		g_autofree gchar *gemini =
 			g_build_filename(sandbox_home, ".gemini", NULL);
+		g_autofree gchar *cursor =
+			g_build_filename(sandbox_home, ".cursor", NULL);
 
 		rm_rf(claude);
 		rm_rf(opencode);
 		rm_rf(grok);
 		rm_rf(agents);
 		rm_rf(gemini);
+		rm_rf(cursor);
 	}
 
 	rm_rf(config);
@@ -307,6 +310,30 @@ test_agents_from_both_harnesses(void)
 		g_assert_cmpstr(ai_resource_get_description(reviewer), ==,
 		                "Reviews C code.");
 	}
+}
+
+static void
+test_cursor_harness_roots(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	AiResource *skill;
+	AiResource *bundled;
+
+	reset();
+	write_project(".cursor/skills/review/SKILL.md",
+	              "---\ndescription: review diffs\n---\nReview.\n");
+	write_home(".cursor/skills-cursor/shell/SKILL.md",
+	           "---\ndescription: bundled shell\n---\nShell.\n");
+
+	registry = fresh_registry();
+
+	skill = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "review");
+	g_assert_nonnull(skill);
+	g_assert_cmpstr(ai_resource_get_origin(skill), ==, "cursor");
+
+	bundled = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "shell");
+	g_assert_nonnull(bundled);
+	g_assert_cmpstr(ai_resource_get_origin(bundled), ==, "cursor");
 }
 
 /* ----------------------------------------------------------------
@@ -1065,6 +1092,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/registry/kinds-coexist",
 	                test_kinds_do_not_collide);
 	g_test_add_func("/ai-glib/registry/agents", test_agents_from_both_harnesses);
+	g_test_add_func("/ai-glib/registry/cursor-roots",
+	                test_cursor_harness_roots);
 
 	g_test_add_func("/ai-glib/registry/project-shadows-user",
 	                test_project_shadows_user);

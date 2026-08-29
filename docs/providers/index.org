@@ -19,6 +19,7 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 | [[file:opencode.org][OpenCode]]                   | =AiOpenCodeClient=   | =OPENCODE_PATH= (optional)    | anthropic/claude-sonnet-5          |
 | [[file:grok-build.org][Grok Build]]              | =AiGrokBuildClient=  | =GROK_PATH= (optional)        | grok-4.6                           |
 | [[file:antigravity.org][Antigravity]]            | =AiAntigravityClient= | =AGY_PATH= (optional)        | gemini-3.7-flash-high              |
+| [[file:cursor.org][Cursor]]                  | =AiCursorClient=      | =CURSOR_AGENT_PATH= / =CURSOR_PATH= | auto                          |
 
 The two Claude Code variants drive the same =claude= CLI but differ in billing path: =AiClaudeCodeClient= uses =claude --print= (Agent SDK credits), while =AiClaudeTmuxClient= runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [[file:claude-code-tmux.org]] for details.
 
@@ -76,16 +77,16 @@ ai_client_set_model(AI_CLIENT(client), "claude-haiku-4-5-20251001");
 #+end_src
 
 ** Provider Comparison
-| Feature          | Claude | OpenAI | Gemini | Grok | Ollama                | Claude Code        | Claude Code (tmux) | OpenCode           | Grok Build         | Antigravity        |
-|------------------+--------+--------+--------+------+-----------------------+--------------------+--------------------+--------------------+--------------------+--------------------|
-| Chat Completion  | Yes    | Yes    | Yes    | Yes  | Yes                   | Yes                | Yes                | Yes                | Yes                | Yes                |
-| Streaming        | Yes    | Yes    | Yes    | Yes  | Yes                   | Yes                | No                 | Yes                | Yes                | Yes                |
-| Tool Use         | Yes    | Yes    | Yes    | Yes  | Yes (model-dependent) | Yes                | Yes                | Model-dependent    | Yes (CLI built-in) | Yes (CLI built-in) |
-| Vision           | Yes    | Yes    | Yes    | Yes  | Model-dependent       | Yes                | Yes                | Model-dependent    | No                 | Yes                |
-| Local            | No     | No     | No     | No   | Yes                   | No                 | No                 | No                 | No                 | No                 |
-| API Key Required | Yes    | Yes    | Yes    | Yes  | No                    | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) |
-| Multi-Provider   | No     | No     | No     | No   | No                    | No                 | No                 | Yes                | No                 | Yes                |
-| Billing Path     | API    | API    | API    | API  | n/a                   | Agent SDK          | Subscription (TUI) | Agent SDK          | xAI account        | Google account     |
+| Feature          | Claude | OpenAI | Gemini | Grok | Ollama                | Claude Code        | Claude Code (tmux) | OpenCode           | Grok Build         | Antigravity        | Cursor             |
+|------------------+--------+--------+--------+------+-----------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------|
+| Chat Completion  | Yes    | Yes    | Yes    | Yes  | Yes                   | Yes                | Yes                | Yes                | Yes                | Yes                | Yes                |
+| Streaming        | Yes    | Yes    | Yes    | Yes  | Yes                   | Yes                | No                 | Yes                | Yes                | Yes                | Yes                |
+| Tool Use         | Yes    | Yes    | Yes    | Yes  | Yes (model-dependent) | Yes                | Yes                | Model-dependent    | Yes (CLI built-in) | Yes (CLI built-in) | Yes (CLI built-in) |
+| Vision           | Yes    | Yes    | Yes    | Yes  | Model-dependent       | Yes                | Yes                | Model-dependent    | No                 | Yes                | Yes                |
+| Local            | No     | No     | No     | No   | Yes                   | No                 | No                 | No                 | No                 | No                 | No                 |
+| API Key Required | Yes    | Yes    | Yes    | Yes  | No                    | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) | No (uses CLI auth) | Optional (=CURSOR_API_KEY=) |
+| Multi-Provider   | No     | No     | No     | No   | No                    | No                 | No                 | Yes                | No                 | Yes                | Yes                |
+| Billing Path     | API    | API    | API    | API  | n/a                   | Agent SDK          | Subscription (TUI) | Agent SDK          | xAI account        | Google account     | Cursor account     |
 
 ** Error Handling
 All providers use the same error domain (=AI_ERROR=):

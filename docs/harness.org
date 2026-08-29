@@ -147,6 +147,10 @@ Antigravity (=agy=) is also scanned: project =.agents/skills= (and
 =.agents/commands=, =.agents/agents=), plus the user-level copies under
 =~/.gemini/antigravity-cli/=.
 
+Cursor (=cursor-agent=) is scanned too: project =.cursor/skills= (and
+=.cursor/commands=, =.cursor/agents=), user copies under =~/.cursor/=,
+and the bundled skills the installer drops at =~/.cursor/skills-cursor=.
+
 Within a directory, three layouts are understood:
 
 - =<name>.md= --- the ordinary case.
@@ -166,7 +170,7 @@ Two rules, in this order:
    directory, so a repository can override a personal command without
    the user editing anything.
 2. **Table order.** Within one scope, ai-glib's own directories come
-   first, then claude, then opencode, then grok, then antigravity. A file written
+   first, then claude, then opencode, then grok, then antigravity, then cursor. A file written
    specifically for ai-glib beats one it is merely borrowing.
 
 Resources added by hand with =ai_resource_registry_add()= sit above all
@@ -462,7 +466,7 @@ on_sent (GObject *source, GAsyncResult *result, gpointer user_data)
 #+end_src
 
 *** Passthrough
-claude-code, opencode, grok and antigravity resolve =@=, =/= and their own skills
+claude-code, opencode, grok, antigravity and cursor resolve =@=, =/= and their own skills
 themselves. So for a CLI provider the line reaches the child
 **byte-for-byte as typed**, and =passthrough-commands= defaults to =TRUE=
 there and =FALSE= for an HTTP provider.

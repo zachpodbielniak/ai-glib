@@ -179,6 +179,29 @@ def main():
     assert AiGlib.provider_type_to_string(
         AiGlib.ProviderType.ANTIGRAVITY) == "antigravity"
 
+    cursor = AiGlib.CursorClient.new()
+    assert isinstance(cursor, AiGlib.CursorClient)
+    assert isinstance(cursor, AiGlib.CliClient)
+    assert cursor.props.model == "auto"
+    cursor.props.skip_permissions = True
+    cursor.props.mode = "plan"
+    cursor.props.sandbox = "disabled"
+    cursor.props.trust = True
+    assert cursor.props.skip_permissions is True
+    assert cursor.props.mode == "plan"
+    assert cursor.props.sandbox == "disabled"
+    assert cursor.props.trust is True
+    assert isinstance(cursor, AiGlib.Provider)
+    assert isinstance(cursor, AiGlib.Streamable)
+    assert cursor.get_provider_type() == AiGlib.ProviderType.CURSOR
+    assert cursor.get_name() == "Cursor"
+    assert AiGlib.provider_type_from_string("cursor") == \
+        AiGlib.ProviderType.CURSOR
+    assert AiGlib.provider_type_from_string("cursor-agent") == \
+        AiGlib.ProviderType.CURSOR
+    assert AiGlib.provider_type_to_string(
+        AiGlib.ProviderType.CURSOR) == "cursor"
+
     # ----- Boxed type roundtrip -----
     usage = AiGlib.Usage.new(100, 50)
     assert usage.get_input_tokens() == 100

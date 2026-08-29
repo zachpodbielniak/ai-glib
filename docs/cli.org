@@ -22,7 +22,7 @@ piping.
 ** Options
 | Option                  | Description                                                        |
 |-------------------------+--------------------------------------------------------------------|
-| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build, antigravity (agy) (default: =$AI_PROVIDER= or =claude=) |
+| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build, antigravity (agy), cursor (default: =$AI_PROVIDER= or =claude=) |
 | =-m=, =--model ID=      | Model id (default: provider default). =ollama/<id>= on the Claude Code providers selects the Ollama transport |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
@@ -49,6 +49,7 @@ Providers:
   opencode       CLI
   grok-build     CLI
   antigravity    CLI
+  cursor         CLI
 #+end_example
 
 A one-shot chat (HTTP provider):
@@ -77,12 +78,17 @@ $ ai -p grok-build -m grok-4.6 --effort low --dry-run "hi"
 
 $ ai -p agy --dry-run "hi"
 /path/to/agy --input-format stream-json --output-format stream-json --print-timeout 30m --model gemini-3.7-flash-high --disable-slash-commands --effort medium
+
+$ ai -p cursor --dry-run "hi"
+/path/to/cursor-agent --print --output-format json --model auto
 #+end_example
 
 The =grok-build= prompt never appears in argv: it is piped on stdin and
 read back through =--prompt-file /dev/stdin=. The =antigravity= / =agy=
 prompt is likewise piped, as one stream-json user event, because
-=agy --print= consumes the next argv word.
+=agy --print= consumes the next argv word. =cursor= also pipes the prompt
+on stdin; its =--print= is a boolean, so flags after it are safe, but a
+long conversation would still hit =MAX_ARG_STRLEN= as a positional.
 
 ** Continuing a session (=--continue=)
 =-c= picks up where this directory left off, rather than starting a new
@@ -94,7 +100,7 @@ $ ai -p claude-code -c "now update the tests"
 #+end_example
 
 It works for every CLI provider, each in its own spelling: =--continue= for
-claude-code, opencode, grok-build and antigravity. claude-tmux resolves the directory's
+claude-code, opencode, grok-build, antigravity and cursor. claude-tmux resolves the directory's
 newest transcript and resumes it *by id* instead — everything in that
 provider is keyed by session id, and claude's own =--continue= never
 reports which session it picked.
@@ -268,7 +274,7 @@ pollute that list.
 
 ** Notes
 - =--dry-run= prints the real argv for *every* CLI provider — claude-code,
-  claude-tmux, opencode, grok-build, antigravity — with the executable resolved and, for
+  claude-tmux, opencode, grok-build, antigravity, cursor — with the executable resolved and, for
   the claude providers, the Ollama transport applied. It goes through the
   =AiCliClient= vtable rather than a branch per provider, so a new CLI
   provider gets it for free. HTTP providers print a short summary instead,
@@ -276,11 +282,12 @@ pollute that list.
 - =--skip-permissions= applies to every CLI provider that has the concept,
   each in its own spelling: =--dangerously-skip-permissions= for the claude
   and antigravity providers, =--auto= for opencode, =--permission-mode bypassPermissions=
-  for grok-build.
+  for grok-build, =--force= for cursor.
 - =--effort= maps to =--reasoning-effort= for =grok-build=, which accepts
   =low=, =medium=, =high= and =xhigh=; =max= is folded onto =xhigh=. For
   =antigravity= it is =--effort= (=low=, =medium=, =high=); =xhigh= and
-  =max= fold onto =high=.
+  =max= fold onto =high=. Cursor bakes effort into the model id; use
+  the =model-params= property for bracket overrides rather than =--effort=.
 - For the Ollama transport the =claude= binary must be installed and on
   =$PATH= (=ollama launch claude= execs it); the launcher path may be
   overridden with =OLLAMA_PATH=.
@@ -305,7 +312,7 @@ mentions are appended to the prompt.
 
 Three cases where it does not apply:
 
-- *CLI providers.* claude-code, opencode, grok and antigravity resolve both
+- *CLI providers.* claude-code, opencode, grok, antigravity and cursor resolve both
   themselves, so the prompt goes through untouched.
 - *=--dry-run=.* The point there is the command line, not the filesystem;
   expanding first would put a file into the argv dump.

@@ -158,6 +158,8 @@ CLI providers use their own tool's authentication and don't require API key envi
 | OpenCode    | =OPENCODE_PATH=       | Optional path override for =opencode= CLI |
 | Grok Build  | =GROK_PATH=           | Optional path override for =grok= CLI     |
 | Antigravity | =AGY_PATH=            | Optional path override for =agy= CLI      |
+| Cursor      | =CURSOR_AGENT_PATH=   | Optional path override for =cursor-agent= |
+| Cursor      | =CURSOR_PATH=         | Fallback override if =CURSOR_AGENT_PATH= is unset |
 
 Additionally, the default provider and model can be set via environment variables:
 

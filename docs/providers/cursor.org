@@ -1,0 +1,409 @@
+* Cursor Provider
+The Cursor provider (=AiCursorClient=) wraps Cursor's =cursor-agent= CLI
+(the =agent= CLI) in =--print= mode. It is the agentic counterpart to
+talking to a model over HTTP: this one drives Cursor's coding agent, with
+its tools, sessions, sandbox, worktrees and MCP servers.
+
+The default binary is =cursor-agent= rather than =agent=: grok also ships
+an =agent= on =$PATH=, and the Cursor install provides both names.
+
+** Overview
+| Property      | Value                     |
+|---------------+---------------------------|
+| Type          | =AI_PROVIDER_CURSOR=      |
+| Name          | "Cursor"                  |
+| Default Model | =auto=                    |
+| Interface     | CLI (subprocess)          |
+| Binary        | =cursor-agent=            |
+| Aliases       | =cursor=, =cursor-agent=  |
+
+** Requirements
+- The Cursor Agent CLI must be installed and authenticated
+  (=cursor-agent login=)
+- The CLI must be available in =$PATH= as =cursor-agent=, or named via
+  =CURSOR_AGENT_PATH= / =CURSOR_PATH=
+
+** Environment Variables
+| Variable             | Description |
+|----------------------+-------------|
+| =CURSOR_AGENT_PATH=  | Override the path to the =cursor-agent= executable (wins) |
+| =CURSOR_PATH=        | Fallback override if =CURSOR_AGENT_PATH= is unset |
+| =CURSOR_API_KEY=     | Optional API key; also settable as the =api-key= property, which is delivered as this env var rather than as =--api-key= (so it never appears in =ps=) |
+| =CURSOR_API_ENDPOINT= | The CLI's own endpoint override; the =endpoint= property emits =--endpoint= instead |
+
+The CLI's stored credentials are read by =cursor-agent= itself.
+
+** Available Models
+Run =cursor-agent models= for the authoritative list; the CLI rejects
+unknown ids rather than falling back. Parameterized models also accept
+quoted bracket overrides, e.g.
+=--model 'claude-opus-4-8[context=1m,effort=high,fast=false]'= --- see
+=model-params=.
+
+=AI_CURSOR_DEFAULT_MODEL= and =AI_CURSOR_MODEL_LATEST= point at =auto=.
+
+| Define | Model ID |
+|--------+----------|
+| =AI_CURSOR_MODEL_AUTO= | =auto= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_LOW= | =gpt-5.3-codex-low= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_LOW_FAST= | =gpt-5.3-codex-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX= | =gpt-5.3-codex= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_FAST= | =gpt-5.3-codex-fast= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_HIGH= | =gpt-5.3-codex-high= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_HIGH_FAST= | =gpt-5.3-codex-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_XHIGH= | =gpt-5.3-codex-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_3_CODEX_XHIGH_FAST= | =gpt-5.3-codex-xhigh-fast= |
+| =AI_CURSOR_MODEL_GPT_5_2= | =gpt-5.2= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_HIGH_FAST= | =cursor-grok-4.6-high-fast= |
+| =AI_CURSOR_MODEL_COMPOSER_2_5= | =composer-2.5= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_HIGH= | =claude-opus-5-thinking-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_HIGH_FAST= | =claude-opus-5-thinking-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_HIGH= | =gpt-5.6-sol-high= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_HIGH_FAST= | =gpt-5.6-sol-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_XHIGH= | =gpt-5.6-sol-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_XHIGH_FAST= | =gpt-5.6-sol-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_THINKING_HIGH= | =claude-fable-5-thinking-high= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_THINKING_XHIGH= | =claude-fable-5-thinking-xhigh= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_HIGH= | =cursor-grok-4.5-high= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_HIGH_FAST= | =cursor-grok-4.5-high-fast= |
+| =AI_CURSOR_MODEL_GEMINI_3_7_FLASH_HIGH= | =gemini-3.7-flash-high= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_THINKING_HIGH= | =claude-sonnet-5-thinking-high= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_THINKING_XHIGH= | =claude-sonnet-5-thinking-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_HIGH= | =gpt-5.6-luna-high= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_LOW= | =cursor-grok-4.6-low= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_LOW_FAST= | =cursor-grok-4.6-low-fast= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_MEDIUM= | =cursor-grok-4.6-medium= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_MEDIUM_FAST= | =cursor-grok-4.6-medium-fast= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_HIGH= | =cursor-grok-4.6-high= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_XHIGH= | =cursor-grok-4.6-xhigh= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_6_XHIGH_FAST= | =cursor-grok-4.6-xhigh-fast= |
+| =AI_CURSOR_MODEL_COMPOSER_2_5_FAST= | =composer-2.5-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_LOW= | =claude-opus-5-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_LOW_FAST= | =claude-opus-5-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_MEDIUM= | =claude-opus-5-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_MEDIUM_FAST= | =claude-opus-5-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_HIGH= | =claude-opus-5-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_HIGH_FAST= | =claude-opus-5-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_LOW= | =claude-opus-5-thinking-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_LOW_FAST= | =claude-opus-5-thinking-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_MEDIUM= | =claude-opus-5-thinking-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_MEDIUM_FAST= | =claude-opus-5-thinking-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_XHIGH= | =claude-opus-5-thinking-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_XHIGH_FAST= | =claude-opus-5-thinking-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_MAX= | =claude-opus-5-thinking-max= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_5_THINKING_MAX_FAST= | =claude-opus-5-thinking-max-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_LOW= | =claude-opus-4-8-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_LOW_FAST= | =claude-opus-4-8-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_MEDIUM= | =claude-opus-4-8-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_MEDIUM_FAST= | =claude-opus-4-8-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_HIGH= | =claude-opus-4-8-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_HIGH_FAST= | =claude-opus-4-8-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_XHIGH= | =claude-opus-4-8-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_XHIGH_FAST= | =claude-opus-4-8-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_MAX= | =claude-opus-4-8-max= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_MAX_FAST= | =claude-opus-4-8-max-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_LOW= | =claude-opus-4-8-thinking-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_LOW_FAST= | =claude-opus-4-8-thinking-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_MEDIUM= | =claude-opus-4-8-thinking-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_MEDIUM_FAST= | =claude-opus-4-8-thinking-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_HIGH= | =claude-opus-4-8-thinking-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_HIGH_FAST= | =claude-opus-4-8-thinking-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_XHIGH= | =claude-opus-4-8-thinking-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_XHIGH_FAST= | =claude-opus-4-8-thinking-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_MAX= | =claude-opus-4-8-thinking-max= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_8_THINKING_MAX_FAST= | =claude-opus-4-8-thinking-max-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_NONE= | =gpt-5.6-sol-none= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_NONE_FAST= | =gpt-5.6-sol-none-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_LOW= | =gpt-5.6-sol-low= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_LOW_FAST= | =gpt-5.6-sol-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_MEDIUM= | =gpt-5.6-sol-medium= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_MEDIUM_FAST= | =gpt-5.6-sol-medium-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_MAX= | =gpt-5.6-sol-max= |
+| =AI_CURSOR_MODEL_GPT_5_6_SOL_MAX_FAST= | =gpt-5.6-sol-max-fast= |
+| =AI_CURSOR_MODEL_GPT_5_5_NONE= | =gpt-5.5-none= |
+| =AI_CURSOR_MODEL_GPT_5_5_NONE_FAST= | =gpt-5.5-none-fast= |
+| =AI_CURSOR_MODEL_GPT_5_5_LOW= | =gpt-5.5-low= |
+| =AI_CURSOR_MODEL_GPT_5_5_LOW_FAST= | =gpt-5.5-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_5_MEDIUM= | =gpt-5.5-medium= |
+| =AI_CURSOR_MODEL_GPT_5_5_MEDIUM_FAST= | =gpt-5.5-medium-fast= |
+| =AI_CURSOR_MODEL_GPT_5_5_HIGH= | =gpt-5.5-high= |
+| =AI_CURSOR_MODEL_GPT_5_5_HIGH_FAST= | =gpt-5.5-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_5_EXTRA_HIGH= | =gpt-5.5-extra-high= |
+| =AI_CURSOR_MODEL_GPT_5_5_EXTRA_HIGH_FAST= | =gpt-5.5-extra-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_LOW= | =claude-fable-5-low= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_MEDIUM= | =claude-fable-5-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_HIGH= | =claude-fable-5-high= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_XHIGH= | =claude-fable-5-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_MAX= | =claude-fable-5-max= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_THINKING_LOW= | =claude-fable-5-thinking-low= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_THINKING_MEDIUM= | =claude-fable-5-thinking-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_FABLE_5_THINKING_MAX= | =claude-fable-5-thinking-max= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_LOW= | =cursor-grok-4.5-low= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_LOW_FAST= | =cursor-grok-4.5-low-fast= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_MEDIUM= | =cursor-grok-4.5-medium= |
+| =AI_CURSOR_MODEL_CURSOR_GROK_4_5_MEDIUM_FAST= | =cursor-grok-4.5-medium-fast= |
+| =AI_CURSOR_MODEL_GEMINI_3_7_FLASH_LOW= | =gemini-3.7-flash-low= |
+| =AI_CURSOR_MODEL_GEMINI_3_7_FLASH_MEDIUM= | =gemini-3.7-flash-medium= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_NONE= | =gpt-5.6-terra-none= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_NONE_FAST= | =gpt-5.6-terra-none-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_LOW= | =gpt-5.6-terra-low= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_LOW_FAST= | =gpt-5.6-terra-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_MEDIUM= | =gpt-5.6-terra-medium= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_MEDIUM_FAST= | =gpt-5.6-terra-medium-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_HIGH= | =gpt-5.6-terra-high= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_HIGH_FAST= | =gpt-5.6-terra-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_XHIGH= | =gpt-5.6-terra-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_XHIGH_FAST= | =gpt-5.6-terra-xhigh-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_MAX= | =gpt-5.6-terra-max= |
+| =AI_CURSOR_MODEL_GPT_5_6_TERRA_MAX_FAST= | =gpt-5.6-terra-max-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_LOW= | =claude-sonnet-5-low= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_MEDIUM= | =claude-sonnet-5-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_HIGH= | =claude-sonnet-5-high= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_XHIGH= | =claude-sonnet-5-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_MAX= | =claude-sonnet-5-max= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_THINKING_LOW= | =claude-sonnet-5-thinking-low= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_THINKING_MEDIUM= | =claude-sonnet-5-thinking-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_SONNET_5_THINKING_MAX= | =claude-sonnet-5-thinking-max= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_SONNET_MEDIUM= | =claude-4.6-sonnet-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_SONNET_MEDIUM_THINKING= | =claude-4.6-sonnet-medium-thinking= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_LOW= | =claude-opus-4-7-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_LOW_FAST= | =claude-opus-4-7-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_MEDIUM= | =claude-opus-4-7-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_MEDIUM_FAST= | =claude-opus-4-7-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_HIGH= | =claude-opus-4-7-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_HIGH_FAST= | =claude-opus-4-7-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_XHIGH= | =claude-opus-4-7-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_XHIGH_FAST= | =claude-opus-4-7-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_MAX= | =claude-opus-4-7-max= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_MAX_FAST= | =claude-opus-4-7-max-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_LOW= | =claude-opus-4-7-thinking-low= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_LOW_FAST= | =claude-opus-4-7-thinking-low-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_MEDIUM= | =claude-opus-4-7-thinking-medium= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_MEDIUM_FAST= | =claude-opus-4-7-thinking-medium-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_HIGH= | =claude-opus-4-7-thinking-high= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_HIGH_FAST= | =claude-opus-4-7-thinking-high-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_XHIGH= | =claude-opus-4-7-thinking-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_XHIGH_FAST= | =claude-opus-4-7-thinking-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_MAX= | =claude-opus-4-7-thinking-max= |
+| =AI_CURSOR_MODEL_CLAUDE_OPUS_4_7_THINKING_MAX_FAST= | =claude-opus-4-7-thinking-max-fast= |
+| =AI_CURSOR_MODEL_GPT_5_4_LOW= | =gpt-5.4-low= |
+| =AI_CURSOR_MODEL_GPT_5_4_MEDIUM= | =gpt-5.4-medium= |
+| =AI_CURSOR_MODEL_GPT_5_4_MEDIUM_FAST= | =gpt-5.4-medium-fast= |
+| =AI_CURSOR_MODEL_GPT_5_4_HIGH= | =gpt-5.4-high= |
+| =AI_CURSOR_MODEL_GPT_5_4_HIGH_FAST= | =gpt-5.4-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_4_XHIGH= | =gpt-5.4-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_4_XHIGH_FAST= | =gpt-5.4-xhigh-fast= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_OPUS_HIGH= | =claude-4.6-opus-high= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_OPUS_MAX= | =claude-4.6-opus-max= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_OPUS_HIGH_THINKING= | =claude-4.6-opus-high-thinking= |
+| =AI_CURSOR_MODEL_CLAUDE_4_6_OPUS_MAX_THINKING= | =claude-4.6-opus-max-thinking= |
+| =AI_CURSOR_MODEL_CLAUDE_4_5_OPUS_HIGH= | =claude-4.5-opus-high= |
+| =AI_CURSOR_MODEL_CLAUDE_4_5_OPUS_HIGH_THINKING= | =claude-4.5-opus-high-thinking= |
+| =AI_CURSOR_MODEL_GPT_5_2_LOW= | =gpt-5.2-low= |
+| =AI_CURSOR_MODEL_GPT_5_2_LOW_FAST= | =gpt-5.2-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_2_FAST= | =gpt-5.2-fast= |
+| =AI_CURSOR_MODEL_GPT_5_2_HIGH= | =gpt-5.2-high= |
+| =AI_CURSOR_MODEL_GPT_5_2_HIGH_FAST= | =gpt-5.2-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_2_XHIGH= | =gpt-5.2-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_2_XHIGH_FAST= | =gpt-5.2-xhigh-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_NONE= | =gpt-5.6-luna-none= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_NONE_FAST= | =gpt-5.6-luna-none-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_LOW= | =gpt-5.6-luna-low= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_LOW_FAST= | =gpt-5.6-luna-low-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_MEDIUM= | =gpt-5.6-luna-medium= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_MEDIUM_FAST= | =gpt-5.6-luna-medium-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_HIGH_FAST= | =gpt-5.6-luna-high-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_XHIGH= | =gpt-5.6-luna-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_XHIGH_FAST= | =gpt-5.6-luna-xhigh-fast= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_MAX= | =gpt-5.6-luna-max= |
+| =AI_CURSOR_MODEL_GPT_5_6_LUNA_MAX_FAST= | =gpt-5.6-luna-max-fast= |
+| =AI_CURSOR_MODEL_GEMINI_3_6_FLASH_MINIMAL= | =gemini-3.6-flash-minimal= |
+| =AI_CURSOR_MODEL_GEMINI_3_6_FLASH_LOW= | =gemini-3.6-flash-low= |
+| =AI_CURSOR_MODEL_GEMINI_3_6_FLASH_MEDIUM= | =gemini-3.6-flash-medium= |
+| =AI_CURSOR_MODEL_GEMINI_3_6_FLASH_HIGH= | =gemini-3.6-flash-high= |
+| =AI_CURSOR_MODEL_GEMINI_3_1_PRO= | =gemini-3.1-pro= |
+| =AI_CURSOR_MODEL_GPT_5_4_MINI_NONE= | =gpt-5.4-mini-none= |
+| =AI_CURSOR_MODEL_GPT_5_4_MINI_LOW= | =gpt-5.4-mini-low= |
+| =AI_CURSOR_MODEL_GPT_5_4_MINI_MEDIUM= | =gpt-5.4-mini-medium= |
+| =AI_CURSOR_MODEL_GPT_5_4_MINI_HIGH= | =gpt-5.4-mini-high= |
+| =AI_CURSOR_MODEL_GPT_5_4_MINI_XHIGH= | =gpt-5.4-mini-xhigh= |
+| =AI_CURSOR_MODEL_GPT_5_4_NANO_NONE= | =gpt-5.4-nano-none= |
+| =AI_CURSOR_MODEL_GPT_5_4_NANO_LOW= | =gpt-5.4-nano-low= |
+| =AI_CURSOR_MODEL_GPT_5_4_NANO_MEDIUM= | =gpt-5.4-nano-medium= |
+| =AI_CURSOR_MODEL_GPT_5_4_NANO_HIGH= | =gpt-5.4-nano-high= |
+| =AI_CURSOR_MODEL_GPT_5_4_NANO_XHIGH= | =gpt-5.4-nano-xhigh= |
+| =AI_CURSOR_MODEL_CLAUDE_4_5_SONNET= | =claude-4.5-sonnet= |
+| =AI_CURSOR_MODEL_CLAUDE_4_5_SONNET_THINKING= | =claude-4.5-sonnet-thinking= |
+| =AI_CURSOR_MODEL_GPT_5_1_LOW= | =gpt-5.1-low= |
+| =AI_CURSOR_MODEL_GPT_5_1= | =gpt-5.1= |
+| =AI_CURSOR_MODEL_GPT_5_1_HIGH= | =gpt-5.1-high= |
+| =AI_CURSOR_MODEL_GEMINI_3_5_FLASH= | =gemini-3.5-flash= |
+| =AI_CURSOR_MODEL_CLAUDE_4_SONNET= | =claude-4-sonnet= |
+| =AI_CURSOR_MODEL_CLAUDE_4_SONNET_THINKING= | =claude-4-sonnet-thinking= |
+| =AI_CURSOR_MODEL_GPT_5_MINI= | =gpt-5-mini= |
+| =AI_CURSOR_MODEL_KIMI_K3_LOW= | =kimi-k3-low= |
+| =AI_CURSOR_MODEL_KIMI_K3_HIGH= | =kimi-k3-high= |
+| =AI_CURSOR_MODEL_KIMI_K3_MAX= | =kimi-k3-max= |
+| =AI_CURSOR_MODEL_KIMI_K2_7_CODE= | =kimi-k2.7-code= |
+| =AI_CURSOR_MODEL_GLM_5_2_HIGH= | =glm-5.2-high= |
+| =AI_CURSOR_MODEL_GLM_5_2_MAX= | =glm-5.2-max= |
+| =AI_CURSOR_MODEL_GEMINI_3_FLASH= | =gemini-3-flash= |
+
+** How the prompt is delivered
+The prompt is *not* passed as a positional argv word. =--print= is a
+boolean (unlike =agy --print=, which consumes the next word), so flags
+after it are safe. The conversation is still piped on stdin so a long
+turn never hits =MAX_ARG_STRLEN= and never appears in =ps=.
+
+A non-streaming turn is:
+
+#+begin_example
+cursor-agent --print --output-format json --model auto ...
+#+end_example
+
+A streaming turn adds =--output-format stream-json= and
+=--stream-partial-output=.
+
+The conversation is flattened into a single prompt: user messages
+verbatim, assistant messages prefixed =Previous assistant response:=,
+joined with blank lines, and a trailing instruction to always produce a
+text summary rather than ending on tool calls. On a fresh session the
+system prompt is wrapped in =<system>...</system>=. Resume / continue
+turns omit it.
+
+** Property Reference
+Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
+
+| Property              | Type    | Default  | Effect |
+|-----------------------+---------+----------+--------|
+| =config=              | object  | NULL     | An =AiConfig= to construct from |
+| =model=               | string  | =auto=   | =--model= |
+| =system-prompt=       | string  | NULL     | Inlined into stdin on a fresh session |
+| =max-tokens=          | int     | 4096     | *Ignored* — cursor-agent has no such flag |
+| =executable-path=     | string  | NULL     | Explicit binary path; overrides env and =$PATH= |
+| =working-directory=   | string  | NULL     | The child's cwd |
+| =session-id=          | string  | NULL     | Captured from =session_id=; sent as =--resume <id>= |
+| =session-persistence= | boolean | TRUE     | Whether to capture and resume chats at all |
+| =effort-level=        | string  | NULL     | *Not emitted* — Cursor bakes effort into the model id. Use =model-params= for bracket overrides. |
+| =process-timeout-ms=  | int     | 1800000  | Bounds the *synchronous* call |
+
+Added by =AiCursorClient=:
+
+| Property                  | Type    | Default | Effect |
+|---------------------------+---------+---------+--------|
+| =skip-permissions=        | boolean | FALSE   | =--force= (the =--yolo= alias is not emitted) |
+| =additional-directories=  | string  | NULL    | CSV → one =--add-dir <path>= pair per item |
+| =plugin-dirs=             | string  | NULL    | CSV → one =--plugin-dir <path>= pair per item |
+| =headers=                 | string  | NULL    | CSV of =Name: Value= → one =--header= pair per item |
+| =mode=                    | string  | NULL    | =--mode= (=plan= or =ask=) |
+| =sandbox=                 | string  | NULL    | =--sandbox= (=enabled= or =disabled=) |
+| =workspace=               | string  | NULL    | =--workspace= |
+| =endpoint=                | string  | NULL    | =--endpoint= |
+| =api-key=                 | string  | NULL    | Delivered as =CURSOR_API_KEY= on the child, never as argv |
+| =model-params=            | string  | NULL    | Appended as =--model id[params]= unless the id already has brackets |
+| =worktree=                | string  | NULL    | =--worktree NAME= |
+| =worktree-auto=           | boolean | FALSE   | =--worktree= with a generated name (ignored if =worktree= is set) |
+| =worktree-base=           | string  | NULL    | =--worktree-base=, only alongside a worktree |
+| =skip-worktree-setup=     | boolean | FALSE   | =--skip-worktree-setup=, only alongside a worktree |
+| =auto-review=             | boolean | FALSE   | =--auto-review= |
+| =approve-mcps=            | boolean | FALSE   | =--approve-mcps= |
+| =trust=                   | boolean | FALSE   | =--trust= |
+| =continue-session=        | boolean | FALSE   | =--continue=, only when no session id is known |
+
+Every one is a real GObject property, so bindings get native syntax and
+=notify::= signals; =ai --set= reaches them with no extra plumbing.
+
+Unknown =mode= / =sandbox= values are omitted with a =g_message= rather
+than aborting a =G_DEBUG=fatal-warnings= run.
+
+** Signals
+The streaming signals are declared on =AiCliClient= and emitted by this client:
+
+| Signal         | Arguments      | When |
+|----------------+----------------+------|
+| =stream-start= | —              | Before the first text delta |
+| =delta=        | =const gchar*= | Each assistant text delta |
+| =stream-end=   | =AiResponse*=  | At EOF, with the assembled response |
+
+With =--stream-partial-output=, only assistant events that carry
+=timestamp_ms= and no =model_call_id= are new text. The others are
+duplicate flushes and are ignored.
+
+Tool start/finish are reported on the =::event= stream as
+=AI_EVENT_TOOL_STARTED= / =AI_EVENT_TOOL_FINISHED=, keyed by
+=call_id=. cursor-agent runs its own tools inside the CLI; they are not
+executed by =AiToolExecutor=.
+
+** JSON shape
+Non-streaming =--output-format json= is Cursor's own envelope:
+
+#+begin_src json
+{"type":"result","subtype":"success","is_error":false,"result":"...","session_id":"..."}
+#+end_src
+
+=is_error= is an error even when the process exits 0. Parse stdout first.
+
+Streaming is NDJSON: =system= / =user= / =assistant= / =tool_call=
+(started, completed) / =result=.
+
+** Usage
+*** Basic Usage
+#+begin_src C
+#include <ai-glib.h>
+
+int main(void)
+{
+    g_autoptr(AiCursorClient) client = ai_cursor_client_new();
+    g_autoptr(AiMessage) msg = ai_message_new_user("Hello!");
+    GList *messages = g_list_append(NULL, msg);
+
+    ai_provider_chat_async(
+        AI_PROVIDER(client),
+        messages,
+        NULL,
+        4096,
+        NULL,
+        NULL,
+        on_chat_complete,
+        user_data
+    );
+
+    g_list_free(messages);
+    return 0;
+}
+#+end_src
+
+*** Skip permissions
+#+begin_src C
+ai_cursor_client_set_skip_permissions(client, TRUE);
+#+end_src
+
+From the CLI this is =ai -p cursor --skip-permissions=.
+
+*** Sessions
+A session id captured from =session_id= is sent as =--resume <id>= on the
+next turn. =--continue= is only emitted when there is no id:
+=ai -p cursor -c=. An explicit session id always wins over it.
+
+*** Model overrides
+#+begin_src C
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CURSOR_MODEL_COMPOSER_2_5);
+g_object_set(client, "model-params", "context=1m,effort=high", NULL);
+#+end_src
+
+** From the =ai= CLI
+#+begin_example
+$ ai -p cursor --dry-run "hi"
+$ ai -p cursor -m composer-2.5 --skip-permissions "summarise this repo"
+$ ai -p cursor -c "continue from last time"
+$ ai -p cursor --set mode=plan --set sandbox=disabled --set trust --dry-run "hi"
+$ ai -p cursor --set model-params=context=1m,effort=high --dry-run "hi"
+#+end_example
+
+** Tests
+- =tests/test-cursor-client.c= — argv, stdin, and both parsers in isolation
+- =tests/test-cursor-subprocess.c= — a stub =cursor-agent= script records argv, cwd and stdin
+
+** See also
+- [[../cli.org][The =ai= CLI]] - =ai -p cursor=
+- [[../api-reference/ai-cli-client.org][AiCliClient]]

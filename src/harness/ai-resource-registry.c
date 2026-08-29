@@ -111,7 +111,18 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
     { "antigravity", AI_RESOURCE_COMMAND, ".agents/commands",
       USER_BASE_HOME, ".gemini/antigravity-cli/commands" },
     { "antigravity", AI_RESOURCE_AGENT,   ".agents/agents",
-      USER_BASE_HOME, ".gemini/antigravity-cli/agents" }
+      USER_BASE_HOME, ".gemini/antigravity-cli/agents" },
+
+    /* cursor / cursor-agent. Project skills live under .cursor/skills;
+     * the install also drops bundled skills at ~/.cursor/skills-cursor. */
+    { "cursor",      AI_RESOURCE_SKILL,   ".cursor/skills",
+      USER_BASE_HOME, ".cursor/skills" },
+    { "cursor",      AI_RESOURCE_SKILL,   NULL,
+      USER_BASE_HOME, ".cursor/skills-cursor" },
+    { "cursor",      AI_RESOURCE_COMMAND, ".cursor/commands",
+      USER_BASE_HOME, ".cursor/commands" },
+    { "cursor",      AI_RESOURCE_AGENT,   ".cursor/agents",
+      USER_BASE_HOME, ".cursor/agents" }
 };
 
 /* ================================================================

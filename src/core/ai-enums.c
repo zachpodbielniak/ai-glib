@@ -33,6 +33,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_CLAUDE_TMUX, "AI_PROVIDER_CLAUDE_TMUX", "claude-tmux" },
             { AI_PROVIDER_GROK_BUILD, "AI_PROVIDER_GROK_BUILD", "grok-build" },
             { AI_PROVIDER_ANTIGRAVITY, "AI_PROVIDER_ANTIGRAVITY", "antigravity" },
+            { AI_PROVIDER_CURSOR, "AI_PROVIDER_CURSOR", "cursor" },
             { 0, NULL, NULL }
         };
 
@@ -296,6 +297,8 @@ ai_provider_type_to_string(AiProviderType provider)
             return "grok-build";
         case AI_PROVIDER_ANTIGRAVITY:
             return "antigravity";
+        case AI_PROVIDER_CURSOR:
+            return "cursor";
         default:
             return "unknown";
     }
@@ -370,6 +373,11 @@ ai_provider_type_from_string(const gchar *str)
              g_ascii_strcasecmp(str, "agy") == 0)
     {
         return AI_PROVIDER_ANTIGRAVITY;
+    }
+    else if (g_ascii_strcasecmp(str, "cursor") == 0 ||
+             g_ascii_strcasecmp(str, "cursor-agent") == 0)
+    {
+        return AI_PROVIDER_CURSOR;
     }
 
     return AI_PROVIDER_CLAUDE;

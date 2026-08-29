@@ -24,6 +24,7 @@
 #include "providers/ai-claude-code-client.h"
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-opencode-client.h"
+#include "providers/ai-cursor-client.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -150,8 +151,11 @@ static AiCliClient *make_grok_build(void)
 static AiCliClient *make_opencode(void)
 { return AI_CLI_CLIENT(ai_opencode_client_new()); }
 
+static AiCliClient *make_cursor(void)
+{ return AI_CLI_CLIENT(ai_cursor_client_new()); }
+
 static const ClientCtor ALL_CTORS[] = {
-	make_claude_code, make_grok_build, make_opencode
+	make_claude_code, make_grok_build, make_opencode, make_cursor
 };
 
 /*
@@ -901,6 +905,63 @@ test_oc_session_id_camel(void)
 }
 
 /* ----------------------------------------------------------------
+ * Cursor Agent
+ * ---------------------------------------------------------------- */
+
+static void
+test_cu_text_delta(void)
+{
+	g_autoptr(AiCursorClient) client = ai_cursor_client_new();
+	Parsed *p = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"assistant\",\"timestamp_ms\":1,"
+		"\"session_id\":\"s1\","
+		"\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}");
+	g_autofree gchar *text = all_text(p);
+
+	g_assert_true(p->ok);
+	g_assert_cmpstr(text, ==, "hi");
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)),
+	                ==, "s1");
+
+	parsed_free(p);
+}
+
+static void
+test_cu_duplicate_flush_ignored(void)
+{
+	g_autoptr(AiCursorClient) client = ai_cursor_client_new();
+	Parsed *p = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"assistant\",\"model_call_id\":\"m1\","
+		"\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}");
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_TEXT_DELTA), ==, 0);
+
+	parsed_free(p);
+}
+
+static void
+test_cu_tool_and_error(void)
+{
+	g_autoptr(AiCursorClient) client = ai_cursor_client_new();
+	const gchar *lines[] = {
+		"{\"type\":\"tool_call\",\"subtype\":\"started\",\"call_id\":\"t1\","
+		"\"tool_call\":{\"shellToolCall\":{\"args\":{\"command\":\"ls\"}}}}",
+		"{\"type\":\"result\",\"is_error\":true,\"result\":\"bad model\"}",
+		NULL
+	};
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+	AiEvent *e = first_of(p, AI_EVENT_TOOL_STARTED);
+
+	g_assert_false(p->ok);
+	g_assert_error(p->error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	g_assert_nonnull(e);
+	g_assert_cmpstr(ai_tool_use_get_name(ai_event_get_tool_use(e)), ==, "shell");
+
+	parsed_free(p);
+}
+
+/* ----------------------------------------------------------------
  * Cross-provider invariants
  * ---------------------------------------------------------------- */
 
@@ -942,6 +1003,10 @@ test_line_and_events_agree(void)
 		  "\"delta\":{\"type\":\"text_delta\",\"text\":\"grok\"}}}", "grok" },
 		{ make_opencode,
 		  "{\"type\":\"text\",\"part\":{\"text\":\"oc\"}}", "oc" },
+		{ make_cursor,
+		  "{\"type\":\"assistant\",\"timestamp_ms\":1,"
+		  "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"cur\"}]}}",
+		  "cur" },
 	};
 	gsize i;
 
@@ -1030,6 +1095,12 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/cli-events/oc/call-id-spelling", test_oc_call_id_spelling);
 	g_test_add_func("/ai-glib/cli-events/oc/step-finish", test_oc_step_finish_usage);
 	g_test_add_func("/ai-glib/cli-events/oc/session-id", test_oc_session_id_camel);
+
+	g_test_add_func("/ai-glib/cli-events/cu/text", test_cu_text_delta);
+	g_test_add_func("/ai-glib/cli-events/cu/duplicate-flush",
+	                test_cu_duplicate_flush_ignored);
+	g_test_add_func("/ai-glib/cli-events/cu/tool-and-error",
+	                test_cu_tool_and_error);
 
 	g_test_add_func("/ai-glib/cli-events/all/vfunc-present",
 	                test_every_provider_implements_the_vfunc);

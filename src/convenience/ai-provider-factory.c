@@ -21,6 +21,7 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-antigravity-client.h"
+#include "providers/ai-cursor-client.h"
 
 /**
  * ai_provider_factory_new:
@@ -85,6 +86,8 @@ ai_provider_factory_new(
             return G_OBJECT(ai_grok_build_client_new_with_config(config));
         case AI_PROVIDER_ANTIGRAVITY:
             return G_OBJECT(ai_antigravity_client_new_with_config(config));
+        case AI_PROVIDER_CURSOR:
+            return G_OBJECT(ai_cursor_client_new_with_config(config));
         default:
             break;
     }

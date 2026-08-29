@@ -164,6 +164,8 @@ test_cli_list_providers(void)
 	g_assert_nonnull(strstr(run.stdout_data, "grok-build     CLI"));
 	g_assert_nonnull(strstr(run.stdout_data, "antigravity"));
 	g_assert_nonnull(strstr(run.stdout_data, "antigravity    CLI"));
+	g_assert_nonnull(strstr(run.stdout_data, "cursor"));
+	g_assert_nonnull(strstr(run.stdout_data, "cursor         CLI"));
 	/* And the HTTP one is still distinct. */
 	g_assert_nonnull(strstr(run.stdout_data, "grok           HTTP"));
 
@@ -182,6 +184,7 @@ test_cli_help_mentions_provider(void)
 	g_assert_cmpint(run.exit_status, ==, 0);
 	g_assert_nonnull(strstr(run.stdout_data, "grok-build"));
 	g_assert_nonnull(strstr(run.stdout_data, "antigravity"));
+	g_assert_nonnull(strstr(run.stdout_data, "cursor"));
 	g_assert_nonnull(strstr(run.stdout_data, "--set"));
 
 	run_clear(&run);
@@ -556,6 +559,80 @@ test_cli_skip_permissions_antigravity(void)
 	run_clear(&run);
 }
 
+static void
+test_cli_dry_run_cursor(void)
+{
+	const gchar *hyphen[] = { "-p", "cursor", "--dry-run", "hello", NULL };
+	const gchar *alias[] = { "-p", "cursor-agent", "--dry-run", "hello", NULL };
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(hyphen, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--print");
+	assert_dry_run_contains(run.stdout_data, "--output-format json");
+	assert_dry_run_contains(run.stdout_data, "--model auto");
+	assert_dry_run_lacks(run.stdout_data, "hello");
+	assert_dry_run_lacks(run.stdout_data, "no CLI subprocess");
+
+	run_clear(&run);
+
+	run_ai(alias, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--print");
+	run_clear(&run);
+}
+
+static void
+test_cli_skip_permissions_cursor(void)
+{
+	const gchar *off[] = { "-p", "cursor", "--dry-run", "hi", NULL };
+	const gchar *on[] = {
+		"-p", "cursor", "--skip-permissions", "--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(off, NULL, &run);
+	assert_dry_run_lacks(run.stdout_data, "--force");
+	run_clear(&run);
+
+	run_ai(on, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--force");
+	assert_dry_run_lacks(run.stdout_data, "--yolo");
+	run_clear(&run);
+}
+
+static void
+test_cli_set_cursor_properties(void)
+{
+	const gchar *args[] = {
+		"-p", "cursor",
+		"--set", "mode=plan",
+		"--set", "sandbox=disabled",
+		"--set", "trust",
+		"--set", "auto-review",
+		"--set", "approve-mcps",
+		"--set", "workspace=/tmp/ws",
+		"--set", "model-params=context=1m,effort=high",
+		"--dry-run", "hi", NULL
+	};
+	Run run = { NULL, NULL, 0 };
+
+	run_ai(args, NULL, &run);
+
+	g_assert_cmpint(run.exit_status, ==, 0);
+	assert_dry_run_contains(run.stdout_data, "--mode plan");
+	assert_dry_run_contains(run.stdout_data, "--sandbox disabled");
+	assert_dry_run_contains(run.stdout_data, "--trust");
+	assert_dry_run_contains(run.stdout_data, "--auto-review");
+	assert_dry_run_contains(run.stdout_data, "--approve-mcps");
+	assert_dry_run_contains(run.stdout_data, "--workspace /tmp/ws");
+	assert_dry_run_contains(run.stdout_data, "--model auto[context=1m,effort=high]");
+
+	run_clear(&run);
+}
+
 /*
  * --skip-permissions reaches opencode as --auto. The flag was accepted
  * and silently ignored for this provider before: `ai` only applied it to
@@ -655,6 +732,7 @@ test_cli_continue_flag(void)
 		{ "opencode",    "--continue" },
 		{ "antigravity", "--continue" },
 		{ "agy",         "--continue" },
+		{ "cursor",      "--continue" },
 	};
 	gsize i;
 
@@ -1116,6 +1194,12 @@ main(
 	                test_cli_dry_run_antigravity);
 	g_test_add_func("/ai-glib/ai-cli/skip-permissions/antigravity",
 	                test_cli_skip_permissions_antigravity);
+	g_test_add_func("/ai-glib/ai-cli/dry-run/cursor",
+	                test_cli_dry_run_cursor);
+	g_test_add_func("/ai-glib/ai-cli/skip-permissions/cursor",
+	                test_cli_skip_permissions_cursor);
+	g_test_add_func("/ai-glib/ai-cli/set/cursor-properties",
+	                test_cli_set_cursor_properties);
 	g_test_add_func("/ai-glib/ai-cli/skip-permissions/opencode",
 	                test_cli_skip_permissions_opencode);
 	g_test_add_func("/ai-glib/ai-cli/set/opencode-properties",

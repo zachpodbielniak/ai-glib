@@ -2,7 +2,7 @@
 A GLib/GObject-based C library for interacting with AI providers.
 
 ** Features
-- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=)
+- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=), Cursor (=cursor-agent=)
 - *Ollama transport*: route the Claude Code providers through =ollama launch claude= with an =ollama/<model>= model id
 - *GObject-based*: Full GObject type system integration
 - *Async Support*: Non-blocking operations via GAsyncResult/GTask

@@ -96,7 +96,7 @@ static gboolean  opt_image_strict       = FALSE;
 static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-	  "claude-tmux, opencode, grok-build, antigravity (agy) "
+	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor "
 	  "(default: $AI_PROVIDER or claude)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
 	  "Model id (default: provider default). For claude-code/claude-tmux, "
@@ -492,6 +492,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	case AI_PROVIDER_ANTIGRAVITY:
 		provider = G_OBJECT(ai_antigravity_client_new_with_config(config));
 		break;
+	case AI_PROVIDER_CURSOR:
+		provider = G_OBJECT(ai_cursor_client_new_with_config(config));
+		break;
 	default:
 		return NULL;
 	}
@@ -535,6 +538,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_ANTIGRAVITY_CLIENT(provider))
 		ai_antigravity_client_set_skip_permissions(
 			AI_ANTIGRAVITY_CLIENT(provider), opt_skip_perms);
+	else if (AI_IS_CURSOR_CLIENT(provider))
+		ai_cursor_client_set_skip_permissions(
+			AI_CURSOR_CLIENT(provider), opt_skip_perms);
 
 	/*
 	 * --continue. Every CLI provider spells this the same way as a
@@ -570,7 +576,8 @@ list_providers(void)
 		AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI,
 		AI_PROVIDER_GROK, AI_PROVIDER_OLLAMA, AI_PROVIDER_CLAUDE_CODE,
 		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE,
-		AI_PROVIDER_GROK_BUILD, AI_PROVIDER_ANTIGRAVITY
+		AI_PROVIDER_GROK_BUILD, AI_PROVIDER_ANTIGRAVITY,
+		AI_PROVIDER_CURSOR
 	};
 	gsize i;
 
@@ -591,6 +598,7 @@ list_providers(void)
 		case AI_PROVIDER_OPENCODE:
 		case AI_PROVIDER_GROK_BUILD:
 		case AI_PROVIDER_ANTIGRAVITY:
+		case AI_PROVIDER_CURSOR:
 			kind = "CLI";
 			break;
 		default:

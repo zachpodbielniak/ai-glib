@@ -22,6 +22,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-5          |
 | [[file:providers/grok-build.org][Grok Build]]        | xAI's =grok= coding agent CLI (headless)       | grok-4.6                           |
 | [[file:providers/antigravity.org][Antigravity]]      | Google's =agy= coding agent CLI (headless)     | gemini-3.7-flash-high              |
+| [[file:providers/cursor.org][Cursor]]            | Cursor's =cursor-agent= CLI (headless)         | auto                               |
 
 The two Claude Code providers also accept =ollama/<model>= model ids, which
 route the turn through =ollama launch claude= (the Ollama-as-transport mode);
@@ -47,6 +48,7 @@ see their provider pages.
 - [[file:providers/opencode.org][OpenCode]] - OpenCode CLI wrapper (multi-provider)
 - [[file:providers/grok-build.org][Grok Build]] - xAI =grok= CLI wrapper (headless agent)
 - [[file:providers/antigravity.org][Antigravity]] - Google =agy= CLI wrapper (headless agent)
+- [[file:providers/cursor.org][Cursor]] - Cursor =cursor-agent= CLI wrapper (headless agent)
 
 *** Tools & Search
 - [[file:tool-executor.org][Tool Executor]] - Built-in tools and the multi-turn tool-use loop

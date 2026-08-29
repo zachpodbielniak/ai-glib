@@ -26,6 +26,7 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-antigravity-client.h"
+#include "providers/ai-cursor-client.h"
 
 #include "convenience/ai-simple.h"
 
@@ -119,6 +120,12 @@ ai_simple_create_provider(
 
     case AI_PROVIDER_ANTIGRAVITY:
         provider = G_OBJECT(ai_antigravity_client_new_with_config(config));
+        if (model != NULL)
+            ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
+        break;
+
+    case AI_PROVIDER_CURSOR:
+        provider = G_OBJECT(ai_cursor_client_new_with_config(config));
         if (model != NULL)
             ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
         break;

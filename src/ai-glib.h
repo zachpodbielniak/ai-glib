@@ -76,6 +76,7 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-antigravity-client.h"
+#include "providers/ai-cursor-client.h"
 
 /* Convenience API */
 #include "convenience/ai-simple.h"

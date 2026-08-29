@@ -76,6 +76,7 @@ test_every_cli_takes_the_env_kind(void)
 	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
 	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
 	g_autoptr(AiAntigravityClient) agy = ai_antigravity_client_new();
+	g_autoptr(AiCursorClient) cursor = ai_cursor_client_new();
 
 	g_assert_true(ai_tool_endpoint_consumer_supports_kind(
 		AI_TOOL_ENDPOINT_CONSUMER(claude), AI_ENDPOINT_KIND_ENV));
@@ -85,6 +86,8 @@ test_every_cli_takes_the_env_kind(void)
 		AI_TOOL_ENDPOINT_CONSUMER(grok), AI_ENDPOINT_KIND_ENV));
 	g_assert_true(ai_tool_endpoint_consumer_supports_kind(
 		AI_TOOL_ENDPOINT_CONSUMER(agy), AI_ENDPOINT_KIND_ENV));
+	g_assert_true(ai_tool_endpoint_consumer_supports_kind(
+		AI_TOOL_ENDPOINT_CONSUMER(cursor), AI_ENDPOINT_KIND_ENV));
 }
 
 static void
@@ -392,17 +395,19 @@ test_endpoint_env_reaches_the_launcher(void)
 	 * failure is per-provider: a client that hand-rolls a launcher
 	 * passes every getter test and still delivers nothing.
 	 */
-	gpointer clients[4];
+	gpointer clients[5];
 	gsize i;
 	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
 	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
 	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
 	g_autoptr(AiAntigravityClient) agy = ai_antigravity_client_new();
+	g_autoptr(AiCursorClient) cursor = ai_cursor_client_new();
 
 	clients[0] = claude;
 	clients[1] = opencode;
 	clients[2] = grok;
 	clients[3] = agy;
+	clients[4] = cursor;
 
 	for (i = 0; i < G_N_ELEMENTS(clients); i++)
 	{
@@ -457,17 +462,19 @@ test_working_directory_reaches_the_launcher(void)
 	 * The user-visible half of the same class of bug: a CLI agent whose
 	 * $PWD is the editor's rather than the project's.
 	 */
-	gpointer clients[4];
+	gpointer clients[5];
 	gsize i;
 	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
 	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
 	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
 	g_autoptr(AiAntigravityClient) agy = ai_antigravity_client_new();
+	g_autoptr(AiCursorClient) cursor = ai_cursor_client_new();
 
 	clients[0] = claude;
 	clients[1] = opencode;
 	clients[2] = grok;
 	clients[3] = agy;
+	clients[4] = cursor;
 
 	for (i = 0; i < G_N_ELEMENTS(clients); i++)
 	{
@@ -574,6 +581,7 @@ test_spawn_delivers_cwd_and_env(void)
 	g_autoptr(AiOpenCodeClient) opencode = ai_opencode_client_new();
 	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
 	g_autoptr(AiAntigravityClient) agy = ai_antigravity_client_new();
+	g_autoptr(AiCursorClient) cursor = ai_cursor_client_new();
 
 	/* Once per client, because overriding `spawn' is per-client and so
 	 * is the way it can go wrong. */
@@ -581,6 +589,7 @@ test_spawn_delivers_cwd_and_env(void)
 	spawn_and_check(opencode, "opencode");
 	spawn_and_check(grok, "grok-build");
 	spawn_and_check(agy, "antigravity");
+	spawn_and_check(cursor, "cursor");
 }
 
 int
