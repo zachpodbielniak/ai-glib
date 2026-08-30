@@ -88,10 +88,12 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
 
     /* opencode. Its configuration lives under XDG -- its own built-in
      * customize-opencode skill says "NOT ~/.opencode/" in as many
-     * words. It accepts both `skill` and `skills` for the project
-     * directory, and additionally auto-loads two directories belonging
-     * to other harnesses, which is why they appear here under its own
-     * origin as well as under theirs. */
+     * words. Every one of its three kinds is accepted both singular
+     * and plural, in both scopes -- `agent` and `agents`, `command`
+     * and `commands`, `skill` and `skills` -- so each needs two rows
+     * rather than a guess at which spelling the user chose. It also
+     * auto-loads two directories belonging to other harnesses, which is
+     * why they appear here under its own origin as well as theirs. */
     { "opencode", AI_RESOURCE_COMMAND, ".opencode/command",
       USER_BASE_XDG_CONFIG, "opencode/command" },
     { "opencode", AI_RESOURCE_COMMAND, ".opencode/commands",
@@ -105,6 +107,8 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
     { "opencode", AI_RESOURCE_SKILL,   NULL,
       USER_BASE_HOME, ".agents/skills" },
     { "opencode", AI_RESOURCE_AGENT,   ".opencode/agent",
+      USER_BASE_XDG_CONFIG, "opencode/agent" },
+    { "opencode", AI_RESOURCE_AGENT,   ".opencode/agents",
       USER_BASE_XDG_CONFIG, "opencode/agents" },
 
     /* grok. Its slash commands ARE its skills -- there is no commands
@@ -117,15 +121,31 @@ static const AiResourceSource RESOURCE_SOURCES[] = {
     { "grok",     AI_RESOURCE_AGENT,   ".grok/agents",
       USER_BASE_HOME, ".grok/agents" },
 
-    /* antigravity / agy. Skills live under a customization root, of
-     * which `.agents` is the usual spelling; the global root is
-     * ~/.gemini/config. It has no commands concept at all -- its
-     * customization types are rules, skills, plugins, hooks and MCP
-     * servers, and nothing else. */
+    /* antigravity / agy. Skills live under a customization root, and
+     * there are four accepted spellings of it. `.agents` is the usual
+     * one and comes first so it wins a tie, but a project using any of
+     * the other three is one antigravity still reads, and a table
+     * naming only the first tells a caller its skill is invisible when
+     * it is not.
+     *
+     * Only the first row carries the user directory. The global root is
+     * ~/.gemini/config however the project spells its own, so repeating
+     * it would walk the same directory four times and file every skill
+     * there as shadowing itself.
+     *
+     * antigravity has neither a commands nor an agents concept. Its
+     * customization types are exactly rules, skills, plugins and hooks;
+     * "subagent" appears nowhere in its vocabulary, and the
+     * .agents/agents and ~/.gemini/config/agents this table used to
+     * name have never been directories it looks in. */
     { "antigravity", AI_RESOURCE_SKILL,   ".agents/skills",
       USER_BASE_HOME, ".gemini/config/skills" },
-    { "antigravity", AI_RESOURCE_AGENT,   ".agents/agents",
-      USER_BASE_HOME, ".gemini/config/agents" },
+    { "antigravity", AI_RESOURCE_SKILL,   ".agent/skills",
+      USER_BASE_HOME, NULL },
+    { "antigravity", AI_RESOURCE_SKILL,   "_agents/skills",
+      USER_BASE_HOME, NULL },
+    { "antigravity", AI_RESOURCE_SKILL,   "_agent/skills",
+      USER_BASE_HOME, NULL },
 
     /* cursor / cursor-agent. It reads its own root, the .agents root,
      * and two other harnesses' directories for back-compatibility.

@@ -365,6 +365,23 @@ paths_have_suffix(GStrv paths, const gchar *suffix)
 	return FALSE;
 }
 
+static guint
+paths_count_suffix(GStrv paths, const gchar *suffix)
+{
+	guint i;
+	guint n = 0;
+
+	for (i = 0; paths != NULL && paths[i] != NULL; i++)
+	{
+		if (g_str_has_suffix(paths[i], suffix))
+		{
+			n++;
+		}
+	}
+
+	return n;
+}
+
 static void
 test_search_paths_per_origin(void)
 {
@@ -397,6 +414,29 @@ test_search_paths_per_origin(void)
 	}
 
 	{
+		g_auto(GStrv) agents = ai_resource_registry_get_search_paths_for_origin(
+			registry, "opencode", AI_RESOURCE_AGENT);
+		g_auto(GStrv) commands = ai_resource_registry_get_search_paths_for_origin(
+			registry, "opencode", AI_RESOURCE_COMMAND);
+
+		/*
+		 * Singular and plural are accepted for every kind, in both
+		 * scopes -- `agent(s)`, `command(s)`, `skill(s)` in its own
+		 * documentation's notation. The table covered that for skills
+		 * and commands and carried one spelling of each scope for
+		 * agents, which is the half-right answer that reads as
+		 * deliberate.
+		 */
+		g_assert_true(paths_have_suffix(agents, "/.opencode/agent"));
+		g_assert_true(paths_have_suffix(agents, "/.opencode/agents"));
+		g_assert_true(paths_have_suffix(agents, "/opencode/agent"));
+		g_assert_true(paths_have_suffix(agents, "/opencode/agents"));
+
+		g_assert_true(paths_have_suffix(commands, "/.opencode/command"));
+		g_assert_true(paths_have_suffix(commands, "/.opencode/commands"));
+	}
+
+	{
 		g_auto(GStrv) skills = ai_resource_registry_get_search_paths_for_origin(
 			registry, "grok", AI_RESOURCE_SKILL);
 		g_auto(GStrv) commands = ai_resource_registry_get_search_paths_for_origin(
@@ -419,16 +459,41 @@ test_search_paths_per_origin(void)
 		g_auto(GStrv) commands = ai_resource_registry_get_search_paths_for_origin(
 			registry, "antigravity", AI_RESOURCE_COMMAND);
 
+		g_auto(GStrv) agents = ai_resource_registry_get_search_paths_for_origin(
+			registry, "antigravity", AI_RESOURCE_AGENT);
+
+		/*
+		 * Four spellings of the customization root, all four read.
+		 * Naming only the usual one told a caller with a `_agents/`
+		 * project that antigravity could not see its skill.
+		 */
 		g_assert_true(paths_have_suffix(skills, "/.agents/skills"));
+		g_assert_true(paths_have_suffix(skills, "/.agent/skills"));
+		g_assert_true(paths_have_suffix(skills, "/_agents/skills"));
+		g_assert_true(paths_have_suffix(skills, "/_agent/skills"));
+
 		g_assert_true(paths_have_suffix(skills, "/.gemini/config/skills"));
+
+		/*
+		 * And exactly once. The user root does not vary with the
+		 * project spelling, so hanging it off all four rows would walk
+		 * one directory four times and file every skill in it as
+		 * shadowing itself.
+		 */
+		g_assert_cmpuint(paths_count_suffix(skills,
+		                                    "/.gemini/config/skills"),
+		                 ==, 1);
 
 		/* Not antigravity-cli, which is not where it keeps them. */
 		g_assert_false(paths_have_suffix(skills,
 		                                 "/.gemini/antigravity-cli/skills"));
 
-		/* Its customizations are rules, skills, plugins, hooks and MCP
-		 * servers. Commands are not among them. */
+		/* Its customizations are rules, skills, plugins and hooks.
+		 * Neither commands nor agents are among them -- "subagent"
+		 * appears nowhere in its vocabulary, and the agents rows this
+		 * table used to carry named directories it has never read. */
 		g_assert_cmpint(g_strv_length(commands), ==, 0);
+		g_assert_cmpint(g_strv_length(agents), ==, 0);
 	}
 
 	{

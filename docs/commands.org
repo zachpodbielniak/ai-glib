@@ -136,13 +136,24 @@ The shape of the disagreement is worth knowing, because the obvious guess
 is wrong in both directions.  =~/.claude/skills= is read by claude-code,
 grok, opencode and cursor -- four of the five.  =~/.agents/skills=, which
 the Agent Skills branding suggests is the universal one, is read by
-opencode, cursor and antigravity, and by neither claude-code nor grok.
-Neither path reaches everybody.
+opencode and cursor alone.  Antigravity is the near miss that makes this
+worth asking rather than recalling: it reads =.agents/skills= inside a
+*project* and keeps user skills under =~/.gemini/config/skills=, so it
+belongs to the first path's story and not the second's.  Neither path
+reaches everybody.
+
+Antigravity accepts four spellings of that project root --- =.agents/=,
+=.agent/=, =_agents/= and =_agent/= --- and reads a skill under any of
+them.  The user root does not vary with the project's choice.
 
 Two harnesses have no commands directory at all: grok resolves =/name=
 against its skill registry, and antigravity's customizations are rules,
-skills, plugins, hooks and MCP servers with commands not among them.
-Writing a command file for either is writing a file nothing reads.
+skills, plugins and hooks, with commands not among them.  Writing a
+command file for either is writing a file nothing reads.
+
+Antigravity has no agents concept either --- "subagent" appears nowhere
+in its vocabulary --- so it answers an agent query with an empty list.
+grok does have subagents, and keeps them in =.grok/agents/=.
 
 ** An agent
 A persona with its own tools, run as a subagent through the =task= tool
