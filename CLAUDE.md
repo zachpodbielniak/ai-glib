@@ -449,6 +449,37 @@ ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CURSOR_MODEL_COMPOSER_2_5);
 
 See `src/providers/ai-*-client.h` for complete model lists.
 
+## Main contexts and source teardown
+
+Several sources here are attached to the **thread-default** context
+rather than the global default, deliberately: a caller driving a nested
+loop on a private context — which `ai_tool_executor_run_full()`'s own
+documentation invites — would never see a global-default timer fire.
+
+**A source attached that way cannot be torn down by its id.** A source id
+is meaningful only inside the context it was attached to, and every
+context allocates from 1, so an id from a private context very likely
+names a *different* source on the global default. `g_source_remove()`
+searches the global default only; `g_main_context_find_source_by_id()`
+against whatever is thread-default *at teardown time* has the same
+problem, since an object is freed wherever its last reference goes and
+not necessarily where it was built.
+
+Both failure modes are live. The wrong source gets destroyed, **and** the
+real one stays armed on an object that is being freed — a
+use-after-free the moment the timer fires, which for
+`AiResourceRegistry` is 250 ms later and lands in `on_rescan_timeout()`.
+When the ids happen not to collide it criticals instead, which is fatal
+under `G_DEBUG=fatal-warnings`.
+
+So: **hold the `GSource *`**, and tear it down with `g_source_destroy()`
+followed by `g_source_unref()`. `ai-claude-tmux-client.c` has done this
+correctly all along and says why; `ai-cli-client.c`'s stream deadline and
+`ai-resource-registry.c`'s debounced rescan did not.
+
+A callback that returns `G_SOURCE_REMOVE` should drop the held reference
+itself, so teardown does not destroy a source that has already finished.
+
 ## Testing
 
 Tests use GLib's GTest framework. Each component has its own test file:

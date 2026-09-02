@@ -189,7 +189,7 @@ struct _AiResourceRegistry
 
     gboolean    watching;
     GPtrArray  *monitors;
-    guint       rescan_id;
+    GSource    *rescan_source;   /* owned; NULL when none is pending */
 };
 
 enum
@@ -546,7 +546,11 @@ on_rescan_timeout(gpointer user_data)
 {
     AiResourceRegistry *self = user_data;
 
-    self->rescan_id = 0;
+    /*
+     * The source has fired and will remove itself; drop our reference to
+     * it here so dispose does not destroy an already-finished source.
+     */
+    g_clear_pointer(&self->rescan_source, g_source_unref);
 
     registry_rescan(self);
 
@@ -576,16 +580,24 @@ registry_schedule_rescan(AiResourceRegistry *self)
 {
     GSource *source;
 
-    if (self->rescan_id != 0)
+    if (self->rescan_source != NULL)
     {
         return;
     }
 
     source = g_timeout_source_new(RESCAN_DEBOUNCE_MS);
     g_source_set_callback(source, on_rescan_timeout, self, NULL);
-    self->rescan_id = g_source_attach(source,
-                                      g_main_context_get_thread_default());
-    g_source_unref(source);
+    g_source_attach(source, g_main_context_get_thread_default());
+
+    /*
+     * The source is kept, not its id.  A source id is meaningful only
+     * within the context it was attached to -- every context allocates
+     * from 1 -- so looking one up in whatever happens to be
+     * thread-default at dispose time can find an unrelated source and
+     * destroy that instead, while leaving this one armed on an object
+     * that is being torn down.
+     */
+    self->rescan_source = source;
 }
 
 static void
@@ -682,17 +694,10 @@ ai_resource_registry_dispose(GObject *object)
      * fired between dispose and finalize would run against a half-torn
      * object.
      */
-    if (self->rescan_id != 0)
+    if (self->rescan_source != NULL)
     {
-        GSource *source = g_main_context_find_source_by_id(
-            g_main_context_get_thread_default(), self->rescan_id);
-
-        if (source != NULL)
-        {
-            g_source_destroy(source);
-        }
-
-        self->rescan_id = 0;
+        g_source_destroy(self->rescan_source);
+        g_clear_pointer(&self->rescan_source, g_source_unref);
     }
 
     registry_detach_monitors(self);

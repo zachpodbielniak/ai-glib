@@ -1962,7 +1962,7 @@ typedef struct
     gboolean          read_pending;
 
     gchar            *stdin_data;
-    guint             timeout_id;
+    GSource          *timeout_source;   /* owned; NULL when none is armed */
 } StreamRun;
 
 static void stream_run_read_next(StreamRun *run);
@@ -1970,10 +1970,26 @@ static void stream_run_read_next(StreamRun *run);
 static void
 stream_run_free(StreamRun *run)
 {
-    if (run->timeout_id != 0)
+    /*
+     * g_source_destroy() on the source we hold, not g_source_remove() on
+     * an id.  The deadline is attached to the *thread-default* context --
+     * deliberately, so a caller driving a nested loop on a private one
+     * still sees it -- and g_source_remove() searches only the global
+     * default.  Ids are allocated per context and every context starts
+     * at 1, so that call could destroy an unrelated source on the global
+     * default *and* leave this deadline armed on freed memory: the
+     * callback then clears run->timeout_source, reads run->client and
+     * force-exits run->subprocess, all after the free.  When the ids did
+     * not collide it criticaled instead, which is fatal under
+     * G_DEBUG=fatal-warnings.
+     *
+     * ai-claude-tmux-client.c already used g_source_destroy() and said
+     * why; the rule existed at one call site and not at its neighbour.
+     */
+    if (run->timeout_source != NULL)
     {
-        g_source_remove(run->timeout_id);
-        run->timeout_id = 0;
+        g_source_destroy(run->timeout_source);
+        g_clear_pointer(&run->timeout_source, g_source_unref);
     }
 
     g_clear_object(&run->task);
@@ -2050,7 +2066,11 @@ on_stream_timeout(gpointer user_data)
     StreamRun *run = user_data;
     GError *error;
 
-    run->timeout_id = 0;
+    /*
+     * The source removes itself on return, so drop our reference rather
+     * than leaving stream_run_free() to destroy a finished one.
+     */
+    g_clear_pointer(&run->timeout_source, g_source_unref);
 
     error = g_error_new(AI_ERROR, AI_ERROR_TIMEOUT,
                         "CLI process exceeded its %d ms deadline",
@@ -2315,9 +2335,10 @@ stream_run_start(StreamRun *run)
         GSource *source = g_timeout_source_new(timeout_ms);
 
         g_source_set_callback(source, on_stream_timeout, run, NULL);
-        run->timeout_id = g_source_attach(source,
-                                          g_main_context_get_thread_default());
-        g_source_unref(source);
+        g_source_attach(source, g_main_context_get_thread_default());
+
+        /* The source is kept; see stream_run_free() for why not its id. */
+        run->timeout_source = source;
     }
 
     stream_run_read_next(run);
