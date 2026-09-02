@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "providers/ai-openai-client.h"
+#include "providers/ai-json-util.h"
 #include "providers/ai-openai-shared.h"
 #include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
@@ -157,57 +158,61 @@ ai_openai_client_parse_response(
 
     obj = json_node_get_object(json);
 
-    /* Check for error response */
-    if (json_object_has_member(obj, "error"))
+    /*
+     * Check for an error response.  Presence, not shape: a server that
+     * answers `"error": "boom"` has still said it failed, and reading the
+     * message off a NULL object gives the generic wording rather than a
+     * pair of criticals.
+     */
+    if (ai_json_get_node(obj, "error") != NULL)
     {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const gchar *err_msg = json_object_get_string_member_with_default(
-            err_obj, "message", "Unknown error");
+        JsonObject *err_obj = ai_json_get_object(obj, "error");
+        const gchar *err_msg = ai_json_get_string(err_obj, "message",
+                                                  "Unknown error");
 
         g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
         return NULL;
     }
 
-    id = json_object_get_string_member_with_default(obj, "id", "");
-    model = json_object_get_string_member_with_default(obj, "model", "");
+    id = ai_json_get_string(obj, "id", "");
+    model = ai_json_get_string(obj, "model", "");
 
     response = ai_response_new(id, model);
 
     /* Parse usage */
-    if (json_object_has_member(obj, "usage"))
     {
-        JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
-        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "prompt_tokens", 0);
-        gint completion_tokens = json_object_get_int_member_with_default(usage_obj, "completion_tokens", 0);
-        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, completion_tokens);
+        JsonObject *usage_obj = ai_json_get_object(obj, "usage");
 
-        ai_response_set_usage(response, usage);
+        if (usage_obj != NULL)
+        {
+            gint prompt_tokens = (gint)ai_json_get_int(usage_obj, "prompt_tokens", 0);
+            gint completion_tokens = (gint)ai_json_get_int(usage_obj, "completion_tokens", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, completion_tokens);
+
+            ai_response_set_usage(response, usage);
+        }
     }
 
     /* Parse choices */
-    if (json_object_has_member(obj, "choices"))
     {
-        JsonArray *choices = json_object_get_array_member(obj, "choices");
+        JsonArray  *choices = ai_json_get_array(obj, "choices");
+        JsonObject *choice = ai_json_array_get_object(choices, 0);
 
-        if (json_array_get_length(choices) > 0)
+        if (choice != NULL)
         {
-            JsonObject *choice = json_array_get_object_element(choices, 0);
-            const gchar *finish_reason = json_object_get_string_member_with_default(
-                choice, "finish_reason", "");
-            JsonObject *message;
+            const gchar *finish_reason =
+                ai_json_get_string(choice, "finish_reason", "");
+            JsonObject *message = ai_json_get_object(choice, "message");
 
             ai_response_set_stop_reason(response, ai_stop_reason_from_string(finish_reason));
 
-            if (json_object_has_member(choice, "message"))
+            if (message != NULL)
             {
-                message = json_object_get_object_member(choice, "message");
-
                 /* Content */
-                if (json_object_has_member(message, "content"))
                 {
-                    JsonNode *content_node = json_object_get_member(message, "content");
+                    JsonNode *content_node = ai_json_get_node(message, "content");
 
-                    if (JSON_NODE_HOLDS_VALUE(content_node))
+                    if (content_node != NULL && JSON_NODE_HOLDS_VALUE(content_node))
                     {
                         const gchar *text = json_node_get_string(content_node);
                         if (text != NULL)
@@ -219,26 +224,24 @@ ai_openai_client_parse_response(
                 }
 
                 /* Tool calls */
-                if (json_object_has_member(message, "tool_calls"))
                 {
-                    JsonArray *tool_calls = json_object_get_array_member(message, "tool_calls");
-                    guint len = json_array_get_length(tool_calls);
+                    JsonArray *tool_calls = ai_json_get_array(message, "tool_calls");
+                    guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
                     guint i;
 
                     for (i = 0; i < len; i++)
                     {
-                        JsonObject *tc = json_array_get_object_element(tool_calls, i);
-                        const gchar *tc_id = json_object_get_string_member_with_default(tc, "id", "");
-                        JsonObject *func;
+                        JsonObject *tc = ai_json_array_get_object(tool_calls, i);
+                        const gchar *tc_id = ai_json_get_string(tc, "id", "");
+                        JsonObject *func = ai_json_get_object(tc, "function");
                         const gchar *name;
                         const gchar *args_str;
                         g_autoptr(AiToolUse) tool_use = NULL;
 
-                        if (json_object_has_member(tc, "function"))
+                        if (func != NULL)
                         {
-                            func = json_object_get_object_member(tc, "function");
-                            name = json_object_get_string_member_with_default(func, "name", "");
-                            args_str = json_object_get_string_member_with_default(func, "arguments", "{}");
+                            name = ai_json_get_string(func, "name", "");
+                            args_str = ai_json_get_string(func, "arguments", "{}");
 
                             tool_use = ai_tool_use_new_from_json_string(tc_id, name, args_str);
                             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&tool_use));
@@ -609,10 +612,8 @@ on_openai_list_models_response(
     }
 
     /* {"object": "list", "data": [{"id": "gpt-...", ...}, ...]} */
-    root = json_node_get_object(json_parser_get_root(parser));
-    arr = (root != NULL && json_object_has_member(root, "data"))
-        ? json_object_get_array_member(root, "data")
-        : NULL;
+    root = ai_json_root_object(parser);
+    arr = ai_json_get_array(root, "data");
 
     if (arr == NULL)
     {
@@ -625,12 +626,12 @@ on_openai_list_models_response(
     n = json_array_get_length(arr);
     for (i = 0; i < n; i++)
     {
-        JsonObject *entry = json_array_get_object_element(arr, i);
+        JsonObject *entry = ai_json_array_get_object(arr, i);
 
-        if (entry != NULL && json_object_has_member(entry, "id"))
+        if (ai_json_get_string(entry, "id", NULL) != NULL)
         {
             models = g_list_append(models,
-                g_strdup(json_object_get_string_member(entry, "id")));
+                g_strdup(ai_json_get_string(entry, "id", "")));
         }
     }
 
@@ -854,8 +855,8 @@ openai_process_stream_chunk(
     /* First chunk - extract id and model, emit stream-start */
     if (!data->stream_started)
     {
-        const gchar *id = json_object_get_string_member_with_default(obj, "id", "");
-        const gchar *model = json_object_get_string_member_with_default(obj, "model", "");
+        const gchar *id = ai_json_get_string(obj, "id", "");
+        const gchar *model = ai_json_get_string(obj, "model", "");
 
         data->response = ai_response_new(id, model);
         data->current_text = g_string_new("");
@@ -869,58 +870,50 @@ openai_process_stream_chunk(
     }
 
     /* Parse choices */
-    if (json_object_has_member(obj, "choices"))
     {
-        JsonArray *choices = json_object_get_array_member(obj, "choices");
+        JsonArray  *choices = ai_json_get_array(obj, "choices");
+        JsonObject *choice = ai_json_array_get_object(choices, 0);
 
-        if (json_array_get_length(choices) > 0)
+        if (choice != NULL)
         {
-            JsonObject *choice = json_array_get_object_element(choices, 0);
+            /* Check finish_reason.  A chunk mid-stream sends JSON null
+             * here, which the accessor reports as absent. */
+            const gchar *finish_reason =
+                ai_json_get_string(choice, "finish_reason", NULL);
+            JsonObject *delta = ai_json_get_object(choice, "delta");
 
-            /* Check finish_reason */
-            if (json_object_has_member(choice, "finish_reason"))
+            if (finish_reason != NULL)
             {
-                JsonNode *fr_node = json_object_get_member(choice, "finish_reason");
-                if (!JSON_NODE_HOLDS_NULL(fr_node))
-                {
-                    const gchar *finish_reason = json_node_get_string(fr_node);
-                    ai_response_set_stop_reason(data->response,
-                        ai_stop_reason_from_string(finish_reason));
-                }
+                ai_response_set_stop_reason(data->response,
+                    ai_stop_reason_from_string(finish_reason));
             }
 
             /* Parse delta */
-            if (json_object_has_member(choice, "delta"))
+            if (delta != NULL)
             {
-                JsonObject *delta = json_object_get_object_member(choice, "delta");
-
                 /* Content delta */
-                if (json_object_has_member(delta, "content"))
                 {
-                    JsonNode *content_node = json_object_get_member(delta, "content");
-                    if (JSON_NODE_HOLDS_VALUE(content_node))
+                    const gchar *content =
+                        ai_json_get_string(delta, "content", NULL);
+
+                    if (content != NULL)
                     {
-                        const gchar *content = json_node_get_string(content_node);
-                        if (content != NULL)
+                        g_string_append(data->current_text, content);
+                        g_signal_emit_by_name(data->client, "delta", content);
                         {
-                            g_string_append(data->current_text, content);
-                            g_signal_emit_by_name(data->client, "delta", content);
-                            {
-                                g_autoptr(AiEvent) event = ai_event_new_text_delta(content);
-                                ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
-                            }
+                            g_autoptr(AiEvent) event = ai_event_new_text_delta(content);
+                            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
                         }
                     }
                 }
 
                 /* Tool calls delta */
-                if (json_object_has_member(delta, "tool_calls"))
                 {
-                    JsonArray *tool_calls = json_object_get_array_member(delta, "tool_calls");
-                    guint len = json_array_get_length(tool_calls);
+                    JsonArray *tool_calls = ai_json_get_array(delta, "tool_calls");
+                    guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
                     guint i;
 
-                    if (data->tool_calls == NULL)
+                    if (len > 0 && data->tool_calls == NULL)
                     {
                         data->tool_calls = g_hash_table_new_full(
                             g_str_hash, g_str_equal,
@@ -929,10 +922,17 @@ openai_process_stream_chunk(
 
                     for (i = 0; i < len; i++)
                     {
-                        JsonObject *tc = json_array_get_object_element(tool_calls, i);
-                        gint index = json_object_get_int_member_with_default(tc, "index", 0);
+                        JsonObject *tc = ai_json_array_get_object(tool_calls, i);
+                        gint index = (gint)ai_json_get_int(tc, "index", 0);
                         g_autofree gchar *index_key = g_strdup_printf("%d", index);
+                        const gchar *tc_id = ai_json_get_string(tc, "id", NULL);
+                        JsonObject *func = ai_json_get_object(tc, "function");
                         OpenAIToolCall *existing;
+
+                        if (tc == NULL)
+                        {
+                            continue;
+                        }
 
                         existing = g_hash_table_lookup(data->tool_calls, index_key);
                         if (existing == NULL)
@@ -941,29 +941,29 @@ openai_process_stream_chunk(
                             existing->arguments = g_string_new("");
 
                             /* Get id if present */
-                            if (json_object_has_member(tc, "id"))
+                            if (tc_id != NULL)
                             {
                                 g_free(index_key);
-                                index_key = g_strdup(json_object_get_string_member(tc, "id"));
+                                index_key = g_strdup(tc_id);
                             }
 
                             g_hash_table_insert(data->tool_calls, g_strdup(index_key), existing);
                         }
 
                         /* Parse function */
-                        if (json_object_has_member(tc, "function"))
+                        if (func != NULL)
                         {
-                            JsonObject *func = json_object_get_object_member(tc, "function");
+                            const gchar *name = ai_json_get_string(func, "name", NULL);
+                            const gchar *args = ai_json_get_string(func, "arguments", NULL);
 
-                            if (json_object_has_member(func, "name"))
+                            if (name != NULL)
                             {
                                 g_free(existing->name);
-                                existing->name = g_strdup(json_object_get_string_member(func, "name"));
+                                existing->name = g_strdup(name);
                             }
 
-                            if (json_object_has_member(func, "arguments"))
+                            if (args != NULL)
                             {
-                                const gchar *args = json_object_get_string_member(func, "arguments");
                                 g_string_append(existing->arguments, args);
                             }
                         }
@@ -974,14 +974,17 @@ openai_process_stream_chunk(
     }
 
     /* Parse usage if present (usually in final chunk) */
-    if (json_object_has_member(obj, "usage"))
     {
-        JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
-        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "prompt_tokens", 0);
-        gint completion_tokens = json_object_get_int_member_with_default(usage_obj, "completion_tokens", 0);
-        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, completion_tokens);
+        JsonObject *usage_obj = ai_json_get_object(obj, "usage");
 
-        ai_response_set_usage(data->response, usage);
+        if (usage_obj != NULL)
+        {
+            gint prompt_tokens = (gint)ai_json_get_int(usage_obj, "prompt_tokens", 0);
+            gint completion_tokens = (gint)ai_json_get_int(usage_obj, "completion_tokens", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, completion_tokens);
+
+            ai_response_set_usage(data->response, usage);
+        }
     }
 }
 

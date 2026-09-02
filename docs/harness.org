@@ -318,7 +318,7 @@ the way out of the program.
 | In the body   | Becomes                                          |
 |---------------+--------------------------------------------------|
 | =$ARGUMENTS=  | everything after the command name                |
-| =$1= … =$9=   | individual arguments, shell-quoted               |
+| =$1= … =$9=   | individual arguments                             |
 | =$$=          | a literal =$=                                    |
 | anything else | itself --- =$HOME=, =$0= and =$FOO= are untouched |
 
@@ -351,6 +351,22 @@ Here is the current state:
 #+end_src
 
 Without =shell: true= the backticks stay literal text.
+
+*The opt-in is a statement about the file*, so the scan runs over the
+file's body and over nothing else. Placeholders are filled in *after* it,
+into the text between the substitutions, and what they produce is never
+scanned --- otherwise anyone who could invoke =/summarise= could pass
+=!`id`= as an argument and have a body containing no backticks at all run
+it. That is what used to happen: arguments were interpolated first and
+the result was scanned.
+
+The file's own command still gets the arguments, the way a shell script
+does: =$1= … =$9= are its positional parameters and =$ARGUMENTS= is in its
+environment. Neither is re-parsed, so =/deploy 'x; rm -rf ~'= against a
+body of =!`echo $1`= echoes one word rather than running two commands.
+Inside a substitution those two spellings mean the *shell's* parameter
+and variable rather than the placeholders above; everywhere else in the
+body they are the placeholders.
 
 The reason is worth stating plainly. These directories are shared with
 other tools, and a frontend builds a listing at startup, unprompted.

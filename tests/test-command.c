@@ -576,9 +576,99 @@ test_shell_sees_substituted_arguments(void)
 		                 "---\nshell: true\n---\n!`echo $1`\n");
 	g_autofree gchar       *prompt = resolve_prompt(set, "/s HELLO");
 
-	/* Placeholders are substituted before the shell runs, so a command
-	 * can act on its arguments rather than only quoting them. */
+	/* An argument reaches the command as the shell's own $1, so a body
+	 * can act on what it was given rather than only quoting it. */
 	g_assert_cmpstr(prompt, ==, "HELLO\n");
+}
+
+static void
+test_shell_sees_the_arguments_variable(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("s", AI_RESOURCE_COMMAND,
+		                 "---\nshell: true\n---\n!`echo $ARGUMENTS`\n");
+	g_autofree gchar       *prompt = resolve_prompt(set, "/s one two");
+
+	/* The whole argument string reaches it too, as an environment
+	 * variable rather than as text pasted into the script. */
+	g_assert_cmpstr(prompt, ==, "one two\n");
+}
+
+/*
+ * A body that opted into running *its own* commands did not thereby opt
+ * into running the caller's.
+ *
+ * `shell: true` is a statement about the file: its author wrote the
+ * backticks and meant them. Arguments were interpolated into the body
+ * first and the *result* was scanned for `` !` ``, so anybody who could
+ * invoke the command could put backticks in an argument and have them
+ * executed by a file that contains none. /summarise is the shape that
+ * makes it obvious -- a command whose entire body is "summarise this"
+ * has no shell in it at all, and ran `id` anyway.
+ */
+static void
+test_shell_does_not_run_from_an_argument(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("summarise", AI_RESOURCE_COMMAND,
+		                 "---\nshell: true\n---\n"
+		                 "Please summarise: $ARGUMENTS\n");
+	g_autofree gchar       *prompt =
+		resolve_prompt(set, "/summarise !`echo PWNED` please");
+
+	g_assert_cmpstr(prompt, ==,
+	                "Please summarise: !`echo PWNED` please\n");
+	g_assert_null(strstr(prompt, "PWNED\n"));
+}
+
+/* The same through $1, which is the other way argument text arrives. */
+static void
+test_shell_does_not_run_from_a_positional_argument(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("s", AI_RESOURCE_COMMAND,
+		                 "---\nshell: true\n---\n[$1]\n");
+	g_autofree gchar       *prompt = resolve_prompt(set, "/s '!`echo PWNED`'");
+
+	g_assert_cmpstr(prompt, ==, "[!`echo PWNED`]\n");
+}
+
+/*
+ * And an argument used *inside* the file's own command is one word to
+ * the shell, not more of the script.
+ *
+ * Pasting the argument into the command text made `;`, `|` and `$( )`
+ * the caller's to write; the argument is a positional parameter now, so
+ * the shell never re-parses it.
+ */
+static void
+test_shell_argument_cannot_extend_the_command(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("s", AI_RESOURCE_COMMAND,
+		                 "---\nshell: true\n---\n[!`echo $1`]\n");
+	g_autofree gchar       *prompt =
+		resolve_prompt(set, "/s 'x; echo PWNED'");
+
+	g_assert_cmpstr(prompt, ==, "[x; echo PWNED]\n");
+}
+
+/*
+ * What a command printed is text, not a template.
+ *
+ * Expanding placeholders after the shell ran would let a price list
+ * saying "$5" lose it to an empty $5, and would spend an argument
+ * wherever the command's own output happened to say $1.
+ */
+static void
+test_shell_output_is_not_scanned_for_placeholders(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("s", AI_RESOURCE_COMMAND,
+		                 "---\nshell: true\n---\n!`echo 'costs $5'`\n");
+	g_autofree gchar       *prompt = resolve_prompt(set, "/s alpha");
+
+	g_assert_cmpstr(prompt, ==, "costs $5\n");
 }
 
 static void
@@ -792,6 +882,16 @@ main(int argc, char *argv[])
 	                test_shell_multiple_substitutions);
 	g_test_add_func("/ai-glib/command/shell-after-substitution",
 	                test_shell_sees_substituted_arguments);
+	g_test_add_func("/ai-glib/command/shell-arguments-variable",
+	                test_shell_sees_the_arguments_variable);
+	g_test_add_func("/ai-glib/command/shell-not-from-an-argument",
+	                test_shell_does_not_run_from_an_argument);
+	g_test_add_func("/ai-glib/command/shell-not-from-a-positional",
+	                test_shell_does_not_run_from_a_positional_argument);
+	g_test_add_func("/ai-glib/command/shell-argument-is-one-word",
+	                test_shell_argument_cannot_extend_the_command);
+	g_test_add_func("/ai-glib/command/shell-output-is-text",
+	                test_shell_output_is_not_scanned_for_placeholders);
 	g_test_add_func("/ai-glib/command/shell-cancel", test_shell_cancellation);
 
 	g_test_add_func("/ai-glib/command/list-every-kind",

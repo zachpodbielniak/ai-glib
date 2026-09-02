@@ -185,6 +185,17 @@ The in-memory model (=AiMessage=, =AiToolUse=, =AiToolResult=, =AiTextContent=) 
 
 This mirrors pi-mono's per-provider =convertMessages()= pattern. Adding a new provider means writing its own message walker; no central switch needs to know about it.
 
+*** Reading the answer back: one type-checked accessor set
+Serialisation is per provider; /deserialisation/ shares =src/providers/ai-json-util.h=, a private header of =static inline= accessors --- =ai_json_get_object()=, =_array=, =_string=, =_int=, =_double=, =_boolean=, =_node=, =ai_json_array_get_object()=, =ai_json_root_object()=.
+
+The reason is that =json_object_has_member()= answers "is the key present", which is a different question from "is the value the type I am about to read it as". ="usage": null= and ="content": \{\}= both pass it, and json-glib's typed accessor then logs a =Json-CRITICAL= and returns =NULL= --- which travels into the next accessor for a second one. A critical is fatal under GTest and under =G_DEBUG=fatal-warnings=; without those the turn silently yields an empty response. All five HTTP providers were written that way, at roughly 130 sites, and a check added at some of them is the bug rather than the fix.
+
+Nothing here needs a hostile server. =ai_config_set_base_url()= points a provider at anything, and a proxy, a gateway or the next version of an API is enough to change a shape.
+
+=tests/test-http-malformed.c= is the standing check: one table of malformed documents run through all five providers, on both the chat and the streaming reader, with criticals fatal. A missing type check at any site fails there rather than at whichever one somebody happened to look at.
+
+Five CLI providers still carry private copies of the same idea (=cc_*=, =oc_*=, =grok_*=, =agy_*=, =cursor_*=), and the copies have already drifted over which numeric types count as a number. Folding them onto this header is worth doing and has not been done.
+
 *** Provider switching and the context boundary
 =AiConversation= can replace its provider between turns without replacing
 its transcript or canonical =AiMessage= list:

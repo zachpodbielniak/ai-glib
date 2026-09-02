@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "providers/ai-gemini-client.h"
+#include "providers/ai-json-util.h"
 #include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"
@@ -329,12 +330,16 @@ ai_gemini_client_parse_response(
 
     obj = json_node_get_object(json);
 
-    /* Check for error */
-    if (json_object_has_member(obj, "error"))
+    /*
+     * Check for an error.  Presence, not shape: a server that answers
+     * `"error": "boom"` has still said it failed, and reading the message
+     * off a NULL object gives the generic wording rather than criticals.
+     */
+    if (ai_json_get_node(obj, "error") != NULL)
     {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const gchar *err_msg = json_object_get_string_member_with_default(
-            err_obj, "message", "Unknown error");
+        JsonObject *err_obj = ai_json_get_object(obj, "error");
+        const gchar *err_msg = ai_json_get_string(err_obj, "message",
+                                                  "Unknown error");
 
         g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
         return NULL;
@@ -343,15 +348,15 @@ ai_gemini_client_parse_response(
     response = ai_response_new("", "");
 
     /* Parse candidates */
-    if (json_object_has_member(obj, "candidates"))
     {
-        JsonArray *candidates = json_object_get_array_member(obj, "candidates");
+        JsonArray  *candidates = ai_json_get_array(obj, "candidates");
+        JsonObject *candidate = ai_json_array_get_object(candidates, 0);
 
-        if (json_array_get_length(candidates) > 0)
+        if (candidate != NULL)
         {
-            JsonObject *candidate = json_array_get_object_element(candidates, 0);
-            const gchar *finish_reason = json_object_get_string_member_with_default(
-                candidate, "finishReason", "");
+            const gchar *finish_reason =
+                ai_json_get_string(candidate, "finishReason", "");
+            JsonObject *content = ai_json_get_object(candidate, "content");
 
             if (g_strcmp0(finish_reason, "STOP") == 0)
             {
@@ -363,35 +368,32 @@ ai_gemini_client_parse_response(
             }
 
             /* Parse content */
-            if (json_object_has_member(candidate, "content"))
+            if (content != NULL)
             {
-                JsonObject *content = json_object_get_object_member(candidate, "content");
                 gboolean tool_use_present = FALSE;
 
-                if (json_object_has_member(content, "parts"))
                 {
-                    JsonArray *parts = json_object_get_array_member(content, "parts");
-                    guint len = json_array_get_length(parts);
+                    JsonArray *parts = ai_json_get_array(content, "parts");
+                    guint len = parts != NULL ? json_array_get_length(parts) : 0;
                     guint i;
 
                     for (i = 0; i < len; i++)
                     {
-                        JsonObject *part = json_array_get_object_element(parts, i);
+                        JsonObject *part = ai_json_array_get_object(parts, i);
+                        const gchar *text = ai_json_get_string(part, "text", NULL);
+                        JsonObject *fc = ai_json_get_object(part, "functionCall");
 
-                        if (json_object_has_member(part, "text"))
+                        if (text != NULL)
                         {
-                            const gchar *text = json_object_get_string_member(part, "text");
                             g_autoptr(AiTextContent) text_content = ai_text_content_new(text);
 
                             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&text_content));
                         }
-                        else if (json_object_has_member(part, "functionCall"))
+                        else if (fc != NULL)
                         {
-                            JsonObject *fc = json_object_get_object_member(part, "functionCall");
-                            const gchar *name = json_object_get_string_member_with_default(fc, "name", "");
-                            const gchar *provided_id = json_object_get_string_member_with_default(fc, "id", NULL);
-                            JsonNode *args = json_object_has_member(fc, "args")
-                                ? json_object_get_member(fc, "args") : NULL;
+                            const gchar *name = ai_json_get_string(fc, "name", "");
+                            const gchar *provided_id = ai_json_get_string(fc, "id", NULL);
+                            JsonNode *args = ai_json_get_node(fc, "args");
                             g_autofree gchar *synthetic_id = NULL;
                             const gchar *id;
                             g_autoptr(AiToolUse) tool_use = NULL;
@@ -423,14 +425,17 @@ ai_gemini_client_parse_response(
     }
 
     /* Parse usage */
-    if (json_object_has_member(obj, "usageMetadata"))
     {
-        JsonObject *usage_obj = json_object_get_object_member(obj, "usageMetadata");
-        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "promptTokenCount", 0);
-        gint output_tokens = json_object_get_int_member_with_default(usage_obj, "candidatesTokenCount", 0);
-        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+        JsonObject *usage_obj = ai_json_get_object(obj, "usageMetadata");
 
-        ai_response_set_usage(response, usage);
+        if (usage_obj != NULL)
+        {
+            gint prompt_tokens = (gint)ai_json_get_int(usage_obj, "promptTokenCount", 0);
+            gint output_tokens = (gint)ai_json_get_int(usage_obj, "candidatesTokenCount", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+
+            ai_response_set_usage(response, usage);
+        }
     }
 
     return (AiResponse *)g_steal_pointer(&response);
@@ -804,10 +809,8 @@ on_gemini_list_models_response(
     /* {"models": [{"name": "models/gemini-...",
      *              "supportedGenerationMethods": [...]}, ...]} ---
      * keep only chat-capable models, strip the "models/" prefix. */
-    root = json_node_get_object(json_parser_get_root(parser));
-    arr = (root != NULL && json_object_has_member(root, "models"))
-        ? json_object_get_array_member(root, "models")
-        : NULL;
+    root = ai_json_root_object(parser);
+    arr = ai_json_get_array(root, "models");
 
     if (arr == NULL)
     {
@@ -820,24 +823,23 @@ on_gemini_list_models_response(
     n = json_array_get_length(arr);
     for (i = 0; i < n; i++)
     {
-        JsonObject *entry = json_array_get_object_element(arr, i);
-        const gchar *name;
+        JsonObject *entry = ai_json_array_get_object(arr, i);
+        const gchar *name = ai_json_get_string(entry, "name", NULL);
+        JsonArray *methods =
+            ai_json_get_array(entry, "supportedGenerationMethods");
         gboolean chat_capable = FALSE;
 
-        if (entry == NULL || !json_object_has_member(entry, "name"))
+        if (name == NULL)
         {
             continue;
         }
 
-        if (json_object_has_member(entry, "supportedGenerationMethods"))
         {
-            JsonArray *methods =
-                json_object_get_array_member(entry, "supportedGenerationMethods");
-            guint j, m = json_array_get_length(methods);
+            guint j, m = methods != NULL ? json_array_get_length(methods) : 0;
 
             for (j = 0; j < m; j++)
             {
-                if (g_strcmp0(json_array_get_string_element(methods, j),
+                if (g_strcmp0(ai_json_array_get_string(methods, j, NULL),
                               "generateContent") == 0)
                 {
                     chat_capable = TRUE;
@@ -851,7 +853,6 @@ on_gemini_list_models_response(
             continue;
         }
 
-        name = json_object_get_string_member(entry, "name");
         if (g_str_has_prefix(name, "models/"))
         {
             name += strlen("models/");
@@ -1022,15 +1023,15 @@ gemini_process_stream_chunk(
     }
 
     /* Parse candidates */
-    if (json_object_has_member(obj, "candidates"))
     {
-        JsonArray *candidates = json_object_get_array_member(obj, "candidates");
+        JsonArray  *candidates = ai_json_get_array(obj, "candidates");
+        JsonObject *candidate = ai_json_array_get_object(candidates, 0);
 
-        if (json_array_get_length(candidates) > 0)
+        if (candidate != NULL)
         {
-            JsonObject *candidate = json_array_get_object_element(candidates, 0);
-            const gchar *finish_reason = json_object_get_string_member_with_default(
-                candidate, "finishReason", "");
+            const gchar *finish_reason =
+                ai_json_get_string(candidate, "finishReason", "");
+            JsonObject *content = ai_json_get_object(candidate, "content");
 
             if (g_strcmp0(finish_reason, "STOP") == 0)
             {
@@ -1041,63 +1042,54 @@ gemini_process_stream_chunk(
                 ai_response_set_stop_reason(data->response, AI_STOP_REASON_MAX_TOKENS);
             }
 
-            if (json_object_has_member(candidate, "content"))
+            if (content != NULL)
             {
-                JsonObject *content = json_object_get_object_member(candidate, "content");
+                JsonArray *parts = ai_json_get_array(content, "parts");
+                guint len = parts != NULL ? json_array_get_length(parts) : 0;
+                guint i;
 
-                if (json_object_has_member(content, "parts"))
+                for (i = 0; i < len; i++)
                 {
-                    JsonArray *parts = json_object_get_array_member(content, "parts");
-                    guint len = json_array_get_length(parts);
-                    guint i;
+                    JsonObject *part = ai_json_array_get_object(parts, i);
+                    const gchar *text = ai_json_get_string(part, "text", NULL);
+                    JsonObject *fc = ai_json_get_object(part, "functionCall");
 
-                    for (i = 0; i < len; i++)
+                    if (text != NULL)
                     {
-                        JsonObject *part = json_array_get_object_element(parts, i);
-
-                        if (json_object_has_member(part, "text"))
+                        g_string_append(data->current_text, text);
+                        g_signal_emit_by_name(data->client, "delta", text);
                         {
-                            const gchar *text = json_object_get_string_member(part, "text");
-                            if (text != NULL)
-                            {
-                                g_string_append(data->current_text, text);
-                                g_signal_emit_by_name(data->client, "delta", text);
-                                {
-                                    g_autoptr(AiEvent) event = ai_event_new_text_delta(text);
-                                    ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
-                                }
-                            }
+                            g_autoptr(AiEvent) event = ai_event_new_text_delta(text);
+                            ai_event_source_emit(AI_EVENT_SOURCE(data->client), event);
                         }
-                        else if (json_object_has_member(part, "functionCall"))
+                    }
+                    else if (fc != NULL)
+                    {
+                        /* Gemini streams tool calls atomically per part —
+                         * accumulate the AiToolUse directly into the
+                         * response now. */
+                        const gchar *name = ai_json_get_string(fc, "name", "");
+                        const gchar *provided_id = ai_json_get_string(fc, "id", NULL);
+                        JsonNode *args = ai_json_get_node(fc, "args");
+                        g_autofree gchar *synthetic_id = NULL;
+                        const gchar *id;
+                        g_autoptr(AiToolUse) tool_use = NULL;
+
+                        if (provided_id != NULL && provided_id[0] != '\0')
                         {
-                            /* Gemini streams tool calls atomically per part —
-                             * accumulate the AiToolUse directly into the
-                             * response now. */
-                            JsonObject *fc = json_object_get_object_member(part, "functionCall");
-                            const gchar *name = json_object_get_string_member_with_default(fc, "name", "");
-                            const gchar *provided_id = json_object_get_string_member_with_default(fc, "id", NULL);
-                            JsonNode *args = json_object_has_member(fc, "args")
-                                ? json_object_get_member(fc, "args") : NULL;
-                            g_autofree gchar *synthetic_id = NULL;
-                            const gchar *id;
-                            g_autoptr(AiToolUse) tool_use = NULL;
-
-                            if (provided_id != NULL && provided_id[0] != '\0')
-                            {
-                                id = provided_id;
-                            }
-                            else
-                            {
-                                synthetic_id = g_uuid_string_random();
-                                id = synthetic_id;
-                            }
-
-                            tool_use = ai_tool_use_new(id, name, args);
-                            ai_response_add_content_block(data->response,
-                                (AiContentBlock *)g_steal_pointer(&tool_use));
-                            ai_response_set_stop_reason(data->response,
-                                AI_STOP_REASON_TOOL_USE);
+                            id = provided_id;
                         }
+                        else
+                        {
+                            synthetic_id = g_uuid_string_random();
+                            id = synthetic_id;
+                        }
+
+                        tool_use = ai_tool_use_new(id, name, args);
+                        ai_response_add_content_block(data->response,
+                            (AiContentBlock *)g_steal_pointer(&tool_use));
+                        ai_response_set_stop_reason(data->response,
+                            AI_STOP_REASON_TOOL_USE);
                     }
                 }
             }
@@ -1105,14 +1097,17 @@ gemini_process_stream_chunk(
     }
 
     /* Parse usage */
-    if (json_object_has_member(obj, "usageMetadata"))
     {
-        JsonObject *usage_obj = json_object_get_object_member(obj, "usageMetadata");
-        gint prompt_tokens = json_object_get_int_member_with_default(usage_obj, "promptTokenCount", 0);
-        gint output_tokens = json_object_get_int_member_with_default(usage_obj, "candidatesTokenCount", 0);
-        g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+        JsonObject *usage_obj = ai_json_get_object(obj, "usageMetadata");
 
-        ai_response_set_usage(data->response, usage);
+        if (usage_obj != NULL)
+        {
+            gint prompt_tokens = (gint)ai_json_get_int(usage_obj, "promptTokenCount", 0);
+            gint output_tokens = (gint)ai_json_get_int(usage_obj, "candidatesTokenCount", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(prompt_tokens, output_tokens);
+
+            ai_response_set_usage(data->response, usage);
+        }
     }
 }
 
@@ -1885,11 +1880,11 @@ ai_gemini_client_parse_image_response(
 
     obj = json_node_get_object(json);
 
-    if (json_object_has_member(obj, "error"))
+    if (ai_json_get_node(obj, "error") != NULL)
     {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const gchar *err_msg = json_object_get_string_member_with_default(
-            err_obj, "message", "Unknown error");
+        JsonObject *err_obj = ai_json_get_object(obj, "error");
+        const gchar *err_msg = ai_json_get_string(err_obj, "message",
+                                                  "Unknown error");
 
         g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
         return NULL;
@@ -1909,21 +1904,13 @@ ai_gemini_client_parse_image_response(
 
         for (k = 0; keys[k] != NULL; k++)
         {
-            JsonArray *array;
-            guint len;
+            JsonArray *array = ai_json_get_array(obj, keys[k]);
+            guint len = array != NULL ? json_array_get_length(array) : 0;
             guint i;
-
-            if (!json_object_has_member(obj, keys[k]))
-            {
-                continue;
-            }
-
-            array = json_object_get_array_member(obj, keys[k]);
-            len = json_array_get_length(array);
 
             for (i = 0; i < len; i++)
             {
-                JsonObject *item = json_array_get_object_element(array, i);
+                JsonObject *item = ai_json_array_get_object(array, i);
                 const gchar *b64;
                 const gchar *mime;
 
@@ -1932,15 +1919,13 @@ ai_gemini_client_parse_image_response(
                     continue;
                 }
 
-                b64 = json_object_get_string_member_with_default(
-                    item, "bytesBase64Encoded", NULL);
+                b64 = ai_json_get_string(item, "bytesBase64Encoded", NULL);
                 if (b64 == NULL)
                 {
                     continue;
                 }
 
-                mime = json_object_get_string_member_with_default(
-                    item, "mimeType", "image/png");
+                mime = ai_json_get_string(item, "mimeType", "image/png");
 
                 ai_image_response_add_image(
                     response, ai_generated_image_new_from_base64(b64, mime));
@@ -1949,76 +1934,59 @@ ai_gemini_client_parse_image_response(
     }
 
     /* Envelope 3: chat candidates carrying inline image parts. */
-    if (json_object_has_member(obj, "candidates"))
     {
-        JsonArray *candidates = json_object_get_array_member(obj, "candidates");
-        guint num_candidates = json_array_get_length(candidates);
+        JsonArray *candidates = ai_json_get_array(obj, "candidates");
+        guint num_candidates =
+            candidates != NULL ? json_array_get_length(candidates) : 0;
         guint c;
 
         for (c = 0; c < num_candidates; c++)
         {
-            JsonObject *candidate = json_array_get_object_element(candidates, c);
-            JsonObject *content;
-            JsonArray *parts;
+            JsonObject *candidate = ai_json_array_get_object(candidates, c);
+            JsonObject *content = ai_json_get_object(candidate, "content");
+            JsonArray *parts = ai_json_get_array(content, "parts");
             guint num_parts;
             guint p;
 
-            if (candidate == NULL ||
-                !json_object_has_member(candidate, "content"))
+            if (parts == NULL)
             {
                 continue;
             }
 
-            content = json_object_get_object_member(candidate, "content");
-            if (!json_object_has_member(content, "parts"))
-            {
-                continue;
-            }
-
-            parts = json_object_get_array_member(content, "parts");
             num_parts = json_array_get_length(parts);
 
             for (p = 0; p < num_parts; p++)
             {
-                JsonObject *part = json_array_get_object_element(parts, p);
+                JsonObject *part = ai_json_array_get_object(parts, p);
                 JsonObject *inline_data;
                 const gchar *b64;
                 const gchar *mime;
 
                 /* Requests use inline_data, responses inlineData; accept
                  * both so neither spelling can surprise us. */
-                if (part == NULL)
+                inline_data = ai_json_get_object(part, "inlineData");
+
+                if (inline_data == NULL)
                 {
-                    continue;
+                    inline_data = ai_json_get_object(part, "inline_data");
                 }
-                else if (json_object_has_member(part, "inlineData"))
-                {
-                    inline_data = json_object_get_object_member(part,
-                                                                "inlineData");
-                }
-                else if (json_object_has_member(part, "inline_data"))
-                {
-                    inline_data = json_object_get_object_member(part,
-                                                                "inline_data");
-                }
-                else
+
+                if (inline_data == NULL)
                 {
                     continue;
                 }
 
-                b64 = json_object_get_string_member_with_default(
-                    inline_data, "data", NULL);
+                b64 = ai_json_get_string(inline_data, "data", NULL);
                 if (b64 == NULL)
                 {
                     continue;
                 }
 
-                mime = json_object_get_string_member_with_default(
-                    inline_data, "mimeType", NULL);
+                mime = ai_json_get_string(inline_data, "mimeType", NULL);
                 if (mime == NULL)
                 {
-                    mime = json_object_get_string_member_with_default(
-                        inline_data, "mime_type", "image/png");
+                    mime = ai_json_get_string(inline_data, "mime_type",
+                                              "image/png");
                 }
 
                 ai_image_response_add_image(

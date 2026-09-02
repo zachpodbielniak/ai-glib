@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "providers/ai-image-shared.h"
+#include "providers/ai-json-util.h"
 #include "core/ai-error.h"
 #include "model/ai-generated-image.h"
 
@@ -825,25 +826,30 @@ ai_image_shared_parse_openai_response (
 
     obj = json_node_get_object (root);
 
-    if (json_object_has_member (obj, "error"))
+    if (ai_json_get_node (obj, "error") != NULL)
     {
-        JsonObject *err = json_object_get_object_member (obj, "error");
-        const gchar *message = json_object_get_string_member_with_default (
-            err, "message", "Unknown error");
+        JsonObject *err = ai_json_get_object (obj, "error");
+        const gchar *message = ai_json_get_string (err, "message",
+                                                   "Unknown error");
 
         g_set_error (error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", message);
         return NULL;
     }
 
-    if (!json_object_has_member (obj, "data"))
+    /* An array, not merely a member: a "data" holding an object passed
+       the old has_member check and then criticalled on the way to a
+       NULL, which the caller read as an empty image list. */
+    data = ai_json_get_array (obj, "data");
+
+    if (data == NULL)
     {
         g_set_error (error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                      "Image response has no 'data' array");
         return NULL;
     }
 
-    created = json_object_get_int_member_with_default (
-        obj, "created", g_get_real_time () / G_USEC_PER_SEC);
+    created = ai_json_get_int (obj, "created",
+                               g_get_real_time () / G_USEC_PER_SEC);
 
     response = ai_image_response_new (NULL, created);
     if (model != NULL)
@@ -851,12 +857,11 @@ ai_image_shared_parse_openai_response (
         ai_image_response_set_model (response, model);
     }
 
-    data = json_object_get_array_member (obj, "data");
     length = json_array_get_length (data);
 
     for (i = 0; i < length; i++)
     {
-        JsonObject *item = json_array_get_object_element (data, i);
+        JsonObject *item = ai_json_array_get_object (data, i);
         g_autoptr(AiGeneratedImage) image = NULL;
         const gchar *b64;
         const gchar *url;
@@ -866,9 +871,8 @@ ai_image_shared_parse_openai_response (
             continue;
         }
 
-        b64 = json_object_get_string_member_with_default (item, "b64_json",
-                                                          NULL);
-        url = json_object_get_string_member_with_default (item, "url", NULL);
+        b64 = ai_json_get_string (item, "b64_json", NULL);
+        url = ai_json_get_string (item, "url", NULL);
 
         /* Prefer inline bytes: they are already in hand, whereas a URL is
          * a second round trip against a link that expires. */
@@ -886,8 +890,8 @@ ai_image_shared_parse_openai_response (
         }
 
         {
-            const gchar *revised = json_object_get_string_member_with_default (
-                item, "revised_prompt", NULL);
+            const gchar *revised = ai_json_get_string (item, "revised_prompt",
+                                                       NULL);
 
             if (revised != NULL)
             {

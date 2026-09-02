@@ -492,6 +492,10 @@ ai_command_split_arguments(const gchar *arguments)
  * is left exactly as written --- command bodies contain shell snippets,
  * and rewriting `$HOME` inside one would be worse than useless.
  *
+ * This is text substitution and nothing else: what it produces is never
+ * scanned for `` !`cmd` ``, so an argument cannot introduce one. See
+ * `ai_command_set_resolve()` for where the two meet.
+ *
  * Returns: (transfer full): the substituted text
  */
 gchar *
@@ -598,21 +602,33 @@ on_outer_cancelled(GCancellable *outer, gpointer user_data)
  * Stderr is discarded rather than folded in: it is not output the author
  * asked for, and quietly pasting a warning into a prompt is worse than
  * dropping it.
+ *
+ * @command is the file's own text, never anything the caller typed.
+ * The arguments reach it the way a shell script's arguments do -- as
+ * `$1`..`$9` from the positional parameters and `$ARGUMENTS` from the
+ * environment -- so a value the shell expands is one word and stays one
+ * word. Pasting them into @command instead made every shell operator in
+ * an argument the caller's to write: `` !`echo $1` `` invoked with
+ * `x; echo PWNED` ran two commands.
  */
 static gchar *
 run_shell(
-    const gchar  *command,
-    const gchar  *cwd,
-    GCancellable *cancellable
+    const gchar        *command,
+    const gchar        *arguments,
+    const gchar *const *argv,
+    const gchar        *cwd,
+    GCancellable       *cancellable
 ){
     g_autoptr(GSubprocessLauncher) launcher = NULL;
     g_autoptr(GSubprocess)         subprocess = NULL;
     g_autoptr(GCancellable)        local_cancel = NULL;
     g_autoptr(GError)              local_error = NULL;
+    g_autoptr(GPtrArray)           sh_argv = NULL;
     g_autofree gchar              *stdout_text = NULL;
     ShellRun                       run = { NULL, NULL, FALSE };
     GSource                       *timeout = NULL;
     gulong                         cancel_id = 0;
+    gsize                          i;
 
     launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                          G_SUBPROCESS_FLAGS_STDERR_SILENCE);
@@ -622,8 +638,29 @@ run_shell(
         g_subprocess_launcher_set_cwd(launcher, cwd);
     }
 
-    subprocess = g_subprocess_launcher_spawn(launcher, &local_error,
-                                             "/bin/sh", "-c", command, NULL);
+    /* Set even when empty, so a body reading it sees the same thing
+     * whether or not the user typed anything -- an ARGUMENTS inherited
+     * from the frontend's own environment would otherwise show up in a
+     * command invoked with none. */
+    g_subprocess_launcher_setenv(launcher, "ARGUMENTS",
+                                 arguments != NULL ? arguments : "", TRUE);
+
+    /* `sh` is $0; everything after it is $1 onwards. */
+    sh_argv = g_ptr_array_new();
+    g_ptr_array_add(sh_argv, (gpointer)"/bin/sh");
+    g_ptr_array_add(sh_argv, (gpointer)"-c");
+    g_ptr_array_add(sh_argv, (gpointer)command);
+    g_ptr_array_add(sh_argv, (gpointer)"sh");
+
+    for (i = 0; argv != NULL && argv[i] != NULL; i++)
+    {
+        g_ptr_array_add(sh_argv, (gpointer)argv[i]);
+    }
+
+    g_ptr_array_add(sh_argv, NULL);
+
+    subprocess = g_subprocess_launcher_spawnv(
+        launcher, (const gchar *const *)sh_argv->pdata, &local_error);
 
     if (subprocess == NULL)
     {
@@ -692,35 +729,51 @@ run_shell(
 }
 
 /*
- * Replace every `` !`cmd` `` in @body with what the command printed.
+ * Expand @body into a prompt: the file's own `` !`cmd` `` substitutions
+ * and the caller's argument placeholders, in one pass.
  *
- * With @allowed FALSE the backticks are left exactly as written, which
- * is the default for any file that has not asked for this.
+ * The one pass is the point, and it is a security boundary rather than
+ * tidiness. `shell: true` is a statement about the *file*: its author
+ * wrote those backticks and meant them. Interpolating the arguments
+ * first and scanning the result meant anybody who could invoke the
+ * command could put `` !`id` `` in an argument and have a file that
+ * contains no backticks at all run it -- reproduced against a body whose
+ * whole text was "Please summarise: $ARGUMENTS".
+ *
+ * So the scan runs over @body only. Argument text is appended as literal
+ * text and never looked at again, and that holds the other way round
+ * too: what a command printed is appended without a second placeholder
+ * pass, or `` !`echo 'costs $5'` `` would lose the $5 to an empty
+ * positional.
+ *
+ * Merely reversing the two passes would have done the first half and not
+ * the second, and would have taken with it the ability for a body to act
+ * on its arguments at all. run_shell() keeps that by handing them to the
+ * shell as parameters rather than as script text.
+ *
+ * With @shell_allowed FALSE nothing here is a substitution: the whole
+ * body is one literal run, backticks included, which is the default for
+ * any file that has not asked for this.
  */
 static gchar *
-substitute_shell(
-    const gchar  *body,
-    const gchar  *cwd,
-    gboolean      allowed,
-    GCancellable *cancellable
+expand_body(
+    const gchar        *body,
+    const gchar        *arguments,
+    const gchar *const *argv,
+    const gchar        *cwd,
+    gboolean            shell_allowed,
+    GCancellable       *cancellable
 ){
-    g_autoptr(GString) out = NULL;
+    g_autoptr(GString) out = g_string_new(NULL);
+    gsize              segment = 0;   /* start of the pending literal run */
     gsize              i;
 
-    if (!allowed || strstr(body, "!`") == NULL)
-    {
-        return g_strdup(body);
-    }
-
-    out = g_string_new(NULL);
-
-    for (i = 0; body[i] != '\0'; i++)
+    for (i = 0; shell_allowed && body[i] != '\0'; i++)
     {
         gsize closing;
 
         if (body[i] != '!' || body[i + 1] != '`')
         {
-            g_string_append_c(out, body[i]);
             continue;
         }
 
@@ -733,15 +786,23 @@ substitute_shell(
 
         if (body[closing] == '\0')
         {
-            /* Unterminated: not a substitution, just text. */
-            g_string_append_c(out, body[i]);
-            continue;
+            /* Unterminated: not a substitution, just text -- and there is
+             * no closing backtick left in the body, so no later one can
+             * be complete either. */
+            break;
         }
 
         {
+            g_autofree gchar *literal =
+                g_strndup(body + segment, i - segment);
+            g_autofree gchar *expanded =
+                ai_command_substitute(literal, arguments, argv);
             g_autofree gchar *command =
                 g_strndup(body + i + 2, closing - i - 2);
-            g_autofree gchar *output = run_shell(command, cwd, cancellable);
+            g_autofree gchar *output =
+                run_shell(command, arguments, argv, cwd, cancellable);
+
+            g_string_append(out, expanded);
 
             if (output != NULL)
             {
@@ -750,6 +811,14 @@ substitute_shell(
         }
 
         i = closing;
+        segment = closing + 1;
+    }
+
+    {
+        g_autofree gchar *expanded =
+            ai_command_substitute(body + segment, arguments, argv);
+
+        g_string_append(out, expanded);
     }
 
     return g_strdup(out->str);
@@ -1211,6 +1280,13 @@ suggest_names(AiCommandSet *self, const gchar *name)
  * cue to pass the line through untouched: `/compact` means something to
  * claude and nothing here.
  *
+ * `` !`cmd` `` runs only where the *file* wrote it, and only when the
+ * file (or #AI_COMMAND_SHELL_ALWAYS) allows it. Text from @line is
+ * substituted into the result of that scan and is never scanned itself,
+ * so an argument cannot introduce a substitution into a file that has
+ * none. A body's own command still sees the arguments --- as the shell's
+ * positional parameters and `$ARGUMENTS`, which it cannot re-parse.
+ *
  * Returns: (transfer full) (nullable): the result, or %NULL on error
  */
 AiCommandResult *
@@ -1285,12 +1361,7 @@ ai_command_set_resolve(
     {
         AiResource        *resource = ai_command_get_resource(command);
         g_auto(GStrv)      argv = ai_command_split_arguments(result->arguments);
-        g_autofree gchar  *substituted = NULL;
         gboolean           shell_allowed;
-
-        substituted = ai_command_substitute(ai_resource_get_body(resource),
-                                            result->arguments,
-                                            (const gchar *const *)argv);
 
         switch (self->shell_policy)
         {
@@ -1308,8 +1379,10 @@ ai_command_set_resolve(
                 break;
         }
 
-        result->prompt = substitute_shell(substituted, cwd, shell_allowed,
-                                          cancellable);
+        result->prompt = expand_body(ai_resource_get_body(resource),
+                                     result->arguments,
+                                     (const gchar *const *)argv,
+                                     cwd, shell_allowed, cancellable);
     }
 
     result->outcome =

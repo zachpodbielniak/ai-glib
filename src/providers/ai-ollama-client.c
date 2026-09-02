@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "providers/ai-ollama-client.h"
+#include "providers/ai-json-util.h"
 #include "providers/ai-openai-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"
@@ -149,10 +150,14 @@ ai_ollama_client_parse_response(
 
     obj = json_node_get_object(json);
 
-    /* Check for error */
-    if (json_object_has_member(obj, "error"))
+    /*
+     * Check for an error.  Presence, not shape: ollama spells this one
+     * as a string, and a build that spells it as an object has still
+     * said it failed.
+     */
+    if (ai_json_get_node(obj, "error") != NULL)
     {
-        const gchar *err_msg = json_object_get_string_member(obj, "error");
+        const gchar *err_msg = ai_json_get_string(obj, "error", "Unknown error");
 
         g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR, "%s", err_msg);
         return NULL;
@@ -161,10 +166,10 @@ ai_ollama_client_parse_response(
     response = ai_response_new("", ai_client_get_model(client));
 
     /* Parse done status */
-    if (json_object_get_boolean_member_with_default(obj, "done", FALSE))
+    if (ai_json_get_boolean(obj, "done", FALSE))
     {
-        const gchar *done_reason = json_object_get_string_member_with_default(
-            obj, "done_reason", "");
+        const gchar *done_reason =
+            ai_json_get_string(obj, "done_reason", "");
 
         if (g_strcmp0(done_reason, "length") == 0)
         {
@@ -177,13 +182,11 @@ ai_ollama_client_parse_response(
     }
 
     /* Parse message */
-    if (json_object_has_member(obj, "message"))
     {
-        JsonObject *message = json_object_get_object_member(obj, "message");
-        const gchar *content = json_object_get_string_member_with_default(
-            message, "content", "");
+        JsonObject  *message = ai_json_get_object(obj, "message");
+        const gchar *content = ai_json_get_string(message, "content", "");
 
-        if (content != NULL && content[0] != '\0')
+        if (content[0] != '\0')
         {
             g_autoptr(AiTextContent) text_content = ai_text_content_new(content);
             ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&text_content));
@@ -192,29 +195,29 @@ ai_ollama_client_parse_response(
         /* Tool calls — Ollama returns them in the same shape as OpenAI,
          * except `arguments` arrives as a parsed JSON object rather than
          * a string. Handle both shapes. */
-        if (json_object_has_member(message, "tool_calls"))
         {
-            JsonArray *tool_calls = json_object_get_array_member(message, "tool_calls");
-            guint len = json_array_get_length(tool_calls);
+            JsonArray *tool_calls = ai_json_get_array(message, "tool_calls");
+            guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
             guint i;
             static guint synthetic_id_counter = 0;
 
             for (i = 0; i < len; i++)
             {
-                JsonObject *tc = json_array_get_object_element(tool_calls, i);
-                const gchar *tc_id = json_object_get_string_member_with_default(tc, "id", NULL);
-                JsonObject *func;
+                JsonObject *tc = ai_json_array_get_object(tool_calls, i);
+                const gchar *tc_id = ai_json_get_string(tc, "id", NULL);
+                JsonObject *func = ai_json_get_object(tc, "function");
+                JsonNode *args_node;
                 const gchar *name;
                 g_autoptr(AiToolUse) tool_use = NULL;
                 g_autofree gchar *synthetic_id = NULL;
 
-                if (!json_object_has_member(tc, "function"))
+                if (func == NULL)
                 {
                     continue;
                 }
 
-                func = json_object_get_object_member(tc, "function");
-                name = json_object_get_string_member_with_default(func, "name", "");
+                name = ai_json_get_string(func, "name", "");
+                args_node = ai_json_get_node(func, "arguments");
 
                 if (tc_id == NULL || tc_id[0] == '\0')
                 {
@@ -223,24 +226,19 @@ ai_ollama_client_parse_response(
                     tc_id = synthetic_id;
                 }
 
-                if (json_object_has_member(func, "arguments"))
+                if (args_node == NULL)
                 {
-                    JsonNode *args_node = json_object_get_member(func, "arguments");
-
-                    if (JSON_NODE_HOLDS_VALUE(args_node))
-                    {
-                        const gchar *args_str = json_node_get_string(args_node);
-                        tool_use = ai_tool_use_new_from_json_string(
-                            tc_id, name, args_str);
-                    }
-                    else
-                    {
-                        tool_use = ai_tool_use_new(tc_id, name, args_node);
-                    }
+                    tool_use = ai_tool_use_new(tc_id, name, NULL);
+                }
+                else if (JSON_NODE_HOLDS_VALUE(args_node))
+                {
+                    const gchar *args_str = json_node_get_string(args_node);
+                    tool_use = ai_tool_use_new_from_json_string(
+                        tc_id, name, args_str);
                 }
                 else
                 {
-                    tool_use = ai_tool_use_new(tc_id, name, NULL);
+                    tool_use = ai_tool_use_new(tc_id, name, args_node);
                 }
 
                 ai_response_add_content_block(response,
@@ -256,8 +254,8 @@ ai_ollama_client_parse_response(
 
     /* Parse usage */
     {
-        gint prompt_tokens = json_object_get_int_member_with_default(obj, "prompt_eval_count", 0);
-        gint output_tokens = json_object_get_int_member_with_default(obj, "eval_count", 0);
+        gint prompt_tokens = (gint)ai_json_get_int(obj, "prompt_eval_count", 0);
+        gint output_tokens = (gint)ai_json_get_int(obj, "eval_count", 0);
 
         if (prompt_tokens > 0 || output_tokens > 0)
         {
@@ -603,10 +601,8 @@ on_ollama_list_models_response(
     }
 
     /* /api/tags: {"models": [{"name": "llama3.2:latest", ...}, ...]} */
-    root = json_node_get_object(json_parser_get_root(parser));
-    arr = (root != NULL && json_object_has_member(root, "models"))
-        ? json_object_get_array_member(root, "models")
-        : NULL;
+    root = ai_json_root_object(parser);
+    arr = ai_json_get_array(root, "models");
 
     if (arr == NULL)
     {
@@ -619,12 +615,12 @@ on_ollama_list_models_response(
     n = json_array_get_length(arr);
     for (i = 0; i < n; i++)
     {
-        JsonObject *entry = json_array_get_object_element(arr, i);
+        JsonObject *entry = ai_json_array_get_object(arr, i);
 
-        if (entry != NULL && json_object_has_member(entry, "name"))
+        if (ai_json_get_string(entry, "name", NULL) != NULL)
         {
             models = g_list_append(models,
-                g_strdup(json_object_get_string_member(entry, "name")));
+                g_strdup(ai_json_get_string(entry, "name", "")));
         }
     }
 
@@ -771,7 +767,7 @@ ollama_process_stream_chunk(
 
     if (!data->stream_started)
     {
-        const gchar *model = json_object_get_string_member_with_default(obj, "model", "");
+        const gchar *model = ai_json_get_string(obj, "model", "");
 
         data->response = ai_response_new("", model);
         data->current_text = g_string_new("");
@@ -785,13 +781,11 @@ ollama_process_stream_chunk(
     }
 
     /* Parse message content delta */
-    if (json_object_has_member(obj, "message"))
     {
-        JsonObject *message = json_object_get_object_member(obj, "message");
-        const gchar *content = json_object_get_string_member_with_default(
-            message, "content", "");
+        JsonObject  *message = ai_json_get_object(obj, "message");
+        const gchar *content = ai_json_get_string(message, "content", "");
 
-        if (content != NULL && content[0] != '\0')
+        if (content[0] != '\0')
         {
             g_string_append(data->current_text, content);
             g_signal_emit_by_name(data->client, "delta", content);
@@ -803,10 +797,10 @@ ollama_process_stream_chunk(
     }
 
     /* Check if done */
-    if (json_object_get_boolean_member_with_default(obj, "done", FALSE))
+    if (ai_json_get_boolean(obj, "done", FALSE))
     {
-        const gchar *done_reason = json_object_get_string_member_with_default(
-            obj, "done_reason", "");
+        const gchar *done_reason =
+            ai_json_get_string(obj, "done_reason", "");
         gboolean tool_use_present = FALSE;
 
         if (g_strcmp0(done_reason, "length") == 0)
@@ -820,8 +814,8 @@ ollama_process_stream_chunk(
 
         /* Parse usage from final message */
         {
-            gint prompt_tokens = json_object_get_int_member_with_default(obj, "prompt_eval_count", 0);
-            gint output_tokens = json_object_get_int_member_with_default(obj, "eval_count", 0);
+            gint prompt_tokens = (gint)ai_json_get_int(obj, "prompt_eval_count", 0);
+            gint output_tokens = (gint)ai_json_get_int(obj, "eval_count", 0);
 
             if (prompt_tokens > 0 || output_tokens > 0)
             {
@@ -838,33 +832,32 @@ ollama_process_stream_chunk(
         }
 
         /* Then tool calls if present on the final message */
-        if (json_object_has_member(obj, "message"))
         {
-            JsonObject *message = json_object_get_object_member(obj, "message");
+            JsonObject *message = ai_json_get_object(obj, "message");
 
-            if (json_object_has_member(message, "tool_calls"))
             {
-                JsonArray *tool_calls = json_object_get_array_member(message, "tool_calls");
-                guint len = json_array_get_length(tool_calls);
+                JsonArray *tool_calls = ai_json_get_array(message, "tool_calls");
+                guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
                 guint i;
                 static guint synthetic_id_counter = 0;
 
                 for (i = 0; i < len; i++)
                 {
-                    JsonObject *tc = json_array_get_object_element(tool_calls, i);
-                    const gchar *tc_id = json_object_get_string_member_with_default(tc, "id", NULL);
-                    JsonObject *func;
+                    JsonObject *tc = ai_json_array_get_object(tool_calls, i);
+                    const gchar *tc_id = ai_json_get_string(tc, "id", NULL);
+                    JsonObject *func = ai_json_get_object(tc, "function");
+                    JsonNode *args_node;
                     const gchar *name;
                     g_autoptr(AiToolUse) tool_use = NULL;
                     g_autofree gchar *synthetic_id = NULL;
 
-                    if (!json_object_has_member(tc, "function"))
+                    if (func == NULL)
                     {
                         continue;
                     }
 
-                    func = json_object_get_object_member(tc, "function");
-                    name = json_object_get_string_member_with_default(func, "name", "");
+                    name = ai_json_get_string(func, "name", "");
+                    args_node = ai_json_get_node(func, "arguments");
 
                     if (tc_id == NULL || tc_id[0] == '\0')
                     {
@@ -873,24 +866,19 @@ ollama_process_stream_chunk(
                         tc_id = synthetic_id;
                     }
 
-                    if (json_object_has_member(func, "arguments"))
+                    if (args_node == NULL)
                     {
-                        JsonNode *args_node = json_object_get_member(func, "arguments");
-
-                        if (JSON_NODE_HOLDS_VALUE(args_node))
-                        {
-                            const gchar *args_str = json_node_get_string(args_node);
-                            tool_use = ai_tool_use_new_from_json_string(
-                                tc_id, name, args_str);
-                        }
-                        else
-                        {
-                            tool_use = ai_tool_use_new(tc_id, name, args_node);
-                        }
+                        tool_use = ai_tool_use_new(tc_id, name, NULL);
+                    }
+                    else if (JSON_NODE_HOLDS_VALUE(args_node))
+                    {
+                        const gchar *args_str = json_node_get_string(args_node);
+                        tool_use = ai_tool_use_new_from_json_string(
+                            tc_id, name, args_str);
                     }
                     else
                     {
-                        tool_use = ai_tool_use_new(tc_id, name, NULL);
+                        tool_use = ai_tool_use_new(tc_id, name, args_node);
                     }
 
                     ai_response_add_content_block(data->response,

@@ -90,6 +90,22 @@ so anything able to write a file into =~/.claude/commands= would
 otherwise be able to run code unprompted. Opting in per file means the
 author of that file meant it.
 
+Because it is the *file* that opts in, only the file's own text is
+scanned. Arguments are substituted into the pieces between the
+substitutions and are never scanned themselves, so passing =!`id`= to a
+command whose body contains no backticks does nothing. Your arguments do
+still reach the command that is there --- as =$1= … =$9= and =$ARGUMENTS=,
+which the shell expands as one word each and does not re-parse:
+
+#+begin_src markdown
+---
+shell: true
+---
+Recent commits touching $1:
+
+!`git log --oneline -5 -- "$1"`
+#+end_src
+
 Limits when it does run: ten seconds, 64 KB of output, stderr discarded,
 and a nonzero exit substitutes whatever was printed rather than failing
 the whole command. Your host application may refuse it outright
