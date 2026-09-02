@@ -15,30 +15,7 @@
 
 #include "core/ai-http-error.h"
 #include "core/ai-error.h"
-
-/*
- * Read a string member without json-glib's *_with_default(), which emits
- * a CRITICAL when the member is there but is not a string. An error body
- * is untrusted input: a provider that answers {"error": {"message": 500}}
- * must not be able to abort the process on the way to being reported.
- */
-static const gchar *
-ai_http_error__string_member(JsonObject *obj, const gchar *name)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, name))
-        return NULL;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return NULL;
-
-    if (json_node_get_value_type(node) != G_TYPE_STRING)
-        return NULL;
-
-    return json_node_get_string(node);
-}
+#include "core/ai-json-util.h"
 
 /*
  * A bounded, whitespace-stripped copy of the raw body, used when the body
@@ -71,7 +48,6 @@ ai_http_error_extract_message(
     gsize        body_len
 ){
     g_autoptr(JsonParser) parser = NULL;
-    JsonNode             *root;
     JsonObject           *obj;
     const gchar          *msg = NULL;
 
@@ -82,12 +58,15 @@ ai_http_error_extract_message(
     if (!json_parser_load_from_data(parser, body, (gssize) body_len, NULL))
         return ai_http_error__excerpt(body, body_len);
 
-    root = json_parser_get_root(parser);
-    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+    obj = ai_json_root_object(parser);
+    if (obj == NULL)
         return ai_http_error__excerpt(body, body_len);
 
-    obj = json_node_get_object(root);
-
+    /*
+     * Presence, not shape, decides an error envelope: a server answering
+     * {"error": "boom"} has still said it failed, and reading that as an
+     * object to find out would be the critical this file exists to avoid.
+     */
     if (json_object_has_member(obj, "error"))
     {
         JsonNode *err = json_object_get_member(obj, "error");
@@ -99,8 +78,8 @@ ai_http_error_extract_message(
          */
         if (JSON_NODE_HOLDS_OBJECT(err))
         {
-            msg = ai_http_error__string_member(json_node_get_object(err),
-                                               "message");
+            msg = ai_json_get_string(json_node_get_object(err),
+                                     "message", NULL);
         }
         else if (JSON_NODE_HOLDS_VALUE(err) &&
                  json_node_get_value_type(err) == G_TYPE_STRING)
@@ -112,7 +91,7 @@ ai_http_error_extract_message(
     /* Anthropic sends {"type":"error","error":{...}}, already handled
      * above; a few services put the message at the top level instead. */
     if (msg == NULL)
-        msg = ai_http_error__string_member(obj, "message");
+        msg = ai_json_get_string(obj, "message", NULL);
 
     if (msg == NULL || msg[0] == '\0')
         return ai_http_error__excerpt(body, body_len);

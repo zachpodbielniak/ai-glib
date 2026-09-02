@@ -133,17 +133,20 @@ Two rules the existing parsers all follow:
 1. *Read every member through a type-checked accessor.* json-glib's
    =*_member_with_default()= emit a critical when a member is present but of
    another type, and a critical is fatal under =G_DEBUG=fatal-warnings=.
+   Worse, the string one returns =NULL= rather than the default --- silently
+   --- when the member is a number, so a caller that went on to read
+   =x[0]= segfaulted; two of these parsers did, on the session id.
    Subprocess stdout and server responses are untrusted input; a CLI that
    changes a field from a number to a string must be ignored, not able to
-   abort the process. The five HTTP providers read every member through
-   =src/providers/ai-json-util.h= --- =ai_json_get_string()=, =_object=,
-   =_array=, =_int=, =_double=, =_boolean=, =_node= --- and new fields go
-   on those. The CLI providers still each carry their own =*_get_string= /
-   =_object= / =_int= set; keep new fields on whichever the file already
-   uses rather than reaching for json-glib. The same applies to
-   =json_parser_get_root()=, which returns =NULL= for a bare =null=
-   document --- =ai_json_root_object()= is that check, and it has to come
-   before =JSON_NODE_HOLDS_OBJECT()=.
+   crash or abort the process. Every provider, HTTP and CLI alike, reads
+   every member through =src/core/ai-json-util.h= --- =ai_json_get_string()=,
+   =_object=, =_array=, =_int=, =_double=, =_boolean=, =_node= --- and new
+   fields go on those. There is no per-provider accessor set any more:
+   there were five, they had drifted over which numeric types count as a
+   number, and they are gone. The same applies to =json_parser_get_root()=,
+   which returns =NULL= for a bare =null= document ---
+   =ai_json_root_object()= is that check, and it has to come before
+   =JSON_NODE_HOLDS_OBJECT()=.
 2. *Return =FALSE= only for a real failure.* A line you do not recognise is
    not an error; return =TRUE= having added nothing. Returning =FALSE= fails
    the whole turn, which is right for =grok='s ={"type":"error"}= line

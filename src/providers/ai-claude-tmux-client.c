@@ -28,6 +28,7 @@
 
 #include "core/ai-error.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-provider.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-message.h"
@@ -267,23 +268,16 @@ extract_text_from_content(JsonArray *content_arr)
     n = json_array_get_length(content_arr);
     for (i = 0; i < n; i++)
     {
-        JsonNode *node;
         JsonObject *block;
         const gchar *btype;
 
-        node = json_array_get_element(content_arr, i);
-        if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-        {
-            continue;
-        }
-
-        block = json_node_get_object(node);
-        btype = json_object_get_string_member_with_default(block, "type", "");
+        block = ai_json_array_get_object(content_arr, i);
+        btype = ai_json_get_string(block, "type", "");
         if (g_strcmp0(btype, "text") == 0)
         {
             const gchar *text;
-            text = json_object_get_string_member_with_default(block, "text", "");
-            if (text != NULL && text[0] != '\0')
+            text = ai_json_get_string(block, "text", "");
+            if (text[0] != '\0')
             {
                 g_string_append(out, text);
             }
@@ -353,7 +347,6 @@ ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice)
     for (i = 0; lines[i] != NULL; i++)
     {
         g_autoptr(JsonParser) parser = NULL;
-        JsonNode *root;
         JsonObject *obj;
         const gchar *type;
 
@@ -368,20 +361,18 @@ ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice)
              * iteration will re-read once more bytes land. */
             continue;
         }
-        root = json_parser_get_root(parser);
-        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        obj = ai_json_root_object(parser);
+        if (obj == NULL)
         {
             continue;
         }
-        obj = json_node_get_object(root);
-        type = json_object_get_string_member_with_default(obj, "type", "");
+        type = ai_json_get_string(obj, "type", "");
 
         if (g_strcmp0(type, "user") == 0)
         {
             /* A real user prompt counts; a compaction summary (also
              * logged as type:"user") does not. */
-            if (!json_object_get_boolean_member_with_default(
-                    obj, "isCompactSummary", FALSE))
+            if (!ai_json_get_boolean(obj, "isCompactSummary", FALSE))
             {
                 return TRUE;
             }
@@ -390,8 +381,7 @@ ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice)
         {
             /* Submitted while claude was busy — queued, not lost. */
             const gchar *op;
-            op = json_object_get_string_member_with_default(
-                obj, "operation", "");
+            op = ai_json_get_string(obj, "operation", "");
             if (g_strcmp0(op, "enqueue") == 0)
             {
                 return TRUE;
@@ -430,10 +420,9 @@ slice_has_accepted_prompt(
 }
 
 /*
- * Returns TRUE if the slice of @jsonl_path starting at byte offset
- * @from_offset contains a top-level `"type":"assistant"` entry whose
- * inner `message.stop_reason` is a TERMINAL stop reason (anything
- * other than `tool_use`).
+ * Returns TRUE if @jsonl_slice contains a top-level `"type":"assistant"`
+ * entry whose inner `message.stop_reason` is a TERMINAL stop reason
+ * (anything other than `tool_use`).
  *
  * We can't rely on either of the simpler signals after the Stop hook
  * fires:
@@ -450,30 +439,18 @@ slice_has_accepted_prompt(
  * need to wait out the JSONL flush.  Anything not yet flushed is
  * "future" — keep polling.
  */
-static gboolean
-slice_has_terminal_assistant_entry(
-    const gchar *jsonl_path,
-    goffset      from_offset
-){
-    g_autofree gchar *content = NULL;
-    gsize content_len = 0;
+gboolean
+ai_claude_tmux_client_jsonl_has_terminal_stop(const gchar *jsonl_slice)
+{
     g_auto(GStrv) lines = NULL;
     guint i;
 
-    if (!g_file_get_contents(jsonl_path, &content, &content_len, NULL))
-    {
-        return FALSE;
-    }
-    if ((goffset)content_len <= from_offset)
-    {
-        return FALSE;
-    }
+    g_return_val_if_fail(jsonl_slice != NULL, FALSE);
 
-    lines = g_strsplit(content + from_offset, "\n", -1);
+    lines = g_strsplit(jsonl_slice, "\n", -1);
     for (i = 0; lines[i] != NULL; i++)
     {
         g_autoptr(JsonParser) parser = NULL;
-        JsonNode *root;
         JsonObject *obj;
         JsonObject *msg;
         const gchar *type;
@@ -490,32 +467,26 @@ slice_has_terminal_assistant_entry(
              * iteration will re-read once more bytes land. */
             continue;
         }
-        root = json_parser_get_root(parser);
-        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        obj = ai_json_root_object(parser);
+        if (obj == NULL)
         {
             continue;
         }
-        obj = json_node_get_object(root);
-        type = json_object_get_string_member_with_default(obj, "type", "");
+        type = ai_json_get_string(obj, "type", "");
         if (g_strcmp0(type, "assistant") != 0)
         {
             continue;
         }
-        if (!json_object_has_member(obj, "message"))
-        {
-            continue;
-        }
-        msg = json_object_get_object_member(obj, "message");
+        msg = ai_json_get_object(obj, "message");
         if (msg == NULL)
         {
             continue;
         }
-        stop_reason = json_object_get_string_member_with_default(
-            msg, "stop_reason", "");
+        stop_reason = ai_json_get_string(msg, "stop_reason", "");
         /* end_turn, stop_sequence, max_tokens are terminal.  tool_use
          * is intermediate — keep waiting for the post-tool follow-up
          * to land. */
-        if (stop_reason != NULL && stop_reason[0] != '\0' &&
+        if (stop_reason[0] != '\0' &&
             g_strcmp0(stop_reason, "tool_use") != 0)
         {
             return TRUE;
@@ -523,6 +494,34 @@ slice_has_terminal_assistant_entry(
     }
 
     return FALSE;
+}
+
+/*
+ * The same question about a slice of a file, which is how the turn loop
+ * asks it.  Split from the predicate above for the reason
+ * ai_claude_tmux_client_jsonl_has_accepted_prompt() is not static: the
+ * transcript is written by another process while this reads it, so what
+ * these do with a half-written or reshaped line is the whole behaviour,
+ * and a test cannot reach it through a file it does not control.
+ */
+static gboolean
+slice_has_terminal_assistant_entry(
+    const gchar *jsonl_path,
+    goffset      from_offset
+){
+    g_autofree gchar *content = NULL;
+    gsize content_len = 0;
+
+    if (!g_file_get_contents(jsonl_path, &content, &content_len, NULL))
+    {
+        return FALSE;
+    }
+    if ((goffset)content_len <= from_offset)
+    {
+        return FALSE;
+    }
+
+    return ai_claude_tmux_client_jsonl_has_terminal_stop(content + from_offset);
 }
 
 AiResponse *
@@ -560,7 +559,6 @@ ai_claude_tmux_client_parse_jsonl(
     for (i = 0; lines[i] != NULL; i++)
     {
         g_autoptr(JsonParser) parser = NULL;
-        JsonNode *root;
         JsonObject *obj;
         JsonObject *msg;
         const gchar *type;
@@ -578,37 +576,30 @@ ai_claude_tmux_client_parse_jsonl(
             continue;
         }
 
-        root = json_parser_get_root(parser);
-        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        obj = ai_json_root_object(parser);
+        if (obj == NULL)
         {
             continue;
         }
 
-        obj = json_node_get_object(root);
-
-        type = json_object_get_string_member_with_default(obj, "type", "");
+        type = ai_json_get_string(obj, "type", "");
         if (g_strcmp0(type, "assistant") != 0)
         {
             continue;
         }
 
         /* Top-level may carry sessionId. */
-        if (json_object_has_member(obj, "sessionId"))
         {
             const gchar *sid;
-            sid = json_object_get_string_member_with_default(obj, "sessionId", "");
-            if (sid != NULL && sid[0] != '\0')
+            sid = ai_json_get_string(obj, "sessionId", "");
+            if (sid[0] != '\0')
             {
                 g_free(last_session_id);
                 last_session_id = g_strdup(sid);
             }
         }
 
-        if (!json_object_has_member(obj, "message"))
-        {
-            continue;
-        }
-        msg = json_object_get_object_member(obj, "message");
+        msg = ai_json_get_object(obj, "message");
         if (msg == NULL)
         {
             continue;
@@ -617,7 +608,7 @@ ai_claude_tmux_client_parse_jsonl(
         /* Some transcript entries use role to disambiguate; assistant
          * type already implies role=assistant but we double-check
          * defensively for forward compatibility. */
-        role = json_object_get_string_member_with_default(msg, "role", "assistant");
+        role = ai_json_get_string(msg, "role", "assistant");
         if (g_strcmp0(role, "assistant") != 0)
         {
             continue;
@@ -629,57 +620,52 @@ ai_claude_tmux_client_parse_jsonl(
         found_assistant = TRUE;
 
         g_free(last_text);
-        last_text = NULL;
-        if (json_object_has_member(msg, "content"))
-        {
-            JsonNode *cnode = json_object_get_member(msg, "content");
-            if (cnode != NULL && JSON_NODE_HOLDS_ARRAY(cnode))
-            {
-                last_text = extract_text_from_content(
-                    json_node_get_array(cnode));
-            }
-        }
+        last_text = extract_text_from_content(
+            ai_json_get_array(msg, "content"));
 
-        if (json_object_has_member(msg, "model"))
         {
             const gchar *m;
-            m = json_object_get_string_member_with_default(msg, "model", "");
-            if (m != NULL && m[0] != '\0')
+            m = ai_json_get_string(msg, "model", "");
+            if (m[0] != '\0')
             {
                 g_free(last_model);
                 last_model = g_strdup(m);
             }
         }
 
-        if (json_object_has_member(msg, "stop_reason"))
         {
-            const gchar *sr;
-            sr = json_object_get_string_member_with_default(msg, "stop_reason", "");
-            g_free(last_stop_reason);
-            last_stop_reason = g_strdup(sr != NULL ? sr : "");
-        }
+            const gchar *sr = ai_json_get_string(msg, "stop_reason", NULL);
 
-        if (json_object_has_member(msg, "usage"))
-        {
-            JsonObject *usage_obj;
-            usage_obj = json_object_get_object_member(msg, "usage");
-            if (usage_obj != NULL)
+            if (sr != NULL)
             {
-                last_input_tokens = json_object_get_int_member_with_default(
-                    usage_obj, "input_tokens", 0);
-                last_output_tokens = json_object_get_int_member_with_default(
-                    usage_obj, "output_tokens", 0);
+                g_free(last_stop_reason);
+                last_stop_reason = g_strdup(sr);
             }
         }
 
-        if (json_object_has_member(obj, "total_cost_usd"))
         {
-            last_cost = json_object_get_double_member(obj, "total_cost_usd");
+            JsonObject *usage_obj = ai_json_get_object(msg, "usage");
+
+            if (usage_obj != NULL)
+            {
+                last_input_tokens =
+                    (gint)ai_json_get_int(usage_obj, "input_tokens", 0);
+                last_output_tokens =
+                    (gint)ai_json_get_int(usage_obj, "output_tokens", 0);
+            }
         }
-        else if (json_object_has_member(msg, "total_cost_usd"))
-        {
-            last_cost = json_object_get_double_member(msg, "total_cost_usd");
-        }
+
+        /*
+         * The cost is written at the top level by newer transcripts and
+         * inside the message by older ones. Reading the second only when
+         * the first is absent keeps that precedence; a value of the
+         * wrong type on either counts as absent, so a reshaped field
+         * falls through to the other spelling rather than to zero.
+         */
+        last_cost = ai_json_get_double(obj, "total_cost_usd",
+                                       ai_json_get_double(msg,
+                                                          "total_cost_usd",
+                                                          last_cost));
     }
 
     if (!found_assistant)

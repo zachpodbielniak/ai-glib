@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "providers/ai-gemini-client.h"
-#include "providers/ai-json-util.h"
+#include "core/ai-json-util.h"
 #include "providers/ai-image-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"

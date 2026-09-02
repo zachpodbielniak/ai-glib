@@ -27,6 +27,7 @@
 #include "convenience/ai-search-provider.h"
 #include "core/ai-error.h"
 #include "core/ai-enums.h"
+#include "core/ai-json-util.h"
 #include "core/ai-provider.h"
 #include "model/ai-content-block.h"
 #include "model/ai-message.h"
@@ -2242,36 +2243,6 @@ tool_web_search (
  * Helpers shared by the harness-aware tools
  * ================================================================ */
 
-/*
- * A string member, or NULL if it is absent or is not a string.
- *
- * json-glib's json_object_get_string_member_with_default() emits a
- * critical on a type mismatch, and a critical is fatal under
- * G_DEBUG=fatal-warnings. This reads model output, which is untrusted in
- * exactly the sense subprocess stdout is --- the same rule the provider
- * translators already follow.
- */
-static const gchar *
-executor_json_string (
-    JsonObject  *object,
-    const gchar *member
-){
-    JsonNode *node;
-
-    if (object == NULL || !json_object_has_member (object, member))
-        return NULL;
-
-    node = json_object_get_member (object, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE (node))
-        return NULL;
-
-    if (json_node_get_value_type (node) != G_TYPE_STRING)
-        return NULL;
-
-    return json_node_get_string (node);
-}
-
 /* The names of everything of one kind, for an error a model can act on. */
 static gchar *
 executor_list_resource_names (
@@ -2458,7 +2429,7 @@ tool_todo_write (
         /* Read every member through a type check: this is model output,
          * and json-glib's convenience accessors emit a critical on a
          * mismatch --- fatal under G_DEBUG=fatal-warnings. */
-        content = executor_json_string (item, "content");
+        content = ai_json_get_string (item, "content", NULL);
 
         if (content == NULL)
         {
@@ -2466,18 +2437,18 @@ tool_todo_write (
             continue;
         }
 
-        active_form = executor_json_string (item, "active_form");
+        active_form = ai_json_get_string (item, "active_form", NULL);
 
         if (active_form == NULL)
         {
-            active_form = executor_json_string (item, "activeForm");
+            active_form = ai_json_get_string (item, "activeForm", NULL);
         }
 
-        state_name = executor_json_string (item, "status");
+        state_name = ai_json_get_string (item, "status", NULL);
 
         if (state_name == NULL)
         {
-            state_name = executor_json_string (item, "state");
+            state_name = ai_json_get_string (item, "state", NULL);
         }
 
         state = ai_todo_state_from_string (state_name);
@@ -2619,8 +2590,8 @@ tool_multi_edit (
         }
 
         edit = json_node_get_object (element);
-        old_string = executor_json_string (edit, "old_string");
-        new_string = executor_json_string (edit, "new_string");
+        old_string = ai_json_get_string (edit, "old_string", NULL);
+        new_string = ai_json_get_string (edit, "new_string", NULL);
 
         if (old_string == NULL || new_string == NULL)
         {

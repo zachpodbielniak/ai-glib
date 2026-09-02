@@ -20,6 +20,7 @@
 #include "providers/ai-grok-home-overlay.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -568,112 +569,6 @@ ai_grok_build_client_build_stdin(
 }
 
 /*
- * Type-safe JSON member accessors.
- *
- * json-glib's *_member_with_default() helpers emit a GLib critical when a
- * member exists but holds the wrong type, and json_object_get_object_member()
- * does the same. Subprocess output is untrusted input -- a future CLI
- * version, a truncated write, or a plugin writing to stdout can all produce
- * a shape we did not expect -- and none of that should turn into criticals
- * or an abort under a fatal-warnings test run. These return the fallback
- * instead, so every parse below is total.
- */
-
-static const gchar *
-grok_get_string(JsonObject *obj, const gchar *name)
-{
-    JsonNode *node;
-
-    if (obj == NULL || name == NULL)
-        return NULL;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return NULL;
-
-    if (json_node_get_value_type(node) != G_TYPE_STRING)
-        return NULL;
-
-    return json_node_get_string(node);
-}
-
-static JsonObject *
-grok_get_object(JsonObject *obj, const gchar *name)
-{
-    JsonNode *node;
-
-    if (obj == NULL || name == NULL)
-        return NULL;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-        return NULL;
-
-    return json_node_get_object(node);
-}
-
-static gint
-grok_get_int(JsonObject *obj, const gchar *name, gint fallback)
-{
-    JsonNode *node;
-    GType value_type;
-
-    if (obj == NULL || name == NULL)
-        return fallback;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    value_type = json_node_get_value_type(node);
-    if (value_type != G_TYPE_INT64 && value_type != G_TYPE_INT &&
-        value_type != G_TYPE_DOUBLE)
-        return fallback;
-
-    return (gint)json_node_get_int(node);
-}
-
-static gdouble
-grok_get_double(JsonObject *obj, const gchar *name, gdouble fallback)
-{
-    JsonNode *node;
-    GType value_type;
-
-    if (obj == NULL || name == NULL)
-        return fallback;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    value_type = json_node_get_value_type(node);
-    if (value_type == G_TYPE_DOUBLE)
-        return json_node_get_double(node);
-    if (value_type == G_TYPE_INT64 || value_type == G_TYPE_INT)
-        return (gdouble)json_node_get_int(node);
-
-    return fallback;
-}
-
-static gboolean
-grok_get_boolean(JsonObject *obj, const gchar *name, gboolean fallback)
-{
-    JsonNode *node;
-
-    if (obj == NULL || name == NULL)
-        return fallback;
-
-    node = json_object_get_member(obj, name);
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    if (json_node_get_value_type(node) != G_TYPE_BOOLEAN)
-        return fallback;
-
-    return json_node_get_boolean(node);
-}
-
-/*
  * Look a string member up under two spellings.
  *
  * grok's --output-format json speaks camelCase ("sessionId", "stopReason")
@@ -688,11 +583,11 @@ grok_string_member(
 ){
     const gchar *value;
 
-    value = grok_get_string(obj, primary);
+    value = ai_json_get_string(obj, primary, NULL);
     if (value != NULL)
         return value;
 
-    return grok_get_string(obj, fallback);
+    return ai_json_get_string(obj, fallback, NULL);
 }
 
 /*
@@ -705,12 +600,12 @@ grok_apply_usage(JsonObject *obj, AiResponse *response)
     JsonObject *usage_obj;
     g_autoptr(AiUsage) usage = NULL;
 
-    usage_obj = grok_get_object(obj, "usage");
+    usage_obj = ai_json_get_object(obj, "usage");
     if (usage_obj == NULL)
         return;
 
-    usage = ai_usage_new(grok_get_int(usage_obj, "input_tokens", 0),
-                         grok_get_int(usage_obj, "output_tokens", 0));
+    usage = ai_usage_new((gint)ai_json_get_int(usage_obj, "input_tokens", 0),
+                         (gint)ai_json_get_int(usage_obj, "output_tokens", 0));
 
     ai_response_set_usage(response, usage);
 }
@@ -898,9 +793,9 @@ ai_grok_build_client_parse_json_output(
      * "is_error". The second only appears in the NDJSON stream, but the
      * fallbacks above can land us on one, so both are handled here.
      */
-    type = grok_get_string(obj, "type");
+    type = ai_json_get_string(obj, "type", NULL);
     if (g_strcmp0(type, "error") == 0 ||
-        grok_get_boolean(obj, "is_error", FALSE))
+        ai_json_get_boolean(obj, "is_error", FALSE))
     {
         grok_set_error_from_object(obj, error);
         return NULL;
@@ -956,8 +851,7 @@ ai_grok_build_client_parse_json_output(
     grok_apply_usage(obj, response);
 
     /* Total cost */
-    self->total_cost = grok_get_double(obj, "total_cost_usd",
-                                       self->total_cost);
+    self->total_cost = ai_json_get_double(obj, "total_cost_usd", self->total_cost);
 
     return (AiResponse *)g_steal_pointer(&response);
 }
@@ -988,17 +882,15 @@ grok_emit_tool_use_block(
     JsonNode *input;
     g_autoptr(AiToolUse) tool_use = NULL;
 
-    id = grok_get_string(block, "id");
-    name = grok_get_string(block, "name");
+    id = ai_json_get_string(block, "id", NULL);
+    name = ai_json_get_string(block, "name", NULL);
 
     if (name == NULL || name[0] == '\0')
     {
         return;
     }
 
-    input = json_object_has_member(block, "input")
-        ? json_object_get_member(block, "input")
-        : NULL;
+    input = ai_json_get_node(block, "input");
 
     tool_use = ai_tool_use_new(id != NULL ? id : "",
                                name,
@@ -1071,7 +963,7 @@ ai_grok_build_client_parse_stream_events(
     }
 
     obj = json_node_get_object(root);
-    type = grok_get_string(obj, "type");
+    type = ai_json_get_string(obj, "type", NULL);
 
     if (g_strcmp0(type, "error") == 0)
     {
@@ -1085,11 +977,11 @@ ai_grok_build_client_parse_stream_events(
         JsonObject *event;
         const gchar *event_type;
 
-        event = grok_get_object(obj, "event");
+        event = ai_json_get_object(obj, "event");
         if (event == NULL)
             return TRUE;
 
-        event_type = grok_get_string(event, "type");
+        event_type = ai_json_get_string(event, "type", NULL);
 
         if (g_strcmp0(event_type, "content_block_start") == 0)
         {
@@ -1097,27 +989,27 @@ ai_grok_build_client_parse_stream_events(
              * A tool call announcing itself. The input is normally an empty
              * object here; the arguments follow as input_json_delta.
              */
-            JsonObject *block = grok_get_object(event, "content_block");
+            JsonObject *block = ai_json_get_object(event, "content_block");
 
             if (block != NULL &&
-                g_strcmp0(grok_get_string(block, "type"), "tool_use") == 0)
+                g_strcmp0(ai_json_get_string(block, "type", NULL), "tool_use") == 0)
             {
                 grok_emit_tool_use_block(block, out_events);
             }
         }
         else if (g_strcmp0(event_type, "content_block_delta") == 0)
         {
-            JsonObject *delta = grok_get_object(event, "delta");
+            JsonObject *delta = ai_json_get_object(event, "delta");
             const gchar *delta_type;
 
             if (delta == NULL)
                 return TRUE;
 
-            delta_type = grok_get_string(delta, "type");
+            delta_type = ai_json_get_string(delta, "type", NULL);
 
             if (g_strcmp0(delta_type, "text_delta") == 0)
             {
-                const gchar *text = grok_get_string(delta, "text");
+                const gchar *text = ai_json_get_string(delta, "text", NULL);
 
                 if (text != NULL && text[0] != '\0')
                     g_ptr_array_add(out_events, ai_event_new_text_delta(text));
@@ -1131,7 +1023,7 @@ ai_grok_build_client_parse_stream_events(
                  * discarding it -- a frontend can collapse what a caller
                  * assembling the answer must exclude.
                  */
-                const gchar *text = grok_get_string(delta, "thinking");
+                const gchar *text = ai_json_get_string(delta, "thinking", NULL);
 
                 if (text != NULL && text[0] != '\0')
                     g_ptr_array_add(out_events,
@@ -1139,7 +1031,7 @@ ai_grok_build_client_parse_stream_events(
             }
             else if (g_strcmp0(delta_type, "input_json_delta") == 0)
             {
-                const gchar *fragment = grok_get_string(delta, "partial_json");
+                const gchar *fragment = ai_json_get_string(delta, "partial_json", NULL);
 
                 if (fragment != NULL && fragment[0] != '\0')
                     g_ptr_array_add(
@@ -1154,14 +1046,11 @@ ai_grok_build_client_parse_stream_events(
          * Text here would double the deltas, but the tool_use blocks carry
          * the assembled arguments and appear nowhere else.
          */
-        JsonObject *message = grok_get_object(obj, "message");
-        JsonNode *content = message != NULL
-            ? json_object_get_member(message, "content")
-            : NULL;
+        JsonObject *message = ai_json_get_object(obj, "message");
+        JsonArray *blocks = ai_json_get_array(message, "content");
 
-        if (content != NULL && JSON_NODE_HOLDS_ARRAY(content))
+        if (blocks != NULL)
         {
-            JsonArray *blocks = json_node_get_array(content);
             guint n = json_array_get_length(blocks);
             guint i;
 
@@ -1175,7 +1064,7 @@ ai_grok_build_client_parse_stream_events(
 
                 b = json_node_get_object(bn);
 
-                if (g_strcmp0(grok_get_string(b, "type"), "tool_use") == 0)
+                if (g_strcmp0(ai_json_get_string(b, "type", NULL), "tool_use") == 0)
                     grok_emit_tool_use_block(b, out_events);
             }
         }
@@ -1193,7 +1082,7 @@ ai_grok_build_client_parse_stream_events(
          * end-of-turn would hand the caller the failure text as if it were
          * the answer.
          */
-        if (grok_get_boolean(obj, "is_error", FALSE))
+        if (ai_json_get_boolean(obj, "is_error", FALSE))
         {
             grok_set_error_from_object(obj, error);
             ai_response_set_stop_reason(response, AI_STOP_REASON_ERROR);
@@ -1220,8 +1109,7 @@ ai_grok_build_client_parse_stream_events(
         grok_apply_usage(obj, response);
 
         /* Total cost */
-        self->total_cost = grok_get_double(obj, "total_cost_usd",
-                                           self->total_cost);
+        self->total_cost = ai_json_get_double(obj, "total_cost_usd", self->total_cost);
 
         /*
          * Report the counts as an event too. -1 rather than 0 when grok
@@ -1229,7 +1117,7 @@ ai_grok_build_client_parse_stream_events(
          */
         {
             AiUsage *usage = ai_response_get_usage(response);
-            gdouble cost = grok_get_double(obj, "total_cost_usd", -1.0);
+            gdouble cost = ai_json_get_double(obj, "total_cost_usd", -1.0);
 
             g_ptr_array_add(out_events,
                 ai_event_new_usage(usage,

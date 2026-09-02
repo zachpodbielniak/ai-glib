@@ -16,6 +16,7 @@
 #include "convenience/ai-search-provider.h"
 #include "convenience/ai-search-http.h"
 #include "core/ai-error.h"
+#include "core/ai-json-util.h"
 
 #define BRAVE_SEARCH_ENDPOINT "https://api.search.brave.com/res/v1/web/search"
 #define BRAVE_DEFAULT_COUNT   10
@@ -181,45 +182,44 @@ ai_brave_search_do_search (
 
     root_obj = json_node_get_object (root);
 
-    /* Brave returns { "web": { "results": [...] } }. */
-    if (!json_object_has_member (root_obj, "web"))
+    /*
+     * Brave returns { "web": { "results": [...] } }.  Absent and
+     * present-but-another-type are the same answer here; see the note in
+     * the Bing provider, which had the identical pair of criticals.
+     */
+    web_obj     = ai_json_get_object (root_obj, "web");
+    results_arr = ai_json_get_array (web_obj, "results");
+
+    if (results_arr == NULL)
         return NULL;
 
-    web_obj = json_object_get_object_member (root_obj, "web");
-    if (web_obj == NULL || !json_object_has_member (web_obj, "results"))
-        return NULL;
-
-    results_arr = json_object_get_array_member (web_obj, "results");
-    count       = (guint) json_array_get_length (results_arr);
+    count = (guint) json_array_get_length (results_arr);
 
     for (i = 0; i < count; i++)
     {
-        JsonObject     *item = json_array_get_object_element (results_arr, i);
+        JsonObject     *item = ai_json_array_get_object (results_arr, i);
         AiSearchResult *res;
-        const gchar    *title   = NULL;
-        const gchar    *url_str  = NULL;
-        const gchar    *descr   = NULL;
+        const gchar    *title;
+        const gchar    *url_str;
+        const gchar    *descr;
+        const gchar    *age;
 
         if (item == NULL)
             continue;
 
-        if (json_object_has_member (item, "title"))
-            title = json_object_get_string_member (item, "title");
-        if (json_object_has_member (item, "url"))
-            url_str = json_object_get_string_member (item, "url");
-        if (json_object_has_member (item, "description"))
-            descr = json_object_get_string_member (item, "description");
+        title   = ai_json_get_string (item, "title", NULL);
+        url_str = ai_json_get_string (item, "url", NULL);
+        descr   = ai_json_get_string (item, "description", NULL);
 
         res = ai_search_result_new (title, url_str, descr);
         ai_search_result_set_rank (res, i + 1);
 
         /* Brave reports recency as "page_age" (and sometimes "age"). */
-        if (json_object_has_member (item, "page_age"))
-            ai_search_result_set_age (
-                res, json_object_get_string_member (item, "page_age"));
-        else if (json_object_has_member (item, "age"))
-            ai_search_result_set_age (
-                res, json_object_get_string_member (item, "age"));
+        age = ai_json_get_string (item, "page_age", NULL);
+        if (age == NULL)
+            age = ai_json_get_string (item, "age", NULL);
+        if (age != NULL)
+            ai_search_result_set_age (res, age);
 
         results = g_list_prepend (results, res);
     }

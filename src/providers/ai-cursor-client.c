@@ -23,6 +23,7 @@
 #include "providers/ai-cursor-client.h"
 #include "providers/ai-cursor-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -756,72 +757,6 @@ ai_cursor_client_build_stdin(
 	return g_string_free(prompt, FALSE);
 }
 
-static const gchar *
-cursor_get_string(JsonObject *obj, const gchar *name)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return NULL;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-		return NULL;
-
-	if (json_node_get_value_type(node) != G_TYPE_STRING)
-		return NULL;
-
-	return json_node_get_string(node);
-}
-
-static JsonObject *
-cursor_get_object(JsonObject *obj, const gchar *name)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return NULL;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-		return NULL;
-
-	return json_node_get_object(node);
-}
-
-static JsonArray *
-cursor_get_array(JsonObject *obj, const gchar *name)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return NULL;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_ARRAY(node))
-		return NULL;
-
-	return json_node_get_array(node);
-}
-
-static gboolean
-cursor_get_boolean(JsonObject *obj, const gchar *name, gboolean fallback)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return fallback;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-		return fallback;
-
-	if (json_node_get_value_type(node) != G_TYPE_BOOLEAN)
-		return fallback;
-
-	return json_node_get_boolean(node);
-}
-
 static gboolean
 cursor_has_member(JsonObject *obj, const gchar *name)
 {
@@ -861,7 +796,7 @@ cursor_try_parse(JsonParser *parser, const gchar *candidate)
 			continue;
 
 		obj = json_node_get_object(element);
-		if (g_strcmp0(cursor_get_string(obj, "type"), "result") == 0)
+		if (g_strcmp0(ai_json_get_string(obj, "type", NULL), "result") == 0)
 			return obj;
 	}
 
@@ -918,7 +853,7 @@ cursor_store_session_id(AiCliClient *client, JsonObject *obj)
 {
 	const gchar *session_id;
 
-	session_id = cursor_get_string(obj, "session_id");
+	session_id = ai_json_get_string(obj, "session_id", NULL);
 	if (session_id != NULL && session_id[0] != '\0' &&
 	    ai_cli_client_get_session_persistence(client))
 	{
@@ -931,9 +866,9 @@ cursor_set_error_from_object(JsonObject *obj, GError **error)
 {
 	const gchar *message;
 
-	message = cursor_get_string(obj, "result");
+	message = ai_json_get_string(obj, "result", NULL);
 	if (message == NULL || message[0] == '\0')
-		message = cursor_get_string(obj, "subtype");
+		message = ai_json_get_string(obj, "subtype", NULL);
 	if (message == NULL || message[0] == '\0')
 		message = "Unknown error";
 
@@ -961,7 +896,7 @@ ai_cursor_client_parse_json_output(
 	if (obj == NULL)
 		return NULL;
 
-	type = cursor_get_string(obj, "type");
+	type = ai_json_get_string(obj, "type", NULL);
 	if (g_strcmp0(type, "result") != 0 && type != NULL && type[0] != '\0')
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
@@ -969,13 +904,13 @@ ai_cursor_client_parse_json_output(
 		return NULL;
 	}
 
-	if (cursor_get_boolean(obj, "is_error", FALSE))
+	if (ai_json_get_boolean(obj, "is_error", FALSE))
 	{
 		cursor_set_error_from_object(obj, error);
 		return NULL;
 	}
 
-	session_id = cursor_get_string(obj, "session_id");
+	session_id = ai_json_get_string(obj, "session_id", NULL);
 	if (session_id == NULL)
 		session_id = "";
 
@@ -984,7 +919,7 @@ ai_cursor_client_parse_json_output(
 
 	cursor_store_session_id(client, obj);
 
-	text = cursor_get_string(obj, "result");
+	text = ai_json_get_string(obj, "result", NULL);
 	if (text != NULL && text[0] != '\0')
 	{
 		g_autoptr(AiTextContent) content = ai_text_content_new(text);
@@ -1012,7 +947,7 @@ cursor_assistant_text(JsonObject *message)
 	if (message == NULL)
 		return NULL;
 
-	content = cursor_get_array(message, "content");
+	content = ai_json_get_array(message, "content");
 	if (content == NULL)
 		return NULL;
 
@@ -1029,10 +964,10 @@ cursor_assistant_text(JsonObject *message)
 			continue;
 
 		block = json_node_get_object(el);
-		if (g_strcmp0(cursor_get_string(block, "type"), "text") != 0)
+		if (g_strcmp0(ai_json_get_string(block, "type", NULL), "text") != 0)
 			continue;
 
-		text = cursor_get_string(block, "text");
+		text = ai_json_get_string(block, "text", NULL);
 		if (text != NULL)
 			g_string_append(acc, text);
 	}
@@ -1056,8 +991,8 @@ cursor_emit_tool_started(JsonObject *obj, GPtrArray *out_events)
 	g_autoptr(AiToolUse) tool_use = NULL;
 	g_autofree gchar *derived = NULL;
 
-	id = cursor_get_string(obj, "call_id");
-	tool_call = cursor_get_object(obj, "tool_call");
+	id = ai_json_get_string(obj, "call_id", NULL);
+	tool_call = ai_json_get_object(obj, "tool_call");
 	if (tool_call == NULL)
 		return;
 
@@ -1076,9 +1011,8 @@ cursor_emit_tool_started(JsonObject *obj, GPtrArray *out_events)
 			{
 				JsonObject *fn = json_node_get_object(value);
 
-				name = cursor_get_string(fn, "name");
-				if (json_object_has_member(fn, "arguments"))
-					args = json_object_get_member(fn, "arguments");
+				name = ai_json_get_string(fn, "name", NULL);
+				args = ai_json_get_node(fn, "arguments");
 				break;
 			}
 
@@ -1096,8 +1030,7 @@ cursor_emit_tool_started(JsonObject *obj, GPtrArray *out_events)
 				name = key;
 			}
 
-			if (json_object_has_member(call, "args"))
-				args = json_object_get_member(call, "args");
+			args = ai_json_get_node(call, "args");
 			break;
 		}
 	}
@@ -1119,8 +1052,8 @@ cursor_emit_tool_finished(JsonObject *obj, GPtrArray *out_events)
 	g_autoptr(AiToolResult) result = NULL;
 	g_autofree gchar *json_dump = NULL;
 
-	id = cursor_get_string(obj, "call_id");
-	tool_call = cursor_get_object(obj, "tool_call");
+	id = ai_json_get_string(obj, "call_id", NULL);
+	tool_call = ai_json_get_object(obj, "tool_call");
 	text = g_string_new("");
 
 	if (tool_call != NULL)
@@ -1142,15 +1075,15 @@ cursor_emit_tool_finished(JsonObject *obj, GPtrArray *out_events)
 				continue;
 
 			call = json_node_get_object(value);
-			res = cursor_get_object(call, "result");
+			res = ai_json_get_object(call, "result");
 			if (res == NULL)
 				continue;
 
-			success = cursor_get_object(res, "success");
-			err = cursor_get_object(res, "error");
+			success = ai_json_get_object(res, "success");
+			err = ai_json_get_object(res, "error");
 			if (success != NULL)
 			{
-				content = cursor_get_string(success, "content");
+				content = ai_json_get_string(success, "content", NULL);
 				if (content != NULL)
 					g_string_append(text, content);
 				else
@@ -1169,7 +1102,7 @@ cursor_emit_tool_finished(JsonObject *obj, GPtrArray *out_events)
 			else if (err != NULL)
 			{
 				is_error = TRUE;
-				content = cursor_get_string(err, "message");
+				content = ai_json_get_string(err, "message", NULL);
 				if (content != NULL)
 					g_string_append(text, content);
 			}
@@ -1220,8 +1153,8 @@ ai_cursor_client_parse_stream_events(
 		return TRUE;
 
 	obj = json_node_get_object(root);
-	type = cursor_get_string(obj, "type");
-	subtype = cursor_get_string(obj, "subtype");
+	type = ai_json_get_string(obj, "type", NULL);
+	subtype = ai_json_get_string(obj, "subtype", NULL);
 
 	if (g_strcmp0(type, "system") == 0)
 	{
@@ -1252,7 +1185,7 @@ ai_cursor_client_parse_stream_events(
 			return TRUE;
 		}
 
-		text = cursor_assistant_text(cursor_get_object(obj, "message"));
+		text = cursor_assistant_text(ai_json_get_object(obj, "message"));
 		if (text != NULL && text[0] != '\0')
 			g_ptr_array_add(out_events, ai_event_new_text_delta(text));
 
@@ -1276,7 +1209,7 @@ ai_cursor_client_parse_stream_events(
 		const gchar *result_text;
 		AiUsage *usage;
 
-		if (cursor_get_boolean(obj, "is_error", FALSE))
+		if (ai_json_get_boolean(obj, "is_error", FALSE))
 		{
 			cursor_set_error_from_object(obj, error);
 			ai_response_set_stop_reason(response, AI_STOP_REASON_ERROR);
@@ -1285,7 +1218,7 @@ ai_cursor_client_parse_stream_events(
 
 		cursor_store_session_id(client, obj);
 
-		result_text = cursor_get_string(obj, "result");
+		result_text = ai_json_get_string(obj, "result", NULL);
 		if (result_text != NULL && result_text[0] != '\0' &&
 		    ai_response_get_content_blocks(response) == NULL)
 		{

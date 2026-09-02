@@ -638,12 +638,13 @@ arguments / result, usage, status, error, stream boundaries.
 Two rules when adding or touching a translator:
 
 - **Read every JSON member through a type-checked accessor.** json-glib's
-  `*_member_with_default()` emit a critical on a type mismatch, and a
-  critical is fatal under `G_DEBUG=fatal-warnings`. Subprocess stdout and
-  server responses are untrusted input. The five HTTP providers go through
-  `src/providers/ai-json-util.h`; the CLI providers each still have their
-  own `*_get_string` / `_object` / `_int` set. The same applies to
-  `json_parser_get_root()`, which returns NULL for a bare `null` document.
+  `*_member_with_default()` emit a critical on a type mismatch — or, for a
+  string member holding a number, return NULL with nothing logged.
+  Subprocess stdout and server responses are untrusted input. Everything
+  goes through `src/core/ai-json-util.h`; there is no per-provider set any
+  more. The same applies to `json_parser_get_root()`, which returns NULL
+  for a bare `null` document — `ai_json_root_object()` is that check. See
+  "Reading JSON".
 - **Return FALSE only for a real failure.** An unrecognised line is not one.
   FALSE fails the whole turn, which is right for grok's `{"type":"error"}`
   line (printed on stdout with exit status 0) and wrong for anything else.
@@ -789,7 +790,7 @@ fails by whose machine ran it.
 
 See `docs/harness.org` and `docs/commands.org`.
 
-## Reading a provider's JSON
+## Reading JSON
 
 `json_object_has_member()` answers **"is the key present"**, which is a
 different question from **"is the value the type I am about to read it
@@ -799,10 +800,31 @@ handed straight to the next accessor for a second one. Under GTest and
 under `G_DEBUG=fatal-warnings` that aborts; without them the turn quietly
 yields an empty response, which is the worse of the two.
 
-All five HTTP providers were written that way, at roughly 130 sites. They
-now read every member through **`src/providers/ai-json-util.h`** — a
-private header of `static inline` accessors, so nothing new is exported
-and nothing new is introspected:
+**And a critical is only the loud half.**
+`json_object_get_string_member_with_default()` guards the *node* type and
+not the *value* type, so a member that is a number or a boolean returns
+**NULL — not the default, with nothing logged**. Verified against
+json-glib 1.10.8 with a ten-line probe, because the name says otherwise:
+
+```
+{"a":7,"b":{},"c":null}
+  get_string_member_with_default(o,"a","DEFAULT") -> (NULL)   <-- silent
+  get_string_member_with_default(o,"b","DEFAULT") -> DEFAULT  + critical
+  get_string_member_with_default(o,"c","DEFAULT") -> DEFAULT
+```
+
+Every caller that wrote `x[0] != '\0'` after one of those was one badly
+typed field away from a segfault, on every build, with or without
+`fatal-warnings`. Two did — the claude-code and opencode whole-stdout
+parsers, on `session_id` and `sessionID` — and `{"sessionID":7}` on a
+CLI's stdout crashed the process.
+
+Everything now reads every member through **`src/core/ai-json-util.h`** —
+a private header of `static inline` accessors, so nothing new is exported
+and nothing new is introspected. It is in `core/` rather than
+`providers/` because `core/ai-http-error.c` and `model/` need it too, and
+a base-layer file reaching into a provider header for an accessor is the
+wrong way round:
 
 ```c
 ai_json_get_object(obj, "usage")            /* NULL, never a critical */
@@ -819,33 +841,66 @@ ai_json_root_object(parser)                 /* the bare `null` guard  */
 JSON null is absent throughout: a server that sends `"usage": null` means
 what one that omits it means.
 
-Three rules that are not style:
+Four rules that are not style:
 
-- **A fix applied at some of 130 sites is the bug.** Add a member with an
-  accessor from this header or not at all; a `json_object_get_*_member()`
-  in `src/providers/` is a regression.
+- **A fix applied at some of the sites is the bug.** Add a member with an
+  accessor from this header or not at all. A `json_object_get_*_member()`
+  or a `json_object_has_member()` anywhere but the four listed below is a
+  regression, and `grep -rn 'json_object_get_.*_member\|json_object_has_member' src/`
+  is the whole check.
 - **Presence, not shape, decides an error envelope.** A server answering
-  `"error": "boom"` has still said it failed. Test `ai_json_get_node(obj,
-  "error") != NULL` and let the accessors fall back to the generic
-  wording, rather than reading it as an object and criticalling.
+  `"error": "boom"` has still said it failed. Test `json_object_has_member(obj,
+  "error")` and let the accessors fall back to the generic wording,
+  rather than reading it as an object and criticalling. Six
+  `has_member()` calls survive and every one of them is a place where
+  *absent* and *wrong type* must give different answers: the three error
+  envelopes (`ai-http-error.c`, `ai-claude-code-client.c`,
+  `ai-opencode-client.c`), `cursor_has_member()`, and `todo_write` /
+  `multi_edit` telling a model that a required parameter is missing
+  rather than that it is the wrong shape.
 - **The response object exists from the first event of a stream.**
   claude's `message_start` created it only when `message` was an object,
   so a type check turned a critical into a NULL and moved the abort five
   branches later, into `ai_response_get_usage(NULL)`. `stream_response()`
   creates it on demand.
+- **There is no eighth copy to write.** There were seven other
+  implementations of this idea — `cc_*`, `oc_*`, `grok_*`, `agy_*`,
+  `cursor_*`, `ai_http_error__string_member()` and
+  `executor_json_string()` — written at different times against the same
+  reasoning, and they had already drifted: `grok_get_int()` and
+  `agy_get_int()` accepted `G_TYPE_INT` and returned `gint`,
+  `cc_get_int()` and `oc_get_int()` did neither. The shared accessors are
+  a superset of all seven, so folding them in changed no answer; the
+  point is that the drift now has nowhere to happen.
 
-`tests/test-http-malformed.c` is the standing check: one table of
-malformed documents through all five providers, chat and streaming, with
-criticals fatal. Most of what it asserts is that the process is still
-running.
+Three standing checks, each one table of malformed documents with
+criticals fatal, and most of what they assert is that the process is
+still running:
 
-Not folded in yet, and worth doing: the five private copies in the CLI
-providers (`cc_*`, `oc_*`, `grok_*`, `agy_*`, `cursor_*`), which have
-already drifted from each other over which numeric types count as a
-number; `ai-opencode-client.c` and `ai-claude-tmux-client.c`, which still
-read most of their JSON through json-glib directly; and
-`ai_http_error__string_member()` in `src/core/`, which is correct but is a
-seventh copy.
+| file | subject |
+|---|---|
+| `tests/test-http-malformed.c` | the five HTTP providers, chat and streaming |
+| `tests/test-cli-malformed.c` | the five CLI providers' two parse vfuncs, the tmux transcript reader, and one real spawned CLI on both paths |
+| `tests/test-model-malformed.c` | `ai_message_new_from_json()` and the four `ai_tool_use_get_input_*()` |
+
+plus `/ai-glib/search/{bing,brave}/malformed` in
+`tests/test-search-providers.c`, which drives both search providers
+against bodies of the wrong shape through the loopback server.
+
+Two things about writing one of those:
+
+- **A GTest path containing a `subprocess` segment does not run.** GTest
+  reserves it for `g_test_trap_subprocess()`, and an ordinary run prints
+  the group markers, counts one fewer in the plan, and exits 0. The
+  spawned-CLI case was written with that name and silently did not run
+  until it was renamed to `spawned-cli`.
+- **The CLI parsers are reachable without a subprocess**, through
+  `AiCliClientClass`'s `parse_json_output` and `parse_stream_events`, and
+  that is where the type checks are — but the end-to-end case is kept
+  anyway, on both the streaming and the chat path, because a synthetic
+  driver removes the platform and the platform here is a child process
+  whose stdout is a pipe. The chat path is the one that was crashing, so
+  a stream-only end-to-end case would have stayed green throughout.
 
 ## The tool list is the grant
 

@@ -15,6 +15,7 @@
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
 #include "core/ai-error.h"
+#include "core/ai-json-util.h"
 
 /*
  * Private structure for AiMessage.
@@ -470,30 +471,41 @@ ai_message_new_from_json(
 
     obj = json_node_get_object(json);
 
-    /* Parse role */
-    if (!json_object_has_member(obj, "role"))
+    /*
+     * A role that is present but is not a string is missing as far as
+     * this is concerned. json_object_get_string_member() would critical
+     * on an object or an array there, and --- worse, because it is
+     * silent --- hand back NULL for a number, which json-glib's typed
+     * readers do without a word. This is a public entry point taking a
+     * document somebody else parsed, so both are reachable.
+     */
+    role_str = ai_json_get_string(obj, "role", NULL);
+
+    if (role_str == NULL)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                     "Message missing 'role' field");
         return NULL;
     }
 
-    role_str = json_object_get_string_member(obj, "role");
     role = ai_role_from_string(role_str);
     self = ai_message_new(role);
 
     /* Parse content */
-    if (json_object_has_member(obj, "content"))
     {
-        JsonNode *content_node = json_object_get_member(obj, "content");
+        JsonNode *content_node = ai_json_get_node(obj, "content");
 
-        if (JSON_NODE_HOLDS_VALUE(content_node))
+        if (content_node != NULL && JSON_NODE_HOLDS_VALUE(content_node))
         {
             /* String shorthand */
-            const gchar *text = json_node_get_string(content_node);
-            ai_message_add_text(self, text);
+            const gchar *text = ai_json_get_string(obj, "content", NULL);
+
+            if (text != NULL)
+            {
+                ai_message_add_text(self, text);
+            }
         }
-        else if (JSON_NODE_HOLDS_ARRAY(content_node))
+        else if (content_node != NULL && JSON_NODE_HOLDS_ARRAY(content_node))
         {
             /* Array of content blocks */
             JsonArray *arr = json_node_get_array(content_node);
@@ -502,37 +514,35 @@ ai_message_new_from_json(
 
             for (i = 0; i < len; i++)
             {
-                JsonNode *block_node = json_array_get_element(arr, i);
-                JsonObject *block_obj;
+                JsonObject *block_obj = ai_json_array_get_object(arr, i);
                 const gchar *type;
 
-                if (!JSON_NODE_HOLDS_OBJECT(block_node))
+                if (block_obj == NULL)
                 {
                     continue;
                 }
 
-                block_obj = json_node_get_object(block_node);
-                type = json_object_get_string_member_with_default(block_obj, "type", "text");
+                type = ai_json_get_string(block_obj, "type", "text");
 
                 if (g_strcmp0(type, "text") == 0)
                 {
-                    const gchar *text = json_object_get_string_member_with_default(block_obj, "text", "");
+                    const gchar *text = ai_json_get_string(block_obj, "text", "");
                     ai_message_add_text(self, text);
                 }
                 else if (g_strcmp0(type, "tool_use") == 0)
                 {
-                    const gchar *id = json_object_get_string_member_with_default(block_obj, "id", "");
-                    const gchar *name = json_object_get_string_member_with_default(block_obj, "name", "");
-                    JsonNode *input = json_object_get_member(block_obj, "input");
+                    const gchar *id = ai_json_get_string(block_obj, "id", "");
+                    const gchar *name = ai_json_get_string(block_obj, "name", "");
+                    JsonNode *input = ai_json_get_node(block_obj, "input");
                     g_autoptr(AiToolUse) tool_use = ai_tool_use_new(id, name, input);
 
                     ai_message_add_content_block(self, (AiContentBlock *)g_steal_pointer(&tool_use));
                 }
                 else if (g_strcmp0(type, "tool_result") == 0)
                 {
-                    const gchar *tool_use_id = json_object_get_string_member_with_default(block_obj, "tool_use_id", "");
-                    const gchar *content = json_object_get_string_member_with_default(block_obj, "content", "");
-                    gboolean is_error = json_object_get_boolean_member_with_default(block_obj, "is_error", FALSE);
+                    const gchar *tool_use_id = ai_json_get_string(block_obj, "tool_use_id", "");
+                    const gchar *content = ai_json_get_string(block_obj, "content", "");
+                    gboolean is_error = ai_json_get_boolean(block_obj, "is_error", FALSE);
                     g_autoptr(AiToolResult) result = ai_tool_result_new(tool_use_id, content, is_error);
 
                     ai_message_add_content_block(self, (AiContentBlock *)g_steal_pointer(&result));

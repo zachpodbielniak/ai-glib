@@ -10,7 +10,7 @@
 #include "config.h"
 
 #include "providers/ai-ollama-client.h"
-#include "providers/ai-json-util.h"
+#include "core/ai-json-util.h"
 #include "providers/ai-openai-shared.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"

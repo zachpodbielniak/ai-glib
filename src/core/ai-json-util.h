@@ -1,5 +1,5 @@
 /*
- * ai-json-util.h - Type-checked JSON member accessors for the providers
+ * ai-json-util.h - Type-checked JSON member accessors
  *
  * Copyright (C) 2026
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -25,15 +25,21 @@
  * points a provider at anything, and a proxy, a gateway or the next
  * version of an API is enough to change a shape.
  *
- * These are the *only* way the five HTTP providers and the shared image
- * parser read a member. Five CLI providers had each already grown a
- * private copy of the same idea --- `cc_*`, `oc_*`, `grok_*`, `agy_*`,
- * `cursor_*` --- and those copies had already drifted from each other,
- * which is the argument for a shared header rather than a sixth private
- * set. Folding them in is left as its own change, along with
- * `ai-opencode-client.c` and `ai-claude-tmux-client.c`, which still read
- * most of their JSON through json-glib directly: those are subprocess
- * output rather than a server, and they are not what was criticalling.
+ * These are the *only* way anything in this library reads a member: the
+ * five HTTP providers, the shared image parser, the six CLI providers
+ * and `ai-http-error.c`. It lives in `core/` rather than `providers/`
+ * for the last of those --- a base-layer file including a provider
+ * header to get an accessor is the wrong way round.
+ *
+ * There were six other implementations of this idea beside it --- one in
+ * each of five CLI providers, plus `ai_http_error__string_member()` ---
+ * and they had drifted: `grok_get_int()` and `agy_get_int()` accepted
+ * `G_TYPE_INT` where `cc_get_int()` and `oc_get_int()` did not, and
+ * returned `gint` where the others returned `gint64`. Nothing chose
+ * either behaviour --- they were written at different times against the
+ * same reasoning. The accessors below are a superset of all six, so the
+ * fold changed no answer; what it buys is that the seventh copy cannot
+ * drift, because there is nowhere left to write it.
  *
  * JSON null is treated as absent throughout: a server that sends
  * `"usage": null` means the same thing as one that omits it, and every
@@ -126,9 +132,12 @@ ai_json_get_string(
  * A document that went through a JavaScript encoder may spell a whole
  * number as a double, so G_TYPE_DOUBLE is accepted; G_TYPE_INT is too,
  * for a node a caller built rather than parsed. This is the detail the
- * private CLI copies had already drifted on --- `grok_get_int()` and
- * `agy_get_int()` take all three, `cc_get_int()` and `oc_get_int()` take
- * two --- which is the argument for one of these rather than six.
+ * private CLI copies had drifted on --- `grok_get_int()` and
+ * `agy_get_int()` took all three, `cc_get_int()` and `oc_get_int()` two
+ * --- and taking all three is what makes this a superset of both, so
+ * the fold could not change an answer. A caller that wants to reject a
+ * float has to say so; none does, because a token count arriving as
+ * 1024.0 is a counter, not a different quantity.
  */
 static inline gint64
 ai_json_get_int(JsonObject *obj, const gchar *member, gint64 fallback)

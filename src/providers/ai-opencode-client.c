@@ -12,6 +12,7 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-opencode-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -612,7 +613,6 @@ ai_opencode_client_parse_json_output(
     for (i = 0; lines[i] != NULL; i++)
     {
         g_autoptr(JsonParser) parser = NULL;
-        JsonNode *root;
         JsonObject *obj;
         const gchar *type;
         const gchar *line = lines[i];
@@ -630,14 +630,12 @@ ai_opencode_client_parse_json_output(
             continue;
         }
 
-        root = json_parser_get_root(parser);
         /* NULL root: a bare `null` line. See the streaming parser. */
-        if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+        obj = ai_json_root_object(parser);
+        if (obj == NULL)
         {
             continue;
         }
-
-        obj = json_node_get_object(root);
 
         /* Check for error — the "error" field may be a plain string or
          * a JSON object with a "message" sub-field (e.g. opencode
@@ -657,13 +655,10 @@ ai_opencode_client_parse_json_output(
             {
                 JsonObject *err_obj = json_node_get_object(err_node);
                 /* Try "message" first (most common), then "error" */
-                err_msg = json_object_get_string_member_with_default(
-                    err_obj, "message", NULL);
+                err_msg = ai_json_get_string(err_obj, "message", NULL);
                 if (err_msg == NULL)
-                    err_msg = json_object_get_string_member_with_default(
-                        err_obj, "error", NULL);
-                if (err_msg == NULL &&
-                    json_object_has_member(err_obj, "data"))
+                    err_msg = ai_json_get_string(err_obj, "error", NULL);
+                if (err_msg == NULL)
                 {
                     /*
                      * opencode's own errors nest one level deeper:
@@ -673,21 +668,19 @@ ai_opencode_client_parse_json_output(
                      * the message and the caller got raw JSON where a
                      * sentence belonged.
                      */
-                    JsonNode *data_node =
-                        json_object_get_member(err_obj, "data");
+                    JsonObject *data_obj = ai_json_get_object(err_obj,
+                                                              "data");
 
-                    if (data_node != NULL && JSON_NODE_HOLDS_OBJECT(data_node))
+                    if (data_obj != NULL)
                     {
-                        JsonObject *data_obj = json_node_get_object(data_node);
                         const gchar *name;
 
-                        err_msg = json_object_get_string_member_with_default(
-                            data_obj, "message", NULL);
+                        err_msg = ai_json_get_string(data_obj, "message",
+                                                     NULL);
 
                         /* Prefix the error class when there is one:
                          * "UnknownError: ..." says more than "...". */
-                        name = json_object_get_string_member_with_default(
-                            err_obj, "name", NULL);
+                        name = ai_json_get_string(err_obj, "name", NULL);
                         if (err_msg != NULL && name != NULL)
                         {
                             err_msg_tmp = g_strdup_printf("%s: %s", name,
@@ -716,30 +709,25 @@ ai_opencode_client_parse_json_output(
         }
 
         /* Capture sessionID for session persistence */
-        if (json_object_has_member(obj, "sessionID"))
         {
-            const gchar *sid = json_object_get_string_member_with_default(
-                obj, "sessionID", "");
+            const gchar *sid = ai_json_get_string(obj, "sessionID", "");
+
             if (sid[0] != '\0' && ai_cli_client_get_session_persistence(client))
             {
                 ai_cli_client_set_session_id(client, sid);
             }
         }
 
-        type = json_object_get_string_member_with_default(obj, "type", "");
+        type = ai_json_get_string(obj, "type", "");
 
         if (g_strcmp0(type, "text") == 0)
         {
             /* Extract text from part.text */
-            if (json_object_has_member(obj, "part"))
             {
-                JsonObject *part = json_object_get_object_member(obj, "part");
-                if (part != NULL && json_object_has_member(part, "text"))
-                {
-                    const gchar *text = json_object_get_string_member_with_default(
-                        part, "text", "");
-                    g_string_append(accumulated_text, text);
-                }
+                JsonObject *part = ai_json_get_object(obj, "part");
+
+                g_string_append(accumulated_text,
+                                ai_json_get_string(part, "text", ""));
             }
         }
         else if (g_strcmp0(type, "tool_use") == 0)
@@ -750,34 +738,22 @@ ai_opencode_client_parse_json_output(
              * on tool-calls or a call was rejected) we have something to
              * show the user rather than failing with "no text content".
              */
-            if (json_object_has_member(obj, "part"))
             {
-                JsonObject *part  = json_object_get_object_member(obj, "part");
-                JsonObject *state = NULL;
+                JsonObject *part  = ai_json_get_object(obj, "part");
+                JsonObject *state;
                 const gchar *tool;
                 const gchar *status;
 
-                tool = json_object_has_member(part, "tool")
-                    ? json_object_get_string_member_with_default(part, "tool", "tool")
-                    : "tool";
+                tool = ai_json_get_string(part, "tool", "tool");
+                state = ai_json_get_object(part, "state");
+                status = ai_json_get_string(state, "status", "");
 
-                if (json_object_has_member(part, "state"))
-                    state = json_object_get_object_member(part, "state");
-
-                status = (state != NULL)
-                    ? json_object_get_string_member_with_default(state, "status", "")
-                    : "";
-
-                if (g_strcmp0(status, "completed") == 0 && state != NULL)
+                if (g_strcmp0(status, "completed") == 0)
                 {
-                    JsonObject *inp = json_object_has_member(state, "input")
-                        ? json_object_get_object_member(state, "input")
-                        : NULL;
-                    const gchar *cmd = (inp != NULL && json_object_has_member(inp, "command"))
-                        ? json_object_get_string_member_with_default(inp, "command", "")
-                        : "";
-                    const gchar *out = json_object_get_string_member_with_default(
-                        state, "output", "");
+                    JsonObject *inp = ai_json_get_object(state, "input");
+                    const gchar *cmd = ai_json_get_string(inp, "command", "");
+                    const gchar *out = ai_json_get_string(state, "output",
+                                                          "");
 
                     if (tool_summary->len > 0)
                         g_string_append_c(tool_summary, '\n');
@@ -788,10 +764,10 @@ ai_opencode_client_parse_json_output(
                         g_string_append_printf(tool_summary,
                                                "**%s:**\n```\n%s```", tool, out);
                 }
-                else if (g_strcmp0(status, "error") == 0 && state != NULL)
+                else if (g_strcmp0(status, "error") == 0)
                 {
-                    const gchar *err = json_object_get_string_member_with_default(
-                        state, "error", "unknown error");
+                    const gchar *err = ai_json_get_string(state, "error",
+                                                          "unknown error");
 
                     if (tool_summary->len > 0)
                         g_string_append_c(tool_summary, '\n');
@@ -803,19 +779,15 @@ ai_opencode_client_parse_json_output(
         else if (g_strcmp0(type, "step_finish") == 0)
         {
             /* Extract usage from part.tokens */
-            if (json_object_has_member(obj, "part"))
             {
-                JsonObject *part = json_object_get_object_member(obj, "part");
-                if (part != NULL && json_object_has_member(part, "tokens"))
+                JsonObject *tokens =
+                    ai_json_get_object(ai_json_get_object(obj, "part"),
+                                       "tokens");
+
+                if (tokens != NULL)
                 {
-                    JsonObject *tokens = json_object_get_object_member(part, "tokens");
-                    if (tokens != NULL)
-                    {
-                        input_tokens = json_object_get_int_member_with_default(
-                            tokens, "input", 0);
-                        output_tokens = json_object_get_int_member_with_default(
-                            tokens, "output", 0);
-                    }
+                    input_tokens = (gint)ai_json_get_int(tokens, "input", 0);
+                    output_tokens = (gint)ai_json_get_int(tokens, "output", 0);
                 }
             }
         }
@@ -860,67 +832,6 @@ ai_opencode_client_parse_json_output(
 }
 
 /*
- * Type-checked JSON accessors, for the same reason grok-build has them:
- * json-glib's *_member_with_default() emit a critical on a type mismatch,
- * and subprocess stdout is untrusted input that must not be able to abort a
- * fatal-warnings run.
- */
-static const gchar *
-oc_get_string(JsonObject *obj, const gchar *member)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return NULL;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
-        json_node_get_value_type(node) != G_TYPE_STRING)
-        return NULL;
-
-    return json_node_get_string(node);
-}
-
-static JsonObject *
-oc_get_object(JsonObject *obj, const gchar *member)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return NULL;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-        return NULL;
-
-    return json_node_get_object(node);
-}
-
-static gint64
-oc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return fallback;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    if (json_node_get_value_type(node) == G_TYPE_INT64)
-        return json_node_get_int(node);
-
-    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
-        return (gint64)json_node_get_double(node);
-
-    return fallback;
-}
-
-/*
  * Turn one opencode tool_use part into events.
  *
  * opencode reports a tool as a single part whose state advances -- pending,
@@ -949,24 +860,22 @@ oc_emit_tool_part(
     if (part == NULL)
         return;
 
-    tool = oc_get_string(part, "tool");
+    tool = ai_json_get_string(part, "tool", NULL);
 
     if (tool == NULL || tool[0] == '\0')
         tool = "tool";
 
     /* opencode has spelled this both ways across versions. */
-    id = oc_get_string(part, "id");
+    id = ai_json_get_string(part, "id", NULL);
     if (id == NULL)
-        id = oc_get_string(part, "callID");
+        id = ai_json_get_string(part, "callID", NULL);
     if (id == NULL)
         id = "";
 
-    state = oc_get_object(part, "state");
-    status = state != NULL ? oc_get_string(state, "status") : NULL;
+    state = ai_json_get_object(part, "state");
+    status = state != NULL ? ai_json_get_string(state, "status", NULL) : NULL;
 
-    input = state != NULL && json_object_has_member(state, "input")
-        ? json_object_get_member(state, "input")
-        : NULL;
+    input = ai_json_get_node(state, "input");
 
     tool_use = ai_tool_use_new(id, tool,
                                input);
@@ -975,7 +884,7 @@ oc_emit_tool_part(
 
     if (g_strcmp0(status, "completed") == 0)
     {
-        const gchar *output = state != NULL ? oc_get_string(state, "output") : NULL;
+        const gchar *output = state != NULL ? ai_json_get_string(state, "output", NULL) : NULL;
         g_autoptr(AiToolResult) result =
             ai_tool_result_new_with_name(id, tool,
                                          output != NULL ? output : "", FALSE);
@@ -985,7 +894,7 @@ oc_emit_tool_part(
     }
     else if (g_strcmp0(status, "error") == 0)
     {
-        const gchar *err = state != NULL ? oc_get_string(state, "error") : NULL;
+        const gchar *err = state != NULL ? ai_json_get_string(state, "error", NULL) : NULL;
         g_autoptr(AiToolResult) result =
             ai_tool_result_new_with_name(id, tool,
                                          err != NULL ? err : "unknown error",
@@ -1017,7 +926,6 @@ ai_opencode_client_parse_stream_events(
     GError      **error
 ){
     g_autoptr(JsonParser) parser = NULL;
-    JsonNode *root;
     JsonObject *obj;
     JsonObject *part;
     const gchar *type;
@@ -1035,27 +943,25 @@ ai_opencode_client_parse_stream_events(
         return TRUE;
     }
 
-    root = json_parser_get_root(parser);
-
     /*
      * A bare `null` document parses successfully and yields a NULL root, and
      * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
      * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
-     * the NULL check comes first.
+     * the NULL check comes first; ai_json_root_object() is that check.
      */
-    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+    obj = ai_json_root_object(parser);
+
+    if (obj == NULL)
     {
         return TRUE;
     }
-
-    obj = json_node_get_object(root);
-    type = oc_get_string(obj, "type");
-    part = oc_get_object(obj, "part");
+    type = ai_json_get_string(obj, "type", NULL);
+    part = ai_json_get_object(obj, "part");
 
     /* opencode spells this camelCase, unlike the rest of its payload. */
-    session_id = oc_get_string(obj, "sessionID");
+    session_id = ai_json_get_string(obj, "sessionID", NULL);
     if (session_id == NULL && part != NULL)
-        session_id = oc_get_string(part, "sessionID");
+        session_id = ai_json_get_string(part, "sessionID", NULL);
 
     if (session_id != NULL && session_id[0] != '\0' &&
         ai_cli_client_get_session_persistence(client))
@@ -1065,7 +971,7 @@ ai_opencode_client_parse_stream_events(
 
     if (g_strcmp0(type, "text") == 0)
     {
-        const gchar *text = part != NULL ? oc_get_string(part, "text") : NULL;
+        const gchar *text = part != NULL ? ai_json_get_string(part, "text", NULL) : NULL;
 
         if (text != NULL && text[0] != '\0')
             g_ptr_array_add(out_events, ai_event_new_text_delta(text));
@@ -1076,12 +982,12 @@ ai_opencode_client_parse_stream_events(
     }
     else if (g_strcmp0(type, "step_finish") == 0)
     {
-        JsonObject *tokens = part != NULL ? oc_get_object(part, "tokens") : NULL;
+        JsonObject *tokens = part != NULL ? ai_json_get_object(part, "tokens") : NULL;
 
         if (tokens != NULL)
         {
-            gint input_tokens = (gint)oc_get_int(tokens, "input", 0);
-            gint output_tokens = (gint)oc_get_int(tokens, "output", 0);
+            gint input_tokens = (gint)ai_json_get_int(tokens, "input", 0);
+            gint output_tokens = (gint)ai_json_get_int(tokens, "output", 0);
             g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
             ai_response_set_usage(response, usage);

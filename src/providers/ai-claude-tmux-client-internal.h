@@ -102,4 +102,21 @@ ai_claude_tmux_client_build_paste_argv(
 gchar *
 ai_claude_tmux_client_build_prompt(GList *messages);
 
+/*
+ * Whether @jsonl_slice contains a top-level `"type":"assistant"` entry
+ * whose inner `message.stop_reason` is terminal --- anything other than
+ * `tool_use`, which is the intermediate state of a tool chain.
+ *
+ * Exposed for the same reason
+ * ai_claude_tmux_client_jsonl_has_accepted_prompt() is: the turn loop
+ * polls this against a file `claude` is still appending to, so a
+ * half-written line and a line whose fields changed type are the
+ * ordinary inputs rather than the exotic ones, and a test cannot present
+ * either through a transcript it does not write itself.
+ *
+ * Returns: %TRUE if the slice shows a finished assistant turn
+ */
+gboolean
+ai_claude_tmux_client_jsonl_has_terminal_stop(const gchar *jsonl_slice);
+
 G_END_DECLS

@@ -19,6 +19,7 @@
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-launch.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-session-limit.h"
 #include "core/ai-event.h"
@@ -1066,7 +1067,6 @@ ai_claude_code_client_parse_json_output(
 ){
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
     g_autoptr(JsonParser) parser = NULL;
-    JsonNode *root;
     JsonObject *obj;
     const gchar *type;
     const gchar *result_text;
@@ -1079,27 +1079,30 @@ ai_claude_code_client_parse_json_output(
         return NULL;
     }
 
-    root = json_parser_get_root(parser);
-
     /* NULL root: see the note in the streaming parser. */
-    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+    obj = ai_json_root_object(parser);
+
+    if (obj == NULL)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
                     "Expected JSON object in CLI output");
         return NULL;
     }
 
-    obj = json_node_get_object(root);
-
     /* Check type */
-    type = json_object_get_string_member_with_default(obj, "type", "");
+    type = ai_json_get_string(obj, "type", "");
     if (g_strcmp0(type, "result") != 0)
     {
         /* Check for error */
         if (json_object_has_member(obj, "error"))
         {
-            const gchar *err_msg = json_object_get_string_member_with_default(
-                obj, "error", "Unknown error");
+            /*
+             * Presence, not shape, decides an error envelope: a CLI that
+             * answered {"error": 500} has still said it failed, and the
+             * generic wording is a better answer than a critical.
+             */
+            const gchar *err_msg = ai_json_get_string(obj, "error",
+                                                      "Unknown error");
             g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
                         "CLI error: %s", err_msg);
         }
@@ -1112,7 +1115,7 @@ ai_claude_code_client_parse_json_output(
     }
 
     /* Create response */
-    session_id = json_object_get_string_member_with_default(obj, "session_id", "");
+    session_id = ai_json_get_string(obj, "session_id", "");
     response = ai_response_new(session_id, ai_cli_client_get_model(client));
     ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
 
@@ -1123,7 +1126,7 @@ ai_claude_code_client_parse_json_output(
     }
 
     /* Parse result text */
-    result_text = json_object_get_string_member_with_default(obj, "result", "");
+    result_text = ai_json_get_string(obj, "result", "");
     if (result_text[0] != '\0')
     {
         g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
@@ -1143,143 +1146,32 @@ ai_claude_code_client_parse_json_output(
     }
 
     /* Parse usage and check for context compaction */
-    if (json_object_has_member(obj, "usage"))
     {
-        JsonObject *usage_obj = json_object_get_object_member(obj, "usage");
-        gint input_tokens = json_object_get_int_member_with_default(usage_obj, "input_tokens", 0);
-        gint output_tokens = json_object_get_int_member_with_default(usage_obj, "output_tokens", 0);
-        g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
+        JsonObject *usage_obj = ai_json_get_object(obj, "usage");
 
-        ai_response_set_usage(response, usage);
-        check_and_emit_compaction(self, input_tokens);
+        if (usage_obj != NULL)
+        {
+            gint input_tokens =
+                (gint)ai_json_get_int(usage_obj, "input_tokens", 0);
+            gint output_tokens =
+                (gint)ai_json_get_int(usage_obj, "output_tokens", 0);
+            g_autoptr(AiUsage) usage = ai_usage_new(input_tokens,
+                                                    output_tokens);
+
+            ai_response_set_usage(response, usage);
+            check_and_emit_compaction(self, input_tokens);
+        }
     }
 
-    /* Store total cost */
-    if (json_object_has_member(obj, "total_cost_usd"))
-    {
-        self->total_cost = json_object_get_double_member(obj, "total_cost_usd");
-    }
+    /*
+     * Store total cost. Absent and present-but-not-a-number are the same
+     * answer -- the CLI did not price this turn -- so whatever was already
+     * recorded stands.
+     */
+    self->total_cost = ai_json_get_double(obj, "total_cost_usd",
+                                          self->total_cost);
 
     return (AiResponse *)g_steal_pointer(&response);
-}
-
-/*
- * Type-checked JSON accessors.
- *
- * json-glib's *_member_with_default() emit a critical when the member is
- * present but of another type, and subprocess stdout is untrusted input --
- * a CLI that changed a field from a number to a string could abort a
- * fatal-warnings run rather than being ignored. Same reasoning as the
- * grok_get_* helpers; keep new fields on these.
- */
-static const gchar *
-cc_get_string(JsonObject *obj, const gchar *member)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return NULL;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
-        json_node_get_value_type(node) != G_TYPE_STRING)
-        return NULL;
-
-    return json_node_get_string(node);
-}
-
-static JsonObject *
-cc_get_object(JsonObject *obj, const gchar *member)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return NULL;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-        return NULL;
-
-    return json_node_get_object(node);
-}
-
-static JsonArray *
-cc_get_array(JsonObject *obj, const gchar *member)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return NULL;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_ARRAY(node))
-        return NULL;
-
-    return json_node_get_array(node);
-}
-
-static gint64
-cc_get_int(JsonObject *obj, const gchar *member, gint64 fallback)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return fallback;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    if (json_node_get_value_type(node) == G_TYPE_INT64)
-        return json_node_get_int(node);
-
-    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
-        return (gint64)json_node_get_double(node);
-
-    return fallback;
-}
-
-static gdouble
-cc_get_double(JsonObject *obj, const gchar *member, gdouble fallback)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return fallback;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-        return fallback;
-
-    if (json_node_get_value_type(node) == G_TYPE_DOUBLE)
-        return json_node_get_double(node);
-
-    if (json_node_get_value_type(node) == G_TYPE_INT64)
-        return (gdouble)json_node_get_int(node);
-
-    return fallback;
-}
-
-static gboolean
-cc_get_boolean(JsonObject *obj, const gchar *member, gboolean fallback)
-{
-    JsonNode *node;
-
-    if (obj == NULL || !json_object_has_member(obj, member))
-        return fallback;
-
-    node = json_object_get_member(obj, member);
-
-    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
-        json_node_get_value_type(node) != G_TYPE_BOOLEAN)
-        return fallback;
-
-    return json_node_get_boolean(node);
 }
 
 /*
@@ -1301,35 +1193,33 @@ cc_emit_content_block(
     if (block == NULL)
         return;
 
-    block_type = cc_get_string(block, "type");
+    block_type = ai_json_get_string(block, "type", NULL);
 
     if (g_strcmp0(block_type, "text") == 0)
     {
-        const gchar *text = cc_get_string(block, "text");
+        const gchar *text = ai_json_get_string(block, "text", NULL);
 
         if (text != NULL && text[0] != '\0')
             g_ptr_array_add(out_events, ai_event_new_text_delta(text));
     }
     else if (g_strcmp0(block_type, "thinking") == 0)
     {
-        const gchar *text = cc_get_string(block, "thinking");
+        const gchar *text = ai_json_get_string(block, "thinking", NULL);
 
         if (text != NULL && text[0] != '\0')
             g_ptr_array_add(out_events, ai_event_new_thinking_delta(text));
     }
     else if (g_strcmp0(block_type, "tool_use") == 0)
     {
-        const gchar *id = cc_get_string(block, "id");
-        const gchar *name = cc_get_string(block, "name");
+        const gchar *id = ai_json_get_string(block, "id", NULL);
+        const gchar *name = ai_json_get_string(block, "name", NULL);
         JsonNode *input;
         g_autoptr(AiToolUse) tool_use = NULL;
 
         if (name == NULL || name[0] == '\0')
             return;
 
-        input = json_object_has_member(block, "input")
-            ? json_object_get_member(block, "input")
-            : NULL;
+        input = ai_json_get_node(block, "input");
 
         tool_use = ai_tool_use_new(id != NULL ? id : "", name,
                                    input);
@@ -1343,15 +1233,13 @@ cc_emit_content_block(
          * transcript models a tool answering the model. Its content is
          * either a plain string or an array of blocks.
          */
-        const gchar *id = cc_get_string(block, "tool_use_id");
-        gboolean is_error = cc_get_boolean(block, "is_error", FALSE);
+        const gchar *id = ai_json_get_string(block, "tool_use_id", NULL);
+        gboolean is_error = ai_json_get_boolean(block, "is_error", FALSE);
         g_autoptr(GString) text = g_string_new(NULL);
         g_autoptr(AiToolResult) result = NULL;
         JsonNode *content;
 
-        content = json_object_has_member(block, "content")
-            ? json_object_get_member(block, "content")
-            : NULL;
+        content = ai_json_get_node(block, "content");
 
         if (content != NULL && JSON_NODE_HOLDS_VALUE(content) &&
             json_node_get_value_type(content) == G_TYPE_STRING)
@@ -1366,13 +1254,9 @@ cc_emit_content_block(
 
             for (i = 0; i < n; i++)
             {
-                JsonNode *pn = json_array_get_element(parts, i);
-                const gchar *part_text;
-
-                if (pn == NULL || !JSON_NODE_HOLDS_OBJECT(pn))
-                    continue;
-
-                part_text = cc_get_string(json_node_get_object(pn), "text");
+                const gchar *part_text =
+                    ai_json_get_string(ai_json_array_get_object(parts, i),
+                                       "text", NULL);
 
                 if (part_text != NULL)
                     g_string_append(text, part_text);
@@ -1396,7 +1280,7 @@ cc_emit_message_content(
     guint n;
     guint i;
 
-    blocks = cc_get_array(message, "content");
+    blocks = ai_json_get_array(message, "content");
 
     if (blocks == NULL)
         return;
@@ -1404,12 +1288,7 @@ cc_emit_message_content(
     n = json_array_get_length(blocks);
 
     for (i = 0; i < n; i++)
-    {
-        JsonNode *bn = json_array_get_element(blocks, i);
-
-        if (bn != NULL && JSON_NODE_HOLDS_OBJECT(bn))
-            cc_emit_content_block(json_node_get_object(bn), out_events);
-    }
+        cc_emit_content_block(ai_json_array_get_object(blocks, i), out_events);
 }
 
 /*
@@ -1425,7 +1304,7 @@ cc_first_text(JsonObject *message)
     guint n;
     guint i;
 
-    blocks = cc_get_array(message, "content");
+    blocks = ai_json_get_array(message, "content");
 
     if (blocks == NULL)
         return NULL;
@@ -1434,16 +1313,10 @@ cc_first_text(JsonObject *message)
 
     for (i = 0; i < n; i++)
     {
-        JsonNode *bn = json_array_get_element(blocks, i);
-        JsonObject *block;
+        JsonObject *block = ai_json_array_get_object(blocks, i);
 
-        if (bn == NULL || !JSON_NODE_HOLDS_OBJECT(bn))
-            continue;
-
-        block = json_node_get_object(bn);
-
-        if (g_strcmp0(cc_get_string(block, "type"), "text") == 0)
-            return cc_get_string(block, "text");
+        if (g_strcmp0(ai_json_get_string(block, "type", NULL), "text") == 0)
+            return ai_json_get_string(block, "text", NULL);
     }
 
     return NULL;
@@ -1476,15 +1349,15 @@ cc_message_is_session_limit(JsonObject *msg_obj, gint64 now, gint64 *reset_out)
     if (msg_obj == NULL)
         return FALSE;
 
-    model = cc_get_string(msg_obj, "model");
-    usage_obj = cc_get_object(msg_obj, "usage");
+    model = ai_json_get_string(msg_obj, "model", NULL);
+    usage_obj = ai_json_get_object(msg_obj, "usage");
 
     if (usage_obj != NULL)
     {
-        input_tokens = cc_get_int(usage_obj, "input_tokens", 0);
-        output_tokens = cc_get_int(usage_obj, "output_tokens", 0);
-        cache_creation = cc_get_int(usage_obj, "cache_creation_input_tokens", 0);
-        cache_read = cc_get_int(usage_obj, "cache_read_input_tokens", 0);
+        input_tokens = ai_json_get_int(usage_obj, "input_tokens", 0);
+        output_tokens = ai_json_get_int(usage_obj, "output_tokens", 0);
+        cache_creation = ai_json_get_int(usage_obj, "cache_creation_input_tokens", 0);
+        cache_read = ai_json_get_int(usage_obj, "cache_read_input_tokens", 0);
     }
 
     if (!ai_session_limit_looks_synthetic(model, input_tokens, output_tokens,
@@ -1518,7 +1391,6 @@ ai_claude_code_line_is_session_limit(
     gint64      *reset_out
 ){
     g_autoptr(JsonParser) parser = NULL;
-    JsonNode *root;
     JsonObject *obj;
     JsonObject *msg_obj;
 
@@ -1530,17 +1402,15 @@ ai_claude_code_line_is_session_limit(
     if (!json_parser_load_from_data(parser, line, -1, NULL))
         return FALSE;
 
-    root = json_parser_get_root(parser);
+    obj = ai_json_root_object(parser);
 
-    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+    if (obj == NULL)
         return FALSE;
 
-    obj = json_node_get_object(root);
-
-    if (g_strcmp0(cc_get_string(obj, "type"), "assistant") != 0)
+    if (g_strcmp0(ai_json_get_string(obj, "type", NULL), "assistant") != 0)
         return FALSE;
 
-    msg_obj = cc_get_object(obj, "message");
+    msg_obj = ai_json_get_object(obj, "message");
 
     return cc_message_is_session_limit(msg_obj, now, reset_out);
 }
@@ -1594,7 +1464,6 @@ ai_claude_code_client_parse_stream_events(
 ){
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
     g_autoptr(JsonParser) parser = NULL;
-    JsonNode *root;
     JsonObject *obj;
     const gchar *type;
 
@@ -1611,26 +1480,25 @@ ai_claude_code_client_parse_stream_events(
         return TRUE;
     }
 
-    root = json_parser_get_root(parser);
-
     /*
      * A bare `null` document parses successfully and yields a NULL root, and
      * JSON_NODE_HOLDS_OBJECT() would dereference it -- a critical, which is
      * fatal under G_DEBUG=fatal-warnings. Subprocess stdout is untrusted, so
-     * the NULL check comes first.
+     * the NULL check comes first; ai_json_root_object() is that check, in
+     * one place rather than at each of the parsers that needs it.
      */
-    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
+    obj = ai_json_root_object(parser);
+
+    if (obj == NULL)
     {
         return TRUE;
     }
-
-    obj = json_node_get_object(root);
-    type = cc_get_string(obj, "type");
+    type = ai_json_get_string(obj, "type", NULL);
 
     if (g_strcmp0(type, "system") == 0)
     {
-        const gchar *subtype = cc_get_string(obj, "subtype");
-        const gchar *session_id = cc_get_string(obj, "session_id");
+        const gchar *subtype = ai_json_get_string(obj, "subtype", NULL);
+        const gchar *session_id = ai_json_get_string(obj, "session_id", NULL);
 
         /*
          * The init line is the first thing a run says, and carries the
@@ -1651,7 +1519,7 @@ ai_claude_code_client_parse_stream_events(
     }
     else if (g_strcmp0(type, "assistant") == 0)
     {
-        JsonObject *msg_obj = cc_get_object(obj, "message");
+        JsonObject *msg_obj = ai_json_get_object(obj, "message");
         const gchar *msg_type;
 
         if (msg_obj == NULL)
@@ -1659,12 +1527,12 @@ ai_claude_code_client_parse_stream_events(
 
         cc_note_session_limit(self, msg_obj);
 
-        msg_type = cc_get_string(msg_obj, "type");
+        msg_type = ai_json_get_string(msg_obj, "type", NULL);
 
         if (g_strcmp0(msg_type, "text") == 0)
         {
             /* Flat shape: {"message": {"type": "text", "text": ...}} */
-            const gchar *text = cc_get_string(msg_obj, "text");
+            const gchar *text = ai_json_get_string(msg_obj, "text", NULL);
 
             if (text != NULL && text[0] != '\0')
                 g_ptr_array_add(out_events, ai_event_new_text_delta(text));
@@ -1677,49 +1545,49 @@ ai_claude_code_client_parse_stream_events(
     else if (g_strcmp0(type, "user") == 0)
     {
         /* Tool results come back as a user message full of tool_result. */
-        JsonObject *msg_obj = cc_get_object(obj, "message");
+        JsonObject *msg_obj = ai_json_get_object(obj, "message");
 
         if (msg_obj != NULL)
             cc_emit_message_content(msg_obj, out_events);
     }
     else if (g_strcmp0(type, "stream_event") == 0)
     {
-        JsonObject *event = cc_get_object(obj, "event");
+        JsonObject *event = ai_json_get_object(obj, "event");
         const gchar *event_type;
 
         if (event == NULL)
             return TRUE;
 
-        event_type = cc_get_string(event, "type");
+        event_type = ai_json_get_string(event, "type", NULL);
 
         if (g_strcmp0(event_type, "content_block_start") == 0)
         {
-            JsonObject *block = cc_get_object(event, "content_block");
+            JsonObject *block = ai_json_get_object(event, "content_block");
 
             if (block != NULL &&
-                g_strcmp0(cc_get_string(block, "type"), "tool_use") == 0)
+                g_strcmp0(ai_json_get_string(block, "type", NULL), "tool_use") == 0)
                 cc_emit_content_block(block, out_events);
         }
         else if (g_strcmp0(event_type, "content_block_delta") == 0)
         {
-            JsonObject *delta = cc_get_object(event, "delta");
+            JsonObject *delta = ai_json_get_object(event, "delta");
             const gchar *delta_type;
 
             if (delta == NULL)
                 return TRUE;
 
-            delta_type = cc_get_string(delta, "type");
+            delta_type = ai_json_get_string(delta, "type", NULL);
 
             if (g_strcmp0(delta_type, "text_delta") == 0)
             {
-                const gchar *text = cc_get_string(delta, "text");
+                const gchar *text = ai_json_get_string(delta, "text", NULL);
 
                 if (text != NULL && text[0] != '\0')
                     g_ptr_array_add(out_events, ai_event_new_text_delta(text));
             }
             else if (g_strcmp0(delta_type, "thinking_delta") == 0)
             {
-                const gchar *text = cc_get_string(delta, "thinking");
+                const gchar *text = ai_json_get_string(delta, "thinking", NULL);
 
                 if (text != NULL && text[0] != '\0')
                     g_ptr_array_add(out_events,
@@ -1727,7 +1595,7 @@ ai_claude_code_client_parse_stream_events(
             }
             else if (g_strcmp0(delta_type, "input_json_delta") == 0)
             {
-                const gchar *fragment = cc_get_string(delta, "partial_json");
+                const gchar *fragment = ai_json_get_string(delta, "partial_json", NULL);
 
                 if (fragment != NULL && fragment[0] != '\0')
                     g_ptr_array_add(
@@ -1738,8 +1606,8 @@ ai_claude_code_client_parse_stream_events(
     }
     else if (g_strcmp0(type, "result") == 0)
     {
-        const gchar *result_text = cc_get_string(obj, "result");
-        const gchar *session_id = cc_get_string(obj, "session_id");
+        const gchar *result_text = ai_json_get_string(obj, "result", NULL);
+        const gchar *session_id = ai_json_get_string(obj, "session_id", NULL);
         JsonObject *usage_obj;
         gdouble cost;
 
@@ -1760,13 +1628,13 @@ ai_claude_code_client_parse_stream_events(
         }
 
         /* Update usage and check for context compaction */
-        usage_obj = cc_get_object(obj, "usage");
-        cost = cc_get_double(obj, "total_cost_usd", -1.0);
+        usage_obj = ai_json_get_object(obj, "usage");
+        cost = ai_json_get_double(obj, "total_cost_usd", -1.0);
 
         if (usage_obj != NULL)
         {
-            gint input_tokens = (gint)cc_get_int(usage_obj, "input_tokens", 0);
-            gint output_tokens = (gint)cc_get_int(usage_obj, "output_tokens", 0);
+            gint input_tokens = (gint)ai_json_get_int(usage_obj, "input_tokens", 0);
+            gint output_tokens = (gint)ai_json_get_int(usage_obj, "output_tokens", 0);
             g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
 
             ai_response_set_usage(response, usage);

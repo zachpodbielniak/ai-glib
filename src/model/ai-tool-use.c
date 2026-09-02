@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include "model/ai-tool-use.h"
+#include "core/ai-json-util.h"
 
 /*
  * Private structure for AiToolUse.
@@ -347,13 +348,18 @@ ai_tool_use_get_input_string(
         return NULL;
     }
 
+    /*
+     * A tool call's input is whatever the model wrote, so the parameter
+     * being present says nothing about its type. json-glib's typed
+     * readers answer that two different ways and neither is usable
+     * here: json_object_get_string_member() criticals on an object or
+     * an array, and returns NULL without a word for a number. The
+     * caller asked for a string; anything else is the same answer as
+     * not being there.
+     */
     obj = json_node_get_object(self->input);
-    if (!json_object_has_member(obj, param_name))
-    {
-        return NULL;
-    }
 
-    return json_object_get_string_member(obj, param_name);
+    return ai_json_get_string(obj, param_name, NULL);
 }
 
 /**
@@ -383,12 +389,8 @@ ai_tool_use_get_input_int(
     }
 
     obj = json_node_get_object(self->input);
-    if (!json_object_has_member(obj, param_name))
-    {
-        return default_value;
-    }
 
-    return json_object_get_int_member(obj, param_name);
+    return ai_json_get_int(obj, param_name, default_value);
 }
 
 /**
@@ -418,12 +420,8 @@ ai_tool_use_get_input_double(
     }
 
     obj = json_node_get_object(self->input);
-    if (!json_object_has_member(obj, param_name))
-    {
-        return default_value;
-    }
 
-    return json_object_get_double_member(obj, param_name);
+    return ai_json_get_double(obj, param_name, default_value);
 }
 
 /**
@@ -453,10 +451,6 @@ ai_tool_use_get_input_boolean(
     }
 
     obj = json_node_get_object(self->input);
-    if (!json_object_has_member(obj, param_name))
-    {
-        return default_value;
-    }
 
-    return json_object_get_boolean_member(obj, param_name);
+    return ai_json_get_boolean(obj, param_name, default_value);
 }

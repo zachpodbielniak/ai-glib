@@ -1127,6 +1127,98 @@ test_brave_missing_web (void)
 }
 
 /* ============================================================
+ * Both providers against bodies of the wrong shape
+ * ============================================================ */
+
+/*
+ * A search API is somebody else's server, and both providers read it by
+ * presence: `has_member("webPages")` and then
+ * json_object_get_object_member() on it.  Presence is not type, so
+ * {"webPages": 5} logged a Json-CRITICAL, handed back NULL, and the NULL
+ * went into json_object_get_array_member() for a second one -- fatal
+ * under GTest and under G_DEBUG=fatal-warnings, and an empty result list
+ * without them.
+ *
+ * One table through both, because each ignores the keys it does not know
+ * and a body aimed at one is a fine no-op for the other.  The assertion
+ * is mostly that the process is still running; beyond that, a body that
+ * cannot be read must come back as no results rather than as an error,
+ * which is what "no web results" already means here.
+ */
+static const gchar *malformed_search_bodies[] = {
+    "null",
+    "[]",
+    "7",
+    "{\"webPages\":5}",
+    "{\"webPages\":null}",
+    "{\"webPages\":[]}",
+    "{\"webPages\":{\"value\":9}}",
+    "{\"webPages\":{\"value\":{}}}",
+    "{\"webPages\":{\"value\":[1,2,3]}}",
+    "{\"webPages\":{\"value\":[null]}}",
+    "{\"webPages\":{\"value\":[{\"name\":7,\"url\":{},"
+        "\"snippet\":[],\"dateLastCrawled\":9}]}}",
+    "{\"web\":5}",
+    "{\"web\":null}",
+    "{\"web\":{\"results\":9}}",
+    "{\"web\":{\"results\":[1,2,3]}}",
+    "{\"web\":{\"results\":[null]}}",
+    "{\"web\":{\"results\":[{\"title\":7,\"url\":[],"
+        "\"description\":{},\"page_age\":9,\"age\":[]}]}}",
+    NULL
+};
+
+static void
+test_bing_malformed_shapes (void)
+{
+    gsize i;
+
+    for (i = 0; malformed_search_bodies[i] != NULL; i++)
+    {
+        TServer                 *ts   = tserver_start ();
+        g_autoptr(AiBingSearch)  bing = NULL;
+        GList                   *res;
+        g_autoptr(GError)        err  = NULL;
+
+        tserver_set_response (ts, 200, "application/json",
+                              malformed_search_bodies[i]);
+        bing = bing_on (ts);
+
+        res = ai_search_provider_search (AI_SEARCH_PROVIDER (bing), "q", NULL,
+                                         NULL, &err);
+        g_assert_no_error (err);
+        g_list_free_full (res, g_object_unref);
+
+        tserver_stop (ts);
+    }
+}
+
+static void
+test_brave_malformed_shapes (void)
+{
+    gsize i;
+
+    for (i = 0; malformed_search_bodies[i] != NULL; i++)
+    {
+        TServer                  *ts    = tserver_start ();
+        g_autoptr(AiBraveSearch)  brave = NULL;
+        GList                    *res;
+        g_autoptr(GError)         err   = NULL;
+
+        tserver_set_response (ts, 200, "application/json",
+                              malformed_search_bodies[i]);
+        brave = brave_on (ts);
+
+        res = ai_search_provider_search (AI_SEARCH_PROVIDER (brave), "q", NULL,
+                                         NULL, &err);
+        g_assert_no_error (err);
+        g_list_free_full (res, g_object_unref);
+
+        tserver_stop (ts);
+    }
+}
+
+/* ============================================================
  * DuckDuckGo provider
  * ============================================================ */
 
@@ -1635,6 +1727,9 @@ main (int argc, char *argv[])
     g_test_add_func ("/ai-glib/search/brave/parse", test_brave_parse);
     g_test_add_func ("/ai-glib/search/brave/params", test_brave_params_and_auth);
     g_test_add_func ("/ai-glib/search/brave/missing-web", test_brave_missing_web);
+    g_test_add_func ("/ai-glib/search/bing/malformed", test_bing_malformed_shapes);
+    g_test_add_func ("/ai-glib/search/brave/malformed",
+                     test_brave_malformed_shapes);
 
     g_test_add_func ("/ai-glib/search/ddg/parse", test_ddg_parse);
     g_test_add_func ("/ai-glib/search/ddg/count", test_ddg_count_truncates);

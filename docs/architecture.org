@@ -186,13 +186,23 @@ The in-memory model (=AiMessage=, =AiToolUse=, =AiToolResult=, =AiTextContent=) 
 This mirrors pi-mono's per-provider =convertMessages()= pattern. Adding a new provider means writing its own message walker; no central switch needs to know about it.
 
 *** Reading the answer back: one type-checked accessor set
-Serialisation is per provider; /deserialisation/ shares =src/providers/ai-json-util.h=, a private header of =static inline= accessors --- =ai_json_get_object()=, =_array=, =_string=, =_int=, =_double=, =_boolean=, =_node=, =ai_json_array_get_object()=, =ai_json_root_object()=.
+Serialisation is per provider; /deserialisation/ shares =src/core/ai-json-util.h=, a private header of =static inline= accessors --- =ai_json_get_object()=, =_array=, =_string=, =_int=, =_double=, =_boolean=, =_node=, =ai_json_array_get_object()=, =ai_json_root_object()=.
 
 The reason is that =json_object_has_member()= answers "is the key present", which is a different question from "is the value the type I am about to read it as". ="usage": null= and ="content": \{\}= both pass it, and json-glib's typed accessor then logs a =Json-CRITICAL= and returns =NULL= --- which travels into the next accessor for a second one. A critical is fatal under GTest and under =G_DEBUG=fatal-warnings=; without those the turn silently yields an empty response. All five HTTP providers were written that way, at roughly 130 sites, and a check added at some of them is the bug rather than the fix.
 
+There is a second, quieter half. =json_object_get_string_member_with_default()= guards the /node/ type and not the /value/ type, so a member holding a number returns =NULL= --- not the default, and with nothing logged. A caller that wrote =x[0] != '\0'= after one of those crashes on a badly typed field on every build, and two of the CLI parsers did exactly that on the session id. That is why the accessor set is shared rather than per file: half of this defect logs nothing at all, so it is found by the site that happens to dereference and not by the site that has it.
+
+The set is used by every provider, HTTP and CLI, by =core/ai-http-error.c=, by =model/ai-message.c= and =model/ai-tool-use.c=, by the Bing and Brave search providers, and by =convenience/ai-tool-executor.c=. It lives in =core/= for the second of those: a base-layer file reaching into a provider header for an accessor is the wrong way round. Seven private copies of it existed before --- one per CLI provider, plus =ai_http_error__string_member()= and =executor_json_string()= --- and they had already drifted over which numeric types count as a number.
+
 Nothing here needs a hostile server. =ai_config_set_base_url()= points a provider at anything, and a proxy, a gateway or the next version of an API is enough to change a shape.
 
-=tests/test-http-malformed.c= is the standing check: one table of malformed documents run through all five providers, on both the chat and the streaming reader, with criticals fatal. A missing type check at any site fails there rather than at whichever one somebody happened to look at.
+Three standing checks, each one table of malformed documents with criticals fatal, so a missing type check at any site fails at the table rather than at whichever one somebody happened to look at:
+
+- =tests/test-http-malformed.c= --- the five HTTP providers, chat and streaming.
+- =tests/test-cli-malformed.c= --- the five CLI providers' =parse_json_output= and =parse_stream_events=, the tmux client's JSONL transcript reader and its two poll predicates, and one really spawned CLI on both the streaming and the chat path.
+- =tests/test-model-malformed.c= --- =ai_message_new_from_json()= and the four =ai_tool_use_get_input_*()=, which read a tool call's arguments and are therefore reading whatever the model wrote.
+
+=tests/test-search-providers.c= carries the same table for Bing and Brave.
 
 Five CLI providers still carry private copies of the same idea (=cc_*=, =oc_*=, =grok_*=, =agy_*=, =cursor_*=), and the copies have already drifted over which numeric types count as a number. Folding them onto this header is worth doing and has not been done.
 

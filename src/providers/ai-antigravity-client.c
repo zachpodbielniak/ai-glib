@@ -21,6 +21,7 @@
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-antigravity-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
@@ -603,65 +604,6 @@ ai_antigravity_client_build_stdin(
 	}
 }
 
-/*
- * Type-safe JSON member accessors. json-glib's *_member_with_default()
- * emit a critical on a type mismatch, and subprocess stdout is untrusted.
- */
-
-static const gchar *
-agy_get_string(JsonObject *obj, const gchar *name)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return NULL;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-		return NULL;
-
-	if (json_node_get_value_type(node) != G_TYPE_STRING)
-		return NULL;
-
-	return json_node_get_string(node);
-}
-
-static JsonObject *
-agy_get_object(JsonObject *obj, const gchar *name)
-{
-	JsonNode *node;
-
-	if (obj == NULL || name == NULL)
-		return NULL;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
-		return NULL;
-
-	return json_node_get_object(node);
-}
-
-static gint
-agy_get_int(JsonObject *obj, const gchar *name, gint fallback)
-{
-	JsonNode *node;
-	GType value_type;
-
-	if (obj == NULL || name == NULL)
-		return fallback;
-
-	node = json_object_get_member(obj, name);
-	if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
-		return fallback;
-
-	value_type = json_node_get_value_type(node);
-	if (value_type != G_TYPE_INT64 && value_type != G_TYPE_INT &&
-	    value_type != G_TYPE_DOUBLE)
-		return fallback;
-
-	return (gint)json_node_get_int(node);
-}
-
 static JsonObject *
 agy_unwrap_envelope(JsonObject *obj)
 {
@@ -671,10 +613,10 @@ agy_unwrap_envelope(JsonObject *obj)
 	if (obj == NULL)
 		return NULL;
 
-	event = agy_get_string(obj, "event");
+	event = ai_json_get_string(obj, "event", NULL);
 	if (g_strcmp0(event, "result") == 0)
 	{
-		inner = agy_get_object(obj, "result");
+		inner = ai_json_get_object(obj, "result");
 		if (inner != NULL)
 			return inner;
 	}
@@ -688,13 +630,13 @@ agy_looks_like_result(JsonObject *obj)
 	if (obj == NULL)
 		return FALSE;
 
-	if (agy_get_string(obj, "status") != NULL)
+	if (ai_json_get_string(obj, "status", NULL) != NULL)
 		return TRUE;
-	if (agy_get_string(obj, "response") != NULL)
+	if (ai_json_get_string(obj, "response", NULL) != NULL)
 		return TRUE;
-	if (agy_get_string(obj, "error") != NULL)
+	if (ai_json_get_string(obj, "error", NULL) != NULL)
 		return TRUE;
-	if (agy_get_string(obj, "conversation_id") != NULL)
+	if (ai_json_get_string(obj, "conversation_id", NULL) != NULL)
 		return TRUE;
 
 	return FALSE;
@@ -802,12 +744,12 @@ agy_apply_usage(JsonObject *obj, AiResponse *response)
 	JsonObject *usage_obj;
 	g_autoptr(AiUsage) usage = NULL;
 
-	usage_obj = agy_get_object(obj, "usage");
+	usage_obj = ai_json_get_object(obj, "usage");
 	if (usage_obj == NULL)
 		return;
 
-	usage = ai_usage_new(agy_get_int(usage_obj, "input_tokens", 0),
-			     agy_get_int(usage_obj, "output_tokens", 0));
+	usage = ai_usage_new((gint)ai_json_get_int(usage_obj, "input_tokens", 0),
+			     (gint)ai_json_get_int(usage_obj, "output_tokens", 0));
 
 	ai_response_set_usage(response, usage);
 }
@@ -818,12 +760,12 @@ agy_set_error_from_object(JsonObject *obj, GError **error)
 	const gchar *message;
 	const gchar *status;
 
-	message = agy_get_string(obj, "error");
+	message = ai_json_get_string(obj, "error", NULL);
 	if (message == NULL || message[0] == '\0')
-		message = agy_get_string(obj, "response");
+		message = ai_json_get_string(obj, "response", NULL);
 	if (message == NULL || message[0] == '\0')
 	{
-		status = agy_get_string(obj, "status");
+		status = ai_json_get_string(obj, "status", NULL);
 		message = (status != NULL && status[0] != '\0')
 			? status : "Unknown error";
 	}
@@ -850,7 +792,7 @@ agy_store_session_id(AiCliClient *client, JsonObject *obj)
 {
 	const gchar *session_id;
 
-	session_id = agy_get_string(obj, "conversation_id");
+	session_id = ai_json_get_string(obj, "conversation_id", NULL);
 	if (session_id != NULL && session_id[0] != '\0' &&
 	    ai_cli_client_get_session_persistence(client))
 	{
@@ -887,14 +829,14 @@ ai_antigravity_client_parse_json_output(
 	if (obj == NULL)
 		return NULL;
 
-	status = agy_get_string(obj, "status");
+	status = ai_json_get_string(obj, "status", NULL);
 	if (agy_status_is_error(status))
 	{
 		agy_set_error_from_object(obj, error);
 		return NULL;
 	}
 
-	session_id = agy_get_string(obj, "conversation_id");
+	session_id = ai_json_get_string(obj, "conversation_id", NULL);
 	if (session_id == NULL)
 		session_id = "";
 
@@ -903,7 +845,7 @@ ai_antigravity_client_parse_json_output(
 
 	agy_store_session_id(client, obj);
 
-	text = agy_get_string(obj, "response");
+	text = ai_json_get_string(obj, "response", NULL);
 	if (text != NULL && text[0] != '\0')
 	{
 		g_autoptr(AiTextContent) content = ai_text_content_new(text);
@@ -925,7 +867,7 @@ ai_antigravity_client_parse_json_output(
 static gchar *
 agy_tool_id(JsonObject *step)
 {
-	gint index = agy_get_int(step, "step_index", -1);
+	gint index = (gint)ai_json_get_int(step, "step_index", -1);
 
 	if (index >= 0)
 		return g_strdup_printf("step-%d", index);
@@ -942,16 +884,15 @@ agy_emit_tool_started(JsonObject *step, GPtrArray *out_events)
 	g_autofree gchar *id = NULL;
 	g_autoptr(AiToolUse) tool_use = NULL;
 
-	info = agy_get_object(step, "tool_info");
-	name = agy_get_string(step, "tool_name");
+	info = ai_json_get_object(step, "tool_info");
+	name = ai_json_get_string(step, "tool_name", NULL);
 	if ((name == NULL || name[0] == '\0') && info != NULL)
-		name = agy_get_string(info, "name");
+		name = ai_json_get_string(info, "name", NULL);
 
 	if (name == NULL || name[0] == '\0')
 		return;
 
-	if (info != NULL && json_object_has_member(info, "parameters"))
-		parameters = json_object_get_member(info, "parameters");
+	parameters = ai_json_get_node(info, "parameters");
 
 	id = agy_tool_id(step);
 	tool_use = ai_tool_use_new(id, name, parameters);
@@ -970,16 +911,16 @@ agy_emit_tool_finished(JsonObject *step, GPtrArray *out_events)
 	g_autoptr(AiToolResult) result = NULL;
 	GString *text;
 
-	info = agy_get_object(step, "tool_info");
+	info = ai_json_get_object(step, "tool_info");
 	id = agy_tool_id(step);
 	text = g_string_new("");
 
-	output = (info != NULL) ? agy_get_string(info, "output") : NULL;
+	output = (info != NULL) ? ai_json_get_string(info, "output", NULL) : NULL;
 	if (output != NULL)
 		g_string_append(text, output);
 
-	err_obj = (info != NULL) ? agy_get_object(info, "error") : NULL;
-	err_msg = (err_obj != NULL) ? agy_get_string(err_obj, "message") : NULL;
+	err_obj = (info != NULL) ? ai_json_get_object(info, "error") : NULL;
+	err_msg = (err_obj != NULL) ? ai_json_get_string(err_obj, "message", NULL) : NULL;
 	if (err_msg != NULL && err_msg[0] != '\0')
 	{
 		is_error = TRUE;
@@ -1030,7 +971,7 @@ ai_antigravity_client_parse_stream_events(
 		return TRUE;
 
 	obj = json_node_get_object(root);
-	event = agy_get_string(obj, "event");
+	event = ai_json_get_string(obj, "event", NULL);
 
 	if (g_strcmp0(event, "init") == 0)
 	{
@@ -1040,7 +981,7 @@ ai_antigravity_client_parse_stream_events(
 
 	if (g_strcmp0(event, "step_update") == 0)
 	{
-		JsonObject *step = agy_get_object(obj, "step_update");
+		JsonObject *step = ai_json_get_object(obj, "step_update");
 		const gchar *step_type;
 		const gchar *state;
 		const gchar *text_delta;
@@ -1051,10 +992,10 @@ ai_antigravity_client_parse_stream_events(
 
 		agy_store_session_id(client, step);
 
-		step_type = agy_get_string(step, "step_type");
-		state = agy_get_string(step, "state");
-		text_delta = agy_get_string(step, "text_delta");
-		thinking = agy_get_string(step, "thinking_delta");
+		step_type = ai_json_get_string(step, "step_type", NULL);
+		state = ai_json_get_string(step, "state", NULL);
+		text_delta = ai_json_get_string(step, "text_delta", NULL);
+		thinking = ai_json_get_string(step, "thinking_delta", NULL);
 
 		if (thinking != NULL && thinking[0] != '\0')
 			g_ptr_array_add(out_events,
@@ -1082,7 +1023,7 @@ ai_antigravity_client_parse_stream_events(
 
 	if (g_strcmp0(event, "result") == 0)
 	{
-		JsonObject *result = agy_get_object(obj, "result");
+		JsonObject *result = ai_json_get_object(obj, "result");
 		const gchar *status;
 		const gchar *result_text;
 		AiUsage *usage;
@@ -1090,7 +1031,7 @@ ai_antigravity_client_parse_stream_events(
 		if (result == NULL)
 			result = obj;
 
-		status = agy_get_string(result, "status");
+		status = ai_json_get_string(result, "status", NULL);
 		if (agy_status_is_error(status))
 		{
 			agy_set_error_from_object(result, error);
@@ -1100,7 +1041,7 @@ ai_antigravity_client_parse_stream_events(
 
 		agy_store_session_id(client, result);
 
-		result_text = agy_get_string(result, "response");
+		result_text = ai_json_get_string(result, "response", NULL);
 		if (result_text != NULL && result_text[0] != '\0' &&
 		    ai_response_get_content_blocks(response) == NULL)
 		{

@@ -16,6 +16,7 @@
 #include "convenience/ai-search-provider.h"
 #include "convenience/ai-search-http.h"
 #include "core/ai-error.h"
+#include "core/ai-json-util.h"
 
 #define BING_SEARCH_ENDPOINT "https://api.bing.microsoft.com/v7.0/search"
 #define BING_DEFAULT_COUNT   10
@@ -194,41 +195,44 @@ ai_bing_search_do_search (
 
     root_obj = json_node_get_object (root);
 
-    /* Bing legitimately omits webPages when there are no web results. */
-    if (!json_object_has_member (root_obj, "webPages"))
+    /*
+     * Bing legitimately omits webPages when there are no web results, and
+     * a member of the wrong type is the same answer as an absent one ---
+     * asking has_member first and then reading it as an object was two
+     * criticals for {"webPages": 5}, the second on the NULL the first
+     * handed back.  A search API is somebody else's server and its shape
+     * is not ours to assume.
+     */
+    web_pages = ai_json_get_object (root_obj, "webPages");
+    value_arr = ai_json_get_array (web_pages, "value");
+
+    if (value_arr == NULL)
         return NULL;
 
-    web_pages = json_object_get_object_member (root_obj, "webPages");
-    if (web_pages == NULL || !json_object_has_member (web_pages, "value"))
-        return NULL;
-
-    value_arr = json_object_get_array_member (web_pages, "value");
-    count     = (guint) json_array_get_length (value_arr);
+    count = (guint) json_array_get_length (value_arr);
 
     for (i = 0; i < count; i++)
     {
-        JsonObject     *item = json_array_get_object_element (value_arr, i);
+        JsonObject     *item = ai_json_array_get_object (value_arr, i);
         AiSearchResult *res;
-        const gchar    *name    = NULL;
-        const gchar    *url_str = NULL;
-        const gchar    *snippet = NULL;
+        const gchar    *name;
+        const gchar    *url_str;
+        const gchar    *snippet;
+        const gchar    *age;
 
         if (item == NULL)
             continue;
 
-        if (json_object_has_member (item, "name"))
-            name = json_object_get_string_member (item, "name");
-        if (json_object_has_member (item, "url"))
-            url_str = json_object_get_string_member (item, "url");
-        if (json_object_has_member (item, "snippet"))
-            snippet = json_object_get_string_member (item, "snippet");
+        name    = ai_json_get_string (item, "name", NULL);
+        url_str = ai_json_get_string (item, "url", NULL);
+        snippet = ai_json_get_string (item, "snippet", NULL);
 
         res = ai_search_result_new (name, url_str, snippet);
         ai_search_result_set_rank (res, i + 1);
 
-        if (json_object_has_member (item, "dateLastCrawled"))
-            ai_search_result_set_age (
-                res, json_object_get_string_member (item, "dateLastCrawled"));
+        age = ai_json_get_string (item, "dateLastCrawled", NULL);
+        if (age != NULL)
+            ai_search_result_set_age (res, age);
 
         results = g_list_prepend (results, res);
     }

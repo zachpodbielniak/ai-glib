@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "providers/ai-image-shared.h"
-#include "providers/ai-json-util.h"
+#include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "model/ai-generated-image.h"
 
