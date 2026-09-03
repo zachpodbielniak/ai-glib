@@ -362,6 +362,28 @@ Every member is read through a type-checked accessor. A =usage= that is a string
 *** Nothing is trusted to the exit status alone
 See below.
 
+*** Text around tool calls is one block per segment
+grok executes tools inside the subprocess, so a single turn can carry a
+preamble, the calls, and then the answer. Those two stretches of text used
+to accumulate into one =AiTextContent= holding both, concatenated with
+nothing between them --- =ai_response_get_text()= puts its newline
+*between* blocks and there was only ever one --- so an operator read
+"...before confirming.Yes. Live session..." and asked whether it should
+have been two messages. It should.
+
+This client sets =ai_cli_client_set_splits_text_at_tool_use()=, so a tool
+call closes the block it interrupted and each segment arrives as its own
+=AiTextContent=. A consumer that delivers messages delivers one per
+segment; one that wants the whole answer still calls
+=ai_response_get_text()= and gets them joined with a newline.
+
+Safe for this client specifically because the =result= line only
+*back-fills* --- its handler is guarded by
+=ai_response_get_content_blocks (response) == NULL= --- so a block
+existing earlier costs it nothing it was contributing. See
+[[../events.org][the event stream]] for why this is opted into per backend
+rather than turned on for everyone.
+
 ** Failure modes worth knowing
 - *An error can arrive with exit status 0.* A rejected =--reasoning-effort= prints ={"type":"error","message":"..."}= on stdout and exits 0, while a rejected =--model= exits 1. The client therefore parses stdout *before* consulting the exit status, and reports =AI_ERROR_CLI_EXECUTION= either way. Treating status alone as the signal would silently return an empty response. The status is only consulted when stdout held nothing parseable. The base class does the same on a non-zero exit — see [[../api-reference/ai-cli-client.org][=AiCliClient=]] — so a structured error beats a status line on every path.
 - *A run can fail after it starts.* The NDJSON result line carries =is_error=; when it is set, the reason is in =result= rather than =message=. That is reported as =AI_ERROR_CLI_EXECUTION= too, not handed back as if the failure text were the answer.

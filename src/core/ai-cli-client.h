@@ -249,6 +249,15 @@ ai_cli_client_set_session_persistence(
     gboolean     persist
 );
 
+gboolean
+ai_cli_client_get_splits_text_at_tool_use(AiCliClient *self);
+
+void
+ai_cli_client_set_splits_text_at_tool_use(
+    AiCliClient *self,
+    gboolean     splits
+);
+
 const gchar *
 ai_cli_client_get_working_directory(AiCliClient *self);
 

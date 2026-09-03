@@ -106,6 +106,44 @@ g_autofree gchar *text = ai_cli_client_events_to_delta (events);
 concatenates the =AI_EVENT_TEXT_DELTA= text and nothing else. Reasoning is
 excluded deliberately --- a caller assembling the answer must not include it.
 
+*** A tool call can end a text block
+
+An AI CLI executes tools inside its own subprocess, so one turn can carry
+text, then tool calls, then more text. Those are two things the model
+wrote, not one paragraph --- and the streamed deltas used to accumulate
+into a single =AiTextContent=, concatenated with *nothing* between them,
+because =ai_response_get_text()= puts its newline between content blocks
+and there was only ever one. What a reader saw was
+
+#+begin_example
+...before confirming.Yes. Live session...
+#+end_example
+
+A backend can say that a tool call closes the block it interrupted:
+
+#+begin_src C
+ai_cli_client_set_splits_text_at_tool_use (AI_CLI_CLIENT (self), TRUE);
+#+end_src
+
+The response then carries one =AiTextContent= per segment, and a consumer
+that delivers messages can deliver one each.
+
+**** It is opted into per backend, and here is why
+
+The accumulator's tail is appended at end-of-stream only when no content
+block exists yet. That rule is what keeps a parser which assembles the
+response from a final envelope --- a =result= line, say --- from having the
+deltas added a second time. Splitting makes a block exist earlier, so a
+backend relying on that envelope would silently start reporting whatever
+its deltas happened to contain instead of what the envelope said.
+
+Before turning it on for a backend, check two things about it: that its
+deltas carry the whole answer, and that anything its parser adds from a
+final line is the *same* text rather than a substitute for it.
+=grok-build= satisfies both --- its =result= handler is guarded by
+=ai_response_get_content_blocks (response) == NULL=, so it only ever
+back-fills --- and is currently the only one that opts in.
+
 ** Adding a provider to the stream
 For a CLI wrapper, implement one vfunc:
 

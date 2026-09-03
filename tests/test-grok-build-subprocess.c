@@ -27,6 +27,7 @@
 #include "core/ai-streamable.h"
 #include "core/ai-error.h"
 #include "model/ai-message.h"
+#include "model/ai-text-content.h"
 #include "view/ai-conversation.h"
 #include "agent/ai-mock-provider.h"
 
@@ -970,6 +971,211 @@ test_stream_result_only(void)
 	stub_free(stub);
 }
 
+/*
+ * The reported shape: a preamble, tool calls, then the answer.
+ *
+ * grok executes tools inside the subprocess, so libreclaw sees one
+ * result for the whole turn and has no message boundary at the gap.
+ * The accumulator used to be one string, so these two arrived as one
+ * content block holding both -- concatenated with *nothing* between
+ * them, because ai_response_get_text() puts its newline between blocks
+ * and there was only ever one.  What the operator saw was
+ *
+ *   ...before confirming.Yes. Live session...
+ *
+ * and the question was "shouldn't this be multiple messages?"
+ */
+static const gchar *STUB_NDJSON_TEXT_TOOL_TEXT =
+	"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n"
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+	"\"index\":0,\"delta\":{\"type\":\"text_delta\","
+	"\"text\":\"I will check first.\"}}}\n"
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\","
+	"\"index\":1,\"content_block\":{\"type\":\"tool_use\","
+	"\"id\":\"t1\",\"name\":\"read\",\"input\":{}}}}\n"
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+	"\"index\":2,\"delta\":{\"type\":\"text_delta\","
+	"\"text\":\"Yes. It is agent.\"}}}\n"
+	"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+	"\"result\":\"I will check first.Yes. It is agent.\","
+	"\"stop_reason\":\"end_turn\",\"session_id\":\"s\"}\n";
+
+static void
+test_stream_text_around_tools_is_two_blocks(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiGrokBuildClient) client = client_for(stub);
+	g_autoptr(AiMessage) msg = NULL;
+	GList *messages = one_message(&msg);
+	g_autofree gchar *text = NULL;
+	GList *blocks;
+	GList *l;
+	guint texts = 0;
+	AsyncCtx ctx;
+
+	stub_set(stub, "stdout", STUB_NDJSON_TEXT_TOOL_TEXT);
+	async_ctx_init(&ctx);
+
+	ai_streamable_chat_stream_async(AI_STREAMABLE(client), messages, NULL,
+	                                4096, NULL, NULL, on_stream_done, &ctx);
+	async_ctx_run(&ctx);
+
+	g_assert_no_error(ctx.error);
+	g_assert_nonnull(ctx.response);
+
+	blocks = ai_response_get_content_blocks(ctx.response);
+	g_assert_nonnull(blocks);
+
+	for (l = blocks; l != NULL; l = l->next)
+	{
+		AiContentBlock *block = l->data;
+
+		if (!AI_IS_TEXT_CONTENT(block))
+		{
+			continue;
+		}
+
+		texts++;
+
+		if (texts == 1)
+		{
+			g_assert_cmpstr(
+				ai_text_content_get_text(AI_TEXT_CONTENT(block)),
+				==, "I will check first.");
+		}
+		else if (texts == 2)
+		{
+			g_assert_cmpstr(
+				ai_text_content_get_text(AI_TEXT_CONTENT(block)),
+				==, "Yes. It is agent.");
+		}
+	}
+
+	/*
+	 * Two, which is the whole point.  Asserted on the *count* of blocks
+	 * rather than on the joined text, because a fix that merely inserted
+	 * a separator would pass a string comparison and still deliver one
+	 * message -- and one message is what was reported.
+	 */
+	g_assert_cmpuint(texts, ==, 2);
+
+	/*
+	 * The tail is not lost.  The accumulator is only appended at EOF
+	 * when no content block exists yet, which stops a parser that
+	 * assembles its own response having the deltas added twice -- and
+	 * would drop everything after the last tool call now that a block
+	 * exists earlier.
+	 */
+	text = ai_response_get_text(ctx.response);
+	g_assert_cmpstr(text, ==, "I will check first.\nYes. It is agent.");
+
+	async_ctx_clear(&ctx);
+	g_list_free(messages);
+	stub_free(stub);
+}
+
+/*
+ * Control: a turn that is only text still yields exactly one block.
+ *
+ * Without this the split could be "always two" and the interesting test
+ * above would still pass, while every ordinary reply arrived as two
+ * messages -- which is the same defect facing the other way.
+ */
+static void
+test_stream_plain_text_is_one_block(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiGrokBuildClient) client = client_for(stub);
+	g_autoptr(AiMessage) msg = NULL;
+	GList *messages = one_message(&msg);
+	GList *blocks;
+	GList *l;
+	guint texts = 0;
+	AsyncCtx ctx;
+
+	stub_set(stub, "stdout", STUB_NDJSON);
+	async_ctx_init(&ctx);
+
+	ai_streamable_chat_stream_async(AI_STREAMABLE(client), messages, NULL,
+	                                4096, NULL, NULL, on_stream_done, &ctx);
+	async_ctx_run(&ctx);
+
+	g_assert_no_error(ctx.error);
+
+	blocks = ai_response_get_content_blocks(ctx.response);
+
+	for (l = blocks; l != NULL; l = l->next)
+	{
+		if (AI_IS_TEXT_CONTENT(l->data))
+		{
+			texts++;
+		}
+	}
+
+	g_assert_cmpuint(texts, ==, 1);
+
+	async_ctx_clear(&ctx);
+	g_list_free(messages);
+	stub_free(stub);
+}
+
+/*
+ * Control: a tool-only turn still carries no text at all.
+ *
+ * A flush that ran unconditionally would add an empty block here, and an
+ * empty text block is not nothing -- it is a message with no body, which
+ * is worse than the silence a tool-only turn is supposed to produce.
+ */
+static void
+test_stream_tool_only_has_no_text(void)
+{
+	Stub *stub = stub_new();
+	g_autoptr(AiGrokBuildClient) client = client_for(stub);
+	g_autoptr(AiMessage) msg = NULL;
+	GList *messages = one_message(&msg);
+	g_autofree gchar *text = NULL;
+	GList *blocks;
+	GList *l;
+	guint texts = 0;
+	AsyncCtx ctx;
+
+	stub_set(stub, "stdout",
+	         "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n"
+	         "{\"type\":\"stream_event\",\"event\":"
+	         "{\"type\":\"content_block_start\",\"index\":0,"
+	         "\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\","
+	         "\"name\":\"read\",\"input\":{}}}}\n"
+	         "{\"type\":\"result\",\"subtype\":\"success\","
+	         "\"is_error\":false,\"result\":\"\","
+	         "\"stop_reason\":\"tool_use\",\"session_id\":\"s\"}\n");
+	async_ctx_init(&ctx);
+
+	ai_streamable_chat_stream_async(AI_STREAMABLE(client), messages, NULL,
+	                                4096, NULL, NULL, on_stream_done, &ctx);
+	async_ctx_run(&ctx);
+
+	g_assert_no_error(ctx.error);
+
+	blocks = ai_response_get_content_blocks(ctx.response);
+
+	for (l = blocks; l != NULL; l = l->next)
+	{
+		if (AI_IS_TEXT_CONTENT(l->data))
+		{
+			texts++;
+		}
+	}
+
+	g_assert_cmpuint(texts, ==, 0);
+
+	text = ai_response_get_text(ctx.response);
+	g_assert_null(text);
+
+	async_ctx_clear(&ctx);
+	g_list_free(messages);
+	stub_free(stub);
+}
+
 /* An error line mid-stream fails the operation rather than ending empty. */
 static void
 test_stream_error_line(void)
@@ -1005,6 +1211,12 @@ main(
 ){
 	g_test_init(&argc, &argv, NULL);
 
+	g_test_add_func("/ai-glib/grok-build-subprocess/stream/text-around-tools",
+	                test_stream_text_around_tools_is_two_blocks);
+	g_test_add_func("/ai-glib/grok-build-subprocess/stream/plain-text-one-block",
+	                test_stream_plain_text_is_one_block);
+	g_test_add_func("/ai-glib/grok-build-subprocess/stream/tool-only-no-text",
+	                test_stream_tool_only_has_no_text);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/success",
 	                test_sync_success);
 	g_test_add_func("/ai-glib/grok-build-subprocess/sync/prompt-via-stdin",

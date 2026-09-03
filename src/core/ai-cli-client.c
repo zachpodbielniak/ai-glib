@@ -156,6 +156,7 @@ typedef struct
     gint      max_tokens;
     gint      process_timeout_ms;
     gboolean  session_persistence;
+    gboolean  splits_text_at_tool_use;
     gboolean  portable_context;
 } AiCliClientPrivate;
 
@@ -972,6 +973,60 @@ ai_cli_client_get_session_persistence(AiCliClient *self)
 
     priv = ai_cli_client_get_instance_private(self);
     return priv->session_persistence;
+}
+
+/**
+ * ai_cli_client_get_splits_text_at_tool_use:
+ * @self: an #AiCliClient
+ *
+ * Whether a tool call ends the text block being accumulated.
+ *
+ * Returns: %TRUE when this backend's streamed text is split at tool
+ *   calls into one content block per segment
+ */
+gboolean
+ai_cli_client_get_splits_text_at_tool_use(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->splits_text_at_tool_use;
+}
+
+/**
+ * ai_cli_client_set_splits_text_at_tool_use:
+ * @self: an #AiCliClient
+ * @splits: whether a tool call closes the open text block
+ *
+ * Says that this backend writes one text block per segment, so a turn
+ * that wrote a preamble, called tools and then wrote an answer produces
+ * two content blocks rather than one holding both concatenated.
+ *
+ * Off by default, and opted into per backend rather than turned on for
+ * everyone.  The accumulator's tail is only appended when no content
+ * block exists yet -- which is what keeps a parser that assembles the
+ * response from a final envelope, a "result" line say, from having the
+ * deltas added a second time.  Splitting makes a block exist earlier, so
+ * a backend that relies on that envelope would silently start reporting
+ * whatever its deltas happened to contain instead.
+ *
+ * Before turning this on for a backend, check two things about it: that
+ * its deltas carry the whole answer, and that anything its parser adds
+ * from a final line is the same text rather than a substitute for it.
+ */
+void
+ai_cli_client_set_splits_text_at_tool_use(
+    AiCliClient *self,
+    gboolean     splits
+){
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+
+    priv = ai_cli_client_get_instance_private(self);
+    priv->splits_text_at_tool_use = splits;
 }
 
 /**
@@ -1950,6 +2005,26 @@ typedef struct
     GCancellable     *cancellable;
     AiResponse       *response;
     GString          *accumulated_text;
+
+    /*
+     * How many text blocks this run has closed of its own accord.
+     *
+     * The accumulator used to be one string for a whole turn, so a
+     * model that wrote a preamble, called tools, and then wrote the
+     * answer produced one content block holding both -- concatenated
+     * with nothing between them, because ai_response_get_text()'s
+     * newline goes *between* blocks and there was only ever one.  The
+     * operator saw "...before confirming.Yes. Live session..." and asked
+     * whether it should have been two messages.  It should.
+     *
+     * Counted rather than flagged because stream_run_complete() needs to
+     * tell "this run assembled the text" from "the parser assembled the
+     * response itself", and the existing test for that is whether any
+     * content block exists -- which is true either way once one has been
+     * flushed here.
+     */
+    guint             text_blocks_added;
+
     gboolean          stream_started;
     gboolean          finished;
 
@@ -1966,6 +2041,33 @@ typedef struct
 } StreamRun;
 
 static void stream_run_read_next(StreamRun *run);
+
+/*
+ * Closes the text block that is open, if there is one.
+ *
+ * A tool call is a boundary between two things the model wrote, not a
+ * gap inside one -- so the text before it is finished and the text after
+ * it has not started.  Emitting them as separate content blocks is what
+ * lets a consumer deliver them as separate messages; joining them with a
+ * newline would still be one paragraph.
+ */
+static void
+stream_run_flush_text(StreamRun *run)
+{
+    g_autoptr(AiTextContent) content = NULL;
+
+    if (run->response == NULL || run->accumulated_text->len == 0)
+    {
+        return;
+    }
+
+    content = ai_text_content_new(run->accumulated_text->str);
+    ai_response_add_content_block(run->response,
+        (AiContentBlock *)g_steal_pointer(&content));
+
+    run->text_blocks_added++;
+    g_string_truncate(run->accumulated_text, 0);
+}
 
 static void
 stream_run_free(StreamRun *run)
@@ -2120,6 +2222,21 @@ stream_run_dispatch_event(
             break;
 
         case AI_EVENT_TOOL_STARTED:
+            /*
+             * Only for backends that have been shown to carry their
+             * whole answer in the deltas.  A backend whose parser
+             * assembles the response from a final envelope -- a
+             * "result" line, say -- would find content blocks already
+             * present and skip its own, silently swapping what it
+             * reports for whatever the deltas happened to contain.  So
+             * this is opted into per client rather than turned on for
+             * five backends nobody has run.
+             */
+            if (ai_cli_client_get_splits_text_at_tool_use(run->client))
+            {
+                stream_run_flush_text(run);
+            }
+
             if (ai_event_get_tool_use(event) != NULL)
             {
                 g_signal_emit(run->client, signals[SIGNAL_TOOL_USE], 0,
@@ -2152,14 +2269,22 @@ stream_run_complete(StreamRun *run)
         return;
     }
 
+    /*
+     * The tail.
+     *
+     * The original test was "no content block yet", which keeps a parser
+     * that assembled the response itself from having the deltas appended
+     * a second time.  That is still the rule -- and it is now wrong on
+     * its own, because a flush at a tool boundary has already added one:
+     * without the first clause the text written *after* the last tool
+     * call would be dropped, which is a worse failure than the one this
+     * commit is fixing.
+     */
     if (run->accumulated_text->len > 0 &&
-        ai_response_get_content_blocks(run->response) == NULL)
+        (run->text_blocks_added > 0 ||
+         ai_response_get_content_blocks(run->response) == NULL))
     {
-        g_autoptr(AiTextContent) content =
-            ai_text_content_new(run->accumulated_text->str);
-
-        ai_response_add_content_block(run->response,
-            (AiContentBlock *)g_steal_pointer(&content));
+        stream_run_flush_text(run);
     }
 
     end_event = ai_event_new(AI_EVENT_STREAM_END);

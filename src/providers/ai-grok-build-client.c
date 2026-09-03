@@ -1432,6 +1432,25 @@ ai_grok_build_client_init(AiGrokBuildClient *self)
 
     /* Set default model */
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_GROK_BUILD_DEFAULT_MODEL);
+
+    /*
+     * A tool call ends the text block it interrupted.
+     *
+     * grok executes tools inside the subprocess, so one turn can carry a
+     * preamble, the calls, and then the answer.  Those are two things
+     * the model wrote and they used to arrive as one content block
+     * holding both, concatenated with nothing between them -- the
+     * operator read "...before confirming.Yes. Live session..." and
+     * asked whether it should have been two messages.
+     *
+     * Safe for this backend specifically because its deltas carry the
+     * whole answer and its "result" line only *back-fills* when the
+     * deltas produced nothing: `result_text != NULL && ... &&
+     * ai_response_get_content_blocks(response) == NULL`, a few hundred
+     * lines up.  So splitting earlier costs that line nothing it was
+     * contributing.
+     */
+    ai_cli_client_set_splits_text_at_tool_use(AI_CLI_CLIENT(self), TRUE);
 }
 
 /*
