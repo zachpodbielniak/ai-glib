@@ -47,7 +47,11 @@ The conversation is flattened into that single prompt: user messages verbatim, a
 
 =grok-build= has no file-taking equivalent of =--system-prompt-override=,
 so unlike the Claude Code client this one cannot spill the prompt to a
-file. The ceiling is therefore real: the kernel caps a *single* argv word
+file.  Re-checked against grok 1.0.13: =--prompt-file= exists for the
+*user* prompt and there is still no =--system-prompt-override-file=.
+Worth re-checking rather than assuming, because this is the one claim
+here about somebody else's tool, and the day it stops being true is the
+day this ceiling can be removed. The ceiling is therefore real: the kernel caps a *single* argv word
 at =MAX_ARG_STRLEN= --- 32 pages, and 131,072 bytes counting the
 terminating NUL, so 131,071 is the longest that works. It is not
 =ARG_MAX=, which is megabytes, and headroom in the total buys nothing.

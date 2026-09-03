@@ -260,9 +260,13 @@ rather than against our own arithmetic about a number the kernel owns.
 
 =--system-prompt-file= and =--append-system-prompt-file= are accepted by
 the CLI but are *not* in its =--help= flag list; they appear only inside
-a description paragraph.  Verified against Claude Code 2.1.247 by
-passing each and confirming it is not rejected the way an invented flag
-is:
+a description paragraph.  That makes this a fact about somebody else's
+tool that this client depends on and cannot see change, so it is
+re-checked rather than carried forward: verified against Claude Code
+2.1.247 and again against 2.1.258, by passing each and confirming it is
+not rejected the way an invented flag is.  The invented flag is the
+control, and it is the whole check --- without it, a CLI that ignored
+unknown options entirely would look like one that accepted these.
 
 #+begin_example
 $ claude --definitely-not-a-flag x --resume <bogus-uuid> --print hi
@@ -271,6 +275,13 @@ error: unknown option '--definitely-not-a-flag'
 $ claude --system-prompt-file /tmp/sp --resume <bogus-uuid> --print hi
 No conversation found with session ID: <bogus-uuid>
 #+end_example
+
+The bogus session id is what keeps this free: the flag is parsed before
+the session is looked up, so reaching "no conversation found" proves
+=execve= accepted the command line and =claude= accepted the flag,
+without spending a turn.  Run with a 200KB file it also settles the
+other half --- that a prompt well past =MAX_ARG_STRLEN= now starts a
+session, which is the thing the inline form could not do.
 
 *** Streaming
 #+begin_src sh
