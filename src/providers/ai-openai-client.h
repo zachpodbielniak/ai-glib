@@ -159,7 +159,10 @@ G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClie
 /*
  * Embedding Models
  *
- * Identifiers only. AiOpenAIClient does not yet expose embeddings.
+ * AiOpenAIClient implements #AiEmbedder, so these reach it through
+ * ai_embedder_embed(). The same endpoint serves every OpenAI-compatible
+ * server, so pointing base_url elsewhere and naming that server's model
+ * works without a new provider.
  */
 #define AI_OPENAI_EMBEDDING_MODEL_3_LARGE   "text-embedding-3-large"
 #define AI_OPENAI_EMBEDDING_MODEL_3_SMALL   "text-embedding-3-small"

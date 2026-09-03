@@ -18,6 +18,8 @@
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-image-generator.h"
+#include "core/ai-embedder.h"
+#include "providers/ai-embedding-shared.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-image-request.h"
@@ -29,6 +31,7 @@
 #define OPENAI_IMAGES_EDITS_ENDPOINT "/v1/images/edits"
 #define OPENAI_IMAGES_VARIATIONS_ENDPOINT "/v1/images/variations"
 #define OPENAI_MODELS_ENDPOINT "/v1/models"
+#define OPENAI_EMBEDDINGS_ENDPOINT "/v1/embeddings"
 
 /*
  * Private structure for AiOpenAIClient.
@@ -42,6 +45,7 @@ struct _AiOpenAIClient
  * Interface implementations forward declarations.
  */
 static void ai_openai_client_provider_init(AiProviderInterface *iface);
+static void ai_openai_client_embedder_init(AiEmbedderInterface *iface);
 static void ai_openai_client_streamable_init(AiStreamableInterface *iface);
 static void ai_openai_client_image_generator_init(AiImageGeneratorInterface *iface);
 
@@ -51,7 +55,9 @@ G_DEFINE_TYPE_WITH_CODE(AiOpenAIClient, ai_openai_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
                                               ai_openai_client_streamable_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_IMAGE_GENERATOR,
-                                              ai_openai_client_image_generator_init))
+                                              ai_openai_client_image_generator_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EMBEDDER,
+                                              ai_openai_client_embedder_init))
 
 /*
  * Build the JSON request body for OpenAI's Chat Completions API.
@@ -1690,4 +1696,232 @@ ai_openai_client_new_with_key(const gchar *api_key)
     ai_config_set_api_key(config, AI_PROVIDER_OPENAI, api_key);
 
     return ai_openai_client_new_with_config(config);
+}
+
+/*
+ * Embeddings
+ *
+ * POST /v1/embeddings, which is the shape every OpenAI-compatible server
+ * also serves -- so pointing base_url at vLLM, LM Studio, llama.cpp or
+ * Together reaches this same code with a different model name.
+ *
+ * text-embedding-3-* accept a "dimensions" parameter that truncates the
+ * vector. It is deliberately not exposed: a store cannot compare vectors of
+ * two widths, so the width has to be a property of the model as configured
+ * rather than of an individual call, and the model table is where that
+ * belongs.
+ */
+
+static const AiEmbeddingModelInfo openai_embedding_models[] = {
+    {
+        AI_OPENAI_EMBEDDING_MODEL_3_SMALL,
+        1536,
+        32000,
+        TRUE,
+        "1536 dimensions. The usual choice; cheaper than 3-large and "
+        "close behind it."
+    },
+    {
+        AI_OPENAI_EMBEDDING_MODEL_3_LARGE,
+        3072,
+        32000,
+        TRUE,
+        "3072 dimensions, and twice the storage per passage."
+    },
+    {
+        "text-embedding-ada-002",
+        1536,
+        32000,
+        TRUE,
+        "Superseded by text-embedding-3-small, which is better and cheaper."
+    }
+};
+
+typedef struct
+{
+    GTask *task;
+    gchar *model;
+    gsize  expected;
+} OpenAIEmbedData;
+
+static void
+openai_embed_data_free(OpenAIEmbedData *data)
+{
+    g_clear_pointer(&data->model, g_free);
+    g_slice_free(OpenAIEmbedData, data);
+}
+
+static void
+on_openai_embed_response(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OpenAIEmbedData *data = user_data;
+    g_autoptr(GTask) task = data->task;
+    g_autoptr(GBytes) body = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonParser) parser = NULL;
+    AiEmbedding *embedding;
+    const gchar *text;
+    gsize length = 0;
+
+    (void)source;
+
+    body = ai_image_shared_send_finish(result, &error);
+
+    if (NULL == body)
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        openai_embed_data_free(data);
+        return;
+    }
+
+    text = g_bytes_get_data(body, &length);
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, text, (gssize)length, &error))
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        openai_embed_data_free(data);
+        return;
+    }
+
+    embedding = ai_embedding_shared_parse(AI_EMBEDDING_WIRE_OPENAI,
+                                          json_parser_get_root(parser),
+                                          data->model, data->expected,
+                                          &error);
+
+    if (NULL == embedding)
+        g_task_return_error(task, g_steal_pointer(&error));
+    else
+        g_task_return_pointer(task, embedding,
+                              (GDestroyNotify)ai_embedding_unref);
+
+    openai_embed_data_free(data);
+}
+
+static void
+ai_openai_client_embed_async(
+    AiEmbedder          *embedder,
+    const gchar *const  *texts,
+    const gchar         *model,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    AiOpenAIClient *self = AI_OPENAI_CLIENT(embedder);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(GBytes) body_bytes = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    OpenAIEmbedData *data;
+    AiConfig *config;
+    const gchar *base_url;
+    gsize request_len = 0;
+    gsize count = 0;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    if (NULL == model)
+        model = AI_OPENAI_EMBEDDING_MODEL_3_SMALL;
+
+    while (NULL != texts[count])
+        count++;
+
+    if (0 == count)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "There is nothing to embed");
+        g_object_unref(task);
+        return;
+    }
+
+    config = ai_client_get_config(AI_CLIENT(self));
+    base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
+
+    request_json = ai_embedding_shared_build_request(texts, model);
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    url = g_strconcat(base_url, OPENAI_EMBEDDINGS_ENDPOINT, NULL);
+    msg = soup_message_new("POST", url);
+
+    if (NULL == msg)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid OpenAI base URL: %s", base_url);
+        g_object_unref(task);
+        return;
+    }
+
+    body_bytes = g_bytes_new_take(g_steal_pointer(&request_body), request_len);
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+                                             body_bytes);
+
+    klass->add_auth_headers(AI_CLIENT(self), msg);
+
+    data = g_slice_new0(OpenAIEmbedData);
+    data->task = task;
+    data->model = g_strdup(model);
+    data->expected = count;
+
+    ai_image_shared_send_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        body_bytes,
+        ai_config_get_max_retries(config),
+        cancellable,
+        on_openai_embed_response,
+        data);
+}
+
+static AiEmbedding *
+ai_openai_client_embed_finish(
+    AiEmbedder    *embedder,
+    GAsyncResult  *result,
+    GError       **error
+){
+    (void)embedder;
+    return g_task_propagate_pointer(G_TASK(result), error);
+}
+
+static const gchar *
+ai_openai_client_get_default_embedding_model(AiEmbedder *embedder)
+{
+    (void)embedder;
+    return AI_OPENAI_EMBEDDING_MODEL_3_SMALL;
+}
+
+static GList *
+ai_openai_client_list_embedding_models(AiEmbedder *embedder)
+{
+    GList *out = NULL;
+    gsize i;
+
+    (void)embedder;
+
+    for (i = G_N_ELEMENTS(openai_embedding_models); i > 0; i--)
+        out = g_list_prepend(out,
+            (gpointer)&openai_embedding_models[i - 1]);
+
+    return out;
+}
+
+static void
+ai_openai_client_embedder_init(AiEmbedderInterface *iface)
+{
+    iface->embed_async = ai_openai_client_embed_async;
+    iface->embed_finish = ai_openai_client_embed_finish;
+    iface->get_default_embedding_model =
+        ai_openai_client_get_default_embedding_model;
+    iface->list_embedding_models = ai_openai_client_list_embedding_models;
 }

@@ -56,6 +56,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-event-source.h \
 	$(SRCDIR)/core/ai-image-capabilities.h \
 	$(SRCDIR)/core/ai-image-generator.h \
+	$(SRCDIR)/core/ai-embedder.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/core/ai-tool-endpoint.h \
@@ -80,6 +81,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/model/ai-message.h \
 	$(SRCDIR)/model/ai-response.h \
 	$(SRCDIR)/model/ai-image.h \
+	$(SRCDIR)/model/ai-embedding.h \
 	$(SRCDIR)/model/ai-image-request.h \
 	$(SRCDIR)/model/ai-generated-image.h \
 	$(SRCDIR)/model/ai-image-response.h \
@@ -133,6 +135,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-event-source.c \
 	$(SRCDIR)/core/ai-image-capabilities.c \
 	$(SRCDIR)/core/ai-image-generator.c \
+	$(SRCDIR)/core/ai-embedder.c \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
@@ -158,10 +161,12 @@ LIB_SOURCES = \
 	$(SRCDIR)/model/ai-message.c \
 	$(SRCDIR)/model/ai-response.c \
 	$(SRCDIR)/model/ai-image.c \
+	$(SRCDIR)/model/ai-embedding.c \
 	$(SRCDIR)/model/ai-image-request.c \
 	$(SRCDIR)/model/ai-generated-image.c \
 	$(SRCDIR)/model/ai-image-response.c \
 	$(SRCDIR)/providers/ai-image-shared.c \
+	$(SRCDIR)/providers/ai-embedding-shared.c \
 	$(SRCDIR)/providers/ai-openai-shared.c \
 	$(SRCDIR)/providers/ai-claude-launch.c \
 	$(SRCDIR)/providers/ai-claude-client.c \

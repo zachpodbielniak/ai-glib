@@ -628,6 +628,67 @@ Three things to know before touching the send path:
    `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
 7. Document it in `docs/providers/<name>.org` with a capability matrix.
 
+## Embedding Subsystem
+
+Embedding hangs off the `AiEmbedder` interface (`src/core/ai-embedder.{h,c}`),
+implemented by the Ollama and OpenAI clients. It is an interface rather than a
+client because embedding is not chat: no messages, no tools, no streaming, and
+the providers that do it are not the same set that do the rest. Anthropic has
+no embeddings API, so `AiClaudeClient` deliberately does **not** implement it —
+`AI_IS_EMBEDDER()` is a real answer, not a stub that fails later.
+
+Pieces:
+
+- `src/model/ai-embedding.{h,c}` — `AiEmbedding`, a refcounted set of vectors
+  that carries the model that produced them, plus `ai_embedding_normalize()`
+  and `ai_embedding_cosine()`.
+- `src/core/ai-embedder.{h,c}` — the interface, the sync wrapper, and
+  `AiEmbeddingModelInfo`.
+- `src/providers/ai-embedding-shared.{h,c}` — **private**. The two wire shapes
+  and the response parser.
+
+Four things to know before touching it:
+
+1. **The model travels with the vectors.** Vectors from two models are not
+   comparable — the numbers are in different spaces, and the cosine between
+   them is noise that reads exactly like a weak match rather than like an
+   error. `ai_embedding_new()` takes the model for this reason, and anything
+   storing a vector should store `ai_embedding_get_model()` beside it.
+2. **Vectors come back unit-normalised**, so a stored vector is directly
+   comparable to any other without the store remembering what scale it was on.
+   `ai_embedding_cosine()` still divides by the norms, so a vector that came
+   from somewhere else is scored correctly rather than plausibly.
+3. **A short batch is an error, not a partial success.** Callers pair vectors
+   with their inputs positionally, so a provider that silently dropped one
+   input would attach every later vector to the wrong text, and nothing
+   downstream can detect that. `ai_embedding_shared_parse()` takes the
+   expected count and refuses a mismatch.
+4. **The transport is `ai_image_shared_send_async()`.** Its name says image
+   because that is what first needed retry-with-backoff and a replayable body,
+   but nothing in it is image-specific. A second copy would be a second place
+   for the 429 handling to drift. Rename it if you like — three providers call
+   it — but do not fork it.
+
+`-lm` is in `PKG_LIBS` because of `ai_embedding_cosine()`. Nothing in
+`PKG_DEPS` pulls it in, and a missing `-lm` does not fail the shared library
+link — it surfaces much later as `ai-tui` failing to link, which points
+nowhere near the cause.
+
+### Adding an embedding provider
+
+1. Implement `AiEmbedder` on the client: `embed_async`, `embed_finish`,
+   `get_default_embedding_model`, `list_embedding_models`.
+2. Declare a static table of `AiEmbeddingModelInfo` — id, dimensions,
+   max input characters, batch support, notes. **That table is the
+   registration**, and its `dimensions` is what every caller sizing a vector
+   store will believe, so it has to be right.
+3. Pick a wire shape in `ai-embedding-shared.h`, or add one if the provider
+   genuinely differs. OpenAI's shape already covers every compatible server —
+   vLLM, LM Studio, llama.cpp, Together — so a new one is rarer than it looks.
+4. `max_input_chars` is characters, not tokens: the tokeniser belongs to the
+   model and callers do not have it. It exists to stop somebody sending a
+   book, not to predict the provider's exact limit.
+
 ## Event stream
 
 Every provider narrates a turn through one normalized stream: `AiEvent`
@@ -1111,6 +1172,30 @@ ai_provider_chat_async(
 g_main_loop_run(loop);
 g_list_free(messages);
 ```
+
+### Embedding text
+
+```c
+g_autoptr(AiOllamaClient) client = ai_ollama_client_new();
+g_autoptr(AiEmbedding) result = NULL;
+g_autoptr(GError) error = NULL;
+const gchar *texts[] = { "first passage", "second passage", NULL };
+
+result = ai_embedder_embed(AI_EMBEDDER(client), texts, NULL, NULL, &error);
+
+if (result != NULL)
+{
+    gsize dims = ai_embedding_get_dimensions(result);
+    gdouble score = ai_embedding_cosine(ai_embedding_get_vector(result, 0),
+                                        ai_embedding_get_vector(result, 1),
+                                        dims);
+    g_print("%s: %zu dims, similarity %.3f\n",
+            ai_embedding_get_model(result), dims, score);
+}
+```
+
+Store `ai_embedding_get_model()` with every vector. Comparing vectors from two
+models produces a number that looks like a weak match and means nothing.
 
 ### Tool Calling (HTTP providers)
 

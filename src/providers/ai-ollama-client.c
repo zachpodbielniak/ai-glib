@@ -18,9 +18,13 @@
 #include "core/ai-event-source.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "core/ai-embedder.h"
+#include "providers/ai-embedding-shared.h"
+#include "providers/ai-image-shared.h"
 
 #define OLLAMA_CHAT_ENDPOINT "/api/chat"
 #define OLLAMA_TAGS_ENDPOINT "/api/tags"
+#define OLLAMA_EMBED_ENDPOINT "/api/embed"
 
 /*
  * Private structure for AiOllamaClient.
@@ -32,12 +36,15 @@ struct _AiOllamaClient
 
 static void ai_ollama_client_provider_init(AiProviderInterface *iface);
 static void ai_ollama_client_streamable_init(AiStreamableInterface *iface);
+static void ai_ollama_client_embedder_init(AiEmbedderInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiOllamaClient, ai_ollama_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
                                               ai_ollama_client_provider_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
-                                              ai_ollama_client_streamable_init))
+                                              ai_ollama_client_streamable_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EMBEDDER,
+                                              ai_ollama_client_embedder_init))
 
 /*
  * Build Ollama API request.
@@ -1216,4 +1223,235 @@ ai_ollama_client_new_with_host(const gchar *host)
     ai_config_set_base_url(config, AI_PROVIDER_OLLAMA, host);
 
     return ai_ollama_client_new_with_config(config);
+}
+
+/*
+ * Embeddings
+ *
+ * ollama serves these from /api/embed with its own response shape. Which
+ * models a given host actually has is a property of that host rather than
+ * of this library, so the table below lists the ones worth naming a default
+ * from and nothing here refuses a model it does not recognise -- an
+ * unlisted model is passed through and the server decides.
+ */
+
+static const AiEmbeddingModelInfo ollama_embedding_models[] = {
+    {
+        AI_OLLAMA_MODEL_NOMIC_EMBED,
+        768,
+        8192,
+        TRUE,
+        "Runs locally; 768 dimensions. A good default when the corpus "
+        "should not leave the machine."
+    },
+    {
+        "mxbai-embed-large",
+        1024,
+        2048,
+        TRUE,
+        "1024 dimensions; larger and slower than nomic-embed-text."
+    },
+    {
+        "all-minilm",
+        384,
+        1024,
+        TRUE,
+        "384 dimensions. Small and quick, and noticeably weaker."
+    }
+};
+
+typedef struct
+{
+    GTask *task;
+    gchar *model;
+    gsize  expected;
+} OllamaEmbedData;
+
+static void
+ollama_embed_data_free(OllamaEmbedData *data)
+{
+    g_clear_pointer(&data->model, g_free);
+    g_slice_free(OllamaEmbedData, data);
+}
+
+static void
+on_ollama_embed_response(
+    GObject      *source,
+    GAsyncResult *result,
+    gpointer      user_data
+){
+    OllamaEmbedData *data = user_data;
+    g_autoptr(GTask) task = data->task;
+    g_autoptr(GBytes) body = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonParser) parser = NULL;
+    AiEmbedding *embedding;
+    const gchar *text;
+    gsize length = 0;
+
+    (void)source;
+
+    body = ai_image_shared_send_finish(result, &error);
+
+    if (NULL == body)
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        ollama_embed_data_free(data);
+        return;
+    }
+
+    text = g_bytes_get_data(body, &length);
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_data(parser, text, (gssize)length, &error))
+    {
+        g_task_return_error(task, g_steal_pointer(&error));
+        ollama_embed_data_free(data);
+        return;
+    }
+
+    embedding = ai_embedding_shared_parse(AI_EMBEDDING_WIRE_OLLAMA,
+                                          json_parser_get_root(parser),
+                                          data->model, data->expected,
+                                          &error);
+
+    if (NULL == embedding)
+        g_task_return_error(task, g_steal_pointer(&error));
+    else
+        g_task_return_pointer(task, embedding,
+                              (GDestroyNotify)ai_embedding_unref);
+
+    ollama_embed_data_free(data);
+}
+
+static void
+ai_ollama_client_embed_async(
+    AiEmbedder          *embedder,
+    const gchar *const  *texts,
+    const gchar         *model,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(embedder);
+    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(JsonNode) request_json = NULL;
+    g_autoptr(GBytes) body_bytes = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *request_body = NULL;
+    OllamaEmbedData *data;
+    AiConfig *config;
+    const gchar *base_url;
+    gsize request_len = 0;
+    gsize count = 0;
+    GTask *task;
+
+    task = g_task_new(self, cancellable, callback, user_data);
+
+    if (NULL == model)
+        model = AI_OLLAMA_MODEL_NOMIC_EMBED;
+
+    while (NULL != texts[count])
+        count++;
+
+    if (0 == count)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "There is nothing to embed");
+        g_object_unref(task);
+        return;
+    }
+
+    config = ai_client_get_config(AI_CLIENT(self));
+    base_url = ai_config_get_base_url(config, AI_PROVIDER_OLLAMA);
+
+    request_json = ai_embedding_shared_build_request(texts, model);
+
+    {
+        g_autoptr(JsonGenerator) gen = json_generator_new();
+
+        json_generator_set_root(gen, request_json);
+        request_body = json_generator_to_data(gen, &request_len);
+    }
+
+    url = g_strconcat(base_url, OLLAMA_EMBED_ENDPOINT, NULL);
+    msg = soup_message_new("POST", url);
+
+    if (NULL == msg)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid Ollama base URL: %s", base_url);
+        g_object_unref(task);
+        return;
+    }
+
+    body_bytes = g_bytes_new_take(g_steal_pointer(&request_body), request_len);
+    soup_message_set_request_body_from_bytes(msg, "application/json",
+                                             body_bytes);
+
+    klass->add_auth_headers(AI_CLIENT(self), msg);
+
+    data = g_slice_new0(OllamaEmbedData);
+    data->task = task;
+    data->model = g_strdup(model);
+    data->expected = count;
+
+    /*
+     * The sender is shared with image generation rather than duplicated.
+     * Its name says "image" because that is what first needed retry with
+     * backoff and a replayable body, but nothing in it is image-specific,
+     * and a second copy would be a second place for the 429 handling to
+     * drift.
+     */
+    ai_image_shared_send_async(
+        ai_client_get_soup_session(AI_CLIENT(self)),
+        msg,
+        body_bytes,
+        ai_config_get_max_retries(config),
+        cancellable,
+        on_ollama_embed_response,
+        data);
+}
+
+static AiEmbedding *
+ai_ollama_client_embed_finish(
+    AiEmbedder    *embedder,
+    GAsyncResult  *result,
+    GError       **error
+){
+    (void)embedder;
+    return g_task_propagate_pointer(G_TASK(result), error);
+}
+
+static const gchar *
+ai_ollama_client_get_default_embedding_model(AiEmbedder *embedder)
+{
+    (void)embedder;
+    return AI_OLLAMA_MODEL_NOMIC_EMBED;
+}
+
+static GList *
+ai_ollama_client_list_embedding_models(AiEmbedder *embedder)
+{
+    GList *out = NULL;
+    gsize i;
+
+    (void)embedder;
+
+    for (i = G_N_ELEMENTS(ollama_embedding_models); i > 0; i--)
+        out = g_list_prepend(out,
+            (gpointer)&ollama_embedding_models[i - 1]);
+
+    return out;
+}
+
+static void
+ai_ollama_client_embedder_init(AiEmbedderInterface *iface)
+{
+    iface->embed_async = ai_ollama_client_embed_async;
+    iface->embed_finish = ai_ollama_client_embed_finish;
+    iface->get_default_embedding_model =
+        ai_ollama_client_get_default_embedding_model;
+    iface->list_embedding_models = ai_ollama_client_list_embedding_models;
 }

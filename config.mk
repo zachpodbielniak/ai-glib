@@ -29,7 +29,12 @@ PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0
 
 # Get flags from pkg-config
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKG_DEPS))
-PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS))
+# -lm is explicit rather than from pkg-config: nothing in PKG_DEPS pulls it,
+# and ai_embedding_cosine() needs sqrt(). Linking the shared library happened
+# to succeed without it -- an unresolved symbol in a .so is only a problem at
+# load time -- and the failure surfaced instead as ai-tui failing to link,
+# which points nowhere near the cause.
+PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS)) -lm
 
 # yaml-glib (bundled under deps/yaml-glib, built as static lib).
 # Always built with its own conventions; not affected by parent DEBUG.

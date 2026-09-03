@@ -61,7 +61,13 @@ G_DECLARE_FINAL_TYPE(AiOllamaClient, ai_ollama_client, AI, OLLAMA_CLIENT, AiClie
 /* Tiny / Lightweight Models */
 #define AI_OLLAMA_MODEL_TINYLLAMA           "tinyllama:1.1b"
 
-/* Embedding Models */
+/*
+ * Embedding Models
+ *
+ * AiOllamaClient implements #AiEmbedder. Which of these a given host
+ * actually has is that host's business, so an unlisted model is passed
+ * through rather than refused.
+ */
 #define AI_OLLAMA_MODEL_NOMIC_EMBED         "nomic-embed-text:v1.5"
 
 /* Custom / Local Models */

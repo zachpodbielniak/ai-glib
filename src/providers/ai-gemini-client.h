@@ -149,7 +149,10 @@ G_DECLARE_FINAL_TYPE(AiGeminiClient, ai_gemini_client, AI, GEMINI_CLIENT, AiClie
 /*
  * Embedding Models
  *
- * Identifiers only. AiGeminiClient does not yet expose embeddings.
+ * Identifiers only. AiGeminiClient does not implement #AiEmbedder: Gemini's
+ * embedding endpoint is shaped differently from the OpenAI one that
+ * ai-embedding-shared.c handles, so it needs its own wire shape rather than
+ * a model constant.
  */
 #define AI_GEMINI_EMBEDDING_MODEL_2         "gemini-embedding-2"
 #define AI_GEMINI_EMBEDDING_MODEL_001       "gemini-embedding-001"
