@@ -512,6 +512,7 @@ ai_tool_to_json(
             json_builder_end_object(builder);
             break;
 
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
         case AI_PROVIDER_OPENAI:
         case AI_PROVIDER_GROK:
         case AI_PROVIDER_OLLAMA:

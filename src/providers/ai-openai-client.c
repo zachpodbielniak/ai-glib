@@ -34,14 +34,6 @@
 #define OPENAI_EMBEDDINGS_ENDPOINT "/v1/embeddings"
 
 /*
- * Private structure for AiOpenAIClient.
- */
-struct _AiOpenAIClient
-{
-    AiClient parent_instance;
-};
-
-/*
  * Interface implementations forward declarations.
  */
 static void ai_openai_client_provider_init(AiProviderInterface *iface);
@@ -265,12 +257,22 @@ ai_openai_client_parse_response(
  * Get the OpenAI Chat Completions endpoint URL.
  */
 static gchar *
+ai_openai_client_build_api_url(AiOpenAIClient *self, const gchar *path)
+{
+	AiConfig *config = ai_client_get_config(AI_CLIENT(self));
+	return g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_OPENAI), path, NULL);
+}
+
+static gchar *
+openai_api_url(AiOpenAIClient *self, const gchar *path)
+{
+	return AI_OPENAI_CLIENT_GET_CLASS(self)->build_api_url(self, path);
+}
+
+static gchar *
 ai_openai_client_get_endpoint_url(AiClient *client)
 {
-    AiConfig *config = ai_client_get_config(client);
-    const gchar *base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
-
-    return g_strconcat(base_url, OPENAI_COMPLETIONS_ENDPOINT, NULL);
+	return openai_api_url(AI_OPENAI_CLIENT(client), OPENAI_COMPLETIONS_ENDPOINT);
 }
 
 /*
@@ -297,6 +299,8 @@ static void
 ai_openai_client_class_init(AiOpenAIClientClass *klass)
 {
     AiClientClass *client_class = AI_CLIENT_CLASS(klass);
+
+    klass->build_api_url = ai_openai_client_build_api_url;
 
     /* Override virtual methods */
     client_class->build_request = ai_openai_client_build_request;
@@ -494,7 +498,14 @@ ai_openai_client_chat_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = url != NULL ? soup_message_new("POST", url) : NULL;
+    if (msg == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid API base URL or token");
+        g_object_unref(task);
+        return;
+    }
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -654,7 +665,6 @@ ai_openai_client_list_models_async(
 ){
     AiOpenAIClient *self = AI_OPENAI_CLIENT(provider);
     AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
-    AiConfig *config = ai_client_get_config(AI_CLIENT(self));
     g_autoptr(SoupMessage) msg = NULL;
     g_autofree gchar *url = NULL;
     OpenAIListModelsData *data;
@@ -662,9 +672,15 @@ ai_openai_client_list_models_async(
 
     task = g_task_new(provider, cancellable, callback, user_data);
 
-    url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_OPENAI),
-                      OPENAI_MODELS_ENDPOINT, NULL);
-    msg = soup_message_new("GET", url);
+    url = openai_api_url(self, OPENAI_MODELS_ENDPOINT);
+    msg = url != NULL ? soup_message_new("GET", url) : NULL;
+    if (msg == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid API base URL or token");
+        g_object_unref(task);
+        return;
+    }
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
     data = g_slice_new0(OpenAIListModelsData);
@@ -1045,10 +1061,37 @@ on_openai_line_read(
         return;
     }
 
-    /* Parse SSE: data: {json} */
-    if (g_str_has_prefix(line, "data: "))
+    /* SSE permits data: with or without one following space. */
+    if (g_str_has_prefix(line, "data:"))
     {
-        openai_process_stream_chunk(data, line + 6);
+        const gchar *payload = line + 5;
+        g_autoptr(JsonParser) parser = json_parser_new();
+        JsonObject *object;
+
+        if (*payload == ' ')
+            payload++;
+        if (json_parser_load_from_data(parser, payload, -1, NULL))
+        {
+            object = ai_json_root_object(parser);
+            if (ai_json_get_node(object, "error") != NULL)
+            {
+                ai_http_error_set(&error, NULL, 500, payload, strlen(payload));
+                g_task_return_error(data->task, g_steal_pointer(&error));
+                openai_stream_data_free(data);
+                return;
+            }
+        }
+        openai_process_stream_chunk(data, payload);
+        if (strcmp(payload, "[DONE]") == 0)
+        {
+            if (data->response != NULL)
+                g_task_return_pointer(data->task, g_object_ref(data->response), g_object_unref);
+            else
+                g_task_return_new_error(data->task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                        "Stream ended without valid response");
+            openai_stream_data_free(data);
+            return;
+        }
     }
 
     openai_read_next_line(data);
@@ -1115,70 +1158,20 @@ ai_openai_client_build_stream_request(
     gint         max_tokens,
     GList       *tools
 ){
-    g_autoptr(JsonBuilder) builder = json_builder_new();
-    const gchar *model;
-    GList *l;
+    g_autoptr(JsonNode) request = NULL;
+    JsonObject *object;
+    JsonObject *options;
 
-    model = ai_client_get_model(client);
-    if (model == NULL)
-    {
-        model = AI_OPENAI_DEFAULT_MODEL;
-    }
-
-    json_builder_begin_object(builder);
-
-    json_builder_set_member_name(builder, "model");
-    json_builder_add_string_value(builder, model);
-
-    /* Enable streaming */
-    json_builder_set_member_name(builder, "stream");
-    json_builder_add_boolean_value(builder, TRUE);
-
-    /* Request usage in stream */
-    json_builder_set_member_name(builder, "stream_options");
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "include_usage");
-    json_builder_add_boolean_value(builder, TRUE);
-    json_builder_end_object(builder);
-
-    if (max_tokens > 0)
-    {
-        json_builder_set_member_name(builder, "max_tokens");
-        json_builder_add_int_value(builder, max_tokens);
-    }
-
-    json_builder_set_member_name(builder, "messages");
-    json_builder_begin_array(builder);
-    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_DEFAULT);
-    json_builder_end_array(builder);
-
-    if (tools != NULL)
-    {
-        json_builder_set_member_name(builder, "tools");
-        json_builder_begin_array(builder);
-
-        for (l = tools; l != NULL; l = l->next)
-        {
-            AiTool *tool = l->data;
-            g_autoptr(JsonNode) tool_node = ai_tool_to_json(tool, AI_PROVIDER_OPENAI);
-            json_builder_add_value(builder, g_steal_pointer(&tool_node));
-        }
-
-        json_builder_end_array(builder);
-    }
-
-    {
-        gdouble temp = ai_client_get_temperature(client);
-        if (temp != 1.0)
-        {
-            json_builder_set_member_name(builder, "temperature");
-            json_builder_add_double_value(builder, temp);
-        }
-    }
-
-    json_builder_end_object(builder);
-
-    return json_builder_get_root(builder);
+    request = AI_CLIENT_GET_CLASS(client)->build_request(
+        client, messages, system_prompt, max_tokens, tools);
+    if (request == NULL)
+        return NULL;
+    object = json_node_get_object(request);
+    json_object_set_boolean_member(object, "stream", TRUE);
+    options = json_object_new();
+    json_object_set_boolean_member(options, "include_usage", TRUE);
+    json_object_set_object_member(object, "stream_options", options);
+    return g_steal_pointer(&request);
 }
 
 static void
@@ -1223,7 +1216,14 @@ ai_openai_client_chat_stream_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = url != NULL ? soup_message_new("POST", url) : NULL;
+    if (msg == NULL)
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "Invalid API base URL or token");
+        g_object_unref(task);
+        return;
+    }
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
     soup_message_headers_append(soup_message_get_request_headers(msg),
@@ -1480,7 +1480,6 @@ ai_openai_client_generate_image_async(
     const AiImageModelInfo *info;
     AiImageOperation operation;
     AiConfig *config;
-    const gchar *base_url;
     const gchar *endpoint;
     const gchar *model;
     OpenAIImageGenData *data;
@@ -1491,9 +1490,16 @@ ai_openai_client_generate_image_async(
     model = ai_image_request_get_model(request);
     if (model == NULL)
     {
-        model = AI_OPENAI_IMAGE_DEFAULT_MODEL;
+        model = ai_image_generator_get_default_model(generator);
     }
 
+    if (model == NULL || model[0] == '\0')
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "An image model is required");
+        g_object_unref(task);
+        return;
+    }
     info = ai_image_generator_get_model_info(generator, model);
 
     /* Reconcile the request with what this model accepts before building
@@ -1508,7 +1514,6 @@ ai_openai_client_generate_image_async(
     }
 
     config = ai_client_get_config(AI_CLIENT(self));
-    base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
     operation = ai_image_request_get_operation(request);
 
     /* Editing and variations are multipart form posts to their own
@@ -1532,13 +1537,13 @@ ai_openai_client_generate_image_async(
             return;
         }
 
-        url = g_strconcat(base_url, endpoint, NULL);
-        msg = soup_message_new("POST", url);
+        url = openai_api_url(self, endpoint);
+        msg = url != NULL ? soup_message_new("POST", url) : NULL;
 
         if (msg == NULL)
         {
             g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                    "Invalid OpenAI base URL: %s", base_url);
+                                    "Invalid API base URL or token");
             g_object_unref(task);
             return;
         }
@@ -1554,8 +1559,8 @@ ai_openai_client_generate_image_async(
                                   &body_bytes);
 
         {
-            const gchar *content_type = soup_message_headers_get_content_type(
-                soup_message_get_request_headers(msg), NULL);
+            g_autofree gchar *content_type = g_strdup(soup_message_headers_get_one(
+                soup_message_get_request_headers(msg), "Content-Type"));
 
             soup_message_set_request_body_from_bytes(msg, content_type,
                                                      body_bytes);
@@ -1582,13 +1587,13 @@ ai_openai_client_generate_image_async(
             request_body = json_generator_to_data(gen, &request_len);
         }
 
-        url = g_strconcat(base_url, OPENAI_IMAGES_ENDPOINT, NULL);
-        msg = soup_message_new("POST", url);
+        url = openai_api_url(self, OPENAI_IMAGES_ENDPOINT);
+        msg = url != NULL ? soup_message_new("POST", url) : NULL;
 
         if (msg == NULL)
         {
             g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                    "Invalid OpenAI base URL: %s", base_url);
+                                    "Invalid API base URL or token");
             g_object_unref(task);
             return;
         }
@@ -1778,6 +1783,8 @@ on_openai_embed_response(
     }
 
     text = g_bytes_get_data(body, &length);
+    if (text == NULL)
+        text = "";
     parser = json_parser_new();
 
     if (!json_parser_load_from_data(parser, text, (gssize)length, &error))
@@ -1819,7 +1826,6 @@ ai_openai_client_embed_async(
     g_autofree gchar *request_body = NULL;
     OpenAIEmbedData *data;
     AiConfig *config;
-    const gchar *base_url;
     gsize request_len = 0;
     gsize count = 0;
     GTask *task;
@@ -1827,7 +1833,15 @@ ai_openai_client_embed_async(
     task = g_task_new(self, cancellable, callback, user_data);
 
     if (NULL == model)
-        model = AI_OPENAI_EMBEDDING_MODEL_3_SMALL;
+        model = ai_embedder_get_default_embedding_model(embedder);
+
+    if (model == NULL || model[0] == '\0')
+    {
+        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                "An embedding model is required");
+        g_object_unref(task);
+        return;
+    }
 
     while (NULL != texts[count])
         count++;
@@ -1841,7 +1855,6 @@ ai_openai_client_embed_async(
     }
 
     config = ai_client_get_config(AI_CLIENT(self));
-    base_url = ai_config_get_base_url(config, AI_PROVIDER_OPENAI);
 
     request_json = ai_embedding_shared_build_request(texts, model);
 
@@ -1852,13 +1865,13 @@ ai_openai_client_embed_async(
         request_body = json_generator_to_data(gen, &request_len);
     }
 
-    url = g_strconcat(base_url, OPENAI_EMBEDDINGS_ENDPOINT, NULL);
-    msg = soup_message_new("POST", url);
+    url = openai_api_url(self, OPENAI_EMBEDDINGS_ENDPOINT);
+    msg = url != NULL ? soup_message_new("POST", url) : NULL;
 
     if (NULL == msg)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Invalid OpenAI base URL: %s", base_url);
+                                "Invalid API base URL or token");
         g_object_unref(task);
         return;
     }

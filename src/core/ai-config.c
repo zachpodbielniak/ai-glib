@@ -56,6 +56,7 @@ struct _AiConfig
 
     /* API keys for each provider (overrides env vars) */
     gchar *claude_api_key;
+    gchar *compatible_api_key;
     gchar *openai_api_key;
     gchar *gemini_api_key;
     gchar *grok_api_key;
@@ -71,6 +72,7 @@ struct _AiConfig
      * Leaving them hardcoded made those providers untestable offline.
      */
     gchar *claude_base_url;
+    gchar *compatible_base_url;
     gchar *openai_base_url;
     gchar *gemini_base_url;
     gchar *grok_base_url;
@@ -117,6 +119,8 @@ ai_config_finalize(GObject *object)
     AiConfig *self = AI_CONFIG(object);
 
     g_clear_pointer(&self->claude_api_key, g_free);
+    g_clear_pointer(&self->compatible_api_key, g_free);
+    g_clear_pointer(&self->compatible_base_url, g_free);
     g_clear_pointer(&self->openai_api_key, g_free);
     g_clear_pointer(&self->gemini_api_key, g_free);
     g_clear_pointer(&self->grok_api_key, g_free);
@@ -309,6 +313,9 @@ ai_config_get_api_key(
             }
             return g_getenv(CLAUDE_API_KEY_ENV);
 
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            return self->compatible_api_key != NULL ? self->compatible_api_key :
+                   g_getenv("OPENAI_COMPATIBLE_API_KEY");
         case AI_PROVIDER_OPENAI:
             key = self->openai_api_key;
             if (key != NULL && key[0] != '\0')
@@ -377,6 +384,9 @@ ai_config_set_api_key(
         case AI_PROVIDER_CLAUDE:
             target = &self->claude_api_key;
             break;
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            target = &self->compatible_api_key;
+            break;
         case AI_PROVIDER_OPENAI:
             target = &self->openai_api_key;
             break;
@@ -406,7 +416,8 @@ ai_config_set_api_key(
  * Checks for explicit settings, then environment variables, then returns
  * the default URL.
  *
- * Returns: (transfer none): the base URL
+ * Returns: (transfer none) (nullable): the base URL; NULL if the
+ *   OpenAI-compatible provider has no configured URL
  */
 const gchar *
 ai_config_get_base_url(
@@ -432,6 +443,9 @@ ai_config_get_base_url(
             }
             return CLAUDE_BASE_URL;
 
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            return self->compatible_base_url != NULL ? self->compatible_base_url :
+                   g_getenv("OPENAI_COMPATIBLE_BASE_URL");
         case AI_PROVIDER_OPENAI:
             /* Check explicit setting first */
             if (self->openai_base_url != NULL && self->openai_base_url[0] != '\0')
@@ -521,6 +535,10 @@ ai_config_set_base_url(
             self->claude_base_url = g_strdup(base_url);
             break;
 
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            g_free(self->compatible_base_url);
+            self->compatible_base_url = g_strdup(base_url);
+            break;
         case AI_PROVIDER_OPENAI:
             g_clear_pointer(&self->openai_base_url, g_free);
             self->openai_base_url = g_strdup(base_url);
@@ -641,8 +659,8 @@ ai_config_validate(
 
     g_return_val_if_fail(AI_IS_CONFIG(self), FALSE);
 
-    /* Ollama doesn't require an API key (but supports optional auth) */
-    if (provider == AI_PROVIDER_OLLAMA)
+    /* Local and compatible servers may not require authentication. */
+    if (provider == AI_PROVIDER_OLLAMA || provider == AI_PROVIDER_OPENAI_COMPATIBLE)
     {
         return TRUE;
     }
@@ -712,6 +730,7 @@ static const struct {
 } provider_name_map[] = {
     { "claude",      AI_PROVIDER_CLAUDE },
     { "openai",      AI_PROVIDER_OPENAI },
+    { "openai-compatible", AI_PROVIDER_OPENAI_COMPATIBLE },
     { "gemini",      AI_PROVIDER_GEMINI },
     { "grok",        AI_PROVIDER_GROK },
     { "ollama",      AI_PROVIDER_OLLAMA },

@@ -37,6 +37,7 @@ G_BEGIN_DECLS
  * @AI_PROVIDER_CURSOR: Cursor Agent CLI wrapper (the `cursor-agent`
  *   binary in `--print` mode)
  * @AI_PROVIDER_CODEX_CLI: Codex CLI wrapper (codex exec)
+ * @AI_PROVIDER_OPENAI_COMPATIBLE: User-configured OpenAI-compatible HTTP API
  *
  * Enumeration of supported AI providers.
  */
@@ -53,7 +54,8 @@ typedef enum
     AI_PROVIDER_GROK_BUILD,
     AI_PROVIDER_ANTIGRAVITY,
     AI_PROVIDER_CURSOR,
-    AI_PROVIDER_CODEX_CLI
+    AI_PROVIDER_CODEX_CLI,
+    AI_PROVIDER_OPENAI_COMPATIBLE
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);

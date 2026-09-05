@@ -1,0 +1,192 @@
+#+TITLE: OpenAI-compatible HTTP provider
+#+AUTHOR: ai-glib contributors
+
+* Bring your own server
+
+=AiOpenAICompatibleClient= connects to an HTTP service implementing the
+OpenAI Chat Completions protocol. Supply your server's URL, model ID and,
+if required, bearer token. This is commonly called an /OpenAI-compatible
+API/. OpenAPI is an API-description specification; this provider does not
+interpret arbitrary OpenAPI schemas.
+
+The provider reuses =AiOpenAIClient='s wire implementation and implements
+=AiProvider=, =AiStreamable=, =AiEventSource=, =AiImageGenerator= and
+=AiEmbedder=. Server support determines which operations actually work.
+There is no built-in model ID: model names belong to your deployment.
+
+* Quick start
+
+#+begin_src sh
+export OPENAI_COMPATIBLE_BASE_URL=http://localhost:8000/v1
+export OPENAI_COMPATIBLE_API_KEY=your-server-token
+ai -p openai-compatible -m your-model "Hello"
+ai -p http -m your-model --stream "Explain this"
+#+end_src
+
+For an unauthenticated local server, omit the token. An explicit empty
+=api-key= disables authentication even when a token is configured elsewhere.
+The =http= name is an alias; it also supports HTTPS.
+
+Properties work with =ai --set=:
+
+#+begin_src sh
+ai -p http -m your-model --set base-url=https://gateway.example/api/v1 "Hello"
+#+end_src
+
+Prefer the environment or application configuration for tokens instead of
+putting secrets in shell arguments. The library sends the token in
+=Authorization: Bearer ...=, never in the request URL.
+
+* URL and configuration rules
+
+| Supplied base-url                       | Chat endpoint                                   |
+|----------------------------------------+-------------------------------------------------|
+| =http://localhost:8000=                 | =http://localhost:8000/v1/chat/completions=       |
+| =http://localhost:8000/=                | =http://localhost:8000/v1/chat/completions=       |
+| =https://gateway.example/v1/=           | =https://gateway.example/v1/chat/completions=    |
+| =https://gateway.example/proxy/api/v2/=  | =https://gateway.example/proxy/api/v2/chat/completions= |
+
+An origin uses =/v1=. A URL with a path names the *exact API root*;
+trailing slashes are removed. Do not supply =/chat/completions= itself.
+Model listing, embeddings and images use the same root. The provider rejects
+non-HTTP schemes, missing hosts, embedded credentials, query strings,
+fragments, whitespace in URLs and newlines in tokens before sending a request.
+No URL is assumed when configuration is missing.
+
+Resolution order for URL and token:
+
+1. Client =base-url= / =api-key= property, if non-NULL.
+2. =AiConfig= value for =AI_PROVIDER_OPENAI_COMPATIBLE=, if non-NULL.
+3. =OPENAI_COMPATIBLE_BASE_URL= / =OPENAI_COMPATIBLE_API_KEY= environment.
+
+An empty string explicitly masks fallback. NULL restores fallback.
+=OPENAI_API_KEY= and =OPENAI_BASE_URL= are never used by this provider.
+The regular =openai= provider retains its existing behavior.
+
+The normal YAML configuration accepts:
+
+#+begin_src yaml
+providers:
+  openai-compatible:
+    base_url: https://gateway.example/v1
+    api_key: your-server-token
+#+end_src
+
+* C and bindings
+
+#+begin_src c
+#include <ai-glib.h>
+
+int main(void)
+{
+	g_autoptr(AiOpenAICompatibleClient) client = ai_openai_compatible_client_new();
+	g_autoptr(AiMessage) message = ai_message_new_user("Hello");
+	g_autoptr(AiResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *text = NULL;
+	GList messages = { message, NULL, NULL };
+
+	g_object_set(client, "base-url", "http://localhost:8000/v1",
+	             "model", "your-model", "api-key", "", NULL);
+	response = ai_client_chat_sync(AI_CLIENT(client), &messages, NULL, &error);
+	if (response == NULL)
+	{
+		g_printerr("%s\n", error->message);
+		return 1;
+	}
+	text = ai_response_get_text(response);
+	g_print("%s\n", text);
+	return 0;
+}
+#+end_src
+
+See =examples/simple-chat-openai-compatible.c= for a buildable example that
+reads the URL and token from configuration. =ai_provider_factory_new()=,
+=ai_provider_factory_new_from_string()= and =AiSimple= accept the new provider.
+
+All settings are GObject properties, available through introspection:
+
+#+begin_src python
+from gi.repository import AiGlib
+client = AiGlib.OpenAICompatibleClient.new()
+client.props.base_url = "http://localhost:8000/v1"
+client.props.model = "your-model"
+client.props.api_key = ""
+client.props.image_model = "your-image-model"
+client.props.embedding_model = "your-embedding-model"
+#+end_src
+
+* Supported operations
+
+| Interface / operation | Endpoint relative to API root | Behavior |
+|-----------------------+-------------------------------+----------|
+| Chat, sync and async  | POST =/chat/completions= | System/user/assistant messages, token limit, temperature, usage, finish reasons |
+| Streaming chat        | POST =/chat/completions= | SSE text and tool deltas, usage, normalized events, cancellation |
+| Tool calling          | Chat endpoint | Function schemas, tool calls, tool-result history and =AiToolExecutor= loops |
+| Vision input          | Chat endpoint | Image content serialized as OpenAI image parts |
+| Model discovery       | GET =/models= | Deployment's IDs; malformed entries skipped |
+| Image generation      | POST =/images/generations= | JSON requests; inline base64 or URL responses |
+| Image edits           | POST =/images/edits= | Multipart references and optional mask |
+| Image variations      | POST =/images/variations= | Multipart image input |
+| Embeddings            | POST =/embeddings= | Single and batched inputs; normalized vectors with producing model ID |
+
+Image and embedding interfaces both expose async/finish pairs and synchronous
+wrappers. Set =image-model= / =embedding-model= for defaults, or pass an
+explicit model on the image request / embedding call. Chat =model= is
+independent. Missing model IDs fail locally. Model discovery needs no model.
+
+Image models are not assumed to have OpenAI's capabilities just because they
+use the same identifier. Optionally supply an =AiImageModelInfo= through the
+construct-only =image-model-info= property, with your model's capabilities,
+limits, sizes and quality vocabulary. The property copies the descriptor.
+It describes one model; other model IDs remain unknown. Create separate
+clients when different image models need different capability descriptors.
+
+#+begin_src c
+g_autoptr(AiImageModelInfo) info = ai_image_model_info_new(
+	"my-image", "My image deployment", AI_PROVIDER_OPENAI_COMPATIBLE,
+	AI_IMAGE_CAP_PIXEL_SIZE | AI_IMAGE_CAP_URL_RESPONSE);
+g_autoptr(AiOpenAICompatibleClient) client = g_object_new(
+	AI_TYPE_OPENAI_COMPATIBLE_CLIENT,
+	"base-url", "https://gateway.example/v1",
+	"image-model", "my-image", "image-model-info", info, NULL);
+#+end_src
+
+Known descriptors use the existing capability validator: unsupported parameters
+are dropped by default; callers can validate with =AI_IMAGE_VALIDATE_STRICT=
+first to require an exact match. Unknown image models follow the existing
+OpenAI unknown-model behavior: applicable explicitly set fields pass through,
+and the server validates them. Quality vocabulary requires a descriptor.
+=/models= cannot discover image capabilities or embedding dimensions; the
+provider does not invent those catalogs. Embedding dimensions come from the
+response, and vectors are reordered by index when supplied. Bad indices,
+non-numeric values, inconsistent dimensions and incomplete batches fail.
+
+* Errors and compatibility limits
+
+HTTP errors preserve the server's message and map to the library's error
+codes, including authentication and rate-limit errors. Transport failures
+and cancellation propagate through the standard =GError= APIs. Image and
+embedding requests use the shared bounded retry/backoff transport and
+=AiConfig.max-retries=. Chat, streaming and model discovery follow the
+existing OpenAI transport without automatic retries. =AiConfig.timeout=
+configures the HTTP session.
+
+This covers the OpenAI-compatible operations already implemented by ai-glib;
+it cannot make a server implement an endpoint or optional field. Streaming
+requests include =stream_options.include_usage=. Services must accept the
+OpenAI message/tool shape and the fields you request. Provider-specific
+extensions, Responses-only APIs, Azure-style query-key authentication,
+arbitrary OpenAPI documents, audio and video APIs are outside this protocol.
+Image partial-preview streaming is not implemented by the shared OpenAI
+transport. Image response URLs are returned as URLs, not fetched automatically.
+
+* Tests
+
+=tests/test-openai-compatible.c= drives every API path against a threaded
+loopback HTTP server. It covers root joining, auth isolation and omission,
+invalid input, missing models, HTTP status errors, cancellation, malformed
+JSON, image multipart bodies, model listing, tool/vision history, embeddings
+and retries. =tests/test-http-malformed.c= additionally runs its shared
+malformed chat/SSE table against this provider. =make test-gi= checks the
+new type, enum, inheritance and properties through PyGObject.

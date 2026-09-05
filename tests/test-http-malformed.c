@@ -113,6 +113,14 @@ static const gchar *malformed_documents[] = {
 /* ------------------------------------------------------------------ */
 
 static gpointer
+make_compatible(TServer *ts)
+{
+	return g_object_new(AI_TYPE_OPENAI_COMPATIBLE_CLIENT,
+	                    "base-url", ts->base_url, "api-key", "test-key",
+	                    "model", "custom-model", NULL);
+}
+
+static gpointer
 make_openai(TServer *ts)
 {
 	g_autoptr(AiConfig) config = ai_config_new();
@@ -223,6 +231,7 @@ typedef struct
 
 static const Provider PROVIDERS[] = {
 	{ "openai", make_openai, frame_openai, "text/event-stream" },
+	{ "compatible", make_compatible, frame_openai, "text/event-stream" },
 	{ "claude", make_claude, frame_claude, "text/event-stream" },
 	{ "grok",   make_grok,   frame_openai, "text/event-stream" },
 	{ "gemini", make_gemini, frame_gemini, "text/event-stream" },

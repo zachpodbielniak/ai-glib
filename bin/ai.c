@@ -491,6 +491,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	case AI_PROVIDER_CLAUDE:
 		provider = G_OBJECT(ai_claude_client_new_with_config(config));
 		break;
+	case AI_PROVIDER_OPENAI_COMPATIBLE:
+		provider = G_OBJECT(ai_openai_compatible_client_new_with_config(config));
+		break;
 	case AI_PROVIDER_OPENAI:
 		provider = G_OBJECT(ai_openai_client_new_with_config(config));
 		break;
@@ -609,7 +612,7 @@ list_providers(void)
 		AI_PROVIDER_GROK, AI_PROVIDER_OLLAMA, AI_PROVIDER_CLAUDE_CODE,
 		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE,
 		AI_PROVIDER_GROK_BUILD, AI_PROVIDER_ANTIGRAVITY,
-		AI_PROVIDER_CURSOR, AI_PROVIDER_CODEX_CLI
+		AI_PROVIDER_CURSOR, AI_PROVIDER_CODEX_CLI, AI_PROVIDER_OPENAI_COMPATIBLE
 	};
 	gsize i;
 

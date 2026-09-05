@@ -68,6 +68,7 @@
 /* Provider implementations (HTTP API) */
 #include "providers/ai-claude-client.h"
 #include "providers/ai-openai-client.h"
+#include "providers/ai-openai-compatible-client.h"
 #include "providers/ai-grok-client.h"
 #include "providers/ai-gemini-client.h"
 #include "providers/ai-ollama-client.h"

@@ -71,6 +71,12 @@ ai_simple_create_provider(
             ai_client_set_model(AI_CLIENT(provider), model);
         break;
 
+    case AI_PROVIDER_OPENAI_COMPATIBLE:
+        provider = G_OBJECT(ai_openai_compatible_client_new_with_config(config));
+        if (model != NULL)
+            ai_client_set_model(AI_CLIENT(provider), model);
+        break;
+
     case AI_PROVIDER_OPENAI:
         provider = G_OBJECT(ai_openai_client_new_with_config(config));
         if (model != NULL)

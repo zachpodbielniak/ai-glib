@@ -355,3 +355,9 @@ ai -p antigravity --sandbox enabled "Inspect the project"
 #+end_src
 
 See [[file:providers/codex-cli.org][Codex CLI]] for models, session behavior and provider properties.
+
+* User-configured OpenAI-compatible servers
+
+Use =openai-compatible= (alias =http=) with your own API root, token and
+model ID. See [[file:providers/openai-compatible.org][the OpenAI-compatible provider guide]] for
+configuration, supported APIs, examples and compatibility limits.

@@ -68,7 +68,8 @@ ai_provider_get_name(AiProvider *self)
  *
  * Gets the default model name for this provider.
  *
- * Returns: (transfer none): the default model name
+ * Returns: (transfer none) (nullable): the default model name, or %NULL
+ *   if the caller must choose a model
  */
 const gchar *
 ai_provider_get_default_model(AiProvider *self)

@@ -13,6 +13,7 @@
 #include "core/ai-error.h"
 #include "providers/ai-claude-client.h"
 #include "providers/ai-openai-client.h"
+#include "providers/ai-openai-compatible-client.h"
 #include "providers/ai-gemini-client.h"
 #include "providers/ai-grok-client.h"
 #include "providers/ai-ollama-client.h"
@@ -69,6 +70,8 @@ ai_provider_factory_new(
     {
         case AI_PROVIDER_CLAUDE:
             return G_OBJECT(ai_claude_client_new_with_config(config));
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            return G_OBJECT(ai_openai_compatible_client_new_with_config(config));
         case AI_PROVIDER_OPENAI:
             return G_OBJECT(ai_openai_client_new_with_config(config));
         case AI_PROVIDER_GEMINI:

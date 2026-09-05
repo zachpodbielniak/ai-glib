@@ -334,8 +334,8 @@ ai_image_shared_send_async (
     soup_message_headers_foreach (soup_message_get_request_headers (msg),
                                   ai_image_copy_header, data->headers);
 
-    content_type = soup_message_headers_get_content_type (
-        soup_message_get_request_headers (msg), NULL);
+    content_type = soup_message_headers_get_one (
+        soup_message_get_request_headers (msg), "Content-Type");
     data->content_type = g_strdup (content_type);
     data->body = body != NULL ? g_bytes_ref (body) : NULL;
 
@@ -814,10 +814,9 @@ ai_image_shared_parse_openai_response (
     guint i;
     gint64 created;
 
-    g_return_val_if_fail (root != NULL, NULL);
     g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
-    if (!JSON_NODE_HOLDS_OBJECT (root))
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT (root))
     {
         g_set_error (error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                      "Expected a JSON object in the image response");
@@ -903,6 +902,12 @@ ai_image_shared_parse_openai_response (
                                      (AiGeneratedImage *) g_steal_pointer (&image));
     }
 
+    if (ai_image_response_get_image_count(response) == 0)
+    {
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                            "Image response contained no images");
+        return NULL;
+    }
     return (AiImageResponse *) g_steal_pointer (&response);
 }
 

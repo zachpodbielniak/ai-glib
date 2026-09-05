@@ -11,6 +11,9 @@
 
 #include "providers/ai-embedding-shared.h"
 #include "core/ai-error.h"
+#include "core/ai-json-util.h"
+#include <math.h>
+#include <float.h>
 
 JsonNode *
 ai_embedding_shared_build_request (
@@ -70,7 +73,26 @@ ai_embedding_shared_take_vector (
     vector = g_new0(gfloat, length);
 
     for (i = 0; i < length; i++)
-        vector[i] = (gfloat)json_array_get_double_element(numbers, i);
+    {
+        JsonNode *node = json_array_get_element(numbers, i);
+        GType type = node != NULL ? json_node_get_value_type(node) : G_TYPE_INVALID;
+        gdouble value;
+
+        if (type != G_TYPE_DOUBLE && type != G_TYPE_INT64 && type != G_TYPE_INT)
+        {
+            g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Embedding contains a non-numeric value");
+            return FALSE;
+        }
+        value = json_node_get_double(node);
+        if (!isfinite(value) || fabs(value) > FLT_MAX)
+        {
+            g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Embedding contains an out-of-range value");
+            return FALSE;
+        }
+        vector[i] = (gfloat)value;
+    }
 
     ai_embedding_normalize(vector, length);
 
@@ -91,10 +113,9 @@ ai_embedding_shared_parse (
     const gchar *member;
     guint length;
     guint i;
+    g_autofree JsonArray **ordered = NULL;
 
-    g_return_val_if_fail(NULL != root, NULL);
-
-    if (!JSON_NODE_HOLDS_OBJECT(root))
+    if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root))
     {
         g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                             "The embedding response was not an object");
@@ -104,40 +125,14 @@ ai_embedding_shared_parse (
     object = json_node_get_object(root);
     member = (AI_EMBEDDING_WIRE_OLLAMA == wire) ? "embeddings" : "data";
 
-    /*
-     * Checked by presence and by type. A service that answered an error as
-     * a 200 with {"error": "..."} would otherwise read as a response with
-     * no vectors, and the message the caller sees would be about shape
-     * rather than about what went wrong.
-     */
-    if (!json_object_has_member(object, member))
+    if (ai_json_get_node(object, "error") != NULL)
     {
-        const gchar *message = NULL;
-
-        if (json_object_has_member(object, "error"))
-        {
-            JsonNode *node = json_object_get_member(object, "error");
-
-            if (JSON_NODE_HOLDS_VALUE(node))
-                message = json_node_get_string(node);
-            else if (JSON_NODE_HOLDS_OBJECT(node))
-                message = json_object_get_string_member_with_default(
-                    json_node_get_object(node), "message", NULL);
-        }
-
-        if (NULL != message)
-            g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                        "The embedding service refused: %s", message);
-        else
-            g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
-                        "The embedding response has no \"%s\"", member);
-
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                            "The embedding service refused the request");
         return NULL;
     }
-
-    list = json_object_get_array_member(object, member);
-
-    if (NULL == list)
+    list = ai_json_get_array(object, member);
+    if (list == NULL)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
                     "The embedding response's \"%s\" was not a list", member);
@@ -147,22 +142,43 @@ ai_embedding_shared_parse (
     out = ai_embedding_new(model, 0);
     length = json_array_get_length(list);
 
+    if (length != expected)
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                    "Asked for %" G_GSIZE_FORMAT " embeddings and got %u", expected, length);
+        return NULL;
+    }
+    ordered = g_new0(JsonArray *, length);
     for (i = 0; i < length; i++)
     {
         JsonArray *numbers;
+        guint index = i;
 
         if (AI_EMBEDDING_WIRE_OLLAMA == wire)
         {
-            numbers = json_array_get_array_element(list, i);
+            JsonNode *node = json_array_get_element(list, i);
+            numbers = node != NULL && JSON_NODE_HOLDS_ARRAY(node) ? json_node_get_array(node) : NULL;
         }
         else
         {
             JsonObject *entry;
 
-            entry = json_array_get_object_element(list, i);
-            numbers = (NULL != entry)
-                ? json_object_get_array_member(entry, "embedding")
-                : NULL;
+            JsonNode *index_node;
+
+            entry = ai_json_array_get_object(list, i);
+            numbers = ai_json_get_array(entry, "embedding");
+            index_node = ai_json_get_node(entry, "index");
+            if (index_node != NULL)
+            {
+                gdouble value = ai_json_get_double(entry, "index", -1);
+                if (value < 0 || value >= length || floor(value) != value)
+                {
+                    g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                        "Invalid embedding index");
+                    return NULL;
+                }
+                index = (guint)value;
+            }
         }
 
         if (NULL == numbers)
@@ -172,7 +188,17 @@ ai_embedding_shared_parse (
             return NULL;
         }
 
-        if (!ai_embedding_shared_take_vector(out, numbers, error))
+        if (ordered[index] != NULL)
+        {
+            g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
+                                "Duplicate embedding index");
+            return NULL;
+        }
+        ordered[index] = numbers;
+    }
+    for (i = 0; i < length; i++)
+    {
+        if (!ai_embedding_shared_take_vector(out, ordered[i], error))
             return NULL;
     }
 

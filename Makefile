@@ -87,6 +87,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/model/ai-image-response.h \
 	$(SRCDIR)/providers/ai-claude-client.h \
 	$(SRCDIR)/providers/ai-openai-client.h \
+	$(SRCDIR)/providers/ai-openai-compatible-client.h \
 	$(SRCDIR)/providers/ai-grok-client.h \
 	$(SRCDIR)/providers/ai-gemini-client.h \
 	$(SRCDIR)/providers/ai-ollama-client.h \
@@ -172,6 +173,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-claude-launch.c \
 	$(SRCDIR)/providers/ai-claude-client.c \
 	$(SRCDIR)/providers/ai-openai-client.c \
+	$(SRCDIR)/providers/ai-openai-compatible-client.c \
 	$(SRCDIR)/providers/ai-grok-client.c \
 	$(SRCDIR)/providers/ai-gemini-client.c \
 	$(SRCDIR)/providers/ai-ollama-client.c \
@@ -354,6 +356,8 @@ check-headers:
 .PHONY: tests
 tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
+
+$(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

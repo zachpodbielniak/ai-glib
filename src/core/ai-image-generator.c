@@ -308,7 +308,7 @@ ai_image_generator_get_model_info(
     const gchar      *model
 ){
     g_autolist(AiImageModelInfo) models = NULL;
-    static GHashTable *cache = NULL;
+    GHashTable *cache;
     static GMutex cache_lock;
     const AiImageModelInfo *found = NULL;
     GList *iter;
@@ -350,16 +350,21 @@ ai_image_generator_get_model_info(
      * The list is transfer-full but this returns transfer-none, so the
      * descriptor has to outlive the list.  Model tables are small, fixed,
      * and looked up repeatedly, so keep one copy per model id in a
-     * process-wide cache rather than making every caller manage a
-     * lifetime for what is really static data.
+     * per-instance cache rather than making every caller manage a
+     * lifetime for what is really static data. Deployment-specific tables
+     * can describe identical model IDs differently, so never share this
+     * cache between generators. Returned data lives as long as self.
      */
     g_mutex_lock(&cache_lock);
 
+    cache = g_object_get_data(G_OBJECT(self), "ai-image-model-cache");
     if (cache == NULL)
     {
         cache = g_hash_table_new_full(
             g_str_hash, g_str_equal, g_free,
             (GDestroyNotify)ai_image_model_info_free);
+        g_object_set_data_full(G_OBJECT(self), "ai-image-model-cache", cache,
+                               (GDestroyNotify)g_hash_table_unref);
     }
 
     if (!g_hash_table_contains(cache, model))
@@ -434,7 +439,8 @@ ai_image_generator_supports(
  *
  * Gets the default model for image generation.
  *
- * Returns: (transfer none): the default model name
+ * Returns: (transfer none) (nullable): the default model name, or %NULL
+ *   if the caller must choose a model
  */
 const gchar *
 ai_image_generator_get_default_model(AiImageGenerator *self)

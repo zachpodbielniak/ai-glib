@@ -35,6 +35,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_ANTIGRAVITY, "AI_PROVIDER_ANTIGRAVITY", "antigravity" },
             { AI_PROVIDER_CODEX_CLI, "AI_PROVIDER_CODEX_CLI", "codex-cli" },
             { AI_PROVIDER_CURSOR, "AI_PROVIDER_CURSOR", "cursor" },
+            { AI_PROVIDER_OPENAI_COMPATIBLE, "AI_PROVIDER_OPENAI_COMPATIBLE", "openai-compatible" },
             { 0, NULL, NULL }
         };
 
@@ -280,6 +281,8 @@ ai_provider_type_to_string(AiProviderType provider)
     {
         case AI_PROVIDER_CLAUDE:
             return "claude";
+        case AI_PROVIDER_OPENAI_COMPATIBLE:
+            return "openai-compatible";
         case AI_PROVIDER_OPENAI:
             return "openai";
         case AI_PROVIDER_GEMINI:
@@ -332,6 +335,11 @@ ai_provider_type_from_string(const gchar *str)
              g_ascii_strcasecmp(str, "codex") == 0)
     {
         return AI_PROVIDER_CODEX_CLI;
+    }
+    else if (g_ascii_strcasecmp(str, "openai-compatible") == 0 ||
+             g_ascii_strcasecmp(str, "http") == 0)
+    {
+        return AI_PROVIDER_OPENAI_COMPATIBLE;
     }
     else if (g_ascii_strcasecmp(str, "openai") == 0 ||
              g_ascii_strcasecmp(str, "gpt") == 0)

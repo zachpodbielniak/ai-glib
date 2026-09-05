@@ -29,6 +29,22 @@ def main():
     gi.require_version("AiGlib", "1.0")
     from gi.repository import AiGlib, Gio  # noqa: E402
 
+    compatible = AiGlib.OpenAICompatibleClient.new()
+    compatible.props.base_url = "http://localhost:8000/v1"
+    compatible.props.api_key = "local-token"
+    compatible.props.model = "local-chat"
+    compatible.props.image_model = "local-image"
+    compatible.props.embedding_model = "local-embedding"
+    assert compatible.props.base_url == "http://localhost:8000/v1"
+    assert compatible.props.api_key == "local-token"
+    assert compatible.props.model == "local-chat"
+    assert compatible.props.image_model == "local-image"
+    assert compatible.props.embedding_model == "local-embedding"
+    assert isinstance(compatible, AiGlib.OpenAIClient)
+    assert isinstance(compatible, AiGlib.ImageGenerator)
+    assert isinstance(compatible, AiGlib.Embedder)
+    assert compatible.get_provider_type() == AiGlib.ProviderType.OPENAI_COMPATIBLE
+
     # ----- Class construction -----
     client = AiGlib.ClaudeClient.new()
     assert isinstance(client, AiGlib.ClaudeClient)

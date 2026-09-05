@@ -22,7 +22,22 @@ G_BEGIN_DECLS
 
 #define AI_TYPE_OPENAI_CLIENT (ai_openai_client_get_type())
 
-G_DECLARE_FINAL_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClient)
+G_DECLARE_DERIVABLE_TYPE(AiOpenAIClient, ai_openai_client, AI, OPENAI_CLIENT, AiClient)
+
+/**
+ * AiOpenAIClientClass:
+ * @parent_class: parent class
+ * @build_api_url: builds an endpoint URL from an OpenAI path including /v1
+ * @_reserved: reserved for future expansion
+ *
+ * Shared OpenAI wire implementation. Subclasses can supply another API root.
+ */
+struct _AiOpenAIClientClass
+{
+	AiClientClass parent_class;
+	gchar *(*build_api_url)(AiOpenAIClient *self, const gchar *path);
+	gpointer _reserved[8];
+};
 
 /**
  * AI_OPENAI_DEFAULT_MODEL:

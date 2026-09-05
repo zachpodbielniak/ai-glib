@@ -375,3 +375,9 @@ int main(void)
 
 * Event coverage
 On [[file:../events.org][the event stream]] this provider reports text and usage.
+
+* User-configured OpenAI-compatible servers
+
+Use =openai-compatible= (alias =http=) with your own API root, token and
+model ID. See [[file:openai-compatible.org][the OpenAI-compatible provider guide]] for
+configuration, supported APIs, examples and compatibility limits.

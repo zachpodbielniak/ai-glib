@@ -162,3 +162,9 @@ int main(void)
 
 ** License
 ai-glib is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+* User-configured OpenAI-compatible servers
+
+Use =openai-compatible= (alias =http=) with your own API root, token and
+model ID. See [[file:providers/openai-compatible.org][the OpenAI-compatible provider guide]] for
+configuration, supported APIs, examples and compatibility limits.
