@@ -30,6 +30,18 @@
 
 G_BEGIN_DECLS
 
+/* Byte-preserving variant for arbitrary command output. */
+gboolean
+ai_subprocess_communicate_bounded(
+    GSubprocess  *subprocess,
+    GBytes       *stdin_data,
+    gint          timeout_ms,
+    GCancellable *cancellable,
+    GBytes      **stdout_data,
+    GBytes      **stderr_data,
+    GError      **error
+);
+
 gboolean
 ai_subprocess_communicate_utf8_bounded(
     GSubprocess  *subprocess,

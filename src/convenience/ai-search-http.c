@@ -11,6 +11,7 @@
 
 #include "convenience/ai-search-http.h"
 #include "core/ai-error.h"
+#include "core/ai-http-redirect-private.h"
 
 /* User-Agent sent on every search-provider request. */
 #define AI_SEARCH_HTTP_USER_AGENT \
@@ -112,6 +113,7 @@ ai_search_http_get_json (
         }
 
         req_headers = soup_message_get_request_headers (msg);
+        g_signal_connect (msg, "got-headers", G_CALLBACK (ai_http_check_redirect), NULL);
         soup_message_headers_replace (req_headers, "User-Agent",
                                       AI_SEARCH_HTTP_USER_AGENT);
         soup_message_headers_replace (req_headers, "Accept",

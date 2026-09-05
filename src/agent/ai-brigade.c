@@ -360,10 +360,11 @@ ai_brigade_add (AiBrigade *self, AiAgent *agent)
 
     g_hash_table_insert(self->agents, g_strdup(id), g_object_ref(agent));
 
-    g_signal_connect(agent, "state-changed",
-                     G_CALLBACK(on_agent_state_changed), self);
-    g_signal_connect(agent, "progress",
-                     G_CALLBACK(on_agent_progress), self);
+    /* Agents can be retained by callers after the brigade is destroyed. */
+    g_signal_connect_object(agent, "state-changed",
+                            G_CALLBACK(on_agent_state_changed), self, 0);
+    g_signal_connect_object(agent, "progress",
+                            G_CALLBACK(on_agent_progress), self, 0);
     return TRUE;
 }
 

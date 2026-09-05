@@ -119,42 +119,17 @@ on_bounded_comm_cancelled(
     return G_SOURCE_REMOVE;
 }
 
-/**
- * ai_subprocess_communicate_utf8_bounded: (skip)
- * @subprocess: the spawned #GSubprocess to communicate with
- * @stdin_data: (nullable): UTF-8 data to pipe to the child's stdin
- * @timeout_ms: wall-clock deadline in milliseconds; <= 0 means no
- *   deadline (the caller's @cancellable is then the only bound)
- * @cancellable: (nullable): a #GCancellable
- * @stdout_data: (out) (optional): captured stdout
- * @stderr_data: (out) (optional): captured stderr
- * @error: (out) (optional): return location for a #GError
- *
- * Like g_subprocess_communicate_utf8(), but guaranteed to return.
- * When the deadline expires or @cancellable fires, the child is
- * killed with g_subprocess_force_exit(); if its pipes still have not
- * reached EOF after a short grace period (a grandchild inherited
- * them), the pending reads are cancelled outright.
- *
- * On timeout the error is %AI_ERROR_TIMEOUT; on cancellation it is
- * %AI_ERROR_CANCELLED.  In both cases the output locations are left
- * unset.  Otherwise behaves exactly like the GLib original: %TRUE
- * means communication completed (the caller still checks the exit
- * status).
- *
- * Runs a private #GMainContext, so it is safe on any worker thread
- * regardless of what the default main loop is doing.
- *
- * Returns: %TRUE on successful communication, %FALSE on error
- */
-gboolean
-ai_subprocess_communicate_utf8_bounded(
+static gboolean
+subprocess_communicate_bounded(
     GSubprocess  *subprocess,
-    const gchar  *stdin_data,
+    gconstpointer stdin_data,
+    gboolean      utf8,
     gint          timeout_ms,
     GCancellable *cancellable,
     gchar       **stdout_data,
     gchar       **stderr_data,
+    GBytes      **stdout_bytes,
+    GBytes      **stderr_bytes,
     GError      **error
 ){
     g_autoptr(GMainContext)  context = NULL;
@@ -162,6 +137,8 @@ ai_subprocess_communicate_utf8_bounded(
     g_autoptr(GError)        comm_error = NULL;
     g_autofree gchar        *out_buf = NULL;
     g_autofree gchar        *err_buf = NULL;
+    g_autoptr(GBytes)        out_bytes = NULL;
+    g_autoptr(GBytes)        err_bytes = NULL;
     GSource                 *deadline_source = NULL;
     GSource                 *cancel_source = NULL;
     BoundedCommState         state = { NULL, };
@@ -178,11 +155,16 @@ ai_subprocess_communicate_utf8_bounded(
 
     g_main_context_push_thread_default(context);
 
-    g_subprocess_communicate_utf8_async(subprocess,
+    if (utf8)
+        g_subprocess_communicate_utf8_async(subprocess,
                                         stdin_data,
                                         read_cancellable,
                                         on_bounded_comm_finished,
                                         &state);
+    else
+        g_subprocess_communicate_async(subprocess, (GBytes *)stdin_data,
+                                       read_cancellable,
+                                       on_bounded_comm_finished, &state);
 
     if (timeout_ms > 0)
     {
@@ -215,9 +197,13 @@ ai_subprocess_communicate_utf8_bounded(
         g_source_unref(cancel_source);
     }
 
-    ok = g_subprocess_communicate_utf8_finish(subprocess, state.result,
+    if (utf8)
+        ok = g_subprocess_communicate_utf8_finish(subprocess, state.result,
                                               &out_buf, &err_buf,
                                               &comm_error);
+    else
+        ok = g_subprocess_communicate_finish(subprocess, state.result,
+                                             &out_bytes, &err_bytes, &comm_error);
     g_clear_object(&state.result);
 
     g_main_context_pop_thread_default(context);
@@ -248,5 +234,64 @@ ai_subprocess_communicate_utf8_bounded(
     if (stderr_data != NULL)
         *stderr_data = g_steal_pointer(&err_buf);
 
+    if (stdout_bytes != NULL)
+        *stdout_bytes = g_steal_pointer(&out_bytes);
+    if (stderr_bytes != NULL)
+        *stderr_bytes = g_steal_pointer(&err_bytes);
+
     return TRUE;
+}
+
+/**
+ * ai_subprocess_communicate_utf8_bounded: (skip)
+ * @subprocess: the spawned #GSubprocess to communicate with
+ * @stdin_data: (nullable): UTF-8 data to pipe to the child's stdin
+ * @timeout_ms: wall-clock deadline in milliseconds; <= 0 means no
+ *   deadline (the caller's @cancellable is then the only bound)
+ * @cancellable: (nullable): a #GCancellable
+ * @stdout_data: (out) (optional): captured stdout
+ * @stderr_data: (out) (optional): captured stderr
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Like g_subprocess_communicate_utf8(), but guaranteed to return.
+ * When the deadline expires or @cancellable fires, the child is
+ * killed with g_subprocess_force_exit(); if its pipes still have not
+ * reached EOF after a short grace period (a grandchild inherited
+ * them), the pending reads are cancelled outright.
+ *
+ * On timeout the error is %AI_ERROR_TIMEOUT; on cancellation it is
+ * %AI_ERROR_CANCELLED.  In both cases the output locations are left
+ * unset.  Otherwise behaves exactly like the GLib original: %TRUE
+ * means communication completed (the caller still checks the exit
+ * status).
+ *
+ * Runs a private #GMainContext, so it is safe on any worker thread
+ * regardless of what the default main loop is doing.
+ *
+ * Returns: %TRUE on successful communication, %FALSE on error
+ */
+gboolean
+ai_subprocess_communicate_utf8_bounded(
+    GSubprocess *subprocess, const gchar *stdin_data, gint timeout_ms,
+    GCancellable *cancellable, gchar **stdout_data, gchar **stderr_data,
+    GError **error)
+{
+    return subprocess_communicate_bounded(subprocess, stdin_data, TRUE,
+        timeout_ms, cancellable, stdout_data, stderr_data, NULL, NULL, error);
+}
+
+/**
+ * ai_subprocess_communicate_bounded: (skip)
+ *
+ * Byte-preserving counterpart of ai_subprocess_communicate_utf8_bounded(),
+ * with the same cancellation, deadline and pipe-draining guarantees.
+ */
+gboolean
+ai_subprocess_communicate_bounded(
+    GSubprocess *subprocess, GBytes *stdin_data, gint timeout_ms,
+    GCancellable *cancellable, GBytes **stdout_data, GBytes **stderr_data,
+    GError **error)
+{
+    return subprocess_communicate_bounded(subprocess, stdin_data, FALSE,
+        timeout_ms, cancellable, NULL, NULL, stdout_data, stderr_data, error);
 }

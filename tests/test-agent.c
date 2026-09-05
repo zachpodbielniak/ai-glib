@@ -485,10 +485,29 @@ test_sync_run_still_works (void)
     g_list_free(messages);
 }
 
+static void
+test_agent_outlives_brigade (void)
+{
+    g_autoptr(AiAgent) agent = ai_agent_new ("retained", NULL);
+    g_autoptr(AiBrigade) brigade = ai_brigade_new ();
+    gpointer weak_brigade = brigade;
+
+    g_object_add_weak_pointer (G_OBJECT (brigade), &weak_brigade);
+    g_assert_true (ai_brigade_add (brigade, agent));
+    g_clear_object (&brigade);
+    g_assert_null (weak_brigade);
+
+    /* Both signals used to call into the brigade after its final unref. */
+    ai_agent_record_turn (agent, 10, 20, 0);
+    ai_agent_set_state (agent, AI_AGENT_STATE_DONE);
+    g_assert_cmpint (ai_agent_get_state (agent), ==, AI_AGENT_STATE_DONE);
+}
+
 int
 main (int argc, char *argv[])
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/ai-glib/brigade/agent-outlives-brigade", test_agent_outlives_brigade);
 
     g_test_add_func("/ai-glib/budget/limits", test_budget_limits);
     g_test_add_func("/ai-glib/budget/dimensions", test_budget_each_dimension);

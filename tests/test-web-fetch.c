@@ -1432,10 +1432,30 @@ test_extract_via_tool_web_fetch (void)
                                     "SEEDED BODY CONTENT"));
 }
 
+static void
+test_extract_private_context (void)
+{
+    if (g_test_subprocess ())
+    {
+        g_autoptr(GMainContext) context = g_main_context_new ();
+
+        g_main_context_push_thread_default (context);
+        test_extract_via_tool_web_fetch ();
+        g_main_context_pop_thread_default (context);
+        return;
+    }
+
+    /* A mismatched nested loop hangs even after the mock completes its task. */
+    g_test_trap_subprocess (NULL, 3 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_passed ();
+}
+
 int
 main (int argc, char *argv[])
 {
     g_test_init (&argc, &argv, NULL);
+    g_test_add_func ("/ai-glib/web-fetch/extract/private-context",
+                     test_extract_private_context);
 
     /* html_to_text */
     g_test_add_func ("/ai-glib/web-fetch/html/basic", test_html_basic);

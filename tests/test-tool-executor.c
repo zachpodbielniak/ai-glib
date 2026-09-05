@@ -150,6 +150,19 @@ test_executor_bash_exit_code (void)
     g_assert_true (g_strstr_len (result, -1, "42") != NULL);
 }
 
+static void
+test_executor_bash_binary_output (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(AiToolUse) use = make_tool_use (
+        "bash", "{\"command\":\"printf '\\\\377'\"}");
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *result = ai_tool_executor_execute (executor, use, NULL, &error);
+
+    g_assert_no_error (error);
+    g_assert_cmpstr (result, ==, "\357\277\275");
+}
+
 /* ================================================================
  * read / write
  * ================================================================ */
@@ -785,12 +798,157 @@ test_new_empty_registers_only_host_tools (void)
     g_assert_cmpstr (ai_tool_get_name (AI_TOOL (tools->data)), ==, "app_query");
 }
 
+/* Editing a text prefix must not silently discard the rest of a binary file. */
+static void
+test_edit_embedded_nul (void)
+{
+    const gchar original[] = "alpha\0valuable tail";
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(AiToolUse) use = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *path = NULL;
+    g_autofree gchar *json = NULL;
+    g_autofree gchar *result = NULL;
+    g_autofree gchar *after = NULL;
+    gsize length;
+    gint fd;
+
+    fd = g_file_open_tmp ("ai-edit-nul-XXXXXX", &path, &error);
+    g_assert_no_error (error);
+    close (fd);
+    g_assert_true (g_file_set_contents (path, original, sizeof original - 1, &error));
+    g_assert_no_error (error);
+    json = g_strdup_printf ("{\"path\":\"%s\",\"old_string\":\"alpha\","
+                            "\"new_string\":\"beta\"}", path);
+    use = make_tool_use ("edit", json);
+    result = ai_tool_executor_execute (executor, use, NULL, &error);
+
+    g_assert_null (result);
+    g_assert_error (error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+    g_clear_error (&error);
+    g_assert_true (g_file_get_contents (path, &after, &length, &error));
+    g_assert_no_error (error);
+    g_assert_cmpmem (after, length, original, sizeof original - 1);
+    g_unlink (path);
+}
+
+/* A directory link back to the root must not duplicate every search result. */
+static void
+test_search_directory_loop (gconstpointer data)
+{
+    const gchar *tool = data;
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(AiToolUse) use = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *dir = g_dir_make_tmp ("ai-search-loop-XXXXXX", &error);
+    g_autofree gchar *file = NULL;
+    g_autofree gchar *link = NULL;
+    g_autofree gchar *json = NULL;
+    g_autofree gchar *result = NULL;
+    g_autofree gchar *expected = NULL;
+
+    g_assert_no_error (error);
+    file = g_build_filename (dir, "file.txt", NULL);
+    link = g_build_filename (dir, "loop", NULL);
+    g_assert_true (g_file_set_contents (file, "needle\n", -1, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (symlink (".", link), ==, 0);
+    json = g_strdup_printf ("{\"path\":\"%s\",\"pattern\":\"%s\"}",
+                            dir, g_str_equal (tool, "glob") ? "*.txt" : "needle");
+    use = make_tool_use (tool, json);
+    result = ai_tool_executor_execute (executor, use, NULL, &error);
+    g_assert_no_error (error);
+    if (g_str_equal (tool, "glob"))
+        expected = g_strdup_printf ("%s\n", file);
+    else
+        expected = g_strdup_printf ("%s:1: needle\n", file);
+    g_assert_cmpstr (result, ==, expected);
+    g_unlink (link);
+    g_unlink (file);
+    g_rmdir (dir);
+}
+
+typedef struct
+{
+    GCancellable *cancellable;
+    const gchar *ready_path;
+} BashCancel;
+
+static gpointer
+cancel_running_bash (gpointer data)
+{
+    BashCancel *cancel = data;
+    gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+
+    while (!g_file_test (cancel->ready_path, G_FILE_TEST_EXISTS))
+    {
+        g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+        g_usleep (1000);
+    }
+    g_cancellable_cancel (cancel->cancellable);
+    return NULL;
+}
+
+static void
+test_bash_cancellation (gconstpointer data)
+{
+    gboolean precancelled = GPOINTER_TO_INT (data);
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JsonNode) input = json_node_new (JSON_NODE_OBJECT);
+    JsonObject *object = json_object_new ();
+    g_autoptr(AiToolUse) use = NULL;
+    g_autofree gchar *dir = g_dir_make_tmp ("ai-bash-cancel-XXXXXX", &error);
+    g_autofree gchar *ready = NULL;
+    g_autofree gchar *marker = NULL;
+    g_autofree gchar *result = NULL;
+    GThread *thread = NULL;
+    BashCancel cancel;
+
+    g_assert_no_error (error);
+    ready = g_build_filename (dir, "ready", NULL);
+    marker = g_build_filename (dir, "survived", NULL);
+    ai_tool_executor_set_working_directory (executor, dir);
+    json_object_set_string_member (object, "command",
+        "printf ready > ready; sleep 0.3; printf survived > survived");
+    json_node_take_object (input, object);
+    use = ai_tool_use_new ("cancel-test", "bash", input);
+
+    cancel.cancellable = cancellable;
+    cancel.ready_path = ready;
+    if (precancelled)
+        g_cancellable_cancel (cancellable);
+    else
+        thread = g_thread_new ("cancel-bash", cancel_running_bash, &cancel);
+
+    result = ai_tool_executor_execute (executor, use, cancellable, &error);
+    if (thread != NULL)
+        g_thread_join (thread);
+    g_assert_null (result);
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+
+    /* Give an incorrectly surviving shell time to perform its side effect. */
+    g_usleep (600 * 1000);
+    g_assert_false (g_file_test (marker, G_FILE_TEST_EXISTS));
+    if (precancelled)
+        g_assert_false (g_file_test (ready, G_FILE_TEST_EXISTS));
+    g_unlink (ready);
+    g_rmdir (dir);
+}
+
 int
 main (
     int   argc,
     char *argv[]
 ){
     g_test_init (&argc, &argv, NULL);
+    g_test_add_data_func ("/ai-glib/tool-executor/bash/cancel-running", GINT_TO_POINTER (FALSE), test_bash_cancellation);
+    g_test_add_data_func ("/ai-glib/tool-executor/bash/precancelled", GINT_TO_POINTER (TRUE), test_bash_cancellation);
+
+    g_test_add_func ("/ai-glib/tool-executor/edit-embedded-nul", test_edit_embedded_nul);
+    g_test_add_data_func ("/ai-glib/tool-executor/glob-directory-loop", "glob", test_search_directory_loop);
+    g_test_add_data_func ("/ai-glib/tool-executor/grep-directory-loop", "grep", test_search_directory_loop);
 
     g_test_add_func ("/ai-glib/tool-executor/new",
                      test_executor_new);
@@ -800,6 +958,8 @@ main (
                      test_executor_bash_echo);
     g_test_add_func ("/ai-glib/tool-executor/bash/exit-code",
                      test_executor_bash_exit_code);
+    g_test_add_func ("/ai-glib/tool-executor/bash/binary-output",
+                     test_executor_bash_binary_output);
     g_test_add_func ("/ai-glib/tool-executor/read-write",
                      test_executor_read_write);
     g_test_add_func ("/ai-glib/tool-executor/edit",

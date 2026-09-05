@@ -399,7 +399,11 @@ test-gir-clean:
 	else \
 		echo "Checking for GIR scanner warnings..."; \
 		rm -f $(GIR_FILE) $(TYPELIB_FILE); \
-		OUTPUT=$$($(MAKE) GIR=1 gir 2>&1); \
+		OUTPUT=$$($(MAKE) GIR=1 gir 2>&1) || { \
+			echo "FAIL: GIR build failed:" >&2; \
+			echo "$$OUTPUT" >&2; \
+			exit 1; \
+		}; \
 		WARN=$$(echo "$$OUTPUT" | grep -c "Warning:" || true); \
 		if [ "$$WARN" != "0" ]; then \
 			echo "FAIL: $$WARN GIR scanner warning(s):"; \

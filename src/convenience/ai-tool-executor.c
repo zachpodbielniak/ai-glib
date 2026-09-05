@@ -23,6 +23,7 @@
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-streamable.h"
+#include "core/ai-subprocess-util.h"
 #include "model/ai-tool-result.h"
 #include "convenience/ai-search-provider.h"
 #include "core/ai-error.h"
@@ -809,6 +810,7 @@ tool_bash (
     g_autoptr (GSubprocessLauncher) launcher = NULL;
     g_autoptr (GSubprocess)         proc     = NULL;
     g_autoptr (GBytes)              out      = NULL;
+    g_autoptr (GError)              comm_error = NULL;
     gconstpointer                   data;
     gsize                           len      = 0;
     gchar                          *result;
@@ -821,6 +823,9 @@ tool_bash (
                              "bash: missing required parameter 'command'");
         return NULL;
     }
+
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+        return NULL;
 
     /* GSubprocess rather than popen(): popen inherits the host
      * process's working directory with no way to override it, and
@@ -837,8 +842,17 @@ tool_bash (
     if (proc == NULL)
         return NULL;
 
-    if (!g_subprocess_communicate (proc, NULL, cancellable, &out, NULL, error))
+    if (!ai_subprocess_communicate_bounded (proc, NULL, 0, cancellable,
+                                           &out, NULL, &comm_error))
+    {
+        /* Preserve the tool's existing cancellation error domain. */
+        if (g_error_matches (comm_error, AI_ERROR, AI_ERROR_CANCELLED))
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                 "bash: command cancelled");
+        else
+            g_propagate_error (error, g_steal_pointer (&comm_error));
         return NULL;
+    }
 
     data = out ? g_bytes_get_data (out, &len) : NULL;
     /* Command output is arbitrary bytes -- a build log carries progress
@@ -982,6 +996,14 @@ tool_edit (
     if (!g_file_get_contents (path, &contents, &length, error))
         return NULL;
 
+    /* String replacement cannot represent bytes past an embedded NUL. */
+    if (memchr (contents, '\0', length) != NULL)
+    {
+        g_set_error_literal (error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                             "edit: file contains NUL bytes; no edits were applied");
+        return NULL;
+    }
+
     found = strstr (contents, old_string);
     if (found == NULL)
     {
@@ -1027,7 +1049,10 @@ glob_collect (
 
         if (g_file_test (full, G_FILE_TEST_IS_DIR))
         {
-            glob_collect (full, pattern, output);
+            /* Follow an explicitly requested root, but not directory links
+             * encountered during traversal: they can lead back to an ancestor. */
+            if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
+                glob_collect (full, pattern, output);
         }
         else if (g_pattern_spec_match_string (pattern, name))
         {
@@ -1127,7 +1152,8 @@ grep_dir_recurse (
 
         if (g_file_test (full, G_FILE_TEST_IS_DIR))
         {
-            grep_dir_recurse (full, file_pattern, regex, output);
+            if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
+                grep_dir_recurse (full, file_pattern, regex, output);
         }
         else if (file_pattern == NULL
                  || g_pattern_spec_match_string (file_pattern, name))
@@ -1804,7 +1830,7 @@ web_fetch_extract (
     msg      = ai_message_new_user (user_text);
     messages = g_list_append (NULL, msg);
 
-    ec.loop = g_main_loop_new (NULL, FALSE);
+    ec.loop = g_main_loop_new (g_main_context_get_thread_default (), FALSE);
     ai_provider_chat_async (
         provider, messages,
         "You extract and summarise fetched web content. Return only what the "

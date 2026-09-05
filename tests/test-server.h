@@ -52,6 +52,8 @@ typedef struct
 	guint       fail_status;
 	/* Stall this long before replying, so a cancellation has a window. */
 	guint       delay_ms;
+	/* Redirect all paths except /redirect-target when configured. */
+	gchar      *redirect_to;
 
 	/* What was received. */
 	guint       hits;
@@ -129,6 +131,14 @@ tserver_handler(
 	ts->last_body = g_strndup(request_body->data, request_body->length);
 
 	delay_ms = ts->delay_ms;
+
+	if (ts->redirect_to != NULL && g_strcmp0(path, "/redirect-target") != 0)
+	{
+		soup_server_message_set_redirect(msg, SOUP_STATUS_FOUND,
+		                                 ts->redirect_to);
+		g_mutex_unlock(&ts->lock);
+		return;
+	}
 
 	if (ts->fail_times > 0)
 	{
@@ -373,6 +383,7 @@ tserver_free(TServer *ts)
 	g_free(ts->body);
 	g_free(ts->content_type);
 	g_free(ts->last_body);
+	g_free(ts->redirect_to);
 	g_free(ts->last_path);
 	g_free(ts->last_api_key_header);
 	g_free(ts->last_query);
