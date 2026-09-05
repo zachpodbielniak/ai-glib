@@ -2,7 +2,7 @@
 A GLib/GObject-based C library for interacting with AI providers.
 
 ** Features
-- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=), Cursor (=cursor-agent=)
+- *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=), Cursor (=cursor-agent=), [[file:docs/providers/codex-cli.org][Codex CLI]] (=codex exec=)
 - *Ollama transport*: route the Claude Code providers through =ollama launch claude= with an =ollama/<model>= model id
 - *GObject-based*: Full GObject type system integration
 - *Async Support*: Non-blocking operations via GAsyncResult/GTask
@@ -117,6 +117,7 @@ int main(void)
 | =CLAUDE_CODE_PATH=  | Claude Code | Override path to the =claude= executable         |
 | =TMUX_PATH=         | Claude Code (tmux) | Override path to the =tmux= executable    |
 | =OLLAMA_PATH=       | Claude Code | Override path to the =ollama= launcher (=ollama/= models) |
+| =CODEX_PATH=        | Codex CLI   | Override path to the =codex= executable             |
 | =GROK_PATH=         | Grok Build  | Override path to the =grok= executable              |
 
 ** Documentation

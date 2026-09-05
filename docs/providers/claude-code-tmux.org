@@ -361,3 +361,14 @@ Revoking (=ai_tool_endpoint_consumer_clear()=) clears the path, so a later run
 cannot point at a config file that has since been deleted.
 
 See [[file:../tools.org][Tools]] for the dialect/delivery split.
+
+** Native sandbox property
+=sandbox= accepts =enabled= or =disabled=; NULL preserves existing behavior.
+For example, =ai -p claude-tmux --sandbox enabled "Run checks"= merges the
+native Bash sandbox configuration into the generated settings file while
+preserving its SessionStart and Stop hooks. Enabling sets
+=allowUnsandboxedCommands=false= and =failIfUnavailable=true= as well as
+=enabled=true=. An invalid mode is rejected before starting tmux. Permission
+approval remains a separate setting. The dry-run command shows the generated
+settings file placeholder, not its eventual JSON contents.
+See [[file:../cli.org][CLI sandbox policies]] for supported provider values and scope.

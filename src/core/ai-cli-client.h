@@ -64,6 +64,7 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  * @endpoint_applied: delivers an already-validated tool endpoint the way
  *   this particular CLI takes one
  * @endpoint_kinds: the #AiAgentEndpoint kinds this class accepts
+ * @check_exit_status: whether streaming requires a successful process exit
  * @_reserved: reserved for future expansion
  *
  * Class structure for #AiCliClient.
@@ -152,7 +153,8 @@ struct _AiCliClientClass
     const gchar * const *endpoint_kinds;
 
     /* Reserved for future expansion */
-    gpointer _reserved[2];
+    gboolean check_exit_status;
+    gpointer _reserved[1];
 };
 
 AiConfig *

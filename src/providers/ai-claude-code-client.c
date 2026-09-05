@@ -20,6 +20,7 @@
 #include "providers/ai-claude-launch.h"
 #include "core/ai-cli-client-private.h"
 #include "core/ai-json-util.h"
+#include "providers/ai-claude-sandbox-private.h"
 #include "core/ai-error.h"
 #include "core/ai-session-limit.h"
 #include "core/ai-event.h"
@@ -33,6 +34,7 @@
 struct _AiClaudeCodeClient
 {
     AiCliClient parent_instance;
+    gchar *sandbox;
 
     gdouble  total_cost;
     gboolean skip_permissions;
@@ -133,6 +135,7 @@ enum
 {
     PROP_0,
     PROP_TOTAL_COST,
+    PROP_SANDBOX,
     PROP_SKIP_PERMISSIONS,
     PROP_MCP_CONFIG_PATH,
     PROP_PERMISSION_MODE,
@@ -194,6 +197,9 @@ ai_claude_code_client_get_property(
     {
         case PROP_TOTAL_COST:
             g_value_set_double(value, self->total_cost);
+            break;
+        case PROP_SANDBOX:
+            g_value_set_string(value, self->sandbox);
             break;
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
@@ -309,6 +315,10 @@ ai_claude_code_client_set_property(
 
     switch (prop_id)
     {
+        case PROP_SANDBOX:
+            g_free(self->sandbox);
+            self->sandbox = g_value_dup_string(value);
+            break;
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
@@ -729,7 +739,14 @@ emit_session_args(AiClaudeCodeClient *self, GPtrArray *args, GError **error)
 
     emit_value_flag(args, "--fallback-model", self->fallback_model);
     emit_value_flag(args, "--json-schema", self->json_schema);
-    emit_value_flag(args, "--settings", self->settings);
+    if (self->sandbox != NULL)
+    {
+        g_autofree gchar *settings = ai_claude_sandbox_settings(self->settings, self->sandbox, error);
+        if (settings == NULL) return FALSE;
+        emit_value_flag(args, "--settings", settings);
+    }
+    else
+        emit_value_flag(args, "--settings", self->settings);
     emit_value_flag(args, "--setting-sources", self->setting_sources);
     emit_value_flag(args, "--autocompact", self->autocompact);
 
@@ -1705,6 +1722,7 @@ ai_claude_code_client_finalize(GObject *object)
 {
     AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(object);
 
+    g_free(self->sandbox);
     g_free(self->last_tool_summary);
     g_free(self->mcp_config_path);
     g_free(self->permission_mode);
@@ -1812,6 +1830,10 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
      * When enabled, the CLI will not prompt for tool-use approval,
      * allowing fully autonomous operation.
      */
+    properties[PROP_SANDBOX] = g_param_spec_string(
+        "sandbox", "Sandbox", "Native Bash sandbox: enabled or disabled; NULL inherits settings",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     properties[PROP_SKIP_PERMISSIONS] =
         g_param_spec_boolean("skip-permissions",
                              "Skip Permissions",

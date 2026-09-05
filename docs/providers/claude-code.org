@@ -537,3 +537,15 @@ reported a fault.
 are the two halves of the machine format, tested as a round trip,
 because halves written apart drift until the watcher silently stops
 matching.
+
+** Native sandbox property
+Set =sandbox= to =enabled= or =disabled= (for example,
+=ai -p claude-code --sandbox enabled "Run checks"=). NULL inherits existing
+settings. Enabling merges =enabled=true=, =allowUnsandboxedCommands=false=
+and =failIfUnavailable=true= into the native sandbox object. Existing hooks,
+network/filesystem restrictions and excluded commands remain intact. Settings
+files are read and merged in memory; the original file is not rewritten.
+The same merge is used on text-summary retries. Invalid policies, malformed
+sandbox objects and unreadable settings files fail instead of discarding the
+requested policy. Disabling only changes =enabled=; other settings survive.
+See [[file:../cli.org][CLI sandbox policies]] for provider differences and native sandbox scope.

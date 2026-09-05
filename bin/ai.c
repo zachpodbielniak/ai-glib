@@ -58,6 +58,7 @@ static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
+static gchar    *opt_sandbox = NULL;
 static gchar   **opt_set             = NULL;
 static gboolean  opt_continue        = FALSE;
 
@@ -96,7 +97,7 @@ static gboolean  opt_image_strict       = FALSE;
 static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor "
+	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
 	  "(default: $AI_PROVIDER or claude)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
 	  "Model id (default: provider default). For claude-code/claude-tmux, "
@@ -116,6 +117,8 @@ static const GOptionEntry option_entries[] = {
 	{ "continue", 'c', 0, G_OPTION_ARG_NONE, &opt_continue,
 	  "Continue this directory's most recent session (CLI providers)",
 	  NULL },
+	{ "sandbox", 0, 0, G_OPTION_ARG_STRING, &opt_sandbox,
+	  "CLI sandbox policy (provider-specific)", "MODE" },
 	{ "set", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_set,
 	  "Set any provider property, e.g. --set sandbox=workspace. "
 	  "Repeatable. A bare --set NAME sets a boolean property to true. "
@@ -394,6 +397,29 @@ apply_property_overrides(GObject *provider)
 {
 	gsize i;
 
+	if (opt_sandbox != NULL)
+	{
+		g_auto(GValue) value = G_VALUE_INIT;
+		GParamSpec *pspec = g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "sandbox");
+		const gchar *text = opt_sandbox;
+		if (pspec == NULL)
+		{
+			g_printerr("This provider does not support --sandbox\n");
+			return FALSE;
+		}
+		if (G_PARAM_SPEC_VALUE_TYPE(pspec) == G_TYPE_BOOLEAN)
+		{
+			if (g_str_equal(text, "enabled")) text = "true";
+			else if (g_str_equal(text, "disabled")) text = "false";
+		}
+		if (!value_from_string(&value, pspec, text))
+		{
+			g_printerr("Invalid sandbox value '%s'\n", opt_sandbox);
+			return FALSE;
+		}
+		g_object_set_property(provider, "sandbox", &value);
+	}
+
 	if (opt_set == NULL)
 		return TRUE;
 
@@ -492,6 +518,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	case AI_PROVIDER_ANTIGRAVITY:
 		provider = G_OBJECT(ai_antigravity_client_new_with_config(config));
 		break;
+	case AI_PROVIDER_CODEX_CLI:
+		provider = G_OBJECT(ai_codex_cli_client_new_with_config(config));
+		break;
 	case AI_PROVIDER_CURSOR:
 		provider = G_OBJECT(ai_cursor_client_new_with_config(config));
 		break;
@@ -538,6 +567,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_ANTIGRAVITY_CLIENT(provider))
 		ai_antigravity_client_set_skip_permissions(
 			AI_ANTIGRAVITY_CLIENT(provider), opt_skip_perms);
+	else if (AI_IS_CODEX_CLI_CLIENT(provider))
+		ai_codex_cli_client_set_skip_permissions(
+			AI_CODEX_CLI_CLIENT(provider), opt_skip_perms);
 	else if (AI_IS_CURSOR_CLIENT(provider))
 		ai_cursor_client_set_skip_permissions(
 			AI_CURSOR_CLIENT(provider), opt_skip_perms);
@@ -577,7 +609,7 @@ list_providers(void)
 		AI_PROVIDER_GROK, AI_PROVIDER_OLLAMA, AI_PROVIDER_CLAUDE_CODE,
 		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE,
 		AI_PROVIDER_GROK_BUILD, AI_PROVIDER_ANTIGRAVITY,
-		AI_PROVIDER_CURSOR
+		AI_PROVIDER_CURSOR, AI_PROVIDER_CODEX_CLI
 	};
 	gsize i;
 
@@ -598,6 +630,7 @@ list_providers(void)
 		case AI_PROVIDER_OPENCODE:
 		case AI_PROVIDER_GROK_BUILD:
 		case AI_PROVIDER_ANTIGRAVITY:
+		case AI_PROVIDER_CODEX_CLI:
 		case AI_PROVIDER_CURSOR:
 			kind = "CLI";
 			break;

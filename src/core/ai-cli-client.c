@@ -2035,12 +2035,24 @@ typedef struct
      * dangling pointer, so it is left to the callback instead.
      */
     gboolean          read_pending;
+    gboolean          stderr_pending;
+    gboolean          wait_pending;
+    gboolean          write_pending;
+    gsize             stdin_offset;
+    gsize             stdin_length;
+    gboolean          stdout_eof;
+    gboolean          process_exited;
+    GString          *stderr_text;
+    GCancellable     *io_cancellable;
+    gulong            cancel_id;
 
     gchar            *stdin_data;
     GSource          *timeout_source;   /* owned; NULL when none is armed */
 } StreamRun;
 
 static void stream_run_read_next(StreamRun *run);
+static void stream_run_complete(StreamRun *run);
+static void stream_run_maybe_complete(StreamRun *run);
 
 /*
  * Closes the text block that is open, if there is one.
@@ -2094,6 +2106,10 @@ stream_run_free(StreamRun *run)
         g_clear_pointer(&run->timeout_source, g_source_unref);
     }
 
+    if (run->cancel_id != 0)
+        g_cancellable_disconnect(run->cancellable, run->cancel_id);
+    g_clear_object(&run->io_cancellable);
+    if (run->stderr_text != NULL) g_string_free(run->stderr_text, TRUE);
     g_clear_object(&run->task);
     g_clear_object(&run->client);
     g_clear_object(&run->subprocess);
@@ -2108,6 +2124,14 @@ stream_run_free(StreamRun *run)
     }
 
     g_slice_free(StreamRun, run);
+}
+
+static void
+stream_run_maybe_free(StreamRun *run)
+{
+    if (run->finished && !run->read_pending && !run->stderr_pending &&
+        !run->wait_pending && !run->write_pending)
+        stream_run_free(run);
 }
 
 /*
@@ -2137,6 +2161,11 @@ stream_run_finish_once(
     }
 
     run->finished = TRUE;
+    if (error != NULL)
+    {
+        g_cancellable_cancel(run->io_cancellable);
+        g_subprocess_force_exit(run->subprocess);
+    }
 
     if (error != NULL)
     {
@@ -2148,10 +2177,7 @@ stream_run_finish_once(
         g_task_return_pointer(run->task, response, g_object_unref);
     }
 
-    if (!run->read_pending)
-    {
-        stream_run_free(run);
-    }
+    stream_run_maybe_free(run);
 }
 
 /*
@@ -2322,7 +2348,9 @@ on_stream_line_read(
      */
     if (run->finished)
     {
-        stream_run_free(run);
+        /* Finish the pending operation even after task completion. */
+        line = g_data_input_stream_read_line_finish(run->data_stream, result, NULL, NULL);
+        stream_run_maybe_free(run);
         return;
     }
 
@@ -2337,7 +2365,8 @@ on_stream_line_read(
 
     if (line == NULL)
     {
-        stream_run_complete(run);
+        run->stdout_eof = TRUE;
+        stream_run_maybe_complete(run);
         return;
     }
 
@@ -2385,9 +2414,106 @@ stream_run_read_next(StreamRun *run)
     g_data_input_stream_read_line_async(
         run->data_stream,
         G_PRIORITY_DEFAULT,
-        run->cancellable,
+        run->io_cancellable,
         on_stream_line_read,
         run);
+}
+
+/* Drain stderr concurrently, retaining only a bounded diagnostic tail. */
+static void stream_run_read_stderr(StreamRun *run);
+static void
+on_stream_stderr(GObject *source, GAsyncResult *result, gpointer data)
+{
+    StreamRun *run = data;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GBytes) bytes = g_input_stream_read_bytes_finish(G_INPUT_STREAM(source), result, &error);
+    gsize size = 0;
+    const gchar *text = bytes != NULL ? g_bytes_get_data(bytes, &size) : NULL;
+    run->stderr_pending = FALSE;
+    if (run->finished) { stream_run_maybe_free(run); return; }
+    if (error != NULL) { stream_run_finish_once(run, NULL, g_steal_pointer(&error)); return; }
+    if (size > 0)
+    {
+        g_string_append_len(run->stderr_text, text, size);
+        if (run->stderr_text->len > 8192)
+            g_string_erase(run->stderr_text, 0, run->stderr_text->len - 8192);
+        stream_run_read_stderr(run);
+    }
+    else stream_run_maybe_complete(run);
+}
+static void
+stream_run_read_stderr(StreamRun *run)
+{
+    GInputStream *stream = g_subprocess_get_stderr_pipe(run->subprocess);
+    if (stream == NULL) return;
+    run->stderr_pending = TRUE;
+    g_input_stream_read_bytes_async(stream, 4096, G_PRIORITY_DEFAULT,
+                                   run->io_cancellable, on_stream_stderr, run);
+}
+static void
+on_stream_wait(GObject *source, GAsyncResult *result, gpointer data)
+{
+    StreamRun *run = data;
+    g_autoptr(GError) error = NULL;
+    gboolean success = g_subprocess_wait_finish(G_SUBPROCESS(source), result, &error);
+    run->wait_pending = FALSE;
+    if (run->finished) { stream_run_maybe_free(run); return; }
+    if (!success) { stream_run_finish_once(run, NULL, g_steal_pointer(&error)); return; }
+    run->process_exited = TRUE;
+    stream_run_maybe_complete(run);
+}
+static void
+stream_run_maybe_complete(StreamRun *run)
+{
+    if (!run->stdout_eof || !run->process_exited || run->stderr_pending || run->write_pending)
+        return;
+    /* Preserve older providers' envelope-authoritative exit semantics. */
+    if (AI_CLI_CLIENT_GET_CLASS(run->client)->check_exit_status &&
+        !g_subprocess_get_successful(run->subprocess))
+    {
+        stream_run_finish_once(run, NULL,
+            g_error_new(AI_ERROR, AI_ERROR_CLI_EXECUTION, "CLI failed: %s",
+                        run->stderr_text->len ? run->stderr_text->str : "unsuccessful process exit"));
+        return;
+    }
+    stream_run_complete(run);
+}
+static void stream_run_write_stdin(StreamRun *run);
+static void
+on_stream_stdin(GObject *source, GAsyncResult *result, gpointer data)
+{
+    StreamRun *run = data;
+    g_autoptr(GError) error = NULL;
+    gsize written = 0;
+    gboolean success = g_output_stream_write_all_finish(G_OUTPUT_STREAM(source), result, &written, &error);
+    run->stdin_offset += written;
+    run->write_pending = FALSE;
+    if (run->finished) { stream_run_maybe_free(run); return; }
+    if (!success) { stream_run_finish_once(run, NULL, g_steal_pointer(&error)); return; }
+    if (run->stdin_data != NULL && run->stdin_data[run->stdin_offset] != '\0')
+    {
+        stream_run_write_stdin(run);
+        return;
+    }
+    g_output_stream_close(G_OUTPUT_STREAM(source), NULL, NULL);
+    stream_run_maybe_complete(run);
+}
+static void
+stream_run_write_stdin(StreamRun *run)
+{
+    const gchar *text = run->stdin_data != NULL ? run->stdin_data + run->stdin_offset : "";
+    run->write_pending = TRUE;
+    /* Unix pipes may be writable for only PIPE_BUF bytes. A larger write
+     * can block the main context despite using the asynchronous API. */
+    g_output_stream_write_all_async(g_subprocess_get_stdin_pipe(run->subprocess),
+        text, MIN(run->stdin_length - run->stdin_offset, 512), G_PRIORITY_DEFAULT,
+        run->io_cancellable, on_stream_stdin, run);
+}
+static void
+on_stream_cancelled(GCancellable *cancellable, gpointer data)
+{
+    (void)cancellable;
+    g_cancellable_cancel(G_CANCELLABLE(data));
 }
 
 /*
@@ -2400,30 +2526,9 @@ stream_run_read_next(StreamRun *run)
 static void
 stream_run_start(StreamRun *run)
 {
-    g_autoptr(GError) error = NULL;
     GInputStream *stdout_stream;
     GOutputStream *stdin_stream;
     gint timeout_ms;
-
-    if (run->stdin_data != NULL)
-    {
-        stdin_stream = g_subprocess_get_stdin_pipe(run->subprocess);
-
-        if (stdin_stream != NULL)
-        {
-            g_output_stream_write_all(stdin_stream,
-                                      run->stdin_data,
-                                      strlen(run->stdin_data),
-                                      NULL, NULL, &error);
-            g_output_stream_close(stdin_stream, NULL, NULL);
-        }
-
-        if (error != NULL)
-        {
-            stream_run_finish_once(run, NULL, g_steal_pointer(&error));
-            return;
-        }
-    }
 
     stdout_stream = g_subprocess_get_stdout_pipe(run->subprocess);
 
@@ -2467,6 +2572,14 @@ stream_run_start(StreamRun *run)
     }
 
     stream_run_read_next(run);
+    stream_run_read_stderr(run);
+    run->wait_pending = TRUE;
+    g_subprocess_wait_async(run->subprocess, run->io_cancellable, on_stream_wait, run);
+    stdin_stream = g_subprocess_get_stdin_pipe(run->subprocess);
+    if (stdin_stream != NULL)
+    {
+        stream_run_write_stdin(run);
+    }
 }
 
 /**
@@ -2528,6 +2641,12 @@ ai_cli_client_stream_run_async(
     klass = AI_CLI_CLIENT_GET_CLASS(self);
     task = g_task_new(self, cancellable, callback, user_data);
 
+    if (g_task_return_error_if_cancelled(task))
+    {
+        g_object_unref(task);
+        return;
+    }
+
     executable = ai_cli_client_resolve_executable(self, &error);
     if (executable == NULL)
     {
@@ -2584,7 +2703,13 @@ ai_cli_client_stream_run_async(
     run->task = task;
     run->subprocess = g_object_ref(subprocess);
     run->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
+    run->io_cancellable = g_cancellable_new();
+    run->stderr_text = g_string_new(NULL);
+    if (cancellable != NULL)
+        run->cancel_id = g_cancellable_connect(cancellable, G_CALLBACK(on_stream_cancelled),
+                                               g_object_ref(run->io_cancellable), g_object_unref);
     run->stdin_data = stdin_data;   /* ownership transferred */
+    run->stdin_length = stdin_data != NULL ? strlen(stdin_data) : 0;
 
     stream_run_start(run);
 }

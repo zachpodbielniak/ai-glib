@@ -29,6 +29,7 @@
 #include "core/ai-error.h"
 #include "core/ai-cli-client-private.h"
 #include "core/ai-json-util.h"
+#include "providers/ai-claude-sandbox-private.h"
 #include "core/ai-provider.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-message.h"
@@ -43,6 +44,7 @@
 struct _AiClaudeTmuxClient
 {
     AiCliClient parent_instance;
+    gchar *sandbox;
 
     gchar    *tmux_path;            /* override for tmux binary */
     gchar    *socket_name;          /* tmux -L <name>: our OWN server, never
@@ -97,6 +99,7 @@ enum
     PROP_CLAUDE_PROJECT_DIR,
     PROP_TURN_TIMEOUT_MS,
     PROP_STARTUP_TIMEOUT_MS,
+    PROP_SANDBOX,
     PROP_SKIP_PERMISSIONS,
     PROP_MCP_CONFIG_PATH,
     PROP_KEEP_ARTIFACTS,
@@ -1340,6 +1343,9 @@ ai_claude_tmux_client_get_property(
         case PROP_STARTUP_TIMEOUT_MS:
             g_value_set_int(value, self->startup_timeout_ms);
             break;
+        case PROP_SANDBOX:
+            g_value_set_string(value, self->sandbox);
+            break;
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
@@ -1410,6 +1416,10 @@ ai_claude_tmux_client_set_property(
         case PROP_STARTUP_TIMEOUT_MS:
             self->startup_timeout_ms = g_value_get_int(value);
             break;
+        case PROP_SANDBOX:
+            g_free(self->sandbox);
+            self->sandbox = g_value_dup_string(value);
+            break;
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
@@ -1454,6 +1464,7 @@ ai_claude_tmux_client_finalize(GObject *object)
 {
     AiClaudeTmuxClient *self = AI_CLAUDE_TMUX_CLIENT(object);
 
+    g_free(self->sandbox);
     g_free(self->tmux_path);
     g_free(self->socket_name);
     g_free(self->claude_project_dir);
@@ -1584,6 +1595,10 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
         "Max time to wait for claude to create its JSONL transcript",
         1, G_MAXINT, 15000,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_SANDBOX] = g_param_spec_string(
+        "sandbox", "Sandbox", "Native Bash sandbox: enabled or disabled; NULL inherits settings",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_SKIP_PERMISSIONS] = g_param_spec_boolean(
         "skip-permissions", "Skip Permissions",
@@ -2078,6 +2093,15 @@ ai_claude_tmux_client_chat_sync_real(
         return NULL;
     }
 
+    if (self->sandbox != NULL &&
+        g_strcmp0(self->sandbox, "enabled") != 0 &&
+        g_strcmp0(self->sandbox, "disabled") != 0)
+    {
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                            "Claude sandbox must be enabled or disabled");
+        return NULL;
+    }
+
     /* ---------- preflight ---------- */
     runtime_dir = get_runtime_dir(error);
     if (runtime_dir == NULL)
@@ -2214,6 +2238,13 @@ ai_claude_tmux_client_chat_sync_real(
      * up by any shell/argv quirks in the tmux invocation chain.
      */
     settings_json = build_settings_json(ready_path, sentinel_path);
+    if (self->sandbox != NULL)
+    {
+        gchar *merged = ai_claude_sandbox_settings(settings_json, self->sandbox, error);
+        if (merged == NULL) return NULL;
+        g_free(settings_json);
+        settings_json = merged;
+    }
     if (!g_file_set_contents(settings_path, settings_json, -1, error))
     {
         g_prefix_error(error, "Failed to write settings file '%s': ",

@@ -720,6 +720,9 @@ static const struct {
     { "grok_build",  AI_PROVIDER_GROK_BUILD },
     { "antigravity", AI_PROVIDER_ANTIGRAVITY },
     { "agy",         AI_PROVIDER_ANTIGRAVITY },
+    { "codex_cli",   AI_PROVIDER_CODEX_CLI },
+    { "codex-cli",   AI_PROVIDER_CODEX_CLI },
+    { "codex",       AI_PROVIDER_CODEX_CLI },
     { "cursor",      AI_PROVIDER_CURSOR },
     { NULL,          0 }
 };

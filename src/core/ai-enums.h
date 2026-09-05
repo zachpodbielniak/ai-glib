@@ -36,6 +36,7 @@ G_BEGIN_DECLS
  *   binary in print / stream-json mode)
  * @AI_PROVIDER_CURSOR: Cursor Agent CLI wrapper (the `cursor-agent`
  *   binary in `--print` mode)
+ * @AI_PROVIDER_CODEX_CLI: Codex CLI wrapper (codex exec)
  *
  * Enumeration of supported AI providers.
  */
@@ -51,7 +52,8 @@ typedef enum
     AI_PROVIDER_CLAUDE_TMUX,
     AI_PROVIDER_GROK_BUILD,
     AI_PROVIDER_ANTIGRAVITY,
-    AI_PROVIDER_CURSOR
+    AI_PROVIDER_CURSOR,
+    AI_PROVIDER_CODEX_CLI
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);

@@ -1,0 +1,189 @@
+* Codex CLI
+=AiCodexCliClient= wraps =codex exec --json= using saved Codex CLI authentication.
+Select it with =codex-cli= (alias =codex=). Install Codex and run =codex login=
+before making requests. =CODEX_PATH= overrides the executable found on PATH;
+the inherited =executable-path= property takes precedence over both.
+
+#+begin_src sh
+ai -p codex-cli -m gpt-6-astra --sandbox workspace-write "Fix the failing test"
+ai -p codex-cli --sandbox read-only --stream "Explain this project"
+ai -p codex-cli --continue "Summarize the changes"
+ai -p codex-cli --set session-id=THREAD_ID --sandbox workspace-write "Continue"
+#+end_src
+
+** Models
+The built-in list returned by =ai_provider_list_models_async()= contains
+the models supplied for this provider:
+
+| Model | Public constant |
+|-------+-----------------|
+| =gpt-6-astra= (default) | =AI_CODEX_CLI_MODEL_GPT_6_ASTRA= |
+| =gpt-5.6-sol= | =AI_CODEX_CLI_MODEL_GPT_5_6_SOL= |
+| =gpt-5.6-terra= | =AI_CODEX_CLI_MODEL_GPT_5_6_TERRA= |
+| =gpt-5.6-luna= | =AI_CODEX_CLI_MODEL_GPT_5_6_LUNA= |
+| =gpt-5.5= | =AI_CODEX_CLI_MODEL_GPT_5_5= |
+| =gpt-5.4-mini= | =AI_CODEX_CLI_MODEL_GPT_5_4_MINI= |
+| =gpt-5.3-codex-spark= | =AI_CODEX_CLI_MODEL_GPT_5_3_CODEX_SPARK= |
+
+The =model= property also accepts other model IDs. Availability and supported
+reasoning efforts depend on the installed CLI and account. =effort-level=
+is sent through =model_reasoning_effort= without silently changing the level.
+
+** Properties
+All [[../api-reference/ai-cli-client.org][AiCliClient properties]] apply, including =working-directory=,
+=process-timeout-ms=, =session-id= and =session-persistence=.
+
+| Property | Type | Default | Meaning |
+|----------+------+---------+---------|
+| =sandbox= | string | NULL | Explicit =read-only=, =workspace-write= or =danger-full-access=; NULL selects =read-only= |
+| =skip-permissions= | boolean | FALSE | Pass =--dangerously-bypass-approvals-and-sandbox= |
+| =continue-session= | boolean | FALSE | Resume the latest session when no explicit session ID exists |
+| =additional-directories= | string | NULL | Comma-separated writable paths, repeated as =--add-dir= |
+| =profile= | string | NULL | Codex configuration profile |
+| =search= | boolean | FALSE | Enable live web search |
+
+Invalid sandbox values and conflicting restrictive sandbox/bypass settings
+fail before launching a subprocess. Approval policy is =never= for headless
+execution; commands disallowed by the sandbox fail without prompting.
+
+Prompts travel through stdin, including projected conversation history and
+the initial system instructions. Portable conversation resume sends only the applicable
+new context, as described below. Disabling session persistence passes =--ephemeral= and prevents
+resume, even if =continue-session= or a session ID is set. System instructions
+are included in the prompt because exec has no separate system-prompt flag.
+=max-tokens= is not mapped to a CLI flag.
+
+** Responses and events
+Sync, async and streaming calls consume the same JSONL protocol. Completed
+agent messages become response text; reasoning, tool starts/results and usage
+are emitted as normalized =AiEvent= values. Codex emits completed message
+items, so text streaming is at message granularity. Tool execution output is
+not inserted into the assistant's prose. Input token counts include cached
+input tokens, as reported by Codex; the library's usage type has no separate
+cache counter or reasoning-token counter. No monetary cost is invented.
+
+Malformed output, failed turns, truncated output and unsuccessful process
+exits return errors. The subprocess pipeline drains stderr, writes stdin
+asynchronously and enforces cancellation and timeouts. The provider inherits
+environment endpoint delivery; it does not translate other providers' MCP
+configuration formats into Codex configuration.
+
+Protocol reference: [[https://learn.chatgpt.com/docs/non-interactive-mode][official OpenAI non-interactive mode documentation]].
+
+** C usage and error handling
+#+begin_src c
+#include <ai-glib.h>
+
+static gboolean
+explain_project(const gchar *directory, GError **error)
+{
+    g_autoptr(AiCodexCliClient) codex = ai_codex_cli_client_new();
+    g_autoptr(AiMessage) message = ai_message_new_user("Explain this project");
+    g_autoptr(AiResponse) response = NULL;
+    g_autofree gchar *text = NULL;
+    GList *messages = g_list_append(NULL, message);
+    AiCliClient *client = AI_CLI_CLIENT(codex);
+
+    ai_cli_client_set_working_directory(client, directory);
+    ai_cli_client_set_process_timeout_ms(client, 120000);
+    ai_codex_cli_client_set_sandbox(codex, "read-only");
+    response = ai_cli_client_chat_sync(client, messages, NULL, error);
+    g_list_free(messages);
+    if (response == NULL)
+        return FALSE;
+
+    text = ai_response_get_text(response);
+    if (text != NULL)
+        g_print("%s\n", text);
+    return TRUE;
+}
+#+end_src
+
+For asynchronous calls, finish with =ai_provider_chat_finish()= or
+=ai_streamable_chat_stream_finish()=, matching the entry point. Keep the
+client and its configuration stable until completion; overlapping turns on
+one instance are not supported. Use separate instances for independent
+concurrent requests. Always check the finish result: text already delivered
+by a streaming callback does not guarantee that the turn succeeded.
+
+| Condition | Result |
+|-----------+--------|
+| Invalid sandbox or conflicting bypass flag | =AI_ERROR_INVALID_REQUEST= before subprocess launch |
+| Unknown nonempty effort string | =AI_ERROR_INVALID_REQUEST= before subprocess launch |
+| Missing executable | Executable-resolution error from =AiCliClient= |
+| Invalid JSON or missing required event fields | =AI_ERROR_CLI_PARSE_ERROR= |
+| EOF before the current turn completes | =AI_ERROR_CLI_PARSE_ERROR= |
+| =turn.failed=, top-level =error=, error item | =AI_ERROR_CLI_EXECUTION=, even if the child exits zero |
+| Nonzero process exit | =AI_ERROR_CLI_EXECUTION=; streaming retains up to 8 KiB of stderr diagnostics |
+| Deadline exceeded | =AI_ERROR_TIMEOUT= |
+| Cancelled asynchronous request | =G_IO_ERROR_CANCELLED=; an already cancelled request does not launch a child |
+| Failed individual native tool | Failed tool-result event; the agent can recover and complete its turn |
+| Completed turn without prose | Valid response with no text; callers must allow =ai_response_get_text()= to return NULL |
+
+Whitespace-only lines and unknown top-level event types are ignored for
+forward compatibility. Unknown item types become status events. Required
+fields of recognized events remain type-checked. Usage fields are optional:
+missing or nonnumeric counts become zero, negative counts become zero, and
+oversized counts saturate at =G_MAXINT=. Cumulative message updates are not
+appended to the answer; completed items supply the text once. A later
+=turn.started= clears completion state, so truncating that turn cannot reuse
+the previous turn's successful completion.
+
+** Configuration and session details
+- =sandbox=NULL= always selects read-only unless =skip-permissions= is true.
+  An empty sandbox string is invalid. Explicit =danger-full-access= can be
+  combined with bypass; =read-only= and =workspace-write= cannot.
+- =effort-level= defaults to =medium=. The C setter maps NULL back to
+  =medium=; an empty string omits the reasoning override. Accepted nonempty
+  values are =none=, =minimal=, =low=, =medium=, =high=, =xhigh=, =max= and
+  =ultra=. The selected model may support only a subset.
+- An explicit =session-id= wins over =continue-session=. With persistence
+  disabled, the stored ID is ignored and newly reported IDs are not captured;
+  the previously stored ID is retained for possible later reuse.
+- After an =AiConversation= provider switch, portable history seeds the new
+  session. Once its native session ID is captured, only the latest message
+  is replayed. Direct callers supply the messages they want sent; a native
+  session alone does not cause arbitrary caller-supplied history to be pruned.
+- =additional-directories= trims whitespace and skips empty comma-separated
+  entries. Paths containing spaces remain single argv entries. Paths
+  containing commas cannot be represented by this property.
+- =profile=NULL= or an empty profile omits the profile flag. =search=false=
+  omits =--search=; it does not override a search setting in user config.
+- The wrapper passes =--skip-git-repo-check=, permitting non-repository working
+  directories. User Codex configuration and project instructions still apply.
+- =tools= arguments do not register local =AiTool= objects with Codex. Codex
+  executes its own native/configured tools. Image content in conversation
+  messages is projected to a textual marker; binary images are not attached
+  through =--image= by this provider.
+
+** Verification coverage
+The tests use temporary executable stubs and captured argv/stdin, requiring
+no saved credentials, model access or network calls.
+
+| Test area | Coverage |
+|-----------+----------|
+| Provider registration | Factory, canonical name, alias, type, seven ordered model IDs |
+| Arguments | All sandbox/bypass combinations, invalid/empty policies, effort options, profile/search, directory splitting |
+| Sessions | Explicit ID precedence, portable history, resumed context, stateless prompts, capture suppression |
+| Events | Event order, reasoning/text separation, cumulative updates, usage, command/file/MCP/search result translation |
+| Parser | Invalid roots and field types, whitespace, unknown events, missing usage, oversized counters, truncated later turns |
+| Processes | Sync/async/stream success, stdin privacy, working directory, nonzero exit, structured error with zero exit, stderr-only failure |
+| Pipe handling | 512 KiB prompt with 256 KiB stderr, cancellation while stdin is blocked, timeout, pre-cancellation |
+| Claude sandbox | Inline/file settings, preserved hooks/network/filesystem/exclusions, unchanged source files, invalid policies/structures, missing files |
+
+#+begin_src sh
+make tests
+build/release/tests/test-codex-cli-client
+build/release/tests/test-ai-cli
+build/release/tests/test-cli-stream-reader
+build/release/tests/test-source-teardown
+make test
+#+end_src
+
+The full suite includes tmux tests and therefore needs a usable tmux runtime
+and terminal environment. Build paths above assume the default release build.
+Stub tests verify the library's command construction, protocol handling and
+process lifecycle. They do not prove model availability, real authentication,
+or OS-level sandbox enforcement by installed CLIs. Those require integration
+checks against the installed CLI versions and target operating system. No
+finite suite establishes coverage of every possible external CLI behavior.

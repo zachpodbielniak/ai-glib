@@ -1,7 +1,7 @@
 * AiCliClient
 =AiCliClient= is the derivable base class behind every provider that wraps a
 command-line coding agent: [[../providers/claude-code.org][Claude Code]], [[../providers/claude-code-tmux.org][Claude Code (tmux)]], [[../providers/opencode.org][OpenCode]],
-[[../providers/grok-build.org][Grok Build]], [[../providers/antigravity.org][Antigravity]] and [[../providers/cursor.org][Cursor]]. It is the CLI-side counterpart to [[file:ai-client.org][=AiClient=]], which is the base
+[[../providers/grok-build.org][Grok Build]], [[../providers/antigravity.org][Antigravity]], [[../providers/cursor.org][Cursor]] and [[../providers/codex-cli.org][Codex CLI]]. It is the CLI-side counterpart to [[file:ai-client.org][=AiClient=]], which is the base
 for the HTTP providers.
 
 A subclass says *what command to run and how to read its output*; the base
@@ -17,6 +17,7 @@ GObject
     AiClaudeTmuxClient (final, AiProvider)
     AiOpenCodeClient   (final, AiProvider, AiStreamable)
     AiGrokBuildClient  (final, AiProvider, AiStreamable)
+    AiCodexCliClient   (final, AiProvider, AiStreamable)
 #+end_example
 
 The interfaces live on the subclasses rather than here, because what a

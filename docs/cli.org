@@ -22,7 +22,7 @@ piping.
 ** Options
 | Option                  | Description                                                        |
 |-------------------------+--------------------------------------------------------------------|
-| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build, antigravity (agy), cursor (default: =$AI_PROVIDER= or =claude=) |
+| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli (default: =$AI_PROVIDER= or =claude=) |
 | =-m=, =--model ID=      | Model id (default: provider default). =ollama/<id>= on the Claude Code providers selects the Ollama transport |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
@@ -50,6 +50,7 @@ Providers:
   grok-build     CLI
   antigravity    CLI
   cursor         CLI
+  codex-cli      CLI
 #+end_example
 
 A one-shot chat (HTTP provider):
@@ -322,3 +323,35 @@ A built-in like =/clear= acts on a session, and a one-shot run has none,
 so =ai= says so and points at =ai-tui=. An unknown =/name= is an error
 rather than a prompt beginning with a slash --- use =--no-expand= if you
 meant it literally.
+
+** Sandbox policies
+=--sandbox MODE= sets the selected provider's native =sandbox= property.
+It can also be set with =--set sandbox=MODE=. Unsupported providers reject
+=--sandbox= instead of silently ignoring it.
+
+| Provider | Values | Implementation |
+|----------+--------+----------------|
+| =codex-cli= | =read-only=, =workspace-write=, =danger-full-access= | =codex exec --sandbox=; defaults to read-only |
+| =claude-code=, =claude-tmux= | =enabled=, =disabled= | Merge native Bash sandbox settings with existing settings/hooks |
+| =grok-build= | Native Grok profile, e.g. =workspace= | Existing =--sandbox PROFILE= support |
+| =cursor= | =enabled=, =disabled= | Existing =--sandbox MODE= support |
+| =antigravity= | =enabled= / =true=, =disabled= / =false= | Boolean =--sandbox= flag |
+
+Claude's =enabled= sets =sandbox.enabled=true=,
+=allowUnsandboxedCommands=false= and =failIfUnavailable=true=. Existing
+filesystem/network rules and excluded commands are retained. This is Claude's
+native Bash sandbox, whose coverage and platform support are defined by
+[[https://code.claude.com/docs/en/sandboxing][Claude's sandbox documentation]]; permission approval and sandboxing are
+separate controls. Leaving the property unset preserves existing settings.
+OpenCode and HTTP providers have no sandbox property; OpenCode's permission
+controls do not supply an OS sandbox.
+
+#+begin_src sh
+ai -p codex-cli --sandbox workspace-write --set additional-directories=/tmp/build "Fix tests"
+ai -p claude-code --sandbox enabled "Run the checks"
+ai -p grok-build --sandbox workspace "Inspect the project"
+ai -p cursor --sandbox enabled "Inspect the project"
+ai -p antigravity --sandbox enabled "Inspect the project"
+#+end_src
+
+See [[file:providers/codex-cli.org][Codex CLI]] for models, session behavior and provider properties.

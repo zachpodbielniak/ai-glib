@@ -33,6 +33,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_CLAUDE_TMUX, "AI_PROVIDER_CLAUDE_TMUX", "claude-tmux" },
             { AI_PROVIDER_GROK_BUILD, "AI_PROVIDER_GROK_BUILD", "grok-build" },
             { AI_PROVIDER_ANTIGRAVITY, "AI_PROVIDER_ANTIGRAVITY", "antigravity" },
+            { AI_PROVIDER_CODEX_CLI, "AI_PROVIDER_CODEX_CLI", "codex-cli" },
             { AI_PROVIDER_CURSOR, "AI_PROVIDER_CURSOR", "cursor" },
             { 0, NULL, NULL }
         };
@@ -297,6 +298,8 @@ ai_provider_type_to_string(AiProviderType provider)
             return "grok-build";
         case AI_PROVIDER_ANTIGRAVITY:
             return "antigravity";
+        case AI_PROVIDER_CODEX_CLI:
+            return "codex-cli";
         case AI_PROVIDER_CURSOR:
             return "cursor";
         default:
@@ -324,6 +327,11 @@ ai_provider_type_from_string(const gchar *str)
         g_ascii_strcasecmp(str, "anthropic") == 0)
     {
         return AI_PROVIDER_CLAUDE;
+    }
+    else if (g_ascii_strcasecmp(str, "codex-cli") == 0 ||
+             g_ascii_strcasecmp(str, "codex") == 0)
+    {
+        return AI_PROVIDER_CODEX_CLI;
     }
     else if (g_ascii_strcasecmp(str, "openai") == 0 ||
              g_ascii_strcasecmp(str, "gpt") == 0)

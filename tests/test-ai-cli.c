@@ -1134,6 +1134,50 @@ test_cli_dry_run_skips_expansion(void)
 	harness_sandbox_free(box);
 }
 
+static void
+test_codex_sandbox_cli(void)
+{
+    const gchar *args[] = { "-p", "codex-cli", "--sandbox", "workspace-write",
+        "--set", "additional-directories=/tmp/build", "--continue", "--dry-run", "private prompt", NULL };
+    Run run = { 0 };
+    run_ai(args, NULL, &run);
+    g_assert_cmpint(run.exit_status, ==, 0);
+    g_assert_nonnull(strstr(run.stdout_data, "--sandbox workspace-write"));
+    g_assert_nonnull(strstr(run.stdout_data, "--model gpt-6-astra"));
+    g_assert_nonnull(strstr(run.stdout_data, "--add-dir /tmp/build"));
+    g_assert_nonnull(strstr(run.stdout_data, "resume --last -"));
+    g_assert_null(strstr(run.stdout_data, "private prompt"));
+    run_clear(&run);
+}
+
+static void
+test_sandbox_option(void)
+{
+    const gchar *providers[] = { "claude-code", "grok-build", "cursor", "antigravity", "openai", "opencode" };
+    const gchar *modes[] = { "enabled", "workspace", "enabled", "disabled", "read-only", "enabled" };
+    guint i;
+    for (i = 0; i < G_N_ELEMENTS(providers); i++)
+    {
+        const gchar *args[] = { "-p", providers[i], "--sandbox", modes[i], "--dry-run", "hi", NULL };
+        Run run = { 0 };
+        run_ai(args, NULL, &run);
+        if (i < 4)
+        {
+            g_assert_cmpint(run.exit_status, ==, 0);
+            if (i == 0) g_assert_nonnull(strstr(run.stdout_data, "allowUnsandboxedCommands"));
+            if (i == 1) g_assert_nonnull(strstr(run.stdout_data, "--sandbox workspace"));
+            if (i == 2) g_assert_nonnull(strstr(run.stdout_data, "--sandbox enabled"));
+            if (i == 3) g_assert_null(strstr(run.stdout_data, "--sandbox"));
+        }
+        else
+        {
+            g_assert_cmpint(run.exit_status, !=, 0);
+            g_assert_nonnull(strstr(run.stderr_data, "does not support --sandbox"));
+        }
+        run_clear(&run);
+    }
+}
+
 int
 main(
 	int   argc,
@@ -1198,6 +1242,8 @@ main(
 	                test_cli_dry_run_cursor);
 	g_test_add_func("/ai-glib/ai-cli/skip-permissions/cursor",
 	                test_cli_skip_permissions_cursor);
+	g_test_add_func("/ai-glib/ai-cli/codex-sandbox", test_codex_sandbox_cli);
+	g_test_add_func("/ai-glib/ai-cli/sandbox-option", test_sandbox_option);
 	g_test_add_func("/ai-glib/ai-cli/set/cursor-properties",
 	                test_cli_set_cursor_properties);
 	g_test_add_func("/ai-glib/ai-cli/skip-permissions/opencode",

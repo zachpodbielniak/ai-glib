@@ -66,6 +66,8 @@ typedef struct _AiImageModelInfo  AiImageModelInfo;
 typedef struct _AiClient       AiClient;
 typedef struct _AiClientClass  AiClientClass;
 
+typedef struct _AiCodexCliClient AiCodexCliClient;
+
 /* AiCliClient is derivable - needs class forward declaration */
 typedef struct _AiCliClient       AiCliClient;
 typedef struct _AiCliClientClass  AiCliClientClass;
