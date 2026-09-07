@@ -53,7 +53,7 @@ static const GOptionEntry option_entries[] = {
       "Provider: claude, openai, gemini, grok, ollama, claude-code, "
       "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli", "NAME" },
     { "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
-      "Model id", "MODEL" },
+      "Model id (omitted/default: matching ai-tui saved model, else native)", "MODEL" },
     { "system", 's', 0, G_OPTION_ARG_STRING, &opt_system,
       "System prompt", "TEXT" },
     { "effort", 0, 0, G_OPTION_ARG_STRING, &opt_effort,
@@ -3028,9 +3028,20 @@ build_provider_named(
     GError     **error
 ){
     g_autoptr(AiConfig) config = ai_config_new();
+    g_autofree gchar *resolved_model = NULL;
+    AiProviderType type;
     GObject *provider;
 
-    provider = ai_provider_factory_new_from_string(name, config, error);
+	/* Startup alone consults app defaults; runtime switches start native. */
+	if (initial)
+	{
+		if (!ai_provider_factory_resolve_defaults(config, "ai-tui", name,
+		                                          opt_model, &type, &resolved_model, error))
+			return NULL;
+		provider = ai_provider_factory_new(type, config, error);
+	}
+	else
+		provider = ai_provider_factory_new_from_string(name, config, error);
 
     if (provider == NULL)
     {
@@ -3041,7 +3052,7 @@ build_provider_named(
     {
         AiClient *c = AI_CLIENT(provider);
 
-        if (initial && opt_model != NULL) ai_client_set_model(c, opt_model);
+		if (resolved_model != NULL) ai_client_set_model(c, resolved_model);
         if (initial && opt_system != NULL)
             ai_client_set_system_prompt(c, opt_system);
         ai_client_set_max_tokens(c, opt_max_tokens);
@@ -3050,8 +3061,8 @@ build_provider_named(
     {
         AiCliClient *c = AI_CLI_CLIENT(provider);
 
-        if (initial && opt_model != NULL)
-            ai_cli_client_set_model(c, opt_model);
+		if (resolved_model != NULL)
+			ai_cli_client_set_model(c, resolved_model);
         if (initial && opt_system != NULL)
             ai_cli_client_set_system_prompt(c, opt_system);
         if (opt_effort != NULL)
@@ -3090,16 +3101,7 @@ build_provider_named(
 static GObject *
 build_provider(GError **error)
 {
-    const gchar *name;
-
-    name = opt_provider != NULL ? opt_provider : g_getenv("AI_PROVIDER");
-
-    if (name == NULL)
-    {
-        name = "claude";
-    }
-
-    return build_provider_named(name, TRUE, error);
+	return build_provider_named(opt_provider, TRUE, error);
 }
 
 int
@@ -3117,6 +3119,13 @@ main(int argc, char *argv[])
     g_option_context_set_summary(context,
         "Drives any ai-glib provider from a terminal, showing prose,\n"
         "reasoning and grouped tool calls as they happen.");
+	g_option_context_set_description(context,
+		"Examples:\n  ai --setup                 # configure ai-tui independently\n"
+		"  ai-tui -p default -m default\n\n"
+		"Omitted provider: AI_PROVIDER, then ai-tui defaults, then Claude.\n"
+		"Explicit default bypasses AI_PROVIDER. Omitted/default model uses the\n"
+		"saved ai-tui model only for its matching provider, otherwise native.\n"
+		"ai and library defaults do not affect ai-tui; runtime switches start native.");
 
     if (!g_option_context_parse(context, &argc, &argv, &error))
     {

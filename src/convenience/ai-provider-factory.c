@@ -26,6 +26,94 @@
 #include "providers/ai-codex-cli-client.h"
 
 /**
+ * ai_provider_factory_resolve_defaults:
+ * @config: an #AiConfig
+ * @app: (nullable): `ai` or `ai-tui`, or %NULL for library defaults
+ * @provider_name: (nullable): provider name, or %NULL to consult defaults
+ * @model: (nullable): explicit model, or %NULL or `default` to consult defaults
+ * @out_provider: (out): resolved provider
+ * @out_model: (out) (transfer full) (nullable): resolved model, or %NULL for native defaults
+ * @error: (out) (optional): return location for a #GError
+ *
+ * A missing or empty provider name consults legacy `AI_PROVIDER` first, then
+ * the scoped default provider. Explicit `default` bypasses `AI_PROVIDER`.
+ * App scopes never consult library defaults or `AI_GLIB_DEFAULT_*`; missing
+ * app settings mean Claude with its native model. Library scope retains its
+ * programmatic and `AI_GLIB_DEFAULT_*` environment precedence.
+ * An explicit model wins; otherwise the configured model is used only when
+ * the selected provider matches the configured provider. An empty configured
+ * model or literal `default` means the provider's native default (%NULL).
+ * Invalid provider names, including an effective `AI_GLIB_DEFAULT_PROVIDER`,
+ * return a configuration error rather than silently selecting Claude.
+ * Programmatic config overrides retain their priority over environment values.
+ * Outputs are initialized to -1 and %NULL on failure.
+ *
+ * Returns: %TRUE if selection succeeded, %FALSE on invalid configuration
+ */
+gboolean
+ai_provider_factory_resolve_defaults(
+	AiConfig       *config,
+	const gchar    *app,
+	const gchar    *provider_name,
+	const gchar    *model,
+	AiProviderType *out_provider,
+	gchar         **out_model,
+	GError        **error
+){
+	AiProviderType configured;
+	AiProviderType selected;
+	const gchar *resolved_model = model;
+
+	g_return_val_if_fail(AI_IS_CONFIG(config), FALSE);
+	g_return_val_if_fail(out_provider != NULL, FALSE);
+	g_return_val_if_fail(out_model != NULL, FALSE);
+	*out_provider = (AiProviderType)-1;
+	*out_model = NULL;
+	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui"))
+	{
+		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Unknown app '%s'", app);
+		return FALSE;
+	}
+	configured = app != NULL ? ai_config_get_app_provider(config, app) :
+	                          ai_config_get_default_provider(config);
+	if (g_str_equal(ai_provider_type_to_string(configured), "unknown"))
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		                    "Invalid configured default provider (check AI_GLIB_DEFAULT_PROVIDER)");
+		return FALSE;
+	}
+	if (provider_name == NULL || provider_name[0] == '\0')
+		provider_name = g_getenv("AI_PROVIDER");
+	selected = configured;
+	if (provider_name != NULL && provider_name[0] != '\0' &&
+	    !g_str_equal(provider_name, "default"))
+	{
+		selected = ai_provider_type_from_string(provider_name);
+		if (selected == AI_PROVIDER_CLAUDE &&
+		    g_ascii_strcasecmp(provider_name, "claude") != 0 &&
+		    g_ascii_strcasecmp(provider_name, "anthropic") != 0)
+		{
+			g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+			            "unknown provider '%s'", provider_name);
+			return FALSE;
+		}
+	}
+	if (model == NULL || g_str_equal(model, "default"))
+	{
+		resolved_model = NULL;
+		if (selected == configured)
+			resolved_model = app != NULL ? ai_config_get_app_model(config, app) :
+			                              ai_config_get_default_model(config);
+		if (resolved_model != NULL &&
+		    (resolved_model[0] == '\0' || g_str_equal(resolved_model, "default")))
+			resolved_model = NULL;
+	}
+	*out_provider = selected;
+	*out_model = g_strdup(resolved_model);
+	return TRUE;
+}
+
+/**
  * ai_provider_factory_new:
  * @type: which provider to build
  * @config: (nullable): configuration, or %NULL for the default
@@ -138,8 +226,8 @@ ai_provider_factory_new_from_string(
      * redirected.
      */
     if (type == AI_PROVIDER_CLAUDE &&
-        g_strcmp0(name, "claude") != 0 &&
-        g_strcmp0(name, "anthropic") != 0)
+        g_ascii_strcasecmp(name, "claude") != 0 &&
+        g_ascii_strcasecmp(name, "anthropic") != 0)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
                     "unknown provider '%s'", name);

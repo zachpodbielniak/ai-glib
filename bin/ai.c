@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "ai-glib.h"
+#include "ai-setup.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -58,6 +59,7 @@ static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
+static gboolean  opt_setup           = FALSE;
 static gchar    *opt_sandbox = NULL;
 static gchar   **opt_set             = NULL;
 static gboolean  opt_continue        = FALSE;
@@ -98,9 +100,9 @@ static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
 	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
-	  "(default: $AI_PROVIDER or claude)", "NAME" },
+	  "(omitted: $AI_PROVIDER then ai defaults; default: ai defaults)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
-	  "Model id (default: provider default). For claude-code/claude-tmux, "
+	  "Model id (omitted/default: matching ai saved model, else native). For claude-code/claude-tmux, "
 	  "an \"ollama/<model>\" id routes via `ollama launch claude`.", "ID" },
 	{ "system", 's', 0, G_OPTION_ARG_STRING, &opt_system,
 	  "System prompt", "TEXT" },
@@ -128,6 +130,8 @@ static const GOptionEntry option_entries[] = {
 	  "Print the command that would be spawned, do not run it", NULL },
 	{ "list-providers", 0, 0, G_OPTION_ARG_NONE, &opt_list_providers,
 	  "List known provider names and exit", NULL },
+	{ "setup", 0, 0, G_OPTION_ARG_NONE, &opt_setup,
+	  "Interactively save independent ai, ai-tui, or library defaults", NULL },
 	{ "no-expand", 0, 0, G_OPTION_ARG_NONE, &opt_no_expand,
 	  "Send the prompt verbatim: no @ mentions, no / commands", NULL },
 	{ "interactive", 'i', 0, G_OPTION_ARG_NONE, &opt_interactive,
@@ -1332,7 +1336,7 @@ main(int argc, char *argv[])
 	g_autoptr(AiConfig)       config = NULL;
 	GObject                  *provider = NULL;
 	AiProviderType            ptype;
-	const gchar              *provider_name;
+	g_autofree gchar         *resolved_model = NULL;
 	g_autofree gchar         *prompt = NULL;
 	AiMessage                *msg;
 	GList                    *messages = NULL;
@@ -1366,6 +1370,8 @@ main(int argc, char *argv[])
 		"  ai --list-image-models -p gemini\n"
 		"\n"
 		"Chat examples:\n"
+		"  ai --setup                       # choose defaults for one scope\n"
+		"  ai -p default -m default \"hi\"    # saved ai defaults, bypass AI_PROVIDER\n"
 		"  ai \"why is the sky blue?\"\n"
 		"  git diff | ai -s \"Review this diff for bugs\"\n"
 		"  ai -p ollama -m llama3.2 --stream \"one-liner: rsync a directory\"\n"
@@ -1409,27 +1415,47 @@ main(int argc, char *argv[])
 		return 0;
 	}
 
-	/* Resolve provider type. */
-	provider_name = opt_provider;
-	if (provider_name == NULL)
-		provider_name = g_getenv("AI_PROVIDER");
-	if (provider_name == NULL)
-		provider_name = "claude";
-	ptype = ai_provider_type_from_string(provider_name);
-
 	config = ai_config_new();
+	if (opt_setup)
+		return ai_setup_run(config);
 
 	/* Listing models needs a config but no prompt, so handle it before
 	 * the provider and prompt are resolved. */
 	if (opt_image_list_models)
 	{
-		return list_image_models(config, opt_provider);
+		if (opt_provider == NULL)
+			return list_image_models(config, NULL);
+		if (!ai_provider_factory_resolve_defaults(config, "ai", opt_provider,
+		                                          NULL, &ptype, &resolved_model, &error))
+		{
+			g_printerr("ai: %s\n", error->message);
+			return 2;
+		}
+		return list_image_models(config, ai_provider_type_to_string(ptype));
+	}
+
+	if (!ai_provider_factory_resolve_defaults(config, "ai", opt_provider,
+	                                          opt_model, &ptype, &resolved_model, &error))
+	{
+		g_printerr("ai: %s\n", error->message);
+		return 2;
+	}
+	/* Saved models are chat defaults, never image-generation defaults. */
+	if (opt_image_gen)
+	{
+		if (g_strcmp0(opt_model, "default") == 0)
+			g_clear_pointer(&opt_model, g_free);
+	}
+	else
+	{
+		g_free(opt_model);
+		opt_model = g_steal_pointer(&resolved_model);
 	}
 
 	provider = make_provider(config, ptype);
 	if (provider == NULL)
 	{
-		g_printerr("ai: unknown provider '%s'\n", provider_name);
+		g_printerr("ai: unknown provider '%s'\n", ai_provider_type_to_string(ptype));
 		return 2;
 	}
 
@@ -1563,7 +1589,7 @@ main(int argc, char *argv[])
 
 		if (opt_stream)
 			g_printerr("note: provider '%s' does not support streaming; "
-			           "using a single response\n", provider_name);
+			           "using a single response\n", ai_provider_type_to_string(ptype));
 
 		resp = sync_chat(provider, messages, &error);
 		if (resp == NULL)

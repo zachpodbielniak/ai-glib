@@ -124,6 +124,21 @@ ai_config_load_from_file(
     GError      **error
 );
 
+gboolean
+ai_config_save_defaults(
+	AiConfig       *self,
+	const gchar    *app,
+	AiProviderType  provider,
+	const gchar    *model,
+	GError        **error
+);
+
+AiProviderType
+ai_config_get_app_provider(AiConfig *self, const gchar *app);
+
+const gchar *
+ai_config_get_app_model(AiConfig *self, const gchar *app);
+
 AiProviderType
 ai_config_get_default_provider(AiConfig *self);
 

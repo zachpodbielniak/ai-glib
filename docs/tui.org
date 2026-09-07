@@ -19,6 +19,9 @@ ai-tui [-p PROVIDER] [-m MODEL] [-s SYSTEM] [OPTIONS]
 ai-tui -p claude-code -m opus
 #+end_src
 
+** Independent Defaults
+Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted provider selection still honors =AI_PROVIDER=; use =ai-tui -p default -m default= to bypass it and use saved ai-tui defaults. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
+
 ** What it looks like
 #+begin_example
 > build phase 1
@@ -41,8 +44,8 @@ explanation lost inside it.
 ** Options
 | Option                | Description                                              |
 |-----------------------+----------------------------------------------------------|
-| =-p=, =--provider=    | Provider name; defaults to =$AI_PROVIDER=, else =claude=  |
-| =-m=, =--model=       | Model id                                                 |
+| =-p=, =--provider=    | Omitted: =$AI_PROVIDER=, then ai-tui saved provider, then =claude=; =default= bypasses =AI_PROVIDER= |
+| =-m=, =--model=       | Explicit model; omitted/=default= uses the matching ai-tui saved model, otherwise native |
 | =-s=, =--system=      | System prompt                                            |
 | =--effort=            | Reasoning effort: =low= … =max= (CLI providers)          |
 | =--max-tokens=        | Cap per response, default 4096                           |

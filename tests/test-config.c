@@ -11,6 +11,13 @@
 
 #include "core/ai-config.h"
 #include "core/ai-enums.h"
+#include "core/ai-error.h"
+#include "core/ai-client.h"
+#include "convenience/ai-simple.h"
+#include "convenience/ai-provider-factory.h"
+#include <yaml-glib.h>
+
+static gchar *sandbox;
 
 static void
 test_config_new(void)
@@ -416,11 +423,476 @@ test_config_file_invalid_yaml(void)
 	g_unlink(path);
 }
 
+/* Saving must preserve arbitrary settings, replace permissive modes and clear overlays. */
+static void
+test_config_save_defaults(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(AiConfig) loaded = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(YamlParser) parser = yaml_parser_new();
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);
+	g_autofree gchar *inherited = write_temp_yaml("default_model: inherited\n");
+	g_autofree gchar *saved = NULL;
+	YamlMapping *mapping;
+	GStatBuf st;
+
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	g_assert_true(ai_config_save_defaults(config, NULL, AI_PROVIDER_OLLAMA, "first", &error));
+	g_assert_no_error(error);
+	g_assert_cmpint(g_stat(directory, &st), ==, 0);
+	g_assert_cmpuint(st.st_mode & 0777, ==, 0700);
+	g_assert_true(g_file_set_contents(path,
+		"timeout: 77\nproviders:\n  openai:\n    api_key: secret\n"
+		"extra: {items: [one, two], enabled: true}\n"
+		"default_provider: ollama\ndefault_model: first\n", -1, &error));
+	g_assert_cmpint(g_chmod(path, 0644), ==, 0);
+	g_assert_true(ai_config_save_defaults(config, NULL, AI_PROVIDER_OPENAI, "second: #model", &error));
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_config_get_default_provider(config), ==, AI_PROVIDER_OPENAI);
+	g_assert_cmpstr(ai_config_get_default_model(config), ==, "second: #model");
+	g_assert_true(ai_config_save_defaults(config, NULL, AI_PROVIDER_GEMINI, NULL, &error));
+	g_assert_no_error(error);
+	g_assert_null(ai_config_get_default_model(config));
+	g_assert_cmpint(g_stat(path, &st), ==, 0);
+	g_assert_cmpuint(st.st_mode & 0777, ==, 0600);
+	g_assert_true(yaml_parser_load_from_file(parser, path, &error));
+	mapping = yaml_node_get_mapping(yaml_parser_get_root(parser));
+	g_assert_cmpuint(yaml_mapping_get_size(mapping), ==, 5);
+	g_assert_cmpint(yaml_mapping_get_int_member(mapping, "timeout"), ==, 77);
+	g_assert_true(g_file_get_contents(path, &saved, NULL, &error));
+	g_assert_nonnull(strstr(saved, "default_model: \"\""));
+	g_assert_cmpstr(yaml_mapping_get_string_member(mapping, "default_provider"), ==, "gemini");
+	mapping = yaml_mapping_get_mapping_member(mapping, "extra");
+	g_assert_true(yaml_mapping_get_boolean_member(mapping, "enabled"));
+	g_assert_cmpuint(yaml_sequence_get_length(yaml_mapping_get_sequence_member(mapping, "items")), ==, 2);
+	g_assert_true(ai_config_load_from_file(loaded, inherited, &error));
+	g_assert_cmpstr(ai_config_get_default_model(loaded), ==, "inherited");
+	g_assert_true(ai_config_load_from_file(loaded, path, &error));
+	g_assert_no_error(error);
+	g_assert_null(ai_config_get_default_model(loaded));
+	g_assert_cmpstr(ai_config_get_api_key(loaded, AI_PROVIDER_OPENAI), ==, "secret");
+	g_unlink(inherited);
+	g_unlink(path);
+	g_rmdir(directory);
+}
+
+/* Failed saves never replace the original bytes or the in-memory defaults. */
+static void
+test_config_save_rejected(void)
+{
+	const gchar *invalid[] = {
+		"broken: [\n", "- sequence\n", "scalar\n", "", "{}\n---\n{}\n",
+		"apps: []\n", "apps: {ai: null}\n", "apps: {ai-tui: []}\n",
+		"apps: {ai: {default_provider: typo}}\n",
+		"apps: {ai: {default_model: []}}\n",
+		"apps: {ai: {}, ai: {}}\n",
+		"default_provider: typo\n", "default_provider: []\n",
+		"default_provider: {}\n", "default_provider: null\n",
+		"default_model: []\n", "default_model: {}\n",
+		"default_model: \"bad\\0model\"\n",
+		"\"default_provider\\0suffix\": ollama\n",
+		"extra: \"bad\\0value\"\n",
+		"extra: &loop {self: *loop}\n",
+		"extra: &loop [*loop]\n",
+		"extra: &outer {child: {parent: *outer}}\n",
+		"&root {self: *root}\n"
+	};
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);
+	guint i;
+
+	ai_config_set_default_provider(config, AI_PROVIDER_OLLAMA);
+	ai_config_set_default_model(config, "unchanged");
+	g_assert_cmpint(g_mkdir_with_parents(directory, 0700), ==, 0);
+	for (i = 0; i < G_N_ELEMENTS(invalid); i++)
+	{
+		g_autoptr(GError) error = NULL;
+		g_autofree gchar *after = NULL;
+
+		g_assert_true(g_file_set_contents(path, invalid[i], -1, &error));
+		g_assert_false(ai_config_load_from_file(config, path, &error));
+		g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+		g_clear_error(&error);
+		g_assert_false(ai_config_save_defaults(config, NULL, AI_PROVIDER_OPENAI, "new", &error));
+		g_assert_nonnull(error);
+		g_clear_error(&error);
+		g_assert_false(ai_config_save_defaults(config, "ai", AI_PROVIDER_OPENAI, "new", &error));
+		g_assert_nonnull(error);
+		g_clear_error(&error);
+		g_assert_true(g_file_get_contents(path, &after, NULL, &error));
+		g_assert_cmpstr(after, ==, invalid[i]);
+		g_assert_cmpint(ai_config_get_default_provider(config), ==, AI_PROVIDER_OLLAMA);
+		g_assert_cmpstr(ai_config_get_default_model(config), ==, "unchanged");
+	}
+	g_unlink(path);
+	g_rmdir(directory);
+}
+
+/* A table keeps precedence and cross-provider model isolation visible together. */
+static void
+test_config_resolve_defaults(void)
+{
+	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	const struct {
+		const gchar *provider;
+		const gchar *model;
+		const gchar *legacy;
+		AiProviderType expected_provider;
+		const gchar *expected_model;
+	} cases[] = {
+		{NULL, NULL, NULL, AI_PROVIDER_OLLAMA, "configured"},
+		{"", "default", "", AI_PROVIDER_OLLAMA, "configured"},
+		{NULL, NULL, "openai", AI_PROVIDER_OPENAI, NULL},
+		{"default", NULL, "openai", AI_PROVIDER_OLLAMA, "configured"},
+		{"gemini", NULL, "openai", AI_PROVIDER_GEMINI, NULL},
+		{"openai", "default", NULL, AI_PROVIDER_OPENAI, NULL},
+		{"ollama", NULL, "openai", AI_PROVIDER_OLLAMA, "configured"},
+		{"openai", "explicit", NULL, AI_PROVIDER_OPENAI, "explicit"},
+		{"ANTHROPIC", NULL, NULL, AI_PROVIDER_CLAUDE, NULL},
+		{NULL, "explicit", "openai", AI_PROVIDER_OPENAI, "explicit"}
+	};
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *model = NULL;
+	g_autofree gchar *path = write_temp_yaml(
+		"default_provider: ollama\ndefault_model: configured\n"
+		"apps:\n  ai: {default_provider: ollama, default_model: configured}\n"
+		"  ai-tui: {default_provider: ollama, default_model: configured}\n");
+	AiProviderType provider;
+	guint i;
+	guint j;
+
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	for (j = 0; j < G_N_ELEMENTS(scopes); j++)
+	{
+		for (i = 0; i < G_N_ELEMENTS(cases); i++)
+		{
+			if (cases[i].legacy != NULL)
+				g_setenv("AI_PROVIDER", cases[i].legacy, TRUE);
+			else
+				g_unsetenv("AI_PROVIDER");
+			g_assert_true(ai_provider_factory_resolve_defaults(config, scopes[j], cases[i].provider,
+				cases[i].model, &provider, &model, &error));
+			g_assert_no_error(error);
+			g_assert_cmpint(provider, ==, cases[i].expected_provider);
+			g_assert_cmpstr(model, ==, cases[i].expected_model);
+			g_clear_pointer(&model, g_free);
+		}
+	}
+	g_setenv("AI_PROVIDER", "typo", TRUE);
+	g_assert_false(ai_provider_factory_resolve_defaults(config, NULL, NULL, NULL, &provider, &model, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_clear_error(&error);
+	g_assert_true(ai_provider_factory_resolve_defaults(config, NULL, "default", NULL, &provider, &model, &error));
+	g_clear_pointer(&model, g_free);
+	g_unsetenv("AI_PROVIDER");
+	g_assert_false(ai_provider_factory_resolve_defaults(config, NULL, "typo", NULL, &provider, &model, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_clear_error(&error);
+	g_setenv("AI_GLIB_DEFAULT_PROVIDER", "typo", TRUE);
+	g_assert_false(ai_provider_factory_resolve_defaults(config, NULL, "default", NULL, &provider, &model, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_assert_cmpint(provider, ==, (AiProviderType)-1);
+	g_assert_null(model);
+	g_clear_error(&error);
+	ai_config_set_default_provider(config, AI_PROVIDER_OLLAMA);
+	ai_config_set_default_model(config, "default");
+	g_assert_true(ai_provider_factory_resolve_defaults(config, NULL, NULL, NULL, &provider, &model, &error));
+	g_assert_null(model);
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_assert_true(g_file_set_contents(path, "default_provider: typo\n", -1, &error));
+	g_assert_false(ai_config_load_from_file(config, path, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_unlink(path);
+}
+
+/* App saves preserve library settings, siblings, unknown fields and aliased maps. */
+static void
+test_config_app_defaults(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(AiConfig) loaded = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(YamlParser) parser = yaml_parser_new();
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);
+	g_autofree gchar *model = NULL;
+	YamlMapping *root;
+	YamlMapping *apps;
+	AiProviderType provider;
+	GStatBuf st;
+
+	g_unsetenv("AI_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	g_assert_cmpint(g_mkdir_with_parents(directory, 0700), ==, 0);
+	g_assert_true(g_file_set_contents(path,
+		"default_provider: ollama\ndefault_model: library\ntimeout: 77\n"
+		"apps: &apps\n  ai: &ai\n    default_provider: openai\n"
+		"    default_model: app-model\n    extra: retained\n"
+		"  ai-tui: *ai\n  other: {custom: kept}\n"
+		"copy: *apps\n", -1, &error));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_cmpint(ai_config_get_app_provider(config, "ai"), ==, AI_PROVIDER_OPENAI);
+	g_assert_cmpstr(ai_config_get_app_model(config, "ai-tui"), ==, "app-model");
+	g_assert_true(ai_config_save_defaults(config, "ai", AI_PROVIDER_GEMINI, "new-model", &error));
+	g_assert_cmpint(ai_config_get_default_provider(config), ==, AI_PROVIDER_OLLAMA);
+	g_assert_cmpstr(ai_config_get_default_model(config), ==, "library");
+	g_assert_cmpstr(ai_config_get_app_model(config, "ai-tui"), ==, "app-model");
+	g_assert_true(yaml_parser_load_from_file(parser, path, &error));
+	root = yaml_node_get_mapping(yaml_parser_get_root(parser));
+	g_assert_cmpstr(yaml_mapping_get_string_member(root, "default_provider"), ==, "ollama");
+	g_assert_cmpstr(yaml_mapping_get_string_member(root, "default_model"), ==, "library");
+	g_assert_cmpint(yaml_mapping_get_int_member(root, "timeout"), ==, 77);
+	apps = yaml_mapping_get_mapping_member(root, "apps");
+	g_assert_cmpstr(yaml_mapping_get_string_member(yaml_mapping_get_mapping_member(apps, "ai"), "extra"), ==, "retained");
+	g_assert_cmpstr(yaml_mapping_get_string_member(yaml_mapping_get_mapping_member(apps, "other"), "custom"), ==, "kept");
+	apps = yaml_mapping_get_mapping_member(root, "copy");
+	g_assert_cmpstr(yaml_mapping_get_string_member(yaml_mapping_get_mapping_member(apps, "ai"), "default_model"), ==, "app-model");
+	g_assert_true(ai_config_load_from_file(loaded, path, &error));
+	g_assert_cmpstr(ai_config_get_app_model(loaded, "ai"), ==, "new-model");
+	g_assert_cmpstr(ai_config_get_app_model(loaded, "ai-tui"), ==, "app-model");
+
+	/* Library env overrides, even invalid ones, cannot affect app resolution. */
+	g_setenv("AI_GLIB_DEFAULT_PROVIDER", "typo", TRUE);
+	g_setenv("AI_GLIB_DEFAULT_MODEL", "env-model", TRUE);
+	g_setenv("AI_PROVIDER", "openai", TRUE);
+	g_assert_true(ai_provider_factory_resolve_defaults(loaded, "ai", NULL, NULL, &provider, &model, &error));
+	g_assert_cmpint(provider, ==, AI_PROVIDER_OPENAI);
+	g_assert_null(model);
+	g_assert_true(ai_provider_factory_resolve_defaults(loaded, "ai", "default", "default", &provider, &model, &error));
+	g_assert_cmpint(provider, ==, AI_PROVIDER_GEMINI);
+	g_assert_cmpstr(model, ==, "new-model");
+	g_clear_pointer(&model, g_free);
+	g_assert_true(ai_provider_factory_resolve_defaults(loaded, "ai-tui", NULL, NULL, &provider, &model, &error));
+	g_assert_cmpstr(model, ==, "app-model");
+	g_clear_pointer(&model, g_free);
+	g_assert_true(ai_config_save_defaults(config, "ai-tui", AI_PROVIDER_CURSOR, NULL, &error));
+	g_assert_true(ai_config_load_from_file(loaded, path, &error));
+	g_assert_null(ai_config_get_app_model(loaded, "ai-tui"));
+	g_assert_cmpstr(ai_config_get_app_model(loaded, "ai"), ==, "new-model");
+	g_assert_cmpint(g_stat(path, &st), ==, 0);
+	g_assert_cmpuint(st.st_mode & 0777, ==, 0600);
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	g_unsetenv("AI_PROVIDER");
+	g_assert_cmpint(ai_config_get_default_provider(loaded), ==, AI_PROVIDER_OLLAMA);
+	g_assert_cmpstr(ai_config_get_default_model(loaded), ==, "library");
+	/* The convenience interface must consume the library pair, not either app. */
+	{
+		g_autoptr(AiSimple) simple = ai_simple_new_with_config(loaded);
+		AiProvider *simple_provider = ai_simple_get_provider(simple);
+
+		g_assert_cmpint(ai_provider_get_provider_type(simple_provider), ==, AI_PROVIDER_OLLAMA);
+		g_assert_cmpstr(ai_client_get_model(AI_CLIENT(simple_provider)), ==, "library");
+	}
+	g_assert_true(ai_config_save_defaults(config, NULL, AI_PROVIDER_GROK, "library-new", &error));
+	g_assert_true(ai_config_load_from_file(loaded, path, &error));
+	g_assert_cmpstr(ai_config_get_app_model(loaded, "ai"), ==, "new-model");
+	g_assert_cmpint(ai_config_get_app_provider(loaded, "ai-tui"), ==, AI_PROVIDER_CURSOR);
+	g_assert_no_error(error);
+	g_unlink(path);
+
+	/* A brand-new app save must not introduce top-level library defaults. */
+	g_assert_true(ai_config_save_defaults(config, "ai", AI_PROVIDER_OPENAI, "fresh", &error));
+	g_clear_object(&parser);
+	parser = yaml_parser_new();
+	g_assert_true(yaml_parser_load_from_file(parser, path, &error));
+	root = yaml_node_get_mapping(yaml_parser_get_root(parser));
+	g_assert_cmpuint(yaml_mapping_get_size(root), ==, 1);
+	g_assert_true(yaml_mapping_has_member(root, "apps"));
+	g_assert_false(yaml_mapping_has_member(root, "default_provider"));
+	g_assert_false(yaml_mapping_has_member(root, "default_model"));
+	g_assert_no_error(error);
+	g_unlink(path);
+	g_rmdir(directory);
+}
+
+/* Missing app fields use native defaults, never the library's saved or env values. */
+static void
+test_config_app_missing(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *model = NULL;
+	g_autofree gchar *path = write_temp_yaml(
+		"default_provider: ollama\ndefault_model: library\n"
+		"apps: {ai: {default_provider: gemini}}\n");
+	AiProviderType provider;
+
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_setenv("AI_GLIB_DEFAULT_PROVIDER", "openai", TRUE);
+	g_setenv("AI_GLIB_DEFAULT_MODEL", "env-model", TRUE);
+	g_unsetenv("AI_PROVIDER");
+	g_assert_true(ai_provider_factory_resolve_defaults(config, "ai", NULL, NULL, &provider, &model, &error));
+	g_assert_cmpint(provider, ==, AI_PROVIDER_GEMINI);
+	g_assert_null(model);
+	g_assert_true(ai_provider_factory_resolve_defaults(config, "ai-tui", NULL, NULL, &provider, &model, &error));
+	g_assert_cmpint(provider, ==, AI_PROVIDER_CLAUDE);
+	g_assert_null(model);
+	g_assert_true(ai_provider_factory_resolve_defaults(config, NULL, NULL, NULL, &provider, &model, &error));
+	g_assert_cmpint(provider, ==, AI_PROVIDER_OPENAI);
+	g_assert_cmpstr(model, ==, "env-model");
+	g_clear_pointer(&model, g_free);
+	g_assert_true(g_file_set_contents(path, "apps: {ai: {default_model: quoted}}\n", -1, &error));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_cmpint(ai_config_get_app_provider(config, "ai"), ==, AI_PROVIDER_GEMINI);
+	g_assert_cmpstr(ai_config_get_app_model(config, "ai"), ==, "quoted");
+	g_assert_true(g_file_set_contents(path, "apps: {ai: {default_model: null}}\n", -1, &error));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_null(ai_config_get_app_model(config, "ai"));
+	g_assert_true(g_file_set_contents(path, "apps: {ai: {default_model: 'null'}}\n", -1, &error));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_cmpstr(ai_config_get_app_model(config, "ai"), ==, "null");
+	g_assert_no_error(error);
+	g_unsetenv("AI_GLIB_DEFAULT_PROVIDER");
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	g_unlink(path);
+}
+
+/* All scopes share null handling, including clearing an inherited model. */
+static void
+test_config_null_models(void)
+{
+	const struct {
+		const gchar *yaml;
+		const gchar *expected;
+	} cases[] = {
+		{"null", NULL}, {"~", NULL}, {"NULL", NULL}, {"", NULL},
+		{"''", NULL}, {"!!null 'null'", NULL},
+		{"'null'", "null"}, {"\"null\"", "null"}, {"'~'", "~"}
+	};
+	g_autofree gchar *path = write_temp_yaml("{}\n");
+	guint i;
+
+	g_unsetenv("AI_GLIB_DEFAULT_MODEL");
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+		g_autoptr(GError) error = NULL;
+		g_autofree gchar *yaml = g_strdup_printf(
+			"default_model: %s\napps:\n  ai:\n    default_model: %s\n"
+			"  ai-tui:\n    default_model: %s\n",
+			cases[i].yaml, cases[i].yaml, cases[i].yaml);
+
+		g_assert_true(g_file_set_contents(path,
+			"default_model: inherited\napps:\n"
+			"  ai: {default_model: inherited}\n  ai-tui: {default_model: inherited}\n",
+			-1, &error));
+		g_assert_true(ai_config_load_from_file(config, path, &error));
+		g_assert_true(g_file_set_contents(path, yaml, -1, &error));
+		g_assert_true(ai_config_load_from_file(config, path, &error));
+		g_assert_no_error(error);
+		g_assert_cmpstr(ai_config_get_default_model(config), ==, cases[i].expected);
+		g_assert_cmpstr(ai_config_get_app_model(config, "ai"), ==, cases[i].expected);
+		g_assert_cmpstr(ai_config_get_app_model(config, "ai-tui"), ==, cases[i].expected);
+	}
+	g_unlink(path);
+}
+
+/* Invalid public input must fail before libyaml sees it, without touching disk. */
+static void
+test_config_invalid_utf8_model(void)
+{
+	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);
+	const gchar *original = "default_provider: ollama\ndefault_model: unchanged\n";
+	guint i;
+
+	g_assert_cmpint(g_mkdir_with_parents(directory, 0700), ==, 0);
+	g_assert_true(g_file_set_contents(path, original, -1, NULL));
+	g_assert_true(ai_config_load_from_file(config, path, NULL));
+	for (i = 0; i < G_N_ELEMENTS(scopes); i++)
+	{
+		g_autoptr(GError) error = NULL;
+		g_autofree gchar *after = NULL;
+
+		g_assert_false(ai_config_save_defaults(config, scopes[i], AI_PROVIDER_OPENAI, "bad\xff", &error));
+		g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+		g_assert_true(g_file_get_contents(path, &after, NULL, NULL));
+		g_assert_cmpstr(after, ==, original);
+		g_assert_cmpint(ai_config_get_default_provider(config), ==, AI_PROVIDER_OLLAMA);
+		g_assert_cmpstr(ai_config_get_default_model(config), ==, "unchanged");
+		g_assert_cmpint(ai_config_get_app_provider(config, "ai"), ==, AI_PROVIDER_CLAUDE);
+		g_assert_null(ai_config_get_app_model(config, "ai"));
+		g_assert_cmpint(ai_config_get_app_provider(config, "ai-tui"), ==, AI_PROVIDER_CLAUDE);
+		g_assert_null(ai_config_get_app_model(config, "ai-tui"));
+	}
+	g_unlink(path);
+	g_rmdir(directory);
+}
+
+/* Reject cycles before yaml-glib conversion without changing any loaded state. */
+static void
+test_config_yaml_edges(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *path = write_temp_yaml("default_model: retained\n");
+	g_autoptr(GString) deep = g_string_new("extra: ");
+	const gchar *cycles[] = {
+		"default_model: new\nextra: &loop {self: *loop}\n",
+		"default_model: new\nsequence: &sequence [*sequence]\n",
+		"default_model: new\nextra: &outer {child: {parent: *outer}}\n",
+		"&root {default_model: new, self: *root}\n"
+	};
+	const gchar raw_nul[] = "default_model: new\n\0default_provider: openai\n";
+	guint i;
+
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_no_error(error);
+	g_assert_cmpstr(ai_config_get_default_model(config), ==, "retained");
+	for (i = 0; i < G_N_ELEMENTS(cycles); i++)
+	{
+		g_assert_true(g_file_set_contents(path, cycles[i], -1, &error));
+		g_assert_false(ai_config_load_from_file(config, path, &error));
+		g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+		g_clear_error(&error);
+		g_assert_cmpstr(ai_config_get_default_model(config), ==, "retained");
+	}
+	/* Repeated aliases are a DAG, not a cycle. */
+	g_assert_true(g_file_set_contents(path,
+		"a: &a [one, two]\nb: &b [*a, *a]\nc: [*b, *b]\n", -1, &error));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_no_error(error);
+	for (i = 0; i < 130; i++)
+		g_string_append_c(deep, '[');
+	g_string_append(deep, "value");
+	for (i = 0; i < 130; i++)
+		g_string_append_c(deep, ']');
+	g_assert_true(g_file_set_contents(path, deep->str, deep->len, &error));
+	g_assert_false(ai_config_load_from_file(config, path, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_clear_error(&error);
+	g_assert_cmpstr(ai_config_get_default_model(config), ==, "retained");
+	g_assert_true(g_file_set_contents(path, raw_nul, sizeof(raw_nul) - 1, &error));
+	g_assert_false(ai_config_load_from_file(config, path, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+	g_assert_cmpstr(ai_config_get_default_model(config), ==, "retained");
+	g_unlink(path);
+}
+
 int
 main(
 	int   argc,
 	char *argv[]
 ){
+	gint result;
+
+	/* Set XDG before GLib caches it; never read or write the developer's config. */
+	sandbox = g_dir_make_tmp("ai-config-sandbox-XXXXXX", NULL);
+	g_assert_nonnull(sandbox);
+	g_setenv("HOME", sandbox, TRUE);
+	g_setenv("XDG_CONFIG_HOME", sandbox, TRUE);
+	g_setenv("GIO_USE_VFS", "local", TRUE);
 	g_test_init(&argc, &argv, NULL);
 
 	g_test_add_func("/ai-glib/config/new", test_config_new);
@@ -445,5 +917,16 @@ main(
 	g_test_add_func("/ai-glib/config/file-invalid-yaml",
 	                test_config_file_invalid_yaml);
 
-	return g_test_run();
+	g_test_add_func("/ai-glib/config/save-defaults", test_config_save_defaults);
+	g_test_add_func("/ai-glib/config/save-rejected", test_config_save_rejected);
+	g_test_add_func("/ai-glib/config/resolve-defaults", test_config_resolve_defaults);
+	g_test_add_func("/ai-glib/config/app-defaults", test_config_app_defaults);
+	g_test_add_func("/ai-glib/config/app-missing", test_config_app_missing);
+	g_test_add_func("/ai-glib/config/null-models", test_config_null_models);
+	g_test_add_func("/ai-glib/config/invalid-utf8-model", test_config_invalid_utf8_model);
+	g_test_add_func("/ai-glib/config/yaml-edges", test_config_yaml_edges);
+	result = g_test_run();
+	g_rmdir(sandbox);
+	g_free(sandbox);
+	return result;
 }

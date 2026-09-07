@@ -22,8 +22,9 @@ piping.
 ** Options
 | Option                  | Description                                                        |
 |-------------------------+--------------------------------------------------------------------|
-| =-p=, =--provider NAME= | claude, openai, gemini, grok, ollama, claude-code, claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli (default: =$AI_PROVIDER= or =claude=) |
-| =-m=, =--model ID=      | Model id (default: provider default). =ollama/<id>= on the Claude Code providers selects the Ollama transport |
+| =-p=, =--provider NAME= | Provider name; omitted: =$AI_PROVIDER=, then =apps.ai.default_provider=, then =claude=. Explicit =default= bypasses =AI_PROVIDER= |
+| =-m=, =--model ID=      | Omitted/=default=: saved ai model only for the matching provider, else native. Image mode defaults to the native image model. =ollama/<id>= selects Ollama transport on Claude Code providers |
+| =--setup=              | Numbered setup wizard for independent ai, ai-tui, or library defaults; no prompt or TTY required |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
 | =--max-tokens N=        | Max output tokens (default: 4096)                                  |
@@ -36,6 +37,29 @@ piping.
 | =--list-providers=      | List known provider names and exit                                 |
 | =-i=, =--interactive=   | Interactive multi-turn REPL (keeps history)                        |
 | =-v=, =--version=       | Print version and exit                                             |
+
+** Defaults Setup
+Run =ai --setup= to display current defaults and update one scope. Run it again to update another. It writes =~/.config/ai-glib/config.yaml= (or =$XDG_CONFIG_HOME/ai-glib/config.yaml=) only after confirmation. Existing provider settings and other scopes remain intact. Wizard prompts are on stdout; save errors are on stderr.
+
+The line-oriented protocol accepts piped input:
+
+1. =Scope:= accepts =1= for ai, =2= for ai-tui, =3= for library.
+2. =Provider:= accepts a number from the displayed =AiProviderType= enum-order menu (currently =6= is claude-code, =7= opencode, =9= grok-build).
+3. =Model:= accepts =1= for native default, =2= for manual entry, or =3= onward for a displayed model.
+4. Only manual entry asks =Model ID:=; enter a nonempty UTF-8 ID. The literal =default= is reserved.
+5. =Save? [y/N]:= accepts =y= or =yes= (case-insensitive) to save; blank, =n= or =no= cancels.
+
+At every prompt, =q=, =cancel= (case-insensitive), or EOF cancels without writing. Every answer must end with a newline; EOF also cancels an unterminated answer. Invalid menu numbers and invalid confirmation answers retry the same prompt. Cancellation exits successfully; save errors exit 1.
+
+Models come from =ai_provider_list_models_async()=: CLI providers supply static lists without launching their CLI, while HTTP providers may discover models from their configured endpoint. Discovery uses the configured timeout clamped to 1-10 seconds, zero retries, and a cancellable deadline; failure or timeout leaves native/manual entry available. No credentials are requested or saved by setup.
+
+#+begin_src bash
+# ai scope, claude-code, manual model, confirmation
+printf '1\n6\n2\nopus\ny\n' | ai --setup
+ai -p default -m default --dry-run "hello"
+#+end_src
+
+An omitted provider honors =AI_PROVIDER= before the selected app's saved provider; explicit =-p default= bypasses that environment variable. An explicit model wins; omitted or =-m default= uses the saved model only when the selected provider matches that scope's provider. Otherwise the provider's native default is used. =ai= never inherits =ai-tui= or top-level library defaults, including =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL=. Image generation uses the selected provider but not its saved chat model: omit =-m= or use =-m default= for the native image model. See [[file:configuration.org][configuration]] for the schema.
 
 ** Examples
 List the providers:

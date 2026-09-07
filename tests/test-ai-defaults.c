@@ -1,0 +1,595 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later
+ * Spawned frontend defaults/setup tests. Only disposable files and recording
+ * CLI stubs are used; no inherited credentials, CLI installations or servers.
+ */
+#include <ai-glib.h>
+#include <glib/gstdio.h>
+#include <yaml.h>
+#include <string.h>
+
+#define CONFIG_FILE "config/ai-glib/config.yaml"
+#define SAVED_CONFIG \
+	"default_provider: opencode\ndefault_model: library-only\n" \
+	"timeout: 77\nmax_retries: 4\nextra: {items: [one, two]}\n" \
+	"providers: {openai: {api_key: fake-preserved-key, base_url: http://127.0.0.1:0}}\n" \
+	"apps:\n" \
+	"  ai: {default_provider: grok-build, default_model: ai-saved, extra: retained}\n" \
+	"  ai-tui: {default_provider: cursor, default_model: tui-saved}\n" \
+	"  other: {custom: kept}\n"
+
+typedef struct {
+	gchar *dir;
+	gchar *out;
+	gchar *err;
+} Box;
+
+static gchar *ai_binary;
+static gchar *tui_binary;
+static gchar *library_dir;
+
+/* All writes, including stub logs, remain beneath the fixture directory. */
+static void
+box_write(Box *box, const gchar *name, const gchar *text)
+{
+	g_autofree gchar *path = g_build_filename(box->dir, name, NULL);
+	g_autofree gchar *parent = g_path_get_dirname(path);
+	g_autoptr(GError) error = NULL;
+
+	g_assert_cmpint(g_mkdir_with_parents(parent, 0700), ==, 0);
+	g_assert_true(g_file_set_contents(path, text, -1, &error));
+	g_assert_no_error(error);
+}
+
+/* Read exact bytes for cancellation checks, not a reserialized approximation. */
+static gchar *
+box_read(Box *box, const gchar *name)
+{
+	g_autofree gchar *path = g_build_filename(box->dir, name, NULL);
+	g_autoptr(GError) error = NULL;
+	gchar *text = NULL;
+
+	g_assert_true(g_file_get_contents(path, &text, NULL, &error));
+	g_assert_no_error(error);
+	return text;
+}
+
+/* Remove only this fixture tree; never follow a symlink out of it. */
+static void
+remove_tree(const gchar *path)
+{
+	if (g_file_test(path, G_FILE_TEST_IS_DIR) &&
+	    !g_file_test(path, G_FILE_TEST_IS_SYMLINK))
+	{
+		g_autoptr(GDir) dir = g_dir_open(path, 0, NULL);
+		const gchar *name;
+
+		g_assert_nonnull(dir);
+		while ((name = g_dir_read_name(dir)) != NULL)
+		{
+			g_autofree gchar *child = g_build_filename(path, name, NULL);
+			remove_tree(child);
+		}
+		g_assert_cmpint(g_rmdir(path), ==, 0);
+	}
+	else
+		g_assert_cmpint(g_unlink(path), ==, 0);
+}
+
+/* Separate stub filenames prove which provider actually executed. Both JSON
+ * and streaming result fields are supplied, so the same stub serves ai/TUI. */
+static void
+box_setup(Box *box, gconstpointer data)
+{
+	const gchar *names[] = { "grok", "cursor" };
+	g_autoptr(GError) error = NULL;
+	guint i;
+
+	(void)data;
+	box->dir = g_dir_make_tmp("ai-defaults-XXXXXX", &error);
+	g_assert_no_error(error);
+	for (i = 0; i < G_N_ELEMENTS(names); i++)
+	{
+		g_autofree gchar *path = g_build_filename(box->dir, names[i], NULL);
+		g_autofree gchar *script = g_strdup_printf(
+			"#!/bin/bash\nset -eu\n"
+			"printf '%%s\\n' \"$@\" > \"$HOME/%s.argv\"\n"
+			"pwd > \"$HOME/%s.cwd\"\n"
+			"/usr/bin/cat > \"$HOME/%s.stdin\"\n"
+			"for arg in \"$@\"; do\n"
+			"  case \"$arg\" in\n"
+			"    stream-json) printf '%%s\\n' '{\"type\":\"assistant\","
+			"\"timestamp_ms\":1,\"message\":{\"content\":[{\"type\":\"text\","
+			"\"text\":\"cursor reply\"}]}}' ;;\n"
+			"    streaming-messages-json) printf '%%s\\n' '{\"type\":\"stream_event\","
+			"\"event\":{\"type\":\"content_block_delta\",\"delta\":{"
+			"\"type\":\"text_delta\",\"text\":\"grok reply\"}}}' ;;\n"
+			"  esac\ndone\n"
+			"printf '%%s\\n' '{\"type\":\"result\",\"text\":\"%s reply\","
+			"\"result\":\"%s reply\",\"stopReason\":\"end_turn\","
+			"\"is_error\":false}'\n",
+			names[i], names[i], names[i], names[i], names[i]);
+		box_write(box, names[i], script);
+		g_assert_cmpint(g_chmod(path, 0700), ==, 0);
+	}
+}
+
+/* Fixture teardown also covers directories the frontend creates itself. */
+static void
+box_teardown(Box *box, gconstpointer data)
+{
+	(void)data;
+	remove_tree(box->dir);
+	g_free(box->dir);
+	g_free(box->out);
+	g_free(box->err);
+}
+
+/* Start with an empty environment rather than guessing every credential and
+ * config override name. PATH contains only our stubs; absolute utility paths
+ * in the scripts prevent accidentally executing a real provider. */
+static gint
+run_box(Box *box, gboolean tui, const gchar * const *args,
+        const gchar *input, const gchar * const *overrides)
+{
+	g_autoptr(GSubprocessLauncher) launcher = g_subprocess_launcher_new(
+		G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+		G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *config = g_build_filename(box->dir, "config", NULL);
+	g_autofree gchar *grok = g_build_filename(box->dir, "grok", NULL);
+	g_autofree gchar *cursor = g_build_filename(box->dir, "cursor", NULL);
+	gchar *empty[] = { NULL };
+	guint i;
+	gint status;
+
+	g_clear_pointer(&box->out, g_free);
+	g_clear_pointer(&box->err, g_free);
+	g_subprocess_launcher_set_environ(launcher, empty);
+	g_subprocess_launcher_set_cwd(launcher, box->dir);
+	g_subprocess_launcher_setenv(launcher, "HOME", box->dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", config, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_DATA_HOME", box->dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_CACHE_HOME", box->dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "PATH", box->dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "LD_LIBRARY_PATH", library_dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "GROK_PATH", grok, TRUE);
+	g_subprocess_launcher_setenv(launcher, "CURSOR_AGENT_PATH", cursor, TRUE);
+	g_subprocess_launcher_setenv(launcher, "G_DEBUG", "fatal-warnings", TRUE);
+	for (i = 0; overrides != NULL && overrides[i] != NULL; i += 2)
+		g_subprocess_launcher_setenv(launcher, overrides[i], overrides[i + 1], TRUE);
+	g_ptr_array_add(argv, tui ? tui_binary : ai_binary);
+	for (i = 0; args[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer)args[i]);
+	g_ptr_array_add(argv, NULL);
+	proc = g_subprocess_launcher_spawnv(launcher,
+		(const gchar * const *)argv->pdata, &error);
+	g_assert_no_error(error);
+	g_assert_true(g_subprocess_communicate_utf8(proc, input != NULL ? input : "",
+		NULL, &box->out, &box->err, &error));
+	g_assert_no_error(error);
+	if (!g_subprocess_get_if_exited(proc))
+		g_error("frontend terminated by signal: %s", box->err);
+	status = g_subprocess_get_exit_status(proc);
+	if (status != 0)
+		g_test_message("exit %d: %s", status, box->err);
+	return status;
+}
+
+/* Derive provider menu numbers from the public enum, not fragile literals. */
+static guint
+provider_choice(AiProviderType provider)
+{
+	g_autoptr(GEnumClass) klass = g_type_class_ref(AI_TYPE_PROVIDER_TYPE);
+	guint i;
+
+	for (i = 0; i < klass->n_values; i++)
+		if (klass->values[i].value == (gint)provider)
+			return i + 1;
+	g_assert_not_reached();
+}
+
+/* Drive only the public stdin protocol; no direct save API calls in tests. */
+static gint
+setup_scope(Box *box, guint scope, AiProviderType provider, const gchar *tail)
+{
+	const gchar *args[] = { "--setup", NULL };
+	g_autofree gchar *input = g_strdup_printf("%u\n%u\n%s", scope,
+		provider_choice(provider), tail);
+
+	return run_box(box, FALSE, args, input, NULL);
+}
+
+/* Inspect arbitrary saved YAML scalars, including explicit empty model IDs.
+ * libyaml preserves empty strings and does not consult process config/env. */
+static void
+assert_saved(Box *box, const gchar *path, const gchar *expected)
+{
+	g_autofree gchar *text = box_read(box, CONFIG_FILE);
+	g_auto(GStrv) parts = g_strsplit(path, "/", -1);
+	yaml_parser_t parser;
+	yaml_document_t document;
+	yaml_node_t *node;
+	guint i;
+
+	g_assert_true(yaml_parser_initialize(&parser));
+	yaml_parser_set_input_string(&parser, (const unsigned char *)text, strlen(text));
+	g_assert_true(yaml_parser_load(&parser, &document));
+	node = yaml_document_get_root_node(&document);
+	for (i = 0; parts[i] != NULL && node != NULL; i++)
+	{
+		yaml_node_pair_t *pair;
+		yaml_node_t *next = NULL;
+
+		if (node->type == YAML_SEQUENCE_NODE)
+		{
+			guint64 index;
+			guint count = (guint)(node->data.sequence.items.top - node->data.sequence.items.start);
+
+			g_assert_cmpuint(count, >, 0);
+			g_assert_true(g_ascii_string_to_unsigned(parts[i], 10, 0, count - 1, &index, NULL));
+			node = yaml_document_get_node(&document, node->data.sequence.items.start[index]);
+			continue;
+		}
+		g_assert_cmpint(node->type, ==, YAML_MAPPING_NODE);
+		for (pair = node->data.mapping.pairs.start; pair < node->data.mapping.pairs.top; pair++)
+		{
+			yaml_node_t *key = yaml_document_get_node(&document, pair->key);
+			if (key->type == YAML_SCALAR_NODE &&
+			    g_str_equal((const gchar *)key->data.scalar.value, parts[i]))
+				next = yaml_document_get_node(&document, pair->value);
+		}
+		node = next;
+	}
+	if (expected == NULL)
+		g_assert_null(node);
+	else
+	{
+		g_assert_nonnull(node);
+		g_assert_cmpint(node->type, ==, YAML_SCALAR_NODE);
+		g_assert_cmpstr((const gchar *)node->data.scalar.value, ==, expected);
+	}
+	yaml_document_delete(&document);
+	yaml_parser_delete(&parser);
+}
+
+/* Creation must not synthesize library or sibling defaults. */
+static void
+test_create(Box *box, gconstpointer data)
+{
+	GStatBuf st;
+	g_autofree gchar *path = g_build_filename(box->dir, CONFIG_FILE, NULL);
+
+	(void)data;
+	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_GROK_BUILD, "2\nmanual-model\ny\n"), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Defaults saved"));
+	assert_saved(box, "apps/ai/default_provider", "grok-build");
+	assert_saved(box, "apps/ai/default_model", "manual-model");
+	assert_saved(box, "default_provider", NULL);
+	assert_saved(box, "default_model", NULL);
+	assert_saved(box, "apps/ai-tui", NULL);
+	g_assert_cmpint(g_stat(path, &st), ==, 0);
+	g_assert_cmpuint(st.st_mode & 0777, ==, 0600);
+}
+
+/* Updating each scope leaves the other two and unknown data intact. Discovery
+ * temporarily clamps timeout/retries, which must not leak into saved config. */
+static void
+test_update(Box *box, gconstpointer data)
+{
+	(void)data;
+	box_write(box, CONFIG_FILE, SAVED_CONFIG);
+	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_GROK_BUILD, "4\ny\n"), ==, 0);
+	g_assert_nonnull(strstr(box->out, "4. " AI_GROK_BUILD_MODEL_GROK_4_5));
+	assert_saved(box, "apps/ai/default_model", AI_GROK_BUILD_MODEL_GROK_4_5);
+	assert_saved(box, "apps/ai-tui/default_model", "tui-saved");
+	assert_saved(box, "default_model", "library-only");
+	g_assert_cmpint(setup_scope(box, 2, AI_PROVIDER_CURSOR, "1\nyes\n"), ==, 0);
+	assert_saved(box, "apps/ai-tui/default_model", "");
+	assert_saved(box, "apps/ai/default_model", AI_GROK_BUILD_MODEL_GROK_4_5);
+	g_assert_cmpint(setup_scope(box, 3, AI_PROVIDER_GROK_BUILD, "2\nlibrary-new\ny\n"), ==, 0);
+	assert_saved(box, "default_provider", "grok-build");
+	assert_saved(box, "default_model", "library-new");
+	assert_saved(box, "apps/ai/default_provider", "grok-build");
+	assert_saved(box, "apps/ai/default_model", AI_GROK_BUILD_MODEL_GROK_4_5);
+	assert_saved(box, "apps/ai-tui/default_provider", "cursor");
+	assert_saved(box, "apps/ai-tui/default_model", "");
+	assert_saved(box, "apps/ai/extra", "retained");
+	assert_saved(box, "apps/other/custom", "kept");
+	assert_saved(box, "timeout", "77");
+	assert_saved(box, "max_retries", "4");
+	assert_saved(box, "extra/items/0", "one");
+	assert_saved(box, "extra/items/1", "two");
+	assert_saved(box, "providers/openai/api_key", "fake-preserved-key");
+	assert_saved(box, "providers/openai/base_url", "http://127.0.0.1:0");
+	g_assert_cmpint(setup_scope(box, 3, AI_PROVIDER_GROK_BUILD, "1\ny\n"), ==, 0);
+	assert_saved(box, "default_model", "");
+}
+
+/* EOF at every stage and negative confirmation are byte-preserving, both
+ * with a preexisting config and with no config directory at all. */
+static void
+test_cancel(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "--setup", NULL };
+	const gchar *tails[] = { "", "q\n", "cancel\n", "2\n", "2\nq\n",
+		"1\n", "1\nn\n", "1\n\n", "2\nmanual\n", "2\nmanual\ny",
+		"1\nmaybe\ncancel\n", "0\n-1\n99999\nnope\nq\n" };
+	guint i, existing;
+	g_autofree gchar *path = g_build_filename(box->dir, CONFIG_FILE, NULL);
+
+	(void)data;
+	for (existing = 0; existing < 2; existing++)
+	{
+		if (existing)
+			box_write(box, CONFIG_FILE, SAVED_CONFIG);
+		for (i = 0; i < G_N_ELEMENTS(tails) + 3; i++)
+		{
+			g_autofree gchar *input = i < 3 ? g_strdup(i == 0 ? "" : i == 1 ? "q\n" : "1\n") :
+				g_strdup_printf("1\n%u\n%s", provider_choice(AI_PROVIDER_GROK_BUILD), tails[i - 3]);
+			g_assert_cmpint(run_box(box, FALSE, args, input, NULL), ==, 0);
+			g_assert_nonnull(strstr(box->out, "Setup cancelled"));
+			if (existing)
+			{
+				g_autofree gchar *after = box_read(box, CONFIG_FILE);
+				g_assert_cmpstr(after, ==, SAVED_CONFIG);
+			}
+			else
+				g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+		}
+	}
+}
+
+/* Invalid input is retried, not silently coerced to a menu index or model. */
+static void
+test_invalid_retry(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "--setup", NULL };
+	g_autofree gchar *input = g_strdup_printf(
+		"bad\n0\n4\n1\n-1\n99999\n%u\n0\n99999\n2\n\ndefault\nmanual\nmaybe\ny\n",
+		provider_choice(AI_PROVIDER_GROK_BUILD));
+
+	(void)data;
+	g_assert_cmpint(run_box(box, FALSE, args, input, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Choose a number"));
+	g_assert_nonnull(strstr(box->out, "default is reserved"));
+	g_assert_nonnull(strstr(box->out, "Enter y to save"));
+	assert_saved(box, "apps/ai/default_model", "manual");
+}
+
+/* A confirmed wizard cannot repair malformed/ambiguous YAML by overwriting it. */
+static void
+test_malformed(Box *box, gconstpointer data)
+{
+	const gchar *bad[] = { "apps: [unclosed\n", "apps: []\n",
+		"apps: {ai: {default_provider: typo}}\n",
+		"apps: {ai: {default_model: [wrong]}}\n",
+		"timeout: 1\ntimeout: 2\n", "---\n{}\n---\n{}\n" };
+	guint i;
+
+	(void)data;
+	for (i = 0; i < G_N_ELEMENTS(bad); i++)
+	{
+		g_autofree gchar *after = NULL;
+		box_write(box, CONFIG_FILE, bad[i]);
+		g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_GROK_BUILD, "1\ny\n"), !=, 0);
+		g_assert_nonnull(strstr(box->err, "could not save defaults"));
+		after = box_read(box, CONFIG_FILE);
+		g_assert_cmpstr(after, ==, bad[i]);
+	}
+}
+
+/* Assert on the child's recorded argv/stdin/cwd, not merely dry-run text. */
+static void
+assert_child(Box *box, const gchar *provider, const gchar *model, const gchar *prompt)
+{
+	g_autofree gchar *name = g_strconcat(provider, ".argv", NULL);
+	g_autofree gchar *args = box_read(box, name);
+	g_autofree gchar *needle = g_strdup_printf("--model\n%s\n", model);
+	g_autofree gchar *stdin_name = g_strconcat(provider, ".stdin", NULL);
+	g_autofree gchar *input = box_read(box, stdin_name);
+	g_autofree gchar *cwd_name = g_strconcat(provider, ".cwd", NULL);
+	g_autofree gchar *cwd = box_read(box, cwd_name);
+
+	g_assert_nonnull(strstr(args, needle));
+	g_assert_null(strstr(args, prompt));
+	g_assert_nonnull(strstr(input, prompt));
+	g_assert_cmpstr(g_strchomp(cwd), ==, box->dir);
+	g_assert_null(strstr(args, "library-only"));
+	g_assert_null(strstr(args, "env-library"));
+}
+
+/* Defaults, concrete overrides, env precedence and --set all reach a real
+ * spawned provider. Cross-provider requests must start with its native model. */
+static void
+test_ai_resolution(Box *box, gconstpointer data)
+{
+	const gchar *env[] = { "AI_PROVIDER", "cursor", "AI_GLIB_DEFAULT_PROVIDER", "opencode",
+		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+	const gchar *library_env[] = { "AI_GLIB_DEFAULT_PROVIDER", "opencode",
+		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+	struct {
+		const gchar *args[12];
+		const gchar *provider;
+		const gchar *model;
+		const gchar * const *env;
+	} cases[] = {
+		{ { NULL }, "grok", "ai-saved", NULL },
+		{ { NULL }, "grok", "ai-saved", library_env },
+		{ { "-p", "default", "-m", "default", "--skip-permissions", NULL }, "grok", "ai-saved", env },
+		{ { "-p", "grok-build", NULL }, "grok", "ai-saved", env },
+		{ { "-m", "concrete", NULL }, "grok", "concrete", NULL },
+		{ { "-p", "cursor", NULL }, "cursor", AI_CURSOR_MODEL_AUTO, NULL },
+		{ { "-p", "cursor", "-m", "default", NULL }, "cursor", AI_CURSOR_MODEL_AUTO, NULL },
+		{ { NULL }, "cursor", AI_CURSOR_MODEL_AUTO, env },
+		{ { "-p", "cursor", "-m", "concrete", NULL }, "cursor", "concrete", NULL },
+		{ { "--set", "model=last", "-m", "concrete", NULL }, "grok", "last", NULL }
+	};
+	guint i;
+
+	(void)data;
+	box_write(box, CONFIG_FILE, SAVED_CONFIG);
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autofree gchar *reply = g_strconcat(cases[i].provider, " reply", NULL);
+		g_test_message("ai resolution case %u", i);
+		g_assert_cmpint(run_box(box, FALSE, cases[i].args, "piped defaults prompt\n", cases[i].env), ==, 0);
+		g_assert_nonnull(strstr(box->out, reply));
+		assert_child(box, cases[i].provider, cases[i].model, "piped defaults prompt");
+		if (i == 2)
+		{
+			g_autofree gchar *args = box_read(box, "grok.argv");
+			g_assert_nonnull(strstr(args, "--permission-mode\nbypassPermissions\n"));
+			g_assert_nonnull(strstr(args, "--prompt-file\n/dev/stdin\n"));
+		}
+	}
+	{
+		g_autofree gchar *after = box_read(box, CONFIG_FILE);
+		g_assert_cmpstr(after, ==, SAVED_CONFIG);
+	}
+}
+
+/* TUI startup has its own scope; --dump drives the streaming parser without a
+ * terminal. Missing optional ncurses skips only this test, not wizard/ai tests. */
+static void
+test_tui_resolution(Box *box, gconstpointer data)
+{
+	const gchar *env[] = { "AI_PROVIDER", "grok-build", "AI_GLIB_DEFAULT_PROVIDER", "opencode",
+		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+	const gchar *library_env[] = { "AI_GLIB_DEFAULT_PROVIDER", "opencode",
+		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+	struct {
+		const gchar *args[12];
+		const gchar *provider;
+		const gchar *model;
+		const gchar * const *env;
+	} cases[] = {
+		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", NULL },
+		{ { "-p", "default", "-m", "default", "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
+		{ { "-p", "grok-build", "-m", "default", "--dump", "tui prompt", NULL }, "grok", AI_GROK_BUILD_DEFAULT_MODEL, NULL },
+		{ { "--dump", "tui prompt", NULL }, "grok", AI_GROK_BUILD_DEFAULT_MODEL, env },
+		{ { "-m", "concrete", "--dump", "tui prompt", NULL }, "cursor", "concrete", NULL },
+		{ { "--set", "model=last", "-m", "concrete", "--dump", "tui prompt", NULL }, "cursor", "last", NULL },
+		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", library_env }
+	};
+	guint i;
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui not built (ncurses-devel required)");
+		return;
+	}
+	box_write(box, CONFIG_FILE, SAVED_CONFIG);
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autofree gchar *reply = g_strconcat(cases[i].provider, " reply", NULL);
+		g_test_message("tui resolution case %u", i);
+		g_assert_cmpint(run_box(box, TRUE, cases[i].args, NULL, cases[i].env), ==, 0);
+		g_assert_nonnull(strstr(box->out, reply));
+		assert_child(box, cases[i].provider, cases[i].model, "tui prompt");
+	}
+	/* Clear a previously saved model through the wizard, then start afresh. */
+	g_assert_cmpint(setup_scope(box, 2, AI_PROVIDER_CURSOR, "1\ny\n"), ==, 0);
+	g_assert_cmpint(run_box(box, TRUE, cases[0].args, NULL, NULL), ==, 0);
+	assert_child(box, "cursor", AI_CURSOR_MODEL_AUTO, "tui prompt");
+	assert_saved(box, "default_model", "library-only");
+	assert_saved(box, "apps/ai/default_model", "ai-saved");
+}
+
+/* A library-only wizard save must not become either frontend's fallback.
+ * Dry-run observes the built-in HTTP choice without sending a request. */
+static void
+test_library_independent(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "--dry-run", "hello", NULL };
+	const gchar *tui_args[] = { "--dry-run", NULL };
+	const gchar *env[] = { "AI_GLIB_DEFAULT_PROVIDER", "grok-build",
+		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+
+	(void)data;
+	g_assert_cmpint(setup_scope(box, 3, AI_PROVIDER_CURSOR, "2\nlibrary-only\ny\n"), ==, 0);
+	assert_saved(box, "default_provider", "cursor");
+	assert_saved(box, "default_model", "library-only");
+	assert_saved(box, "apps", NULL);
+	g_assert_cmpint(run_box(box, FALSE, args, NULL, env), ==, 0);
+	g_assert_nonnull(strstr(box->out, "claude"));
+	g_assert_null(strstr(box->out, "library-only"));
+	g_assert_null(strstr(box->out, "env-library"));
+	if (g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_assert_cmpint(run_box(box, TRUE, tui_args, NULL, env), ==, 0);
+		g_assert_nonnull(strstr(box->out, "HTTP provider"));
+		g_assert_null(strstr(box->out, "library-only"));
+		g_assert_null(strstr(box->out, "env-library"));
+	}
+}
+
+/* Bind, but do not listen, on a private loopback port. Discovery must fail
+ * locally; reserving the port avoids ever connecting to somebody's server. */
+static void
+test_http_fallback(Box *box, gconstpointer data)
+{
+	g_autoptr(GSocket) socket = NULL;
+	g_autoptr(GInetAddress) loopback = g_inet_address_new_loopback(G_SOCKET_FAMILY_IPV4);
+	g_autoptr(GSocketAddress) address = g_inet_socket_address_new(loopback, 0);
+	g_autoptr(GSocketAddress) bound = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *config = NULL;
+
+	(void)data;
+	socket = g_socket_new(G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, &error);
+	g_assert_no_error(error);
+	g_assert_true(g_socket_bind(socket, address, FALSE, &error));
+	g_assert_no_error(error);
+	bound = g_socket_get_local_address(socket, &error);
+	g_assert_no_error(error);
+	config = g_strdup_printf("timeout: 1\nproviders:\n  openai:\n"
+		"    api_key: offline-test-only\n    base_url: http://127.0.0.1:%u\n",
+		g_inet_socket_address_get_port(G_INET_SOCKET_ADDRESS(bound)));
+	box_write(box, CONFIG_FILE, config);
+	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_OPENAI, "2\noffline-manual\ny\n"), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Discovery unavailable"));
+	assert_saved(box, "apps/ai/default_provider", "openai");
+	assert_saved(box, "apps/ai/default_model", "offline-manual");
+	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_OPENAI, "1\ny\n"), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Discovery unavailable"));
+	assert_saved(box, "apps/ai/default_model", "");
+}
+
+/* Resolve siblings before subprocesses change cwd; release/debug both work. */
+int
+main(int argc, char *argv[])
+{
+	g_autofree gchar *self = NULL;
+	g_autofree gchar *absolute = NULL;
+	g_autofree gchar *dir = NULL;
+	gint status;
+
+	g_test_init(&argc, &argv, NULL);
+	self = g_file_read_link("/proc/self/exe", NULL);
+	absolute = g_canonicalize_filename(self != NULL ? self : argv[0], NULL);
+	dir = g_path_get_dirname(absolute);
+	library_dir = g_canonicalize_filename("..", dir);
+	ai_binary = g_build_filename(library_dir, "bin", "ai", NULL);
+	tui_binary = g_build_filename(library_dir, "bin", "ai-tui", NULL);
+	g_assert_true(g_file_test(ai_binary, G_FILE_TEST_IS_EXECUTABLE));
+
+#define ADD(name, func) g_test_add("/ai-glib/ai-defaults/" name, Box, NULL, box_setup, func, box_teardown)
+	ADD("setup/create", test_create);
+	ADD("setup/update-scopes", test_update);
+	ADD("setup/cancel-eof", test_cancel);
+	ADD("setup/invalid-retry", test_invalid_retry);
+	ADD("setup/malformed-unchanged", test_malformed);
+	ADD("setup/http-fallback", test_http_fallback);
+	ADD("setup/library-independent", test_library_independent);
+	ADD("ai-resolution", test_ai_resolution);
+	ADD("tui-resolution", test_tui_resolution);
+#undef ADD
+	status = g_test_run();
+	g_free(ai_binary);
+	g_free(tui_binary);
+	g_free(library_dir);
+	return status;
+}

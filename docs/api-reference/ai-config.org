@@ -309,6 +309,44 @@ Sets the default model name programmatically. This takes the highest priority, o
 
 --------------
 
+*** Application Defaults and Persistence
+The existing =get_default_provider()= / =get_default_model()= and their setters operate only on library defaults. Applications use independent pairs and do not inherit library defaults or =AI_GLIB_DEFAULT_PROVIDER= / =AI_GLIB_DEFAULT_MODEL=.
+
+#+begin_src C
+AiProviderType
+ai_config_get_app_provider(AiConfig *self, const gchar *app);
+
+const gchar *
+ai_config_get_app_model(AiConfig *self, const gchar *app);
+
+gboolean
+ai_config_save_defaults(
+	AiConfig       *self,
+	const gchar    *app,
+	AiProviderType  provider,
+	const gchar    *model,
+	GError        **error
+);
+#+end_src
+
+Use ="ai"= or ="ai-tui"= for =app=. The app model getter returns a borrowed nullable string; an unset app uses Claude and its native model. Saving writes =apps.<app>.default_provider= and =apps.<app>.default_model= in the user configuration. Pass =NULL= for =app= to save top-level library defaults, or for =model= to select the provider's native model. The save operation returns FALSE with =GError= on failure and preserves unrelated configuration values. See [[file:../configuration.org][configuration]] for the complete schema and [[file:../cli.org][ai --setup]] for the confirmation-based UI.
+
+*** Resolving a Selection
+#+begin_src C
+gboolean
+ai_provider_factory_resolve_defaults(
+	AiConfig       *config,
+	const gchar    *app,
+	const gchar    *provider_name,
+	const gchar    *model,
+	AiProviderType *out_provider,
+	gchar         **out_model,
+	GError        **error
+);
+#+end_src
+
+Select ="ai"=, ="ai-tui"=, or NULL (library) as the scope. A NULL provider consults =AI_PROVIDER= before that scope's provider; explicit ="default"= bypasses =AI_PROVIDER=. Explicit model IDs win. NULL or ="default"= models use the saved model only when the selected provider matches the scope's provider, otherwise return NULL for native selection. =out_model= is transfer-full and nullable, suitable for =g_autofree=. Invalid selections return FALSE with =GError=. This resolver does not construct the provider: use =ai_provider_factory_new()= and apply the returned model. Saved models are chat defaults, not image defaults.
+
 ** YAML Config File Format
 =ai_config_new()= automatically loads YAML config files from a 3-path fallback chain:
 

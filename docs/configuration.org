@@ -15,13 +15,22 @@ g_autoptr(AiConfig) config = ai_config_new();
 2. =/etc/ai-glib/config.yaml= --- system admin overrides
 3. =~/.config/ai-glib/config.yaml= --- user overrides
 
-Each file is optional. Later files override earlier ones. Environment variables override all file values. Programmatic =set_*()= calls override everything.
+Each file is optional. Later files override earlier ones. Supported environment variables override their corresponding file values; library default environment variables do not affect application defaults. Programmatic =set_*()= calls override their corresponding values.
 
 *** Config File Format
 #+begin_src yaml
-# Default provider and model used when no explicit provider is requested
+# Library defaults only; apps do not inherit these
 default_provider: ollama
 default_model: qwen2.5:7b
+
+# Independent application defaults
+apps:
+  ai:
+    default_provider: claude-code
+    default_model: opus
+  ai-tui:
+    default_provider: opencode
+    default_model: ""
 
 # Per-provider configuration
 providers:
@@ -106,8 +115,17 @@ ai_config_set_api_key(config, AI_PROVIDER_CLAUDE, "your-api-key");
 ai_config_set_api_key(config, AI_PROVIDER_OPENAI, "your-openai-key");
 #+end_src
 
+** Independent Default Scopes
+There are three independent provider/model pairs: top-level =default_provider= / =default_model= for the library, =apps.ai.default_provider= / =apps.ai.default_model= for =ai=, and =apps.ai-tui.default_provider= / =apps.ai-tui.default_model= for =ai-tui=. Missing app defaults mean Claude and its native model, not a fallback to the library or another app. An empty model string selects the provider-native model. Shared =providers= credentials/base URLs and request settings are not scoped.
+
+=ai_provider_factory_resolve_defaults(config, app, provider_name, model, &provider, &resolved_model, &error)= selects the scope with =app= equal to ="ai"=, ="ai-tui"=, or =NULL= for the library. A NULL provider honors =AI_PROVIDER=, then the scope's provider; explicit ="default"= bypasses =AI_PROVIDER=. An explicit model wins; NULL or ="default"= returns the saved model only if the selected provider matches that scope's configured provider, otherwise NULL for native behavior. The caller owns =resolved_model=. Image callers must not use a saved chat model as an image default.
+
+=ai_config_get_app_provider(config, app)= and =ai_config_get_app_model(config, app)= read an app scope. Existing =ai_config_get_default_provider()= and =ai_config_get_default_model()= remain library-only. =ai_config_save_defaults(config, app, provider, model, &error)= saves only the selected pair to the user config; =app == NULL= targets the top-level library pair. Pass NULL for =model= to save the native choice. =ai --setup= provides the interactive interface, including confirmation and cancellation; see [[file:cli.org][the wizard input protocol]].
+
+=ai_simple_new()= and =ai_simple_new_with_config()= continue to use the library pair, not either application's settings. Configuration documents must be single YAML mappings with unambiguous scalar keys; recursive aliases, embedded NULs, and nesting deeper than 128 levels are rejected. Setup refuses to overwrite invalid documents. Unrelated YAML data is preserved when saving, but comments and formatting are not preserved.
+
 ** Default Provider and Model Environment Variables
-The default provider and model can be set via environment variables, which override config file values but are overridden by programmatic =set_*()= calls:
+The library default provider and model can be set via environment variables, which override top-level config file values but are overridden by programmatic =set_*()= calls. These variables do not override either application's defaults:
 
 | Variable                   | Description           | Example                                                                   |
 |----------------------------+-----------------------+---------------------------------------------------------------------------|

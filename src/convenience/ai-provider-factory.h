@@ -20,6 +20,17 @@
 
 G_BEGIN_DECLS
 
+gboolean
+ai_provider_factory_resolve_defaults(
+	AiConfig       *config,
+	const gchar    *app,
+	const gchar    *provider_name,
+	const gchar    *model,
+	AiProviderType *out_provider,
+	gchar         **out_model,
+	GError        **error
+);
+
 GObject *
 ai_provider_factory_new(
     AiProviderType   type,
