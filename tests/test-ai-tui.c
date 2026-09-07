@@ -19,6 +19,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <unistd.h>
 
 /* ----------------------------------------------------------------
  * Harness
@@ -32,6 +33,7 @@ typedef struct
 } Run;
 
 static gchar *tui_binary = NULL;
+static gchar *tmux_socket = NULL;
 
 static void
 run_free(Run *run)
@@ -230,6 +232,10 @@ tmux_run(const gchar * const *args)
 	gsize                i;
 
 	g_ptr_array_add(argv, g_strdup("tmux"));
+	g_ptr_array_add(argv, g_strdup("-L"));
+	g_ptr_array_add(argv, g_strdup(tmux_socket));
+	g_ptr_array_add(argv, g_strdup("-f"));
+	g_ptr_array_add(argv, g_strdup("/dev/null"));
 
 	for (i = 0; args[i] != NULL; i++)
 	{
@@ -346,6 +352,14 @@ tmux_wait_for(const gchar *session, const gchar *needle)
 	return FALSE;
 }
 
+/* Resizes and theme changes are observed on the real rendered screen. */
+static void
+tmux_resize(const gchar *width, const gchar *height)
+{
+	const gchar *args[] = { "resize-window", "-x", width, "-y", height, NULL };
+	g_autofree gchar *out = tmux_run(args);
+}
+
 /*
  * Start ai-tui in a detached tmux session against a stub `grok`.
  *
@@ -354,14 +368,15 @@ tmux_wait_for(const gchar *session, const gchar *needle)
  * which is exactly what happened the first time this was tried by hand.
  */
 static void
-tmux_start_tui(const gchar *session, const gchar *stub_dir,
-               const gchar *editor)
+tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
+                           const gchar *editor, const gchar *environment,
+                           const gchar *options)
 {
 	g_autofree gchar *grok = g_build_filename(stub_dir, "grok", NULL);
 	g_autofree gchar *command = NULL;
 	const gchar      *args[] = {
 		"new-session", "-d", "-s", session, "-x", "100", "-y", "24",
-		NULL, NULL
+		"-c", stub_dir, "/bin/bash", "--noprofile", "--norc", "-c", NULL, NULL
 	};
 	g_autofree gchar *out = NULL;
 	g_autofree gchar *libdir = g_path_get_dirname(tui_binary);
@@ -370,17 +385,24 @@ tmux_start_tui(const gchar *session, const gchar *stub_dir,
 	tmux_kill(session);
 
 	command = g_strdup_printf(
-		"env -u VISUAL LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
-		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' '%s' -p grok-build",
+		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
+		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' %s '%s' -p grok-build %s",
 		libs, grok, stub_dir, stub_dir,
-		editor != NULL ? editor : "true", tui_binary);
+		editor != NULL ? editor : "true", environment != NULL ? environment : "",
+		tui_binary, options != NULL ? options : "");
 
-	args[8] = command;
+	args[14] = command;
 	out = tmux_run(args);
 
 	/* The prompt marker is the first thing drawn, so its arrival is the
 	 * signal that ncurses is up and reading keys. */
-	g_assert_true(tmux_wait_for(session, ">"));
+	g_assert_true(tmux_wait_for(session, "COMPOSE"));
+}
+
+static void
+tmux_start_tui(const gchar *session, const gchar *stub_dir, const gchar *editor)
+{
+	tmux_start_tui_with_options(session, stub_dir, editor, NULL, NULL);
 }
 
 /* Write an executable stand-in for $EDITOR into @dir. */
@@ -1361,10 +1383,231 @@ test_an_aborted_edit_keeps_the_prompt(void)
 	sandbox_free(box);
 }
 
+/* Listing and validation must not need provider credentials or a terminal. */
+static void
+test_theme_options(void)
+{
+	const gchar *list[] = { "--list-themes", "-p", "invalid-provider", NULL };
+	const gchar *bad[] = { "--theme", "not-a-theme", "--dry-run", NULL };
+	const gchar *override[] = { "--theme", "nord", "--dry-run", "-p", "grok-build", NULL };
+	Run *run = run_tui(list, NULL, NULL);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "catppuccin-mocha (default)"));
+	g_assert_nonnull(strstr(run->stdout_data, "catppuccin-latte"));
+	g_assert_nonnull(strstr(run->stdout_data, "monochrome"));
+	run_free(run);
+	run = run_tui(bad, NULL, NULL);
+	g_assert_cmpint(run->status, !=, 0);
+	g_assert_nonnull(strstr(run->stderr_data, "unknown theme"));
+	run_free(run);
+	run = run_tui(override, "AI_TUI_THEME", "invalid-environment-theme");
+	g_assert_cmpint(run->status, ==, 0);
+	run_free(run);
+}
+
+static void
+test_themes_and_resizing(void)
+{
+	Stub *stub;
+	guint i;
+	const gchar *names[] = { "catppuccin-latte", "nord", "terminal", "monochrome", "catppuccin-mocha" };
+	const gchar *capture[] = { "capture-pane", "-t", TUI_SESSION, "-p", "-e", NULL };
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_resize("120", "36");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "SESSION"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "catppuccin-mocha"));
+	pane = tmux_run(capture);
+	g_assert_nonnull(strstr(pane, "38;5;"));
+	g_assert_nonnull(strstr(pane, "48;5;"));
+	g_test_message("Mocha 120x36:\n%s", pane);
+	for (i = 0; i < G_N_ELEMENTS(names); i++)
+	{
+		tmux_send(TUI_SESSION, "F2");
+		g_assert_true(tmux_wait_for(TUI_SESSION, names[i]));
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_run(capture);
+		if (g_str_equal(names[i], "monochrome"))
+		{
+			g_assert_null(strstr(pane, "38;5;"));
+			g_assert_null(strstr(pane, "48;5;"));
+		}
+	}
+	tmux_send(TUI_SESSION, "F3");
+	g_usleep(150000);
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "SESSION"));
+	tmux_send(TUI_SESSION, "F3");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "SESSION"));
+	tmux_send(TUI_SESSION, "retained-draft");
+	tmux_resize("40", "10");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "retained-draft"));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "SESSION"));
+	g_test_message("Narrow 40x10:\n%s", pane);
+	tmux_resize("20", "5");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "resize"));
+	tmux_resize("120", "36");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "SESSION"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "retained-draft"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/* Unicode must survive the entire input path, including code points whose
+ * numeric values collide with ncurses KEY_* constants. */
+static void
+test_unicode_and_search(void)
+{
+	Stub *stub;
+	g_autofree gchar *pane = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *input = NULL;
+	const gchar *text = "café 中文 λ é";
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_send(TUI_SESSION, text);
+	g_assert_true(tmux_wait_for(TUI_SESSION, "café 中文 λ"));
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_assert_true(g_file_get_contents(stdin_path, &input, NULL, NULL));
+	g_assert_nonnull(strstr(input, text));
+	tmux_send(TUI_SESSION, "preserved-draft");
+	tmux_send(TUI_SESSION, "C-f");
+	tmux_send(TUI_SESSION, "the reply");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "1 matching rows"));
+	tmux_send(TUI_SESSION, "Enter");
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "C-u");
+	tmux_send(TUI_SESSION, "no-such-needle");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "No matches"));
+	tmux_send(TUI_SESSION, "Escape");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "preserved-draft"));
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "Down");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "preserved-draft"));
+	tmux_send(TUI_SESSION, "F4");
+	g_usleep(150000);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "[scrolled]"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+static void
+test_long_bracketed_paste(void)
+{
+	Stub *stub;
+	g_autoptr(GString) paste = g_string_new(NULL);
+	g_autofree gchar *pane = NULL;
+	guint i;
+	const gchar *set[] = { "set-buffer", "--", NULL, NULL };
+	const gchar *send[] = { "paste-buffer", "-p", "-t", TUI_SESSION, NULL };
+	g_autofree gchar *out = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	for (i = 0; i < 18; i++) g_string_append_printf(paste, "draft-line-%02u\n", i);
+	g_string_append(paste, "final-draft-line");
+	set[2] = paste->str;
+	out = tmux_run(set);
+	g_clear_pointer(&out, g_free);
+	out = tmux_run(send);
+	g_assert_true(tmux_wait_for(TUI_SESSION, "final-draft-line"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "the reply"));
+	g_assert_null(strstr(pane, "draft-line-00"));
+	tmux_send(TUI_SESSION, "C-a");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "draft-line-00"));
+	tmux_send(TUI_SESSION, "C-e");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "final-draft-line"));
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/* NO_COLOR and low-color terminfo are exercised against the styled
+ * positive control above, not by simply trusting absence of escapes. */
+static void
+test_theme_fallbacks(void)
+{
+	static const struct {
+		const gchar *environment;
+		const gchar *options;
+		const gchar *name;
+		gboolean extended;
+	} cases[] = {
+		{ "AI_TUI_THEME=nord", "", "nord", TRUE },
+		{ "NO_COLOR=1 AI_TUI_THEME=nord", "", "nord", FALSE },
+		{ "NO_COLOR=1 AI_TUI_THEME=nord", "--theme catppuccin-mocha", "catppuccin-mocha", TRUE },
+		{ "TERM=xterm", "--theme catppuccin-mocha", "catppuccin-mocha", FALSE },
+		{ "TERM=vt100", "--theme catppuccin-mocha", "catppuccin-mocha", FALSE }
+	};
+	guint i;
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		Stub *stub = stub_new(STUB_REPLY);
+		const gchar *capture[] = { "capture-pane", "-t", TUI_SESSION, "-p", "-e", NULL };
+		g_autofree gchar *pane = NULL;
+		tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, cases[i].environment, cases[i].options);
+		g_assert_true(tmux_wait_for(TUI_SESSION, cases[i].name));
+		pane = tmux_run(capture);
+		g_assert_cmpint(strstr(pane, "38;5;") != NULL, ==, cases[i].extended);
+		g_assert_cmpint(strstr(pane, "48;5;") != NULL, ==, cases[i].extended);
+		tmux_kill(TUI_SESSION);
+		stub_free(stub);
+	}
+}
+
+static void
+test_busy_keeps_draft(void)
+{
+	Stub *stub;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *pane = NULL;
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	script = g_strdup_printf("#!/bin/sh\ncat > '%s/stdin.log'\n"
+		"while [ ! -f '%s/release' ]; do sleep 0.05; done\ncat '%s/stdout'\n",
+		stub->dir, stub->dir, stub->dir);
+	sandbox_write(stub->dir, "grok", script);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_send(TUI_SESSION, "first request");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
+	tmux_send(TUI_SESSION, "second-draft");
+	tmux_send(TUI_SESSION, "Enter");
+	g_usleep(150000);
+	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "the reply"));
+	sandbox_write(stub->dir, "release", "ready\n");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 int
 main(int argc, char *argv[])
 {
+	gint status;
+
 	g_test_init(&argc, &argv, NULL);
+	/* Never inherit the developer's tmux options or touch their sessions. */
+	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
 
 	tui_binary = find_tui_binary(argv[0]);
 
@@ -1396,6 +1639,12 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/version", test_version);
 	g_test_add_func("/ai-glib/ai-tui/license", test_license);
 	g_test_add_func("/ai-glib/ai-tui/help", test_help);
+	g_test_add_func("/ai-glib/ai-tui/themes", test_theme_options);
+	g_test_add_func("/ai-glib/ai-tui/keys/themes-resize", test_themes_and_resizing);
+	g_test_add_func("/ai-glib/ai-tui/keys/unicode-search", test_unicode_and_search);
+	g_test_add_func("/ai-glib/ai-tui/keys/long-paste", test_long_bracketed_paste);
+	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
+	g_test_add_func("/ai-glib/ai-tui/keys/busy-draft", test_busy_keeps_draft);
 	g_test_add_func("/ai-glib/ai-tui/unknown-provider",
 	                test_unknown_provider_is_an_error);
 	g_test_add_func("/ai-glib/ai-tui/dry-run", test_dry_run_cli_provider);
@@ -1456,5 +1705,13 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/editor-abort",
 	                test_an_aborted_edit_keeps_the_prompt);
 
-	return g_test_run();
+	status = g_test_run();
+	if (tmux_available())
+	{
+		const gchar *args[] = { "kill-server", NULL };
+		g_autofree gchar *out = tmux_run(args);
+	}
+	g_free(tmux_socket);
+	g_free(tui_binary);
+	return status;
 }

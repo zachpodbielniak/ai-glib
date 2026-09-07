@@ -36,23 +36,48 @@ ai-tui --launch-cmd-print -p codex-cli "review this change"
 See [[file:cli.org::*Native CLI Launch][native CLI launch]] for supported providers, shell quoting, stdin, credentials, native option limitations, and executable overrides. Launch modes cannot be combined with =--dump=, =--dry-run=, =--local-tools=, or =--yes=.
 
 *** ai-glib Harness
+The interface uses Catppuccin Mocha by default: a mauve identity header and composer frame, a contrasting session panel, readable tool states, and highlighted completion rows. The header names the provider, working directory and active theme; the activity strip reports the model, current work and elapsed time. An empty session shows a short getting-started view instead of a blank transcript.
+
 #+begin_example
-> build phase 1
+ ai / Grok Build                                      catppuccin-mocha
+ /home/zach/source/projects/ai-glib
 
-Now the codec registry.
+   YOU
+   > build phase 1
 
-Created 2 files  +5-0 ›
+   ASSISTANT
+   Now the codec registry.
 
-Cleaning up a clumsy double-lookup.
+   Created 2 files  +5-0
 
-Edited cmacs-office-package.c, ran 2 commands  +9-12 ›
+ Grok Build / grok-4.6   ready
+ ╭─ COMPOSE ───────────────────────────────────────────────────────╮
+ │ Ask, build, investigate...  / commands  @ files                  │
+ ╰───────────────────────────────────────────────────────── 1/1 ───╯
+ Enter send | ^F find | F1 help | F2 theme | F3 panel
 
-1200 in / 340 out  $0.0182
 #+end_example
 
 The alternation is the point. Narration, a collapsed group of what the model
 actually did, more narration --- rather than a wall of tool output with the
 explanation lost inside it.
+
+The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits; =/todos=, =/running= and =/tools= provide full listings. =F3= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders fall back to ASCII.
+
+*** Themes
+Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =F2= cycles themes in the running interface without interrupting the conversation or discarding a draft.
+
+#+begin_src bash
+ai-tui --theme catppuccin-mocha
+ai-tui --theme catppuccin-latte --no-animation
+AI_TUI_THEME=nord ai-tui
+NO_COLOR=1 ai-tui
+ai-tui --list-themes
+#+end_src
+
+Theme selection is =--theme=, then =AI_TUI_THEME=, then Catppuccin Mocha. An unknown name is an error with a hint to list valid themes. =NO_COLOR= disables colors unless =--theme= explicitly requests them; pressing =F2= is also an explicit color choice. =monochrome= always disables color. Live choices are session-local: set =AI_TUI_THEME= in your environment for a persistent preference. These visual settings do not affect provider properties or =--set=.
+
+On 256-color terminals the RGB palettes are mapped to the nearest stable xterm color-cube/grayscale entries; ai-tui never mutates the user's terminal palette. The =terminal= theme retains the terminal's background and standard colors. Lower-color terminals use standard colors, and terminals without color support retain bold and reverse-video selection. Theme surfaces and selection colors cover blank cells as well as text. =--no-animation= replaces the animated spinner with a stationary marker, while elapsed time still updates once per second. None of the chrome or color escapes appears in =--dump= output.
 
 ** Options
 | Option                | Description                                              |
@@ -68,6 +93,9 @@ explanation lost inside it.
 | =--local-tools=       | Run tools in this process (HTTP providers only)          |
 | =-y=, =--yes=         | Approve every local tool call without asking             |
 | =--set PROP=VALUE=    | Set any provider property; repeatable                    |
+| =--theme NAME=        | Select a theme, overriding =AI_TUI_THEME= and =NO_COLOR= |
+| =--list-themes=       | List built-in themes without starting a provider        |
+| =--no-animation=      | Static activity marker; elapsed time still updates     |
 | =--no-agents=         | Do not let the model start background agents             |
 | =--dump PROMPT=       | Run one turn with no terminal and print the transcript   |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
@@ -101,6 +129,16 @@ one that refuses to start.
 | =Escape=                   | Dismiss the completion menu                       |
 | =C-n=                      | Select the next tool or reasoning block           |
 | =C-b=                      | Expand or collapse the selected block             |
+| =F1=                       | Show command and keyboard help                    |
+| =F2=                       | Cycle themes without restarting                   |
+| =F3=                       | Toggle the wide-terminal session panel            |
+| =F4=                       | Jump to latest output and resume following        |
+| =C-f=                      | Search the transcript without replacing the draft |
+
+*** Searching and following
+=C-f= opens a separate, append-only search field. Type a case-sensitive substring; matching rendered rows are highlighted and the view jumps to the first match. =Enter= or =Down= advances, =Up= or =Shift-Enter= goes back, and navigation wraps. =Backspace= edits the query and =C-u= clears it. =Escape= or =C-f= closes search and restores the untouched draft. The result count is matching rows, not occurrences; text hidden inside a collapsed block is not searched until expanded, and a match does not span a wrap boundary.
+
+=PgUp= and =PgDn= scroll incrementally rather than jumping straight to the bottom. Scrolling away pauses following even if a turn completes while you read. =F4=, sending a prompt, or reaching the bottom with =PgDn= resumes following. Search and history remain in memory only; the redesign does not persist prompts to disk. Existing explicit export/save commands still do so.
 
 *** Writing more than one line
 =Alt-Enter= inserts a newline and works everywhere. =Shift-Enter= does the
@@ -112,13 +150,14 @@ terminal produces (the kitty keyboard protocol's =CSI 13;2u= and xterm's
 =modifyOtherKeys= =CSI 27;2;13~=), so =Shift-Enter= works if your terminal
 sends either and costs nothing if it does not.
 
-The input grows as you type, up to ten rows, and continuation rows carry
-a =│= marker so a wrapped prompt reads as one thing. Past ten rows it
-scrolls rather than eating the screen --- at which point =C-g= is the
-better tool.
+The framed composer grows as you type, up to ten content rows or the available terminal height. Longer drafts scroll to keep the cursor visible; =C-a= and =C-e= reveal the beginning and end. The frame reports the current row and total rows when space permits. Unicode input is accepted, including wide characters; byte offsets remain compatible with the library's completion APIs. Complex emoji/grapheme display still depends on the terminal's width rules.
+
+Bracketed paste is enabled while ai-tui owns the terminal. A multiline paste is inserted into the composer without submitting any of its lines; press =Enter= explicitly when ready. Terminals without bracketed paste support cannot distinguish a pasted newline from a typed =Enter=, so use =C-g= for multiline text there. Pasted approval answers are ignored: approvals require a deliberate key. Control characters other than newlines and tabs are discarded in bracketed input; tabs are displayed as a single blank but retained in the prompt.
+
+Pressing =Enter= during a running turn preserves the entire draft instead of discarding it; the composer is labeled =DRAFT / waiting for turn=. This is not an automatic send queue. The draft remains for you to submit after the turn ends. Navigating back down past the newest history item also restores the draft you were editing.
 
 *** =C-c= takes one thing at a time
-In order: stop the turn, close the completion menu, throw away the
+First close an active search or deny a pending approval; otherwise stop the turn, close the completion menu, throw away the
 half-written line, and only then --- pressed twice inside a second and a
 half, with nothing left to interrupt --- leave.
 
@@ -129,7 +168,7 @@ is armed the status bar says =^C again to quit=; let it lapse and the
 next one starts over rather than quitting.
 
 =C-d= on an empty line quits outright, as it does in a shell, and =/quit=
-always works.
+works when no turn is in flight; use =C-c= to cancel a running turn first.
 
 Note that =C-c= reaches ai-tui as =SIGINT= rather than as a keystroke:
 =cbreak()= leaves =ISIG= on, so the terminal driver signals before
@@ -151,9 +190,7 @@ cancel do the opposite of cancelling.
 One trailing newline is stripped, since every editor that ends a file
 properly adds one. Interior blank lines are kept exactly as written.
 
-The turn keeps running while the editor is open. Nothing repaints ---
-this process is blocked --- but callbacks queue up and are dispatched the
-moment the editor exits.
+The external editor runs synchronously, so ai-glib's main loop pauses until it exits. A wrapped process may continue until pipe backpressure stops it; local asynchronous work cannot advance during that pause. Terminal size and bracketed paste mode are restored on return. Invalid UTF-8 from the editor is rejected without replacing the draft.
 
 Scrolling away from the bottom stops the view following new output; the
 status bar says =[scrolled]= while that is so. Sending, or scrolling back
@@ -178,7 +215,7 @@ to the input history and the transcript when it is not --- one key, two
 jobs, decided by what is on screen. Press =Escape= first if you want the
 history back with a half-typed command still on the line.
 
-Each row is the name in bold, its description dimmed, and the harness it
+Each row is the name in bold, its description in readable secondary text, and the harness it
 came from right-aligned --- the origin has its own column because the
 description is what gets truncated, and the origin is the half that tells
 two same-named commands apart.
