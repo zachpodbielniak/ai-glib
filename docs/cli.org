@@ -22,7 +22,7 @@ piping.
 ** Options
 | Option                  | Description                                                        |
 |-------------------------+--------------------------------------------------------------------|
-| =-p=, =--provider NAME= | Provider name; omitted: =$AI_PROVIDER=, then =apps.ai.default_provider=, then =claude=. Explicit =default= bypasses =AI_PROVIDER= |
+| =-p=, =--provider NAME= | Provider name; omitted/=default=: =apps.ai.default_provider=, then =claude=. Neither consults =AI_PROVIDER= |
 | =-m=, =--model ID=      | Omitted/=default=: saved ai model only for the matching provider, else native. Image mode defaults to the native image model. =ollama/<id>= selects Ollama transport on Claude Code providers |
 | =--setup=              | Numbered setup wizard for independent ai, ai-tui, or library defaults; no prompt or TTY required |
 | =--launch=             | Replace this process with the provider's native interactive CLI |
@@ -62,7 +62,7 @@ printf '1\n6\n2\nopus\ny\n' | ai --setup
 ai -p default -m default --dry-run "hello"
 #+end_src
 
-An omitted provider honors =AI_PROVIDER= before the selected app's saved provider; explicit =-p default= bypasses that environment variable. An explicit model wins; omitted or =-m default= uses the saved model only when the selected provider matches that scope's provider. Otherwise the provider's native default is used. =ai= never inherits =ai-tui= or top-level library defaults, including =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL=. Image generation uses the selected provider but not its saved chat model: omit =-m= or use =-m default= for the native image model. See [[file:configuration.org][configuration]] for the schema.
+For provider/model selection, omitted options behave exactly like =-p default -m default=: use the selected app's saved defaults and ignore =AI_PROVIDER=. Thus =ai <<< "some prompt"= and =ai -p default -m default <<< "some prompt"= select the same provider and model. An explicit model wins; omitted or =-m default= uses the saved model only when the selected provider matches that scope's provider. Otherwise the provider's native default is used. =ai= never inherits =ai-tui= or top-level library defaults, including =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL=. Image generation uses the selected provider but not its saved chat model: omit =-m= or use =-m default= for the native image model. The special =--image-list-models= listing still lists all image providers when =-p= is omitted. See [[file:configuration.org][configuration]] for the schema.
 
 ** Native CLI Launch
 The three launch modes bypass ai-glib's conversation, tools, resource expansion, subprocess protocol, and UI. =--launch= replaces the process with the real CLI, inheriting stdin/stdout/stderr and its exit status. A prompt is optional; positional arguments are joined into one literal initial prompt. Stdin is left untouched for the native CLI, rather than collected or converted to JSON. Native interactive handling of redirected stdin is up to that CLI. Use =--= before a prompt beginning with a dash.

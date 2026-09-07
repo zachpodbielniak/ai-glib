@@ -104,7 +104,7 @@ static const GOptionEntry option_entries[] = {
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
 	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
-	  "(omitted: $AI_PROVIDER then ai defaults; default: ai defaults)", "NAME" },
+	  "(omitted/default: saved ai defaults)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
 	  "Model id (omitted/default: matching ai saved model, else native). For claude-code/claude-tmux, "
 	  "an \"ollama/<model>\" id routes via `ollama launch claude`.", "ID" },
@@ -1384,7 +1384,7 @@ main(int argc, char *argv[])
 		"  ai --launch-cmd -p default -m default\n"
 		"  ai --launch-cmd-print -p grok-build \"explain this project\"\n"
 		"  ai --setup                       # choose defaults for one scope\n"
-		"  ai -p default -m default \"hi\"    # saved ai defaults, bypass AI_PROVIDER\n"
+		"  ai -p default -m default \"hi\"    # same defaults as ai \"hi\"\n"
 		"  ai \"why is the sky blue?\"\n"
 		"  git diff | ai -s \"Review this diff for bugs\"\n"
 		"  ai -p ollama -m llama3.2 --stream \"one-liner: rsync a directory\"\n"
@@ -1454,8 +1454,12 @@ main(int argc, char *argv[])
 		return list_image_models(config, ai_provider_type_to_string(ptype));
 	}
 
-	if (!ai_provider_factory_resolve_defaults(config, "ai", opt_provider,
-	                                          opt_model, &ptype, &resolved_model, &error))
+	/* Omitted CLI options mean explicit default, not the library's legacy
+	 * NULL-provider path through AI_PROVIDER. */
+	if (!ai_provider_factory_resolve_defaults(config, "ai",
+	                                          opt_provider != NULL ? opt_provider : "default",
+	                                          opt_model != NULL ? opt_model : "default",
+	                                          &ptype, &resolved_model, &error))
 	{
 		g_printerr("ai: %s\n", error->message);
 		return 2;

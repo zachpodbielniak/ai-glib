@@ -479,9 +479,8 @@ test_properties(Fixture *f, gconstpointer data)
 	}
 }
 
-/* App scopes must beat library defaults, while explicit default bypasses the
- * environment. An environment-selected provider must not inherit another model.
- */
+/* Omitted and explicit default options select the same app scope, ignoring
+ * both legacy environment selection and library defaults. */
 static void
 test_defaults(Fixture *f, gconstpointer data)
 {
@@ -513,17 +512,10 @@ test_defaults(Fixture *f, gconstpointer data)
 		run = execute_command(f, c, args, "", 0);
 		g_assert_cmpint(run->status, ==, 0);
 		argv = record_argv(f);
-		exe = g_build_filename(f->tools, variant == 1 ? "grok" :
-			c->frontend == 0 ? "claude" : "cursor", NULL);
+		exe = g_build_filename(f->tools, c->frontend == 0 ? "claude" : "cursor", NULL);
 		g_assert_cmpstr(argv[0], ==, exe);
 		g_assert_cmpint(arg_index(argv, "library-model"), ==, -1);
-		if (variant != 1)
-			assert_pair(argv, "--model", c->frontend == 0 ? "opus" : "cursor-saved");
-		else
-		{
-			g_assert_cmpint(arg_index(argv, "opus"), ==, -1);
-			g_assert_cmpint(arg_index(argv, "cursor-saved"), ==, -1);
-		}
+		assert_pair(argv, "--model", c->frontend == 0 ? "opus" : "cursor-saved");
 	}
 }
 

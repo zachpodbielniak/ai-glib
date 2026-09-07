@@ -64,7 +64,8 @@ static const GOptionEntry option_entries[] = {
 	{ "no-animation", 0, 0, G_OPTION_ARG_NONE, &opt_no_animation, "Disable animated activity indicator", NULL },
     { "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
       "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-      "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli", "NAME" },
+      "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
+      "(omitted/default: saved ai-tui defaults)", "NAME" },
     { "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
       "Model id (omitted/default: matching ai-tui saved model, else native)", "MODEL" },
     { "system", 's', 0, G_OPTION_ARG_STRING, &opt_system,
@@ -3511,8 +3512,12 @@ build_provider_named(
 	/* Startup alone consults app defaults; runtime switches start native. */
 	if (initial)
 	{
-		if (!ai_provider_factory_resolve_defaults(config, "ai-tui", name,
-		                                          opt_model, &type, &resolved_model, error))
+		/* Omission must behave exactly like -p default -m default, including
+		 * bypassing the library's legacy AI_PROVIDER fallback. */
+		if (!ai_provider_factory_resolve_defaults(config, "ai-tui",
+		                                          name != NULL ? name : "default",
+		                                          opt_model != NULL ? opt_model : "default",
+		                                          &type, &resolved_model, error))
 			return NULL;
 		if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
 			type = ai_launch_provider_type(type);

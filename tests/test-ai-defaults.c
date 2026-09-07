@@ -400,7 +400,7 @@ assert_child(Box *box, const gchar *provider, const gchar *model, const gchar *p
 	g_assert_null(strstr(args, "env-library"));
 }
 
-/* Defaults, concrete overrides, env precedence and --set all reach a real
+/* Defaults, concrete overrides, ignored legacy env and --set reach a real
  * spawned provider. Cross-provider requests must start with its native model. */
 static void
 test_ai_resolution(Box *box, gconstpointer data)
@@ -422,9 +422,14 @@ test_ai_resolution(Box *box, gconstpointer data)
 		{ { "-m", "concrete", NULL }, "grok", "concrete", NULL },
 		{ { "-p", "cursor", NULL }, "cursor", AI_CURSOR_MODEL_AUTO, NULL },
 		{ { "-p", "cursor", "-m", "default", NULL }, "cursor", AI_CURSOR_MODEL_AUTO, NULL },
-		{ { NULL }, "cursor", AI_CURSOR_MODEL_AUTO, env },
+		{ { NULL }, "grok", "ai-saved", env },
 		{ { "-p", "cursor", "-m", "concrete", NULL }, "cursor", "concrete", NULL },
-		{ { "--set", "model=last", "-m", "concrete", NULL }, "grok", "last", NULL }
+		{ { "--set", "model=last", "-m", "concrete", NULL }, "grok", "last", NULL },
+		{ { "-m", "default", NULL }, "grok", "ai-saved", env },
+		{ { "-p", "default", NULL }, "grok", "ai-saved", env },
+		{ { "--model", "default", "--provider", "default", NULL }, "grok", "ai-saved", env },
+		{ { "--model", "concrete", NULL }, "grok", "concrete", env },
+		{ { "--provider", "cursor", NULL }, "cursor", AI_CURSOR_MODEL_AUTO, env }
 	};
 	guint i;
 
@@ -468,10 +473,15 @@ test_tui_resolution(Box *box, gconstpointer data)
 		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", NULL },
 		{ { "-p", "default", "-m", "default", "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
 		{ { "-p", "grok-build", "-m", "default", "--dump", "tui prompt", NULL }, "grok", AI_GROK_BUILD_DEFAULT_MODEL, NULL },
-		{ { "--dump", "tui prompt", NULL }, "grok", AI_GROK_BUILD_DEFAULT_MODEL, env },
+		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
 		{ { "-m", "concrete", "--dump", "tui prompt", NULL }, "cursor", "concrete", NULL },
 		{ { "--set", "model=last", "-m", "concrete", "--dump", "tui prompt", NULL }, "cursor", "last", NULL },
-		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", library_env }
+		{ { "--dump", "tui prompt", NULL }, "cursor", "tui-saved", library_env },
+		{ { "-m", "default", "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
+		{ { "-p", "default", "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
+		{ { "--model", "default", "--provider", "default", "--dump", "tui prompt", NULL }, "cursor", "tui-saved", env },
+		{ { "--model", "concrete", "--dump", "tui prompt", NULL }, "cursor", "concrete", env },
+		{ { "--provider", "grok-build", "--dump", "tui prompt", NULL }, "grok", AI_GROK_BUILD_DEFAULT_MODEL, env }
 	};
 	guint i;
 
@@ -506,7 +516,7 @@ test_library_independent(Box *box, gconstpointer data)
 	const gchar *args[] = { "--dry-run", "hello", NULL };
 	const gchar *tui_args[] = { "--dry-run", NULL };
 	const gchar *env[] = { "AI_GLIB_DEFAULT_PROVIDER", "grok-build",
-		"AI_GLIB_DEFAULT_MODEL", "env-library", NULL };
+		"AI_GLIB_DEFAULT_MODEL", "env-library", "AI_PROVIDER", "not-a-provider", NULL };
 
 	(void)data;
 	g_assert_cmpint(setup_scope(box, 3, AI_PROVIDER_CURSOR, "2\nlibrary-only\ny\n"), ==, 0);
