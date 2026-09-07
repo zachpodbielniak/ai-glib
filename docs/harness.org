@@ -137,19 +137,18 @@ registration --- the same pattern =AiToolStyle= and =AiImageModelInfo=
 already use. Teaching ai-glib about another harness is one struct
 literal, and nothing else in the library learns its name.
 
-| Kind    | claude                                   | opencode                                                        | grok               | ai-glib                        |
-|---------+------------------------------------------+-----------------------------------------------------------------+--------------------+--------------------------------|
-| command | =.claude/commands=, =~/.claude/commands= | =.opencode/command=, =$XDG_CONFIG_HOME/opencode/command=        | =.grok/commands=   | =$XDG_CONFIG_HOME/ai-glib/commands= |
-| skill   | =.claude/skills=, =~/.claude/skills=     | =$XDG_CONFIG_HOME/opencode/skills=, =~/.opencode/skills=        | ---                | =$XDG_CONFIG_HOME/ai-glib/skills=   |
-| agent   | =.claude/agents=, =~/.claude/agents=     | =.opencode/agent=, =$XDG_CONFIG_HOME/opencode/agents=           | =.grok/agents=     | =$XDG_CONFIG_HOME/ai-glib/agents=   |
+Skills have two canonical roots: project =.agents/skills= and =~/.agents/skills=, reported with origin =agents=. Other harness directories remain fallbacks:
 
-Antigravity (=agy=) is also scanned: project =.agents/skills= (and
-=.agents/commands=, =.agents/agents=), plus the user-level copies under
-=~/.gemini/antigravity-cli/=.
+| Harness | Project root | User root | Kinds |
+|---------+--------------+-----------+-------|
+| ai-glib | =.ai-glib/= | =$XDG_CONFIG_HOME/ai-glib/= | commands, skills, agents |
+| Claude | =.claude/= | =~/.claude/= | commands, skills, agents |
+| OpenCode | =.opencode/= | =$XDG_CONFIG_HOME/opencode/= | command(s), skill(s), agent(s) |
+| Grok | =.grok/= | =~/.grok/= | skills, agents |
+| Antigravity | =.agents/=, =.agent/=, =_agents/=, =_agent/= | =~/.gemini/config/= | skills |
+| Cursor | =.cursor/= | =~/.cursor/= | commands, skills, agents |
 
-Cursor (=cursor-agent=) is scanned too: project =.cursor/skills= (and
-=.cursor/commands=, =.cursor/agents=), user copies under =~/.cursor/=,
-and the bundled skills the installer drops at =~/.cursor/skills-cursor=.
+Cursor's shared =.codex/skills= and =~/.codex/skills= roots are also scanned. Overlapping harness paths are scanned once; =ai_resource_registry_get_search_paths_for_origin()= still reports each harness's own supported paths.
 
 Within a directory, three layouts are understood:
 
@@ -164,7 +163,7 @@ Within a directory, three layouts are understood:
 which is why both are supported rather than one.
 
 *** Precedence
-Two rules, in this order:
+Canonical skills win first: project =.agents/skills=, then =~/.agents/skills=, even over another harness's project-local skill of the same name. The remaining fallback paths follow two rules:
 
 1. **Scope.** Every project directory is searched before any user
    directory, so a repository can override a personal command without
@@ -194,10 +193,7 @@ both halves of the problem.
 ai_resource_registry_set_watching (registry, TRUE);
 #+end_src
 
-Attaches a =GFileMonitor= per existing directory and emits
-=::changed= a quarter-second after things settle. Events are coalesced:
-an editor writing a file as four operations, or a =git pull= touching
-thirty of them, produces one notification rather than thirty.
+Attaches deduplicated =GFileMonitor= watches to search roots and nested resource directories, including the directories containing =SKILL.md=. Missing roots watch their nearest existing ancestor so creating a skills directory after startup is discovered too. Changes schedule a rescan after 250 ms; events within that interval are coalesced. Deleting a winning skill exposes the next fallback automatically. This is event-driven monitoring, not periodic polling.
 
 Off by default --- a registry built to answer one question should not
 leave inotify watches behind. The debounce timer attaches to the

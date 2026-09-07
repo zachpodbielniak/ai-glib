@@ -549,6 +549,78 @@ test_project_shadows_user(void)
 	g_list_free(shadowed);
 }
 
+/* Canonical home beats even vendor project files; only canonical project
+ * and explicit embedder resources may override it. */
+static void
+test_canonical_skills(void)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	g_autoptr(AiResource) pinned = NULL;
+	g_auto(GStrv) paths = NULL;
+	g_auto(GStrv) canonical = NULL;
+	g_autofree gchar *project_path = NULL;
+	g_autofree gchar *home_path = NULL;
+	AiResource *winner;
+	GList *list;
+	guint i;
+	guint j;
+	gboolean saw_home = FALSE;
+
+	reset();
+	write_project(".ai-glib/skills/shared/SKILL.md", "Vendor.\n");
+	write_project(".claude/skills/shared/SKILL.md", "Vendor.\n");
+	write_project(".opencode/skills/shared/SKILL.md", "Vendor.\n");
+	write_home(".agents/skills/shared/SKILL.md", "---\ndescription: home\n---\nx\n");
+	write_home(".config/opencode/skills/unique/SKILL.md", "Fallback.\n");
+	registry = fresh_registry();
+	winner = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "shared");
+	g_assert_cmpstr(ai_resource_get_origin(winner), ==, "agents");
+	g_assert_cmpstr(ai_resource_get_description(winner), ==, "home");
+	g_assert_cmpint(ai_resource_get_scope(winner), ==, AI_RESOURCE_SCOPE_USER);
+	list = ai_resource_registry_list(registry, AI_RESOURCE_SKILL);
+	g_assert_cmpuint(g_list_length(list), ==, 2);
+	g_list_free(list);
+	list = ai_resource_registry_list_shadowed(registry);
+	g_assert_cmpuint(g_list_length(list), ==, 3);
+	g_list_free(list);
+
+	write_project(".agents/skills/shared/SKILL.md", "---\ndescription: project\n---\nx\n");
+	ai_resource_registry_scan(registry);
+	winner = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "shared");
+	g_assert_cmpstr(ai_resource_get_description(winner), ==, "project");
+	g_assert_cmpstr(ai_resource_get_origin(winner), ==, "agents");
+	g_assert_cmpint(ai_resource_get_scope(winner), ==, AI_RESOURCE_SCOPE_PROJECT);
+	g_assert_nonnull(ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "unique"));
+
+	paths = ai_resource_registry_get_search_paths(registry, AI_RESOURCE_SKILL);
+	canonical = ai_resource_registry_get_search_paths_for_origin(registry, "agents", AI_RESOURCE_SKILL);
+	project_path = g_build_filename(sandbox_project, ".agents/skills", NULL);
+	home_path = g_build_filename(sandbox_home, ".agents/skills", NULL);
+	g_assert_cmpstr(paths[0], ==, project_path);
+	g_assert_cmpstr(paths[1], ==, home_path);
+	g_assert_cmpuint(g_strv_length(canonical), ==, 2);
+	g_assert_cmpstr(canonical[0], ==, paths[0]);
+	g_assert_cmpstr(canonical[1], ==, paths[1]);
+	for (i = 0; paths[i] != NULL; i++)
+	{
+		for (j = i + 1; paths[j] != NULL; j++)
+			g_assert_cmpstr(paths[i], !=, paths[j]);
+		if (i < 2)
+			continue;
+		if (g_str_has_prefix(paths[i], sandbox_project))
+			g_assert_false(saw_home);
+		else
+			saw_home = TRUE;
+	}
+	g_assert_true(saw_home);
+
+	pinned = ai_resource_new_from_data("Pinned.\n", -1, "shared",
+		AI_RESOURCE_SKILL, "embedder", AI_RESOURCE_SCOPE_BUILTIN, NULL);
+	ai_resource_registry_add(registry, pinned);
+	ai_resource_registry_scan(registry);
+	g_assert_true(ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "shared") == pinned);
+}
+
 static void
 test_ai_glib_wins_within_a_scope(void)
 {
@@ -762,6 +834,9 @@ test_symlink_loop_terminates(void)
 	/* The depth cap is what makes this terminate rather than walk
 	 * forever. If it did not, this test would hang, not fail. */
 	registry = fresh_registry();
+
+	ai_resource_registry_set_watching(registry, TRUE);
+	ai_resource_registry_set_watching(registry, FALSE);
 
 	g_assert_nonnull(ai_resource_registry_lookup(registry,
 	                                             AI_RESOURCE_COMMAND,
@@ -1191,6 +1266,68 @@ test_watching_survives_finalization_with_events_pending(void)
 	}
 }
 
+/* Wait for the actual state, not an unrelated ancestor event. This also
+ * exercises monitor/debounce dispatch on a private thread-default context. */
+static void
+wait_for_skill(AiResourceRegistry *registry, GMainContext *context,
+               const gchar *description)
+{
+	gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+
+	do
+	{
+		AiResource *resource;
+
+		while (g_main_context_iteration(context, FALSE))
+			;
+		resource = ai_resource_registry_lookup(registry, AI_RESOURCE_SKILL, "group:deep:live");
+		if (description == NULL ? resource == NULL :
+		    resource != NULL && g_strcmp0(ai_resource_get_description(resource), description) == 0)
+			return;
+		g_usleep(10000);
+	} while (g_get_monotonic_time() < deadline);
+	g_error("Timed out waiting for live skill state: %s", description != NULL ? description : "deleted");
+}
+
+/* Both canonical roots start absent. Creation, deepest supported marker
+ * edits, deletion and restoration must work without any manual scan. */
+static void
+test_watching_canonical_tree(gconstpointer data)
+{
+	g_autoptr(AiResourceRegistry) registry = NULL;
+	g_autoptr(GMainContext) context = g_main_context_new();
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *root = NULL;
+	const gchar *base;
+	const gchar *relative = ".agents/skills/group/deep/live/SKILL.md";
+	Watcher w = { 0, NULL };
+
+	reset();
+	base = GPOINTER_TO_INT(data) ? sandbox_project : sandbox_home;
+	path = g_build_filename(base, relative, NULL);
+	root = g_build_filename(base, ".agents", NULL);
+	g_main_context_push_thread_default(context);
+	registry = fresh_registry();
+	g_signal_connect(registry, "changed", G_CALLBACK(on_changed), &w);
+	ai_resource_registry_set_watching(registry, TRUE);
+	write_file(base, relative, "---\ndescription: created\n---\nx\n");
+	wait_for_skill(registry, context, "created");
+	write_file(base, relative, "---\ndescription: edited\n---\nx\n");
+	wait_for_skill(registry, context, "edited");
+	g_assert_cmpint(g_unlink(path), ==, 0);
+	wait_for_skill(registry, context, NULL);
+	write_file(base, relative, "---\ndescription: restored\n---\nx\n");
+	wait_for_skill(registry, context, "restored");
+	rm_rf(root);
+	wait_for_skill(registry, context, NULL);
+	write_file(base, relative, "---\ndescription: root restored\n---\nx\n");
+	wait_for_skill(registry, context, "root restored");
+	g_assert_cmpuint(w.changed, >=, 6);
+	/* Dispose outside the context that owns the watches. */
+	g_main_context_pop_thread_default(context);
+	g_clear_object(&registry);
+}
+
 static void
 test_watching_toggles_cleanly(void)
 {
@@ -1261,6 +1398,8 @@ main(int argc, char *argv[])
 	 * below would silently test nothing. Fail loudly instead. */
 	g_assert_cmpstr(g_get_home_dir(), ==, sandbox_home);
 	g_assert_cmpstr(g_get_user_config_dir(), ==, config);
+	/* Even tests that construct without setting cwd must stay sandboxed. */
+	g_assert_cmpint(g_chdir(sandbox_home), ==, 0);
 
 	g_test_add_func("/ai-glib/registry/empty", test_empty_registry);
 	g_test_add_func("/ai-glib/registry/user-command",
@@ -1283,6 +1422,7 @@ main(int argc, char *argv[])
 
 	g_test_add_func("/ai-glib/registry/project-shadows-user",
 	                test_project_shadows_user);
+	g_test_add_func("/ai-glib/registry/canonical-skills", test_canonical_skills);
 	g_test_add_func("/ai-glib/registry/ai-glib-first",
 	                test_ai_glib_wins_within_a_scope);
 	g_test_add_func("/ai-glib/registry/scope-beats-order",
@@ -1330,6 +1470,10 @@ main(int argc, char *argv[])
 	                test_setting_working_directory_emits_changed);
 	g_test_add_func("/ai-glib/registry/watch-new-file",
 	                test_watching_reports_a_new_file);
+	g_test_add_data_func("/ai-glib/registry/watch-canonical-home", GINT_TO_POINTER(0),
+	                     test_watching_canonical_tree);
+	g_test_add_data_func("/ai-glib/registry/watch-canonical-project", GINT_TO_POINTER(1),
+	                     test_watching_canonical_tree);
 	g_test_add_func("/ai-glib/registry/watch-finalize",
 	                test_watching_survives_finalization_with_events_pending);
 	g_test_add_func("/ai-glib/registry/watch-toggle",

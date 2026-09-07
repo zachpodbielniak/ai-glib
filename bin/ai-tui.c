@@ -2448,6 +2448,20 @@ completion_select(App *app, gint delta)
     return TRUE;
 }
 
+/* A disk change must update an open slash menu without another keystroke. */
+static void
+on_resources_changed(AiResourceRegistry *registry, gpointer user_data)
+{
+	App *app = user_data;
+
+	(void)registry;
+	if (app->input->len > 0 && app->input->str[0] == '/')
+	{
+		completion_refresh(app);
+		app_schedule_redraw(app);
+	}
+}
+
 /*
  * Tab: take what is on offer.
  *
@@ -3233,6 +3247,8 @@ main(int argc, char *argv[])
 
         app.commands = ai_command_set_new(app.registry);
         app.completion = ai_completion_context_new(app.commands, cwd);
+		g_signal_connect(app.registry, "changed",
+		                 G_CALLBACK(on_resources_changed), &app);
 
         ai_conversation_set_command_set(app.conversation, app.commands);
         ai_conversation_set_working_directory(app.conversation, cwd);

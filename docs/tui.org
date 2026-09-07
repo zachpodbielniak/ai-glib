@@ -268,6 +268,11 @@ prompt; the CLI's older JSONL or session database is not imported.
 See [[file:provider-switching.org][Provider switching]] for the exact
 migration table and limits.
 
+*** Skill discovery
+The =/= menu discovers =.agents/skills/<name>/SKILL.md= relative to the working directory and =~/.agents/skills/<name>/SKILL.md=; flat =<name>.md= files work too. These are the source of truth: project =.agents= wins over home =.agents=, and both win over same-named skills in other harness directories. Unique skills from the other common locations remain available, with one menu entry per name. A frontmatter =name:= overrides the filename-derived name used for deduplication. Built-ins and explicit commands retain their existing priority over skills with the same slash name.
+
+Filesystem watches refresh the menu automatically, including nested skill edits, additions, deletions and roots created after startup; no restart or extra keystroke is needed. =/reload= remains available for a manual rescan. This changes discovery and menu precedence, not the native skill resolution of wrapped CLI providers.
+
 *** When a command is not found
 =/commands= with nothing to show prints every directory it searched,
 which is the answer to the question you are about to ask. If a file is

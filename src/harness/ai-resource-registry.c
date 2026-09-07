@@ -54,7 +54,8 @@ typedef enum
  * is one struct literal, and nothing else in the library needs to know
  * the new name.
  *
- * Order matters twice over. Scope dominates: every project directory is
+ * Canonical agents skills precede every vendor directory, project then
+ * home. For the remaining paths scope dominates: every project directory is
  * searched before any user directory, so a repository can override a
  * personal command. Within one scope the table order breaks ties, and
  * ai-glib's own directories come first so a file written specifically
@@ -70,6 +71,9 @@ typedef struct
 } AiResourceSource;
 
 static const AiResourceSource RESOURCE_SOURCES[] = {
+	/* Canonical skills; keep this row first for source_in_scan_order(). */
+	{ "agents", AI_RESOURCE_SKILL, ".agents/skills",
+	  USER_BASE_HOME, ".agents/skills" },
     /* ai-glib's own, first so it can override a borrowed definition. */
     { "ai-glib",  AI_RESOURCE_COMMAND, ".ai-glib/commands",
       USER_BASE_XDG_CONFIG, "ai-glib/commands" },
@@ -269,6 +273,22 @@ source_user_path(const AiResourceSource *source)
 /* ================================================================
  * Scanning
  * ================================================================ */
+
+/* Share precedence between the actual walk and the reported search paths. */
+static const AiResourceSource *
+source_in_scan_order(gsize position, AiResourceScope *scope)
+{
+	gsize count = G_N_ELEMENTS(RESOURCE_SOURCES);
+
+	if (position < 2)
+	{
+		*scope = position == 0 ? AI_RESOURCE_SCOPE_PROJECT : AI_RESOURCE_SCOPE_USER;
+		return &RESOURCE_SOURCES[0];
+	}
+	position -= 2;
+	*scope = position < count - 1 ? AI_RESOURCE_SCOPE_PROJECT : AI_RESOURCE_SCOPE_USER;
+	return &RESOURCE_SOURCES[1 + position % (count - 1)];
+}
 
 /*
  * Is this the marker file that names a directory-shaped resource?
@@ -485,15 +505,13 @@ registry_scan_dir(
 }
 
 /*
- * Walk every search directory, project scope first.
- *
- * The two passes are what implement "project beats user"; doing it in
- * one pass with a comparison per collision would put the rule in two
- * places at once.
+ * Walk canonical skills first, then vendor paths in scope order.
  */
 static void
 registry_rescan(AiResourceRegistry *self)
 {
+	g_autoptr(GHashTable) seen = g_hash_table_new_full(g_str_hash, g_str_equal,
+	                                                g_free, NULL);
     gsize i;
 
     g_hash_table_remove_all(self->resources);
@@ -511,30 +529,20 @@ registry_rescan(AiResourceRegistry *self)
         registry_file_resource(self, g_ptr_array_index(self->pinned, i));
     }
 
-    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
-    {
-        g_autofree gchar *path =
-            source_project_path(self, &RESOURCE_SOURCES[i]);
+	for (i = 0; i < 2 * G_N_ELEMENTS(RESOURCE_SOURCES); i++)
+	{
+		AiResourceScope scope;
+		const AiResourceSource *source = source_in_scan_order(i, &scope);
+		g_autofree gchar *path = scope == AI_RESOURCE_SCOPE_PROJECT
+			? source_project_path(self, source) : source_user_path(source);
+		g_autofree gchar *key = NULL;
 
-        if (path != NULL)
-        {
-            registry_scan_dir(self, path, "", RESOURCE_SOURCES[i].kind,
-                              RESOURCE_SOURCES[i].origin,
-                              AI_RESOURCE_SCOPE_PROJECT, 0);
-        }
-    }
-
-    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
-    {
-        g_autofree gchar *path = source_user_path(&RESOURCE_SOURCES[i]);
-
-        if (path != NULL)
-        {
-            registry_scan_dir(self, path, "", RESOURCE_SOURCES[i].kind,
-                              RESOURCE_SOURCES[i].origin,
-                              AI_RESOURCE_SCOPE_USER, 0);
-        }
-    }
+		if (path == NULL)
+			continue;
+		key = resource_key(source->kind, path);
+		if (g_hash_table_add(seen, g_steal_pointer(&key)))
+			registry_scan_dir(self, path, "", source->kind, source->origin, scope, 0);
+	}
 }
 
 /* ================================================================
@@ -621,7 +629,8 @@ on_monitor_changed(
 static void
 registry_watch_path(
     AiResourceRegistry *self,
-    const gchar        *path
+    const gchar        *path,
+    GHashTable         *seen
 ){
     g_autoptr(GFile)        dir = NULL;
     g_autoptr(GFileMonitor) monitor = NULL;
@@ -633,6 +642,8 @@ registry_watch_path(
     }
 
     dir = g_file_new_for_path(path);
+	if (!g_hash_table_add(seen, g_object_ref(dir)))
+		return;
     monitor = g_file_monitor_directory(dir, G_FILE_MONITOR_NONE, NULL,
                                        &local_error);
 
@@ -648,20 +659,66 @@ registry_watch_path(
     g_ptr_array_add(self->monitors, g_steal_pointer(&monitor));
 }
 
+/* The scanner also reads markers in children of its deepest directory. */
+static void
+registry_watch_tree(AiResourceRegistry *self, const gchar *path,
+                    GHashTable *seen, guint depth)
+{
+	g_autoptr(GDir) dir = NULL;
+	const gchar *entry;
+
+	registry_watch_path(self, path, seen);
+	if (depth >= MAX_SCAN_DEPTH + 1)
+		return;
+	dir = g_dir_open(path, 0, NULL);
+	if (dir == NULL)
+		return;
+	while ((entry = g_dir_read_name(dir)) != NULL)
+	{
+		g_autofree gchar *child = g_build_filename(path, entry, NULL);
+
+		if (g_file_test(child, G_FILE_TEST_IS_DIR))
+			registry_watch_tree(self, child, seen, depth + 1);
+	}
+}
+
 static void
 registry_attach_monitors(AiResourceRegistry *self)
 {
-    gsize i;
+	g_autoptr(GHashTable) seen = g_hash_table_new_full(g_file_hash, (GEqualFunc)g_file_equal,
+	                                                g_object_unref, NULL);
+	gsize i;
 
-    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
-    {
-        g_autofree gchar *project =
-            source_project_path(self, &RESOURCE_SOURCES[i]);
-        g_autofree gchar *user = source_user_path(&RESOURCE_SOURCES[i]);
+	for (i = 0; i < 2 * G_N_ELEMENTS(RESOURCE_SOURCES); i++)
+	{
+		AiResourceScope scope;
+		const AiResourceSource *source = source_in_scan_order(i, &scope);
+		g_autofree gchar *path = scope == AI_RESOURCE_SCOPE_PROJECT
+			? source_project_path(self, source) : source_user_path(source);
+		g_autofree gchar *ancestor = NULL;
 
-        registry_watch_path(self, project);
-        registry_watch_path(self, user);
-    }
+		if (path == NULL)
+			continue;
+		registry_watch_tree(self, path, seen, 0);
+
+		/* Watch the parent even for existing roots: deletion/recreation
+		 * must remain visible. Missing roots climb, but never recurse
+		 * through unrelated contents of HOME or the working directory. */
+		ancestor = g_path_get_dirname(path);
+		while (!g_file_test(ancestor, G_FILE_TEST_IS_DIR))
+		{
+			gchar *parent = g_path_get_dirname(ancestor);
+
+			if (g_str_equal(parent, ancestor))
+			{
+				g_free(parent);
+				break;
+			}
+			g_free(ancestor);
+			ancestor = parent;
+		}
+		registry_watch_path(self, ancestor, seen);
+	}
 }
 
 static void
@@ -1125,45 +1182,27 @@ ai_resource_registry_get_search_paths(
     AiResourceKind      kind
 ){
     g_autoptr(GPtrArray) paths = NULL;
+	g_autoptr(GHashTable) seen = g_hash_table_new_full(g_str_hash, g_str_equal,
+	                                                g_free, NULL);
     gsize                i;
 
     g_return_val_if_fail(AI_IS_RESOURCE_REGISTRY(self), NULL);
 
     paths = g_ptr_array_new_with_free_func(g_free);
 
-    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
-    {
-        gchar *path;
+	for (i = 0; i < 2 * G_N_ELEMENTS(RESOURCE_SOURCES); i++)
+	{
+		AiResourceScope scope;
+		const AiResourceSource *source = source_in_scan_order(i, &scope);
+		g_autofree gchar *path = NULL;
 
-        if (RESOURCE_SOURCES[i].kind != kind)
-        {
-            continue;
-        }
-
-        path = source_project_path(self, &RESOURCE_SOURCES[i]);
-
-        if (path != NULL)
-        {
-            g_ptr_array_add(paths, path);
-        }
-    }
-
-    for (i = 0; i < G_N_ELEMENTS(RESOURCE_SOURCES); i++)
-    {
-        gchar *path;
-
-        if (RESOURCE_SOURCES[i].kind != kind)
-        {
-            continue;
-        }
-
-        path = source_user_path(&RESOURCE_SOURCES[i]);
-
-        if (path != NULL)
-        {
-            g_ptr_array_add(paths, path);
-        }
-    }
+		if (source->kind != kind)
+			continue;
+		path = scope == AI_RESOURCE_SCOPE_PROJECT
+			? source_project_path(self, source) : source_user_path(source);
+		if (path != NULL && g_hash_table_add(seen, g_strdup(path)))
+			g_ptr_array_add(paths, g_steal_pointer(&path));
+	}
 
     g_ptr_array_add(paths, NULL);
 
