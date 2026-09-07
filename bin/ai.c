@@ -31,6 +31,7 @@
 
 #include "ai-glib.h"
 #include "ai-setup.h"
+#include "ai-launch.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -60,6 +61,9 @@ static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
 static gboolean  opt_setup           = FALSE;
+static gboolean  opt_launch          = FALSE;
+static gboolean  opt_launch_cmd      = FALSE;
+static gboolean  opt_launch_cmd_print = FALSE;
 static gchar    *opt_sandbox = NULL;
 static gchar   **opt_set             = NULL;
 static gboolean  opt_continue        = FALSE;
@@ -132,6 +136,12 @@ static const GOptionEntry option_entries[] = {
 	  "List known provider names and exit", NULL },
 	{ "setup", 0, 0, G_OPTION_ARG_NONE, &opt_setup,
 	  "Interactively save independent ai, ai-tui, or library defaults", NULL },
+	{ "launch", 0, 0, G_OPTION_ARG_NONE, &opt_launch,
+	  "Open the provider's native interactive CLI instead of this harness", NULL },
+	{ "launch-cmd", 0, 0, G_OPTION_ARG_NONE, &opt_launch_cmd,
+	  "Print the native interactive CLI command without running it", NULL },
+	{ "launch-cmd-print", 0, 0, G_OPTION_ARG_NONE, &opt_launch_cmd_print,
+	  "Print the native plain-text noninteractive command without running it", NULL },
 	{ "no-expand", 0, 0, G_OPTION_ARG_NONE, &opt_no_expand,
 	  "Send the prompt verbatim: no @ mentions, no / commands", NULL },
 	{ "interactive", 'i', 0, G_OPTION_ARG_NONE, &opt_interactive,
@@ -1370,6 +1380,9 @@ main(int argc, char *argv[])
 		"  ai --list-image-models -p gemini\n"
 		"\n"
 		"Chat examples:\n"
+		"  ai --launch -p claude -m opus     # open Claude Code directly\n"
+		"  ai --launch-cmd -p default -m default\n"
+		"  ai --launch-cmd-print -p grok-build \"explain this project\"\n"
 		"  ai --setup                       # choose defaults for one scope\n"
 		"  ai -p default -m default \"hi\"    # saved ai defaults, bypass AI_PROVIDER\n"
 		"  ai \"why is the sky blue?\"\n"
@@ -1414,6 +1427,13 @@ main(int argc, char *argv[])
 		list_providers();
 		return 0;
 	}
+	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
+	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
+	     (opt_setup || opt_image_gen || opt_image_list_models || opt_interactive || opt_dry_run)))
+	{
+		g_printerr("ai: choose one launch mode; it cannot be combined with setup, image, interactive, or dry-run modes\n");
+		return 2;
+	}
 
 	config = ai_config_new();
 	if (opt_setup)
@@ -1452,6 +1472,9 @@ main(int argc, char *argv[])
 		opt_model = g_steal_pointer(&resolved_model);
 	}
 
+	/* Resolve the app's saved model before mapping HTTP Claude to its real CLI. */
+	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
+		ptype = ai_launch_provider_type(ptype);
 	provider = make_provider(config, ptype);
 	if (provider == NULL)
 	{
@@ -1467,6 +1490,17 @@ main(int argc, char *argv[])
 	{
 		g_object_unref(provider);
 		return 2;
+	}
+	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
+	{
+		gint first = argc > 1 && g_str_equal(argv[1], "--") ? 2 : 1;
+
+		/* Never consume stdin: the native program owns the terminal and input. */
+		if (argc > first)
+			prompt = g_strjoinv(" ", &argv[first]);
+		status = ai_launch_run(provider, !opt_launch, opt_launch_cmd_print, prompt);
+		g_object_unref(provider);
+		return status;
 	}
 
 	if (opt_interactive)

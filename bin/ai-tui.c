@@ -24,6 +24,7 @@
 #include <glib-unix.h>
 
 #include <ai-glib.h>
+#include "ai-launch.h"
 
 /* ================================================================
  * Options
@@ -47,6 +48,9 @@ static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
+static gboolean  opt_launch = FALSE;
+static gboolean  opt_launch_cmd = FALSE;
+static gboolean  opt_launch_cmd_print = FALSE;
 
 static const GOptionEntry option_entries[] = {
     { "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
@@ -82,6 +86,12 @@ static const GOptionEntry option_entries[] = {
       "Wrap width for --dump (0 for none)", "N" },
     { "dry-run", 0, 0, G_OPTION_ARG_NONE, &opt_dry_run,
       "Print the command a CLI provider would run, then exit", NULL },
+	{ "launch", 0, 0, G_OPTION_ARG_NONE, &opt_launch,
+	  "Open the provider's native interactive CLI instead of this harness", NULL },
+	{ "launch-cmd", 0, 0, G_OPTION_ARG_NONE, &opt_launch_cmd,
+	  "Print the native interactive CLI command without running it", NULL },
+	{ "launch-cmd-print", 0, 0, G_OPTION_ARG_NONE, &opt_launch_cmd_print,
+	  "Print the native plain-text noninteractive command without running it", NULL },
     { "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
       "Print the version and exit", NULL },
     { "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
@@ -3038,6 +3048,8 @@ build_provider_named(
 		if (!ai_provider_factory_resolve_defaults(config, "ai-tui", name,
 		                                          opt_model, &type, &resolved_model, error))
 			return NULL;
+		if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
+			type = ai_launch_provider_type(type);
 		provider = ai_provider_factory_new(type, config, error);
 	}
 	else
@@ -3122,6 +3134,8 @@ main(int argc, char *argv[])
 	g_option_context_set_description(context,
 		"Examples:\n  ai --setup                 # configure ai-tui independently\n"
 		"  ai-tui -p default -m default\n\n"
+		"  ai-tui --launch -p claude -m opus\n"
+		"  ai-tui --launch-cmd-print -p default -m default \"hello\"\n\n"
 		"Omitted provider: AI_PROVIDER, then ai-tui defaults, then Claude.\n"
 		"Explicit default bypasses AI_PROVIDER. Omitted/default model uses the\n"
 		"saved ai-tui model only for its matching provider, otherwise native.\n"
@@ -3147,6 +3161,13 @@ main(int argc, char *argv[])
         return 0;
     }
 
+	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
+	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
+	     (opt_dump != NULL || opt_dry_run || opt_local_tools || opt_yes)))
+	{
+		g_printerr("ai-tui: choose one launch mode; it cannot be combined with dump, dry-run, or local-tool modes\n");
+		return 2;
+	}
     provider = build_provider(&error);
 
     if (provider == NULL)
@@ -3154,6 +3175,16 @@ main(int argc, char *argv[])
         g_printerr("ai-tui: %s\n", error->message);
         return 1;
     }
+
+	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
+	{
+		gint first = argc > 1 && g_str_equal(argv[1], "--") ? 2 : 1;
+		g_autofree gchar *prompt = argc > first ? g_strjoinv(" ", &argv[first]) : NULL;
+		gint status = ai_launch_run(provider, !opt_launch, opt_launch_cmd_print, prompt);
+
+		g_object_unref(provider);
+		return status;
+	}
 
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);

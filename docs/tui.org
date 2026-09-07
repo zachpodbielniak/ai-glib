@@ -23,6 +23,19 @@ ai-tui -p claude-code -m opus
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted provider selection still honors =AI_PROVIDER=; use =ai-tui -p default -m default= to bypass it and use saved ai-tui defaults. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
 
 ** What it looks like
+*** Native CLI Alternative
+=ai-tui --launch= opens the underlying provider's own interactive interface instead of initializing ncurses or the ai-glib conversation. =--launch-cmd= prints that native command, and =--launch-cmd-print= prints its noninteractive text-output equivalent; neither command-printing option executes anything. Optional positional text is passed literally as an initial prompt. All three modes use ai-tui's independent saved provider/model defaults, including =-p default -m default=.
+
+#+begin_src bash
+ai-tui --launch -p claude -m opus
+ai-tui --launch -p default -m default --skip-permissions
+ai-tui --launch -p default -m default "Continue implementing authentication"
+ai-tui --launch-cmd-print -p codex-cli "review this change"
+#+end_src
+
+See [[file:cli.org::*Native CLI Launch][native CLI launch]] for supported providers, shell quoting, stdin, credentials, native option limitations, and executable overrides. Launch modes cannot be combined with =--dump=, =--dry-run=, =--local-tools=, or =--yes=.
+
+*** ai-glib Harness
 #+begin_example
 > build phase 1
 
@@ -59,6 +72,9 @@ explanation lost inside it.
 | =--dump PROMPT=       | Run one turn with no terminal and print the transcript   |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
 | =--dry-run=           | Print the command a CLI provider would run, then exit    |
+| =--launch=            | Open the native CLI instead of the ai-glib harness      |
+| =--launch-cmd=        | Print the native interactive shell command              |
+| =--launch-cmd-print=  | Print the native plain-text noninteractive shell command |
 | =-v=, =--version=     | Print the version                                        |
 | =--license=           | Print licensing information                              |
 

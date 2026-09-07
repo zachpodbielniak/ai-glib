@@ -25,6 +25,9 @@ piping.
 | =-p=, =--provider NAME= | Provider name; omitted: =$AI_PROVIDER=, then =apps.ai.default_provider=, then =claude=. Explicit =default= bypasses =AI_PROVIDER= |
 | =-m=, =--model ID=      | Omitted/=default=: saved ai model only for the matching provider, else native. Image mode defaults to the native image model. =ollama/<id>= selects Ollama transport on Claude Code providers |
 | =--setup=              | Numbered setup wizard for independent ai, ai-tui, or library defaults; no prompt or TTY required |
+| =--launch=             | Replace this process with the provider's native interactive CLI |
+| =--launch-cmd=         | Print a shell-quoted native interactive command; do not execute it |
+| =--launch-cmd-print=   | Print the native CLI's plain-text noninteractive command; do not execute it |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
 | =--max-tokens N=        | Max output tokens (default: 4096)                                  |
@@ -60,6 +63,56 @@ ai -p default -m default --dry-run "hello"
 #+end_src
 
 An omitted provider honors =AI_PROVIDER= before the selected app's saved provider; explicit =-p default= bypasses that environment variable. An explicit model wins; omitted or =-m default= uses the saved model only when the selected provider matches that scope's provider. Otherwise the provider's native default is used. =ai= never inherits =ai-tui= or top-level library defaults, including =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL=. Image generation uses the selected provider but not its saved chat model: omit =-m= or use =-m default= for the native image model. See [[file:configuration.org][configuration]] for the schema.
+
+** Native CLI Launch
+The three launch modes bypass ai-glib's conversation, tools, resource expansion, subprocess protocol, and UI. =--launch= replaces the process with the real CLI, inheriting stdin/stdout/stderr and its exit status. A prompt is optional; positional arguments are joined into one literal initial prompt. Stdin is left untouched for the native CLI, rather than collected or converted to JSON. Native interactive handling of redirected stdin is up to that CLI. Use =--= before a prompt beginning with a dash.
+
+#+begin_src bash
+ai --launch -p claude -m opus
+ai --launch -p claude -m opus "Review this repository and identify bugs"
+ai-tui --launch -p default -m default --skip-permissions
+ai --launch -p opencode -m openai/gpt-5.2 "explain this repository"
+ai --launch-cmd -p cursor -m default
+ai --launch-cmd -p default -m default "Explain this project"
+ai --launch-cmd-print -p grok-build "summarize the changes"
+#+end_src
+
+=--launch-cmd= and =--launch-cmd-print= only print commands. They do not run a CLI, read a prompt from stdin, or require an installed executable. Output is shell syntax with each literal argument quoted, not a whitespace-delimited argv list; execute it with a shell if desired, not unquoted command substitution. Plain commands do not contain =exec=, so pasting one does not replace your interactive shell. A configured working directory is represented by a =cd= subshell.
+
+#+begin_src bash
+# The generated command reads stdin when no positional prompt was supplied.
+command=$(ai --launch-cmd-print -p claude-code -m opus)
+printf '%s\n' 'Explain this function' | bash -c "$command"
+#+end_src
+
+*** Provider Modes
+These are the base commands; model, effort, permission, session and other supported options are appended as appropriate.
+
+| Provider | Interactive | Plain Noninteractive |
+|----------+-------------+----------------------|
+| =claude=, =claude-code=, =claude-tmux= | =claude= | =claude --print= |
+| =opencode= | =opencode= | =opencode run --format default= |
+| =grok-build= | =grok= | =grok --single PROMPT --output-format plain=, or =--prompt-file /dev/stdin= without a prompt |
+| =antigravity=, =agy= | =agy= | =agy --print PROMPT= |
+| =cursor= | =cursor-agent= | =cursor-agent --print= |
+| =codex-cli=, =codex= | =codex= | =codex exec= |
+
+Only in launch modes, =claude= (normally the HTTP provider) selects Claude Code, and =claude-tmux= opens Claude directly without tmux automation. Other HTTP providers are rejected; use their CLI provider name where available, such as =grok-build=. The =ollama/MODEL= Claude transport continues to use =ollama launch claude --model MODEL -- ...=.
+
+OpenCode interactive prompts use =--prompt= because its positional argument is a project directory. Antigravity interactive prompts use =--prompt-interactive=. Its =--print= consumes a value; without a supplied prompt the printed command uses =--print="$(cat)"=, reading stdin when the command is subsequently executed. Shell command substitution strips trailing newlines. Codex print mode uses =-= to read stdin. Explicit argv prompts remain subject to OS argument-length limits; use native stdin where supported for large inputs.
+
+*** Defaults and Options
+Each app resolves its own =default= provider/model exactly as in normal mode, before launch-only provider mapping. =ai= uses =apps.ai=; =ai-tui= uses =apps.ai-tui=; neither inherits library defaults. =--set= is applied to the mapped CLI object after dedicated options, so =ai --launch -p claude --set agent=reviewer= configures Claude Code rather than the HTTP client. Without a saved model, the wrapper's built-in model is used.
+
+Executable overrides retain their normal precedence: =executable-path=, then =CLAUDE_CODE_PATH= / =OPENCODE_PATH= / =GROK_PATH= / =AGY_PATH= / =CURSOR_AGENT_PATH= (then =CURSOR_PATH=) / =CODEX_PATH=, then PATH. Ollama transport honors =OLLAMA_PATH=. =--set working-directory= changes the native process's directory. =--continue= and =--set session-id= use native resume flags; explicit session IDs win. =--skip-permissions= uses the native bypass option; bypass is never enabled merely because launch is requested.
+
+Only options with native equivalents are forwarded. Examples include model, agent, native system prompts, effort, permissions, sandbox, directories, and session selection. Unsupported nondefault provider properties fail instead of silently disappearing. OpenCode interactive mode has no effort flag (its print mode accepts =--variant=); Cursor effort is encoded in its model ID. Native system-prompt overrides are supported for Claude, Grok Build, and Codex, not OpenCode, Antigravity, or Cursor. JSON schemas are refused because these modes request ordinary text output.
+
+Wrapper-only controls such as response token caps, process timeouts, session persistence, JSON-stream toggles, and harness expansion are not native launch controls and are ignored. Launch does not impose the wrapper's headless session-disabling, slash-command-disabling, or automatic approval settings. Explicit values identical to a property's default cannot be distinguished from untouched defaults; in particular default medium effort is omitted for native modes without an effort option.
+
+Native execution inherits credentials from the environment. Cursor's explicit =api-key= property is delivered through =CURSOR_API_KEY=, never argv. Command display refuses custom environment values, explicit API keys differing from the inherited key, or credential-capable headers rather than printing them; use inherited environment for these commands. The nonsecret OpenCode bypass environment assignment may appear in printed commands. Non-environment tool endpoints require the ordinary ai-glib harness.
+
+Choose exactly one launch mode. Launch cannot be combined with =--dry-run=, the ai REPL, setup, or image modes; ai-tui also refuses =--dump= and local-tool approval modes. =--dry-run= remains the diagnostic for ai-glib's own headless protocol, not a synonym for =--launch-cmd=. Configuration errors exit 2, missing executables exit 127, and exec/directory failures exit 126; successful =--launch= retains the native CLI's status.
 
 ** Examples
 List the providers:
