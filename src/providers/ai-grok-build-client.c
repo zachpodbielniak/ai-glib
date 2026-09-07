@@ -1069,6 +1069,29 @@ ai_grok_build_client_parse_stream_events(
             }
         }
     }
+    else if (g_strcmp0(type, "user") == 0)
+	{
+		/* Anthropic-shaped tool replies carry the command output that the
+		 * transcript needs; ignoring these leaves every call running forever. */
+		JsonArray *blocks = ai_json_get_array(ai_json_get_object(obj, "message"), "content");
+		guint i;
+		for (i = 0; blocks != NULL && i < json_array_get_length(blocks); i++)
+		{
+			JsonObject *block = ai_json_array_get_object(blocks, i);
+			g_autoptr(GString) text = g_string_new(NULL);
+			g_autoptr(AiToolResult) result = NULL;
+			JsonArray *parts;
+			guint j;
+			if (g_strcmp0(ai_json_get_string(block, "type", NULL), "tool_result") != 0) continue;
+			g_string_append(text, ai_json_get_string(block, "content", ""));
+			parts = ai_json_get_array(block, "content");
+			for (j = 0; parts != NULL && j < json_array_get_length(parts); j++)
+				g_string_append(text, ai_json_get_string(ai_json_array_get_object(parts, j), "text", ""));
+			result = ai_tool_result_new(ai_json_get_string(block, "tool_use_id", ""), text->str,
+				ai_json_get_boolean(block, "is_error", FALSE));
+			g_ptr_array_add(out_events, ai_event_new_tool_finished(NULL, result));
+		}
+	}
     else if (g_strcmp0(type, "result") == 0)
     {
         /* Final result with session and usage info */

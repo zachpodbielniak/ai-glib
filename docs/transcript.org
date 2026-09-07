@@ -164,6 +164,18 @@ replaces one exact string with another, so the line counts of the two are
 the answer. A tool whose style does not claim =counts_diff= contributes
 nothing, which is why running a command never inflates the total.
 
+*** Inline previews
+=AiViewToolBlock:show-previews= opts a consumer into recorded command/output and edit-region previews. It defaults to false so existing embedders keep the one-line collapsed summary and per-call expanded listing; =ai-tui= enables it on arriving tool blocks, including its headless =--dump= path. Changing the property invalidates the render cache and emits the ordinary block-change notification. The summary accessor is unchanged.
+
+#+begin_src c
+g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+g_object_set(block, "show-previews", TRUE, NULL);
+#+end_src
+
+Preview generation lives in the private =src/view/ai-tool-preview.c= renderer, not in ncurses. All text and styles use =AiRenderedText= with sorted, non-overlapping UTF-8 byte spans, so wrapping, export and language bindings share the result. The new stable style names are =syntax-keyword=, =syntax-string=, =syntax-comment=, =syntax-number=, =syntax-type= and =syntax-function=. Existing =added=/=removed= tags color diff gutters independently of source tokens. A frontend can map the syntax roles to theme colors or editor font-lock faces without re-parsing the preview.
+
+The renderer uses a bounded line LCS for supplied replacement snippets, short unchanged context, recorded patch headers, and conservative filename-based lexical highlighting. It never reads the current file or invokes an external command. Missing snapshots, unconfirmed edits and truncation are explicit. Compact previews cover write/command calls among the last four calls, with twelve diff rows or six output rows per call; expansion shows all call headers and allows 64 preview rows per call. Each payload is bounded to 64 KiB/256 lines and each displayed source line to 320 UTF-8-safe bytes. ANSI/control sanitization only changes the presentation, not the data returned by =ai_tool_call_get_result()=. See [[file:tui.org::*Tool previews][tool preview behavior and limitations]] for dialects and language coverage.
+
 *** Teaching it a new tool
 One struct literal, the same way =AiImageModelInfo= registers an image
 model:

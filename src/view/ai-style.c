@@ -55,7 +55,13 @@ static const gchar * const TAG_NAMES[AI_STYLE_N_TAGS] = {
     "command",
     "todo-pending",
     "todo-active",
-    "todo-done"
+    "todo-done",
+	"syntax-keyword",
+	"syntax-string",
+	"syntax-comment",
+	"syntax-number",
+	"syntax-type",
+	"syntax-function"
 };
 
 /**

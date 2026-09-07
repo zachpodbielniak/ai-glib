@@ -259,6 +259,14 @@ ai_tool_call_get_target(AiToolCall *self)
     }
 
     raw = ai_tool_use_get_input_string(self->tool_use, style->target_key);
+	/* OpenCode uses camelCase while local tools and Claude use snake_case. */
+	if (raw == NULL && (style->category == AI_TOOL_CATEGORY_FILE_READ ||
+		style->category == AI_TOOL_CATEGORY_FILE_WRITE))
+	{
+		raw = ai_tool_use_get_input_string(self->tool_use, "filePath");
+		if (raw == NULL) raw = ai_tool_use_get_input_string(self->tool_use, "file_path");
+		if (raw == NULL) raw = ai_tool_use_get_input_string(self->tool_use, "path");
+	}
 
     if (raw == NULL || raw[0] == '\0')
     {
@@ -473,6 +481,8 @@ ai_tool_call_derive_diff(AiToolCall *self)
             ai_tool_use_get_input_string(self->tool_use, "new_string");
         const gchar *content =
             ai_tool_use_get_input_string(self->tool_use, "content");
+		if (old_string == NULL) old_string = ai_tool_use_get_input_string(self->tool_use, "oldString");
+		if (new_string == NULL) new_string = ai_tool_use_get_input_string(self->tool_use, "newString");
 
         if (old_string != NULL || new_string != NULL)
         {

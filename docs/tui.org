@@ -36,7 +36,7 @@ ai-tui --launch-cmd-print -p codex-cli "review this change"
 See [[file:cli.org::*Native CLI Launch][native CLI launch]] for supported providers, shell quoting, stdin, credentials, native option limitations, and executable overrides. Launch modes cannot be combined with =--dump=, =--dry-run=, =--local-tools=, or =--yes=.
 
 *** ai-glib Harness
-The interface uses Catppuccin Mocha by default: a mauve identity header and composer frame, a contrasting session panel, readable tool states, and highlighted completion rows. The header names the provider, working directory and active theme; the activity strip reports the model, current work and elapsed time. An empty session shows a short getting-started view instead of a blank transcript.
+The interface uses Catppuccin Mocha by default: a high-contrast identity badge, two-tone wordmark, mauve composer frame, contrasting session panel, readable tool states, and highlighted completion rows. Message-role badges and slim gutter rails separate your prompts from assistant prose. The header names the provider, working directory and active theme; the activity strip reports the model, current work and elapsed time. An empty session shows a short getting-started view instead of a blank transcript.
 
 #+begin_example
  ai / Grok Build                                      catppuccin-mocha
@@ -54,7 +54,7 @@ The interface uses Catppuccin Mocha by default: a mauve identity header and comp
  ╭─ COMPOSE ───────────────────────────────────────────────────────╮
  │ Ask, build, investigate...  / commands  @ files                  │
  ╰───────────────────────────────────────────────────────── 1/1 ───╯
- Enter send | ^F find | F1 help | F2 theme | F3 panel
+ Enter send | ^F find | ^O help | ^T theme | ^P panel
 
 #+end_example
 
@@ -62,10 +62,15 @@ The alternation is the point. Narration, a collapsed group of what the model
 actually did, more narration --- rather than a wall of tool output with the
 explanation lost inside it.
 
-The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits; =/todos=, =/running= and =/tools= provide full listings. =F3= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders fall back to ASCII.
+The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits; =/todos=, =/running= and =/tools= provide full listings. =C-p= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders and the wordmark fall back to ASCII.
+
+*** Motion and feedback
+A brief startup sweep introduces the composer. While a turn runs, a small two-tone highlight travels along the composer's top border alongside the existing activity spinner. It never covers the prompt, shifts the layout, or delays text and keyboard input. Search and approval overlays suppress the border sweep. Once the turn finishes, the border briefly indicates success, failure, or cancellation, and the status strip names the outcome. Theme and panel changes also give short status feedback without adding messages to the transcript or model context.
+
+Motion is deliberately bounded: startup lasts 900 ms, feedback lasts about 1.6 seconds, and an idle session has no ongoing animation timer. The activity and effect clock is shared, and cached transcript rows are reused rather than rebuilt for animation ticks. =--no-animation= disables the startup/border sweeps and spinner rotation; elapsed time still updates once per second and static feedback remains available. There are no blinking text effects, palette changes, or moving transcript contents.
 
 *** Themes
-Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =F2= cycles themes in the running interface without interrupting the conversation or discarding a draft.
+Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =C-t= cycles themes in the running interface without interrupting the conversation or discarding a draft.
 
 #+begin_src bash
 ai-tui --theme catppuccin-mocha
@@ -75,7 +80,7 @@ NO_COLOR=1 ai-tui
 ai-tui --list-themes
 #+end_src
 
-Theme selection is =--theme=, then =AI_TUI_THEME=, then Catppuccin Mocha. An unknown name is an error with a hint to list valid themes. =NO_COLOR= disables colors unless =--theme= explicitly requests them; pressing =F2= is also an explicit color choice. =monochrome= always disables color. Live choices are session-local: set =AI_TUI_THEME= in your environment for a persistent preference. These visual settings do not affect provider properties or =--set=.
+Theme selection is =--theme=, then =AI_TUI_THEME=, then Catppuccin Mocha. An unknown name is an error with a hint to list valid themes. =NO_COLOR= disables colors unless =--theme= explicitly requests them; pressing =C-t= is also an explicit color choice. =monochrome= always disables color. Live choices are session-local: set =AI_TUI_THEME= in your environment for a persistent preference. These visual settings do not affect provider properties or =--set=.
 
 On 256-color terminals the RGB palettes are mapped to the nearest stable xterm color-cube/grayscale entries; ai-tui never mutates the user's terminal palette. The =terminal= theme retains the terminal's background and standard colors. Lower-color terminals use standard colors, and terminals without color support retain bold and reverse-video selection. Theme surfaces and selection colors cover blank cells as well as text. =--no-animation= replaces the animated spinner with a stationary marker, while elapsed time still updates once per second. None of the chrome or color escapes appears in =--dump= output.
 
@@ -95,7 +100,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--set PROP=VALUE=    | Set any provider property; repeatable                    |
 | =--theme NAME=        | Select a theme, overriding =AI_TUI_THEME= and =NO_COLOR= |
 | =--list-themes=       | List built-in themes without starting a provider        |
-| =--no-animation=      | Static activity marker; elapsed time still updates     |
+| =--no-animation=      | Disable decorative motion; elapsed time still updates  |
 | =--no-agents=         | Do not let the model start background agents             |
 | =--dump PROMPT=       | Run one turn with no terminal and print the transcript   |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
@@ -129,16 +134,18 @@ one that refuses to start.
 | =Escape=                   | Dismiss the completion menu                       |
 | =C-n=                      | Select the next tool or reasoning block           |
 | =C-b=                      | Expand or collapse the selected block             |
-| =F1=                       | Show command and keyboard help                    |
-| =F2=                       | Cycle themes without restarting                   |
-| =F3=                       | Toggle the wide-terminal session panel            |
-| =F4=                       | Jump to latest output and resume following        |
+| =C-o=                      | Open command and keyboard help                    |
+| =C-t=                      | Cycle themes without restarting                   |
+| =C-p=                      | Toggle the wide-terminal session panel            |
+| =C-l=                      | Jump to latest output and resume following        |
 | =C-f=                      | Search the transcript without replacing the draft |
+
+These interface shortcuts use ordinary Ctrl-letter combinations; no function keys are bound. Theme and panel shortcuts also work while searching without changing the query or draft. =C-o= opens help and =C-l= returns to the latest output, closing search in either case. =C-p= means panel, not previous history; =Up= and =Down= retain history navigation.
 
 *** Searching and following
 =C-f= opens a separate, append-only search field. Type a case-sensitive substring; matching rendered rows are highlighted and the view jumps to the first match. =Enter= or =Down= advances, =Up= or =Shift-Enter= goes back, and navigation wraps. =Backspace= edits the query and =C-u= clears it. =Escape= or =C-f= closes search and restores the untouched draft. The result count is matching rows, not occurrences; text hidden inside a collapsed block is not searched until expanded, and a match does not span a wrap boundary.
 
-=PgUp= and =PgDn= scroll incrementally rather than jumping straight to the bottom. Scrolling away pauses following even if a turn completes while you read. =F4=, sending a prompt, or reaching the bottom with =PgDn= resumes following. Search and history remain in memory only; the redesign does not persist prompts to disk. Existing explicit export/save commands still do so.
+=PgUp= and =PgDn= scroll incrementally rather than jumping straight to the bottom. Scrolling away pauses following even if a turn completes while you read. =C-l=, sending a prompt, or reaching the bottom with =PgDn= resumes following. Search and history remain in memory only; the redesign does not persist prompts to disk. Existing explicit export/save commands still do so.
 
 *** Writing more than one line
 =Alt-Enter= inserts a newline and works everywhere. =Shift-Enter= does the
@@ -195,6 +202,38 @@ The external editor runs synchronously, so ai-glib's main loop pauses until it e
 Scrolling away from the bottom stops the view following new output; the
 status bar says =[scrolled]= while that is so. Sending, or scrolling back
 down, resumes following.
+
+** Tool previews
+Edits and commands now show compact inline previews beneath the grouped summary without requiring expansion. =C-n= selects a tool group and =C-b= expands it for more detail. Read/search calls remain summarized in compact mode. A compact group previews relevant calls among its last four calls and names how many earlier calls are hidden; expanded groups list every call.
+
+*** Edit regions
+Recorded =old_string=/=new_string= pairs (including OpenCode's =oldString=/=newString=) are rendered as a line diff with two lines of surrounding context. A red =-= gutter and green =+= gutter identify removals and additions without forcing the entire source line into one color. The two number columns refer to lines within the supplied old/new snippets, *not absolute file line numbers*. Unchanged gaps between hunks are explicitly marked. Newline-only changes are noted separately.
+
+#+begin_example
+Edited demo.c, ran make -j4  +1-1 >
+  Edit demo.c
+    @@ edit region; relative old/new lines @@
+    -    1      | static int answer(void) { return 1; }
+    +         1 | static int answer(void) { return 2027; }
+  Bash make -j4
+    $ make -j4
+      | Compiling demo.c
+      | Linking demo
+#+end_example
+
+Keywords, strings, comments, numbers, types and callable names use distinct theme roles. In Catppuccin Mocha these use mauve, green, muted subtext, peach, yellow and blue respectively; changing themes with =C-t= recolors existing previews immediately. Monochrome retains the textual diff gutters and line numbers.
+
+The language-aware lexical highlighter recognizes C/C++, JavaScript/TypeScript, Rust, Go, Python, shell/Makefile, JSON, YAML, Lisp/Elisp, Haskell and SQL by filename. It preserves multiline comment/string state within supplied snippets, including context hidden by the preview. It is not a compiler or semantic highlighter; constructs requiring a full parser and context outside the supplied snippet cannot be inferred. Unknown extensions use plain literal-code styling.
+
+Multi-edit arrays, unified diffs, =apply_patch= envelopes and Codex =file_change= entries containing diffs are supported. Supplied patch hunk headers are preserved rather than replaced with invented coordinates. Pending, failed and denied edits say the requested change is not confirmed successful. A write with only new content is labeled as having no previous snapshot; a provider that supplies only filenames gets an explicit unavailable-preview message. Rendering never rereads files or runs =git diff=, so later filesystem changes cannot silently rewrite the history.
+
+*** Commands and output
+Each preview shows the recorded command after =$=, preserving up to six command lines, followed by the first six output lines. Empty, pending and denied results are distinguished. Expanding a group raises the output allowance to 64 lines per call. Preview text comes from the normalized tool result; if a provider supplies no result yet, the UI says it is waiting rather than inventing output. Grok Build's Anthropic-shaped =user= tool-result events now feed this path, including string and text-block-array results.
+
+*** Limits and safety
+Compact edit previews allow twelve diff rows per call; expanded previews allow 64. Inputs are bounded to 64 KiB and 256 lines before diffing, with at most eight entries from a multi-edit or file-change array. Long source/output lines show at most 320 UTF-8-safe bytes followed by a truncation marker. These are logical-line limits: narrow terminals may wrap them into additional screen rows. Truncated previews explicitly say more exists; expansion increases the row allowance but does not remove the byte/line safety bounds. ANSI CSI/OSC sequences and unsafe control bytes are removed from preview payloads, tabs display as four spaces, and invalid UTF-8 becomes replacement characters. The original tool result remains unchanged.
+
+=--dump= includes the same compact previews as plain text, without ANSI styling. No preview text is added to the model's conversation. The shared =AiViewToolBlock:show-previews= property provides the same rendering to other frontends; see [[file:transcript.org][the view-layer contract]].
 
 ** Completion
 The menu opens as you type. A =/= at the start of the line lists every

@@ -41,6 +41,12 @@ G_BEGIN_DECLS
  * @AI_STYLE_TODO_PENDING: a todo item not started
  * @AI_STYLE_TODO_ACTIVE: the todo item being worked on
  * @AI_STYLE_TODO_DONE: a finished todo item
+ * @AI_STYLE_SYNTAX_KEYWORD: a language keyword
+ * @AI_STYLE_SYNTAX_STRING: a quoted string
+ * @AI_STYLE_SYNTAX_COMMENT: a source comment
+ * @AI_STYLE_SYNTAX_NUMBER: a numeric literal
+ * @AI_STYLE_SYNTAX_TYPE: a type name
+ * @AI_STYLE_SYNTAX_FUNCTION: a function or callable name
  *
  * How a run of characters should look.
  *
@@ -75,6 +81,12 @@ typedef enum
     AI_STYLE_TODO_PENDING,
     AI_STYLE_TODO_ACTIVE,
     AI_STYLE_TODO_DONE,
+	AI_STYLE_SYNTAX_KEYWORD,
+	AI_STYLE_SYNTAX_STRING,
+	AI_STYLE_SYNTAX_COMMENT,
+	AI_STYLE_SYNTAX_NUMBER,
+	AI_STYLE_SYNTAX_TYPE,
+	AI_STYLE_SYNTAX_FUNCTION,
 
     /*< private >*/
     AI_STYLE_N_TAGS

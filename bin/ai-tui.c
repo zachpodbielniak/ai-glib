@@ -61,7 +61,7 @@ static gboolean theme_explicit = FALSE;
 static const GOptionEntry option_entries[] = {
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme, "Terminal theme (overrides AI_TUI_THEME and NO_COLOR)", "NAME" },
 	{ "list-themes", 0, 0, G_OPTION_ARG_NONE, &opt_list_themes, "List terminal themes without loading a provider", NULL },
-	{ "no-animation", 0, 0, G_OPTION_ARG_NONE, &opt_no_animation, "Disable animated activity indicator", NULL },
+	{ "no-animation", 0, 0, G_OPTION_ARG_NONE, &opt_no_animation, "Disable decorative motion (elapsed time still updates)", NULL },
     { "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
       "Provider: claude, openai, gemini, grok, ollama, claude-code, "
       "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
@@ -162,7 +162,13 @@ static const short TAG_COLOURS[] = {
     COLOR_MAGENTA,  /* command       */
     -1,             /* todo-pending  */
     COLOR_YELLOW,   /* todo-active   */
-    COLOR_GREEN     /* todo-done     */
+    COLOR_GREEN,    /* todo-done     */
+	COLOR_MAGENTA,  /* syntax-keyword */
+	COLOR_GREEN,    /* syntax-string */
+	COLOR_BLUE,     /* syntax-comment */
+	COLOR_YELLOW,   /* syntax-number */
+	COLOR_YELLOW,   /* syntax-type */
+	COLOR_CYAN      /* syntax-function */
 };
 
 G_STATIC_ASSERT(G_N_ELEMENTS(TAG_COLOURS) == AI_STYLE_N_TAGS);
@@ -207,6 +213,8 @@ init_colours(void)
 			case COLOR_RED: rgb = theme->red; break;
 			default: break;
 			}
+			if (i == AI_STYLE_SYNTAX_NUMBER) rgb = theme->number;
+			if (i == AI_STYLE_SYNTAX_FUNCTION) rgb = theme->function;
 			colour = theme_nearest(rgb);
 		}
 		else if (colour == COLOR_BLUE)
@@ -276,6 +284,10 @@ attr_for_tag(AiStyleTag tag)
  * a slow model is not also spending a core on redrawing one glyph.
  */
 #define SPINNER_INTERVAL_MS (110)
+
+/* Short, bounded accents; a quiet session must not repaint indefinitely. */
+#define INTRO_DURATION_US (900 * G_TIME_SPAN_MILLISECOND)
+#define FEEDBACK_DURATION_US (1600 * G_TIME_SPAN_MILLISECOND)
 
 /*
  * How many background agents may run at once.
@@ -388,9 +400,13 @@ typedef struct
      * and not a mode somebody can be left stuck in. */
     guint                interrupt_id;
 
-    /* The spinner: a repeating timer that lives only while a turn does. */
+    /* One clock for activity and bounded UI accents, never a permanent idle loop. */
     guint                spinner_id;
     guint                spinner_frame;
+	gint64               intro_started;
+	gint64               feedback_until;
+	gchar               *feedback;
+	AiStyleTag           feedback_style;
 
     /* Set only by --dump, and quit by whichever callback finishes the
      * turn. Polling the busy flag is not enough: a line that resolves to
@@ -528,6 +544,23 @@ on_transcript_changed(App *app)
 	app_schedule_redraw(app);
 }
 
+/* Enable shared previews as blocks arrive, including in --dump mode.
+ * The library keeps summary-only behavior for other embedders by default. */
+static void
+on_transcript_items_changed(AiTranscript *transcript, guint position,
+                            guint removed, guint added, gpointer user_data)
+{
+	App *app = user_data;
+	guint i;
+	(void)removed;
+	for (i = position; i < position + added; i++)
+	{
+		AiViewBlock *block = ai_transcript_get_block(transcript, i);
+		if (AI_IS_VIEW_TOOL_BLOCK(block)) g_object_set(block, "show-previews", TRUE, NULL);
+	}
+	on_transcript_changed(app);
+}
+
 /* Draw one row, switching attributes as the spans say. */
 static void
 draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
@@ -539,9 +572,17 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
 
 	if (row->label != NULL)
 	{
-		wattrset(win, theme_attr(PAIR_ACCENT) | A_BOLD);
-		mvwaddstr(win, y, 2, row->label);
+		wattrset(win, theme_attr(ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN
+			? PAIR_SELECTION : PAIR_SURFACE) | A_BOLD);
+		mvwprintw(win, y, 2, " %s ", row->label);
 		return;
+	}
+	if (row->line_len > 0 && (ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN ||
+		ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TEXT))
+	{
+		wattrset(win, attr_for_tag(ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN
+			? AI_STYLE_TOOL_TARGET : AI_STYLE_DIM));
+		mvwaddstr(win, y, 0, g_get_charset(NULL) ? "│" : "|");
 	}
 	if (app->searching && app->search->len > 0)
 	{
@@ -585,28 +626,30 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
     wattrset(win, A_NORMAL);
 }
 
-/*
- * Advance one frame and redraw.
- *
- * Only the status bar changes, but a redraw is already coalesced onto an
- * idle and costs a hundred lines of text; a partial-update path here
- * would be a second way to draw the screen, for no gain anybody can see.
- */
+/* Activity and short UI accents share a clock. The transcript row cache
+ * stays intact, and the final tick restores the static frame before stopping. */
 static gboolean
 on_spinner_tick(gpointer user_data)
 {
     App *app = user_data;
+	gint64 now = g_get_monotonic_time();
 
 	if (!opt_no_animation)
 		app->spinner_frame = (app->spinner_frame + 1) % G_N_ELEMENTS(SPINNER_FRAMES);
 
     app_schedule_redraw(app);
+	if (!ai_conversation_get_busy(app->conversation) && now >= app->feedback_until &&
+		(opt_no_animation || now >= app->intro_started + INTRO_DURATION_US))
+	{
+		app->spinner_id = 0;
+		return G_SOURCE_REMOVE;
+	}
 
     return G_SOURCE_CONTINUE;
 }
 
 /*
- * Run the spinner exactly while a turn does.
+ * Run the clock while a turn or a short feedback/intro accent is active.
  *
  * Driven from ::busy rather than started and stopped at each call site:
  * a turn can end through the callback, through cancellation, or through
@@ -617,19 +660,48 @@ static void
 sync_spinner(App *app)
 {
     gboolean busy = ai_conversation_get_busy(app->conversation);
+	gint64 now = g_get_monotonic_time();
+	gboolean active = busy || now < app->feedback_until ||
+		(!opt_no_animation && now < app->intro_started + INTRO_DURATION_US);
 
-    if (busy && app->spinner_id == 0)
+    if (active && app->spinner_id == 0 && app->running)
     {
         app->spinner_frame = 0;
 		/* Reduced motion still updates elapsed time once per second. */
         app->spinner_id = g_timeout_add(opt_no_animation ? 1000 : SPINNER_INTERVAL_MS, on_spinner_tick,
                                         app);
     }
-    else if (!busy && app->spinner_id != 0)
+    else if (!active && app->spinner_id != 0)
     {
         g_source_remove(app->spinner_id);
         app->spinner_id = 0;
     }
+}
+
+/* Feedback belongs to the chrome, not the conversation or model context. */
+static void
+ui_feedback(App *app, const gchar *text, AiStyleTag style)
+{
+	if (!app->running) return;
+	g_free(app->feedback);
+	app->feedback = g_strdup(text);
+	app->feedback_style = style;
+	app->feedback_until = g_get_monotonic_time() + FEEDBACK_DURATION_US;
+	sync_spinner(app);
+	app_schedule_redraw(app);
+}
+
+/* Cancellation is an intentional stop, not a failed operation. */
+static void
+ui_turn_finished(App *app, const GError *error)
+{
+	if (error == NULL)
+		ui_feedback(app, "Turn complete", AI_STYLE_TOOL_OK);
+	else if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+		g_error_matches(error, AI_ERROR, AI_ERROR_CANCELLED))
+		ui_feedback(app, "Turn stopped", AI_STYLE_STATUS);
+	else
+		ui_feedback(app, "Turn failed", AI_STYLE_ERROR);
 }
 
 static void
@@ -717,8 +789,16 @@ draw_status(App *app)
                                app->interrupt_id != 0
                                    ? "^C again to quit"
                                    : "ready",
-                               app->follow ? "" : "   [scrolled]");
+                                app->follow ? "" : "   [scrolled]");
     }
+	if (app->feedback != NULL && app->interrupt_id == 0 &&
+		!ai_conversation_get_busy(app->conversation) &&
+		g_get_monotonic_time() < app->feedback_until)
+	{
+		g_free(line);
+		line = g_strdup_printf(" %s  |  %s%s", app->feedback,
+			model != NULL ? model : "ready", app->follow ? "" : "   [scrolled]");
+	}
 
 	wbkgd(app->status_win, ' ' | theme_attr(PAIR_SURFACE));
 	werase(app->status_win);
@@ -930,21 +1010,55 @@ draw_frame(WINDOW *win)
 	mvwaddstr(win, height - 1, width - 1, unicode ? "╯" : "+");
 }
 
+/* A small two-tone runner lives on a border, never on readable content.
+ * Geometry and colors stay fixed; no palette mutation or layout animation. */
+static void
+draw_sweep(App *app, WINDOW *win, gint y, gint start, gint length)
+{
+	gint64 now = g_get_monotonic_time();
+	gint travel = length - 5;
+	gint position, i;
+	gboolean intro = now < app->intro_started + INTRO_DURATION_US;
+
+	if (opt_no_animation || travel < 1 || app->approval_prompt != NULL ||
+		app->searching || (!intro && !ai_conversation_get_busy(app->conversation)))
+		return;
+	if (intro)
+		position = (gint)((now - app->intro_started) * travel / INTRO_DURATION_US);
+	else
+	{
+		position = (gint)((now / (SPINNER_INTERVAL_MS * G_TIME_SPAN_MILLISECOND)) % (2 * travel));
+		if (position > travel) position = 2 * travel - position;
+	}
+	for (i = 0; i < 5; i++)
+	{
+		wattrset(win, i == 2 ? theme_attr(PAIR_ACCENT) | A_BOLD : attr_for_tag(AI_STYLE_TOOL_TARGET));
+		mvwaddstr(win, y, start + position + i, g_get_charset(NULL) ? "━" : "=");
+	}
+}
+
 static void
 draw_input(App *app)
 {
     gint     width = getmaxx(app->input_win);
     gint     rows = getmaxy(app->input_win) - 2;
     InputPen pen = { 0 };
+	gboolean busy = ai_conversation_get_busy(app->conversation);
+	attr_t border = theme_attr(PAIR_ACCENT);
+
+	if (!busy && app->feedback != NULL && g_get_monotonic_time() < app->feedback_until)
+		border = attr_for_tag(app->feedback_style);
 
 	wbkgd(app->input_win, ' ' | attr_for_tag(AI_STYLE_DEFAULT));
     werase(app->input_win);
-	wattrset(app->input_win, theme_attr(PAIR_ACCENT));
+	wattrset(app->input_win, border);
 	draw_frame(app->input_win);
 	{
 		g_autofree gchar *title = fit_to_width(ai_conversation_get_busy(app->conversation) ? " DRAFT / waiting for turn " : " COMPOSE ", width - 4);
 		mvwaddstr(app->input_win, 0, 2, title);
 	}
+	draw_sweep(app, app->input_win, 0, busy ? 30 : 13, width - (busy ? 32 : 15));
+	wattrset(app->input_win, border);
 	pen.width = MAX(1, width - INPUT_GUTTER - 2);
     pen.max_rows = rows;
     pen.cursor = app->cursor;
@@ -1037,9 +1151,10 @@ draw_chrome(App *app)
 	GObject *provider = ai_conversation_get_provider(app->conversation);
 	const gchar *model = AI_IS_CLIENT(provider) ? ai_client_get_model(AI_CLIENT(provider)) :
 		AI_IS_CLI_CLIENT(provider) ? ai_cli_client_get_model(AI_CLI_CLIENT(provider)) : NULL;
-	g_autofree gchar *identity = g_strdup_printf(" ai / %s", ai_provider_get_name(AI_PROVIDER(provider)));
+	const gchar *identity = ai_provider_get_name(AI_PROVIDER(provider));
 	gint x = app->content_width + 2, y = 3;
-	chrome_text(0, 1, app->content_width - 2, identity, theme_attr(PAIR_ACCENT) | A_BOLD);
+	chrome_text(0, 1, 5, " ai ", theme_attr(PAIR_SELECTION) | A_BOLD);
+	chrome_text(0, 7, app->content_width - 9, identity, theme_attr(PAIR_ACCENT) | A_BOLD);
 	if (COLS >= 65)
 		chrome_text(0, COLS - (gint)strlen(THEMES[theme_index].name) - 3,
 			(gint)strlen(THEMES[theme_index].name) + 1, THEMES[theme_index].name,
@@ -1047,10 +1162,10 @@ draw_chrome(App *app)
 	chrome_text(1, 2, app->content_width - 3, ai_conversation_get_working_directory(app->conversation), attr_for_tag(AI_STYLE_DIM));
 	chrome_text(LINES - 1, 1, COLS - 2,
 		app->searching ? "Enter next | Up / Shift-Enter previous | ^U clear | Esc close" :
-		app->candidates != NULL ? "Tab / arrows choose | Enter accept | Esc dismiss | F1 help" :
-		COLS < 65 ? "Enter send  F1 help  ^C stop" :
-		COLS < 100 ? "Enter send | ^F find | F1 help | F2 theme | F3 panel" :
-		"Enter send  Alt-Enter newline  ^G editor  ^F search  F1 help  F2 theme  F3 details  F4 latest",
+		app->candidates != NULL ? "Tab / arrows choose | Enter accept | Esc dismiss | ^O help" :
+		COLS < 65 ? "Enter send  ^O help  ^C stop" :
+		COLS < 100 ? "Enter send | ^F find | ^O help | ^T theme | ^P panel" :
+		"Enter send  Alt-Enter newline  ^G editor  ^F search  ^O help  ^T theme  ^P panel  ^L latest",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
 	attrset(theme_attr(PAIR_SURFACE));
@@ -1061,7 +1176,7 @@ draw_chrome(App *app)
 	chrome_text(y++, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD);
 	chrome_text(++y, x, 28, "APPEARANCE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
 	chrome_text(++y, x, 28, THEMES[theme_index].name, theme_attr(PAIR_SURFACE));
-	chrome_text(++y, x, 28, theme_colour ? "F2 cycle / F3 hide" : "No color / F3 hide", theme_attr(PAIR_SURFACE));
+	chrome_text(++y, x, 28, theme_colour ? "^T cycle / ^P hide" : "No color / ^P hide", theme_attr(PAIR_SURFACE));
 	chrome_text(y += 2, x, 28, "LATEST REPORTED USAGE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
 	{
 		AiTranscript *transcript = ai_conversation_get_transcript(app->conversation);
@@ -1183,9 +1298,22 @@ app_redraw(App *app)
 			"/model     Inspect or change the model",
 			"@path      Bring a file into the conversation",
 			"/running   Check background agents",
-			"", "F2 change the mood.  Ctrl-G think in your editor."
+			"", "Ctrl-T change the mood.  Ctrl-G open your editor."
 		};
-		gint top = MAX(0, (height - (gint)G_N_ELEMENTS(welcome)) / 2);
+		gboolean logo = width >= 58 && height >= 14;
+		gint top = MAX(0, (height - (gint)G_N_ELEMENTS(welcome) - (logo ? 4 : 0)) / 2);
+		if (logo)
+		{
+			wattrset(app->transcript_win, theme_attr(PAIR_ACCENT) | A_BOLD);
+			mvwaddstr(app->transcript_win, top, 3, g_get_charset(NULL) ? "▄▀█ █" : " /\\  | ");
+			wattrset(app->transcript_win, attr_for_tag(AI_STYLE_TOOL_TARGET) | A_BOLD);
+			mvwaddstr(app->transcript_win, top + 1, 3, g_get_charset(NULL) ? "█▀█ █" : "/--\\ | ");
+			wattrset(app->transcript_win, theme_attr(PAIR_ACCENT) | A_BOLD);
+			mvwaddstr(app->transcript_win, top, 14, "AI / GLIB");
+			wattrset(app->transcript_win, attr_for_tag(AI_STYLE_DIM));
+			mvwaddstr(app->transcript_win, top + 1, 14, "A workspace for your next idea.");
+			top += 4;
+		}
 		for (i = 0; i < (gint)G_N_ELEMENTS(welcome) && top + i < height; i++)
 		{
 			g_autofree gchar *text = fit_to_width(welcome[i], width - 5);
@@ -1574,7 +1702,7 @@ show_help(App *app)
 
     g_string_append(out,
                     "\nKeys\n"
-					"  F1 help / F2 cycle theme / F3 details / F4 latest\n"
+					"  ^O help / ^T cycle theme / ^P panel / ^L latest\n"
 					"  ^F search transcript (case-sensitive matching rows)\n"
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
@@ -2461,8 +2589,8 @@ drain_keys(App *app)
 		/* Do not submit or edit a draft while it cannot be seen. */
 		if (app->tiny && !((kind == OK && (ch == 3 || ch == 4)) ||
 			(kind == KEY_CODE_YES && ch == KEY_RESIZE))) continue;
-		if (app->searching && !(kind == KEY_CODE_YES &&
-			((ch >= KEY_F(1) && ch <= KEY_F(4)) || ch == KEY_RESIZE)))
+		if (app->searching && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
+			(kind == OK && (ch == 12 || ch == 15 || ch == 16 || ch == 20))))
 		{
 			if (kind == OK && (ch == 27 || ch == 6 || ch == 3)) app->searching = FALSE;
 			else if ((kind == KEY_CODE_YES && (ch == KEY_UP || ch == KEY_SHIFT_ENTER || ch == KEY_LEFT))) search_step(app, -1);
@@ -2495,19 +2623,34 @@ drain_keys(App *app)
 			case KEY_RESIZE:
 				clearok(curscr, TRUE);
 				break;
-			case KEY_F(1):
+			case 15:  /* ^O: open help */
 				app->searching = FALSE;
+				completion_close(app);
+				app->completion_dismissed = TRUE;
 				show_help(app);
 				app->follow = TRUE;
 				break;
-			case KEY_F(2):
+			case 20:  /* ^T: theme */
+			{
+				g_autofree gchar *notice = NULL;
 				theme_index = (theme_index + 1) % G_N_ELEMENTS(THEMES);
 				theme_explicit = TRUE;
 				init_colours();
 				clearok(curscr, TRUE);
+				notice = g_strdup_printf("Theme: %s", THEMES[theme_index].name);
+				ui_feedback(app, notice, AI_STYLE_COMMAND);
 				break;
-			case KEY_F(3): app->details = !app->details; break;
-			case KEY_F(4): app->searching = FALSE; app->follow = TRUE; break;
+			}
+			case 16:  /* ^P: panel */
+				app->details = !app->details;
+				ui_feedback(app, !app->details ? "Panel hidden" :
+					COLS >= 110 && LINES >= 20 ? "Panel shown" : "Panel enabled (widen terminal)", AI_STYLE_COMMAND);
+				break;
+			case 12:  /* ^L: latest */
+				app->searching = FALSE;
+				app->follow = TRUE;
+				ui_feedback(app, "Following latest output", AI_STYLE_COMMAND);
+				break;
 			case 6:
 				completion_close(app);
 				app->searching = TRUE;
@@ -2795,7 +2938,8 @@ on_sent(GObject *source, GAsyncResult *result, gpointer user_data)
     ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
 	app->sending = FALSE;
 
-    /* Any failure is already a status block; nothing more to say here. */
+    /* The full error is in the transcript; chrome carries only the outcome. */
+	ui_turn_finished(app, error);
     app_schedule_redraw(app);
 
     if (app->dump_loop != NULL)
@@ -2825,11 +2969,14 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
     if (error != NULL)
     {
         say(app, "%s", error->message);
+		ui_turn_finished(app, error);
     }
     else if (command != NULL)
     {
         handle_builtin(app, command);
     }
+	else
+		ui_turn_finished(app, NULL);
 
     app_schedule_redraw(app);
 
@@ -3182,21 +3329,19 @@ draw_completion(App *app)
      * apart. */
     origin_width = (origin_width > 0) ? origin_width + 3 : 0;
 
-    /* The rule, with a count when there is more than fits. */
+    /* Explicit UTF-8 avoids ACS rules becoming literal q's under tmux. */
     {
         gint y = height - rows - 1;
+		gint x;
+		g_autofree gchar *count = g_strdup_printf(" %u/%u ", app->candidate_index + 1, n);
+		gint at = MAX(0, width - (gint)strlen(count) - 2);
 
-        wattrset(app->transcript_win, A_DIM);
-        mvwhline(app->transcript_win, y, 0, ACS_HLINE, width);
-
-        if ((gint)n > rows)
-        {
-            g_autofree gchar *count =
-                g_strdup_printf(" %u/%u ", app->candidate_index + 1, n);
-            gint              at = MAX(0, width - (gint)strlen(count) - 2);
-
-            mvwaddstr(app->transcript_win, y, at, count);
-        }
+		wattrset(app->transcript_win, theme_attr(PAIR_ACCENT));
+		for (x = 0; x < width; x++)
+			mvwaddstr(app->transcript_win, y, x, g_get_charset(NULL) ? "─" : "-");
+		if (at > 14)
+			mvwaddstr(app->transcript_win, y, 2, app->input->str[0] == '/' ? " COMMANDS " : " FILES ");
+		mvwaddstr(app->transcript_win, y, at, count);
     }
 
     for (i = 0; i < rows; i++)
@@ -3222,6 +3367,8 @@ draw_completion(App *app)
          * whatever the transcript had there. */
         wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE));
         mvwhline(app->transcript_win, y, 0, ' ', width);
+		if (selected)
+			mvwaddstr(app->transcript_win, y, 0, g_get_charset(NULL) ? "›" : ">");
 
         name = fit_to_width(display, name_column - 3);
         wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE) | A_BOLD);
@@ -3682,6 +3829,8 @@ main(int argc, char *argv[])
 
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);
+	g_signal_connect(ai_conversation_get_transcript(app.conversation), "items-changed",
+		G_CALLBACK(on_transcript_items_changed), &app);
     app.input = g_string_new(NULL);
     app.history = g_ptr_array_new_with_free_func(g_free);
     app.history_pos = -1;
@@ -3925,10 +4074,9 @@ main(int argc, char *argv[])
 
     app.running = TRUE;
     app.loop = g_main_loop_new(NULL, FALSE);
+	app.intro_started = g_get_monotonic_time();
+	sync_spinner(&app);
 
-    g_signal_connect_swapped(ai_conversation_get_transcript(app.conversation),
-                             "items-changed",
-                             G_CALLBACK(on_transcript_changed), &app);
     g_signal_connect_swapped(ai_conversation_get_transcript(app.conversation),
                              "block-changed",
                              G_CALLBACK(on_transcript_changed), &app);
@@ -3994,6 +4142,7 @@ main(int argc, char *argv[])
     g_main_loop_unref(app.loop);
 	g_string_free(app.search, TRUE);
 	g_free(app.history_draft);
+	g_free(app.feedback);
 	g_clear_pointer(&app.row_cache, g_ptr_array_unref);
 	delwin(app.input_win);
 	delwin(app.status_win);

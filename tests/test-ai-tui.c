@@ -1427,7 +1427,7 @@ test_themes_and_resizing(void)
 	g_test_message("Mocha 120x36:\n%s", pane);
 	for (i = 0; i < G_N_ELEMENTS(names); i++)
 	{
-		tmux_send(TUI_SESSION, "F2");
+		tmux_send(TUI_SESSION, "C-t");
 		g_assert_true(tmux_wait_for(TUI_SESSION, names[i]));
 		g_clear_pointer(&pane, g_free);
 		pane = tmux_run(capture);
@@ -1437,12 +1437,12 @@ test_themes_and_resizing(void)
 			g_assert_null(strstr(pane, "48;5;"));
 		}
 	}
-	tmux_send(TUI_SESSION, "F3");
+	tmux_send(TUI_SESSION, "C-p");
 	g_usleep(150000);
 	g_clear_pointer(&pane, g_free);
 	pane = tmux_capture(TUI_SESSION);
 	g_assert_null(strstr(pane, "SESSION"));
-	tmux_send(TUI_SESSION, "F3");
+	tmux_send(TUI_SESSION, "C-p");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "SESSION"));
 	tmux_send(TUI_SESSION, "retained-draft");
 	tmux_resize("40", "10");
@@ -1495,7 +1495,7 @@ test_unicode_and_search(void)
 	tmux_send(TUI_SESSION, "Up");
 	tmux_send(TUI_SESSION, "Down");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "preserved-draft"));
-	tmux_send(TUI_SESSION, "F4");
+	tmux_send(TUI_SESSION, "C-l");
 	g_usleep(150000);
 	pane = tmux_capture(TUI_SESSION);
 	g_assert_null(strstr(pane, "[scrolled]"));
@@ -1600,6 +1600,205 @@ test_busy_keeps_draft(void)
 	stub_free(stub);
 }
 
+/* Ctrl shortcuts work with a live draft, a menu, and a search field. The
+ * old function keys are deliberately unbound, not hidden aliases. */
+static void
+test_control_shortcuts(void)
+{
+	Stub *stub;
+	g_autofree gchar *pane = NULL;
+	guint i;
+	const gchar *old_keys[] = { "F1", "F2", "F3", "F4" };
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_resize("120", "36");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "SESSION"));
+	for (i = 0; i < G_N_ELEMENTS(old_keys); i++) tmux_send(TUI_SESSION, old_keys[i]);
+	g_usleep(150000);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_nonnull(strstr(pane, "catppuccin-mocha"));
+	g_assert_nonnull(strstr(pane, "MAKE SOMETHING WORTH SHIPPING."));
+	g_assert_nonnull(strstr(pane, "SESSION"));
+	tmux_send(TUI_SESSION, "/pro");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Show or change the provider"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "COMMANDS"));
+	tmux_send(TUI_SESSION, "C-o");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "cycle theme"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "COMPOSE"));
+	tmux_send(TUI_SESSION, "C-f");
+	tmux_send(TUI_SESSION, "cycle theme");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "1 matching rows"));
+	tmux_send(TUI_SESSION, "C-t");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "catppuccin-latte"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "SEARCH / case sensitive"));
+	tmux_send(TUI_SESSION, "C-p");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Panel hidden"));
+	tmux_send(TUI_SESSION, "C-l");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Following latest output"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "COMPOSE"));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "SEARCH / case sensitive"));
+	g_assert_null(strstr(pane, "[scrolled]"));
+	g_assert_nonnull(strstr(pane, "/pro"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/* Compare only the border: elapsed time should still advance in reduced
+ * motion mode, so comparing whole busy screens would give a false failure. */
+static gchar *
+composer_border(void)
+{
+	g_autofree gchar *pane = tmux_capture(TUI_SESSION);
+	const gchar *start = strstr(pane, "╭");
+	const gchar *end;
+
+	g_assert_nonnull(start);
+	end = strchr(start, '\n');
+	g_assert_nonnull(end);
+	return g_strndup(start, (gsize)(end - start));
+}
+
+static void
+test_activity_motion(gconstpointer data)
+{
+	gboolean reduced = GPOINTER_TO_INT(data);
+	Stub *stub;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *first = NULL;
+	g_autofree gchar *next = NULL;
+	g_autofree gchar *idle = NULL;
+	gint64 deadline;
+	gboolean changed = FALSE;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	script = g_strdup_printf("#!/bin/sh\ncat > '%s/stdin.log'\n"
+		"while [ ! -f '%s/release' ]; do sleep 0.05; done\ncat '%s/stdout'\n",
+		stub->dir, stub->dir, stub->dir);
+	sandbox_write(stub->dir, "grok", script);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL,
+		reduced ? "--no-animation" : "");
+	tmux_send(TUI_SESSION, "watch the border");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
+	first = composer_border();
+	if (reduced) g_assert_null(strstr(first, "━"));
+	else g_assert_nonnull(strstr(first, "━"));
+	deadline = g_get_monotonic_time() + G_TIME_SPAN_SECOND;
+	do
+	{
+		g_usleep(150000);
+		g_clear_pointer(&next, g_free);
+		next = composer_border();
+		changed = g_strcmp0(first, next) != 0;
+	} while (!changed && g_get_monotonic_time() < deadline);
+	g_assert_cmpint(changed, ==, !reduced);
+	sandbox_write(stub->dir, "release", "ready\n");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "ready"));
+	g_clear_pointer(&first, g_free);
+	first = composer_border();
+	g_assert_null(strstr(first, "━"));
+	idle = tmux_capture(TUI_SESSION);
+	g_usleep(250000);
+	g_clear_pointer(&next, g_free);
+	next = tmux_capture(TUI_SESSION);
+	g_assert_cmpstr(idle, ==, next);
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+#define PREVIEW_REPLY \
+	"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"edit\",\"name\":\"Edit\",\"input\":{\"file_path\":\"demo.c\",\"old_string\":\"static int answer(void) { return 1; }\",\"new_string\":\"static int answer(void) { return 2027; }\"}}]}}\n" \
+	"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"edit\",\"content\":[{\"type\":\"text\",\"text\":\"Applied\"}]}]}}\n" \
+	"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"build\",\"name\":\"Bash\",\"input\":{\"command\":\"make -j4\"}}]}}\n" \
+	"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"build\",\"content\":\"build-line-0\\nbuild-line-1\\nbuild-line-2\\nbuild-line-3\\nbuild-line-4\\nbuild-line-5\\nbuild-line-6\"}]}}\n" \
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Preview complete\"}}}\n" \
+	"{\"type\":\"result\",\"result\":\"Preview complete\",\"session_id\":\"s1\"}\n"
+
+/* Read SGR foreground state at a token rather than accepting any colored
+ * header as evidence that the source itself is syntax-highlighted. */
+static gint
+foreground_at(const gchar *capture, const gchar *needle)
+{
+	const gchar *at = strstr(capture, needle), *p = capture;
+	gint foreground = -1;
+	g_assert_nonnull(at);
+	while ((p = strstr(p, "\033[")) != NULL && p < at)
+	{
+		const gchar *end = strchr(p, 'm');
+		g_autofree gchar *sequence = NULL;
+		g_auto(GStrv) fields = NULL;
+		guint i;
+		g_assert_nonnull(end);
+		sequence = g_strndup(p + 2, (gsize)(end - p - 2));
+		fields = g_strsplit(sequence, ";", -1);
+		for (i = 0; fields[i] != NULL; i++)
+		{
+			gint value = (gint)g_ascii_strtoll(fields[i], NULL, 10);
+			if ((value == 38 || value == 48) && fields[i + 1] != NULL &&
+				g_str_equal(fields[i + 1], "5") && fields[i + 2] != NULL)
+			{
+				if (value == 38) foreground = (gint)g_ascii_strtoll(fields[i + 2], NULL, 10);
+				i += 2;
+			}
+			else if (value == 0 || value == 39) foreground = -1;
+			else if (value >= 30 && value <= 37) foreground = value - 30;
+		}
+		p = end + 1;
+	}
+	return foreground;
+}
+
+static void
+test_inline_tool_previews(void)
+{
+	Stub *stub = stub_new(PREVIEW_REPLY);
+	g_autofree gchar *property = g_strconcat("executable-path=", stub->stub, NULL);
+	const gchar *args[] = { "-p", "grok-build", "--set", property, "--dump", "render previews", NULL };
+	Run *run = run_tui_in(stub->dir, args);
+	const gchar *capture[] = { "capture-pane", "-t", TUI_SESSION, "-p", "-e", NULL };
+	g_autofree gchar *pane = NULL;
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "return 1;"));
+	g_assert_nonnull(strstr(run->stdout_data, "return 2027;"));
+	g_assert_nonnull(strstr(run->stdout_data, "$ make -j4"));
+	g_assert_nonnull(strstr(run->stdout_data, "build-line-5"));
+	g_assert_null(strstr(run->stdout_data, "build-line-6"));
+	g_assert_null(strstr(run->stdout_data, "not confirmed successful"));
+	g_assert_null(strchr(run->stdout_data, '\033'));
+	run_free(run);
+	if (!tmux_available()) { stub_free(stub); g_test_skip("tmux is not installed; dump assertions passed"); return; }
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_resize("150", "44");
+	tmux_send(TUI_SESSION, "render previews");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "build-line-5"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Preview complete"));
+	pane = tmux_run(capture);
+	g_assert_cmpint(foreground_at(pane, "return"), ==, 183); /* Mocha mauve */
+	g_assert_cmpint(foreground_at(pane, "answer"), ==, 111); /* Mocha blue */
+	g_assert_cmpint(foreground_at(pane, "2027"), ==, 216); /* Mocha peach */
+	g_assert_cmpint(foreground_at(pane, "+     "), ==, 151); /* addition green */
+	g_assert_cmpint(foreground_at(pane, "-    1"), ==, 211); /* removal red */
+	g_test_message("Inline tool previews:\n%s", pane);
+	tmux_send(TUI_SESSION, "C-t");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "catppuccin-latte"));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_run(capture);
+	g_assert_cmpint(foreground_at(pane, "return"), !=, 183);
+	tmux_send(TUI_SESSION, "C-n");
+	tmux_send(TUI_SESSION, "C-b");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "build-line-6"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1640,11 +1839,15 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/license", test_license);
 	g_test_add_func("/ai-glib/ai-tui/help", test_help);
 	g_test_add_func("/ai-glib/ai-tui/themes", test_theme_options);
+	g_test_add_func("/ai-glib/ai-tui/inline-tool-previews", test_inline_tool_previews);
 	g_test_add_func("/ai-glib/ai-tui/keys/themes-resize", test_themes_and_resizing);
 	g_test_add_func("/ai-glib/ai-tui/keys/unicode-search", test_unicode_and_search);
 	g_test_add_func("/ai-glib/ai-tui/keys/long-paste", test_long_bracketed_paste);
 	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
 	g_test_add_func("/ai-glib/ai-tui/keys/busy-draft", test_busy_keeps_draft);
+	g_test_add_func("/ai-glib/ai-tui/keys/control-shortcuts", test_control_shortcuts);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/activity-motion", GINT_TO_POINTER(FALSE), test_activity_motion);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/reduced-motion", GINT_TO_POINTER(TRUE), test_activity_motion);
 	g_test_add_func("/ai-glib/ai-tui/unknown-provider",
 	                test_unknown_provider_is_an_error);
 	g_test_add_func("/ai-glib/ai-tui/dry-run", test_dry_run_cli_provider);

@@ -24,14 +24,21 @@
 
 #include "view/ai-view-tool-block.h"
 #include "view/ai-tool-style.h"
+#include "view/ai-tool-preview.h"
 
 struct _AiViewToolBlock
 {
     AiViewBlock parent_instance;
     GPtrArray  *calls;   /* AiToolCall, owned, in the order they started */
+	gboolean show_previews;
 };
 
 G_DEFINE_TYPE(AiViewToolBlock, ai_view_tool_block, AI_TYPE_VIEW_BLOCK)
+
+enum {
+	PROP_0,
+	PROP_SHOW_PREVIEWS
+};
 
 /* Everything one category contributes to the summary. */
 typedef struct
@@ -283,15 +290,24 @@ tool_render(AiViewBlock *block)
     if (!ai_view_block_get_expanded(block))
     {
         ai_rendered_text_append(out, " \xe2\x80\xba", AI_STYLE_MARKER);
-        return out;
+        if (!self->show_previews) return out;
     }
+	else
+		ai_rendered_text_append(out, " \xe2\x8c\x84", AI_STYLE_MARKER);
 
-    ai_rendered_text_append(out, " \xe2\x8c\x84", AI_STYLE_MARKER);
+	i = self->show_previews && !ai_view_block_get_expanded(block) && self->calls->len > 4
+		? self->calls->len - 4 : 0;
+	if (i > 0)
+		ai_rendered_text_append_printf(out, AI_STYLE_DIM, "\n  ... %u earlier calls; expand for details", i);
 
-    for (i = 0; i < self->calls->len; i++)
+    for (; i < self->calls->len; i++)
     {
+		AiToolCall *call = g_ptr_array_index(self->calls, i);
+		if (!ai_view_block_get_expanded(block) && ai_tool_call_get_category(call) != AI_TOOL_CATEGORY_COMMAND &&
+			ai_tool_call_get_category(call) != AI_TOOL_CATEGORY_FILE_WRITE) continue;
         ai_rendered_text_append(out, "\n", AI_STYLE_DEFAULT);
-        render_call_line(g_ptr_array_index(self->calls, i), out);
+        render_call_line(call, out);
+		if (self->show_previews) _ai_tool_preview_append(call, out, ai_view_block_get_expanded(block));
     }
 
     return out;
@@ -307,12 +323,49 @@ ai_view_tool_block_finalize(GObject *object)
     G_OBJECT_CLASS(ai_view_tool_block_parent_class)->finalize(object);
 }
 
+/* Keep the legacy summary-only rendering unless an embedder opts in. */
+static void
+tool_get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
+{
+	if (id == PROP_SHOW_PREVIEWS) g_value_set_boolean(value, AI_VIEW_TOOL_BLOCK(object)->show_previews);
+	else G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+}
+
+static void
+tool_set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
+{
+	AiViewToolBlock *self = AI_VIEW_TOOL_BLOCK(object);
+	if (id == PROP_SHOW_PREVIEWS)
+	{
+		gboolean enabled = g_value_get_boolean(value);
+		if (self->show_previews != enabled)
+		{
+			self->show_previews = enabled;
+			ai_view_block_changed(AI_VIEW_BLOCK(self));
+		}
+	}
+	else G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+}
+
 static void
 ai_view_tool_block_class_init(AiViewToolBlockClass *klass)
 {
     AiViewBlockClass *block_class = AI_VIEW_BLOCK_CLASS(klass);
 
     G_OBJECT_CLASS(klass)->finalize = ai_view_tool_block_finalize;
+	G_OBJECT_CLASS(klass)->get_property = tool_get_property;
+	G_OBJECT_CLASS(klass)->set_property = tool_set_property;
+	/**
+	 * AiViewToolBlock:show-previews:
+	 *
+	 * Whether command/output and edit-region previews accompany the summary.
+	 * Off by default. Compact groups show the last four calls, up to twelve
+	 * diff lines or six output lines per call; expanded groups show up to 64.
+	 * Previews use recorded tool data and never read the current filesystem.
+	 */
+	g_object_class_install_property(G_OBJECT_CLASS(klass), PROP_SHOW_PREVIEWS,
+		g_param_spec_boolean("show-previews", NULL, NULL, FALSE,
+			G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
     block_class->render = tool_render;
     block_class->get_kind = tool_get_kind;
 }

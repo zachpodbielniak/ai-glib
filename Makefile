@@ -150,6 +150,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/view/ai-view-block.c \
 	$(SRCDIR)/view/ai-view-blocks.c \
 	$(SRCDIR)/view/ai-view-tool-block.c \
+	$(SRCDIR)/view/ai-tool-preview.c \
 	$(SRCDIR)/view/ai-transcript.c \
 	$(SRCDIR)/view/ai-conversation.c \
 	$(SRCDIR)/model/ai-usage.c \
