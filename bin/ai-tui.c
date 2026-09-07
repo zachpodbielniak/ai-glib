@@ -3810,6 +3810,25 @@ resolve_prompt(gint argc, gchar **argv)
 	return NULL;
 }
 
+/*
+ * Point fd 0 at the controlling terminal after a piped prompt.
+ *
+ * fread() has already drained the pipe. freopen() closes that fd and
+ * opens /dev/tty as stdin, which is what ncurses and
+ * g_unix_fd_add(STDIN_FILENO) then read. Fails with no controlling
+ * terminal (cron, ssh -T).
+ *
+ * Callers must also require isatty(STDOUT_FILENO). Otherwise a test or
+ * `echo p | ai-tui > out` would steal the developer's terminal via
+ * /dev/tty while stdout is still a pipe.
+ */
+static gboolean
+attach_stdin_to_tty(void)
+{
+	return freopen("/dev/tty", "r", stdin) != NULL
+		&& isatty(STDIN_FILENO);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -3834,7 +3853,8 @@ main(int argc, char *argv[])
 		"  ai-tui --launch -p claude -m opus\n"
 		"  ai-tui --launch-cmd-print -p default -m default \"hello\"\n\n"
 		"Prompt: leftover arguments, else stdin when it is not a terminal.\n"
-		"A prompt without a terminal runs one turn, as --dump does.\n"
+		"A piped prompt on a terminal is the first turn; without a terminal,\n"
+		"one turn is printed as --dump does.\n"
 		"Omitted provider: AI_PROVIDER, then ai-tui defaults, then Claude.\n"
 		"Explicit default bypasses AI_PROVIDER. Omitted/default model uses the\n"
 		"saved ai-tui model only for its matching provider, otherwise native.\n"
@@ -4056,14 +4076,16 @@ main(int argc, char *argv[])
     /*
      * One-shot: --dump, or a prompt given without a terminal.
      *
-     * Piping the prompt on stdin is how `ai` works; ncurses cannot share
-     * that fd, so a pipe with a prompt is this path rather than a fight
-     * for the terminal. --dump still forces a one-shot on a tty.
+     * A pipe on stdin is drained first (resolve_prompt). If stdout is
+     * still a tty, stdin is then reopened on /dev/tty so the TUI can
+     * run. If that is impossible, the prompt is this path --- the same
+     * as `ai`. --dump still forces a one-shot on a tty.
      */
     {
         const gchar *one_shot = opt_dump != NULL ? opt_dump : NULL;
 
-        if (one_shot == NULL && !isatty(STDIN_FILENO))
+        if (one_shot == NULL && !isatty(STDIN_FILENO)
+            && !(isatty(STDOUT_FILENO) && attach_stdin_to_tty()))
             one_shot = prompt;
 
         if (one_shot != NULL)

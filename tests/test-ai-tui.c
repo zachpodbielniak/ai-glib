@@ -448,6 +448,41 @@ tmux_start_tui(const gchar *session, const gchar *stub_dir, const gchar *editor)
 	tmux_start_tui_with_options(session, stub_dir, editor, NULL, NULL);
 }
 
+/*
+ * Same as tmux_start_tui(), but the prompt arrives on stdin.
+ *
+ * That is the /dev/tty reopen path: the pane is a terminal on stdout,
+ * the pipe is drained, fd 0 becomes the pane.
+ */
+static void
+tmux_start_tui_piped(const gchar *session, const gchar *stub_dir,
+                     const gchar *stdin_text)
+{
+	g_autofree gchar *grok = g_build_filename(stub_dir, "grok", NULL);
+	g_autofree gchar *quoted = g_shell_quote(stdin_text);
+	g_autofree gchar *command = NULL;
+	const gchar      *args[] = {
+		"new-session", "-d", "-s", session, "-x", "100", "-y", "24",
+		"-c", stub_dir, "/bin/bash", "--noprofile", "--norc", "-c", NULL, NULL
+	};
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *libdir = g_path_get_dirname(tui_binary);
+	g_autofree gchar *libs = g_path_get_dirname(libdir);
+
+	tmux_kill(session);
+
+	command = g_strdup_printf(
+		"printf '%%s\\n' %s | exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME "
+		"TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' "
+		"HOME='%s' XDG_CONFIG_HOME='%s/.config' EDITOR=true '%s' -p grok-build",
+		quoted, libs, grok, stub_dir, stub_dir, tui_binary);
+
+	args[14] = command;
+	out = tmux_run(args);
+
+	g_assert_true(tmux_wait_for(session, "COMPOSE"));
+}
+
 /* Write an executable stand-in for $EDITOR into @dir. */
 static gchar *
 editor_stub(const gchar *dir, const gchar *name, const gchar *body)
@@ -1253,6 +1288,31 @@ test_positional_prompt_sends_in_the_tui(void)
 	sandbox_free(box);
 }
 
+static void
+test_piped_prompt_sends_in_the_tui(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui_piped(TUI_SESSION, stub->dir, "ask something");
+
+	/* Pipe drained, /dev/tty attached, first turn sent. */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
 /*
  * One ^C throws the line away and stays.
  *
@@ -2032,6 +2092,8 @@ main(int argc, char *argv[])
 	                test_enter_sends_the_prompt);
 	g_test_add_func("/ai-glib/ai-tui/keys/positional-prompt-sends",
 	                test_positional_prompt_sends_in_the_tui);
+	g_test_add_func("/ai-glib/ai-tui/keys/piped-prompt-sends",
+	                test_piped_prompt_sends_in_the_tui);
 	g_test_add_func("/ai-glib/ai-tui/keys/alt-enter-is-a-newline",
 	                test_alt_enter_inserts_a_newline);
 	g_test_add_func("/ai-glib/ai-tui/keys/one-interrupt-stays",

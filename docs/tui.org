@@ -22,7 +22,7 @@ ai-tui "review the diff"
 echo "review the diff" | ai-tui
 #+end_src
 
-The prompt comes from leftover arguments if present, otherwise from stdin when stdin is not a terminal --- the same rule as [[file:cli.org][the =ai= CLI]]. A prompt without a terminal runs one turn and prints the transcript, as =--dump= does; ncurses cannot share a piped stdin. On a terminal, leftover text is the first turn: it is placed in the composer and sent. Use =--= before a prompt that begins with a dash.
+The prompt comes from leftover arguments if present, otherwise from stdin when stdin is not a terminal --- the same rule as [[file:cli.org][the =ai= CLI]]. On a terminal, that text is the first turn: it is placed in the composer and sent. A piped prompt is read, then stdin is reopened on =/dev/tty= so ncurses can take the keyboard. Without a terminal --- stdout is not a tty, or =/dev/tty= cannot be opened --- the same prompt runs one turn and prints the transcript, as =--dump= does. Use =--= before a prompt that begins with a dash.
 
 ** Independent Defaults
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted options behave exactly like =ai-tui -p default -m default=: use saved ai-tui defaults and ignore =AI_PROVIDER=. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
@@ -440,14 +440,15 @@ ai-tui -p grok-build "list the files here"
 echo "list the files here" | ai-tui -p grok-build
 #+end_src
 
-A prompt without a terminal --- leftover arguments, or stdin when it is a
-pipe --- runs one turn and prints the transcript as plain text. =--dump=
-is the same one-shot on a terminal, where leftover text would otherwise
-open the composer. That is how the TUI is tested --- =tests/test-ai-tui.c=
-drives the whole path from argv through the NDJSON parser, the event
-stream, the folding and the summariser against a stub =grok=, with no
-network and no tty, and asserts the grouped summary line comes out with
-the narration in the right order around it.
+A prompt without a terminal --- leftover arguments or a pipe, with stdout
+captured or no controlling tty --- runs one turn and prints the transcript
+as plain text. =echo PROMPT | ai-tui= at a real terminal is interactive:
+the pipe is drained, stdin becomes =/dev/tty=, and that text is the first
+turn. =--dump= forces the one-shot even on a terminal. That is how the TUI
+is tested --- =tests/test-ai-tui.c= drives the whole path from argv through
+the NDJSON parser, the event stream, the folding and the summariser against
+a stub =grok=, with no network and no tty, and asserts the grouped summary
+line comes out with the narration in the right order around it.
 
 It is also the right thing to reach for in a script:
 
