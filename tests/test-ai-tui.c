@@ -19,6 +19,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 #include <unistd.h>
 
 /* ----------------------------------------------------------------
@@ -125,6 +126,48 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 
 	g_assert_no_error(error);
 
+	return run;
+}
+
+/*
+ * Spawn ai-tui with @stdin_text on its stdin.
+ *
+ * g_spawn_sync attaches stdin to /dev/null, which is how the no-tty
+ * tests work; this is the pipe-a-prompt path, matching `ai`.
+ */
+static Run *
+run_tui_feed(const gchar * const *args, const gchar *stdin_text,
+             const gchar *env_key, const gchar *env_value)
+{
+	Run *run = g_new0(Run, 1);
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	gsize i;
+
+	g_ptr_array_add(argv, tui_binary);
+	for (i = 0; args[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer)args[i]);
+	g_ptr_array_add(argv, NULL);
+
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	if (env_key != NULL)
+		g_subprocess_launcher_setenv(launcher, env_key, env_value, TRUE);
+	g_subprocess_launcher_unsetenv(launcher, "ANTHROPIC_API_KEY");
+	g_subprocess_launcher_unsetenv(launcher, "OPENAI_API_KEY");
+
+	proc = g_subprocess_launcher_spawnv(
+		launcher, (const gchar * const *)argv->pdata, &error);
+	g_assert_no_error(error);
+
+	g_subprocess_communicate_utf8(proc, stdin_text, NULL,
+	                              &run->stdout_data, &run->stderr_data,
+	                              &error);
+	g_assert_no_error(error);
+	run->status = g_subprocess_get_exit_status(proc);
 	return run;
 }
 
@@ -474,6 +517,7 @@ test_help(void)
 	g_assert_cmpint(run->status, ==, 0);
 	g_assert_true(strstr(run->stdout_data, "--dump") != NULL);
 	g_assert_true(strstr(run->stdout_data, "--provider") != NULL);
+	g_assert_true(strstr(run->stdout_data, "[PROMPT]") != NULL);
 
 	run_free(run);
 }
@@ -684,6 +728,67 @@ test_dump_reaches_the_child(void)
 	g_assert_cmpint(run->status, ==, 0);
 	g_assert_true(g_file_get_contents(path, &seen, NULL, NULL));
 	g_assert_true(strstr(seen, "the prompt") != NULL);
+
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
+test_positional_prompt_without_a_tty_runs_one_shot(void)
+{
+	const gchar *ndjson = "{\"type\":\"result\",\"result\":\"ok\"}\n";
+	const gchar *args[] = { "-p", "grok-build", "the prompt", NULL };
+	Stub *stub = stub_new(ndjson);
+	Run *run = run_tui(args, "GROK_PATH", stub->stub);
+	g_autofree gchar *path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_autofree gchar *seen = NULL;
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_true(g_file_get_contents(path, &seen, NULL, NULL));
+	g_assert_true(strstr(seen, "the prompt") != NULL);
+
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
+test_prompt_from_stdin_runs_one_shot(void)
+{
+	const gchar *ndjson =
+		"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"piped\"}}}\n"
+		"{\"type\":\"result\",\"result\":\"piped\",\"session_id\":\"s1\"}\n";
+	const gchar *args[] = { "-p", "grok-build", NULL };
+	Stub *stub = stub_new(ndjson);
+	Run *run = run_tui_feed(args, "hello from stdin\n",
+	                       "GROK_PATH", stub->stub);
+	g_autofree gchar *path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_autofree gchar *seen = NULL;
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_true(strstr(run->stdout_data, "> hello from stdin") != NULL);
+	g_assert_true(strstr(run->stdout_data, "piped") != NULL);
+	g_assert_true(g_file_get_contents(path, &seen, NULL, NULL));
+	g_assert_true(strstr(seen, "hello from stdin") != NULL);
+
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
+test_positional_prompt_wins_over_stdin(void)
+{
+	const gchar *ndjson = "{\"type\":\"result\",\"result\":\"ok\"}\n";
+	const gchar *args[] = { "-p", "grok-build", "from argv", NULL };
+	Stub *stub = stub_new(ndjson);
+	Run *run = run_tui_feed(args, "from stdin\n", "GROK_PATH", stub->stub);
+	g_autofree gchar *path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_autofree gchar *seen = NULL;
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_true(g_file_get_contents(path, &seen, NULL, NULL));
+	g_assert_true(strstr(seen, "from argv") != NULL);
+	g_assert_null(strstr(seen, "from stdin"));
 
 	run_free(run);
 	stub_free(stub);
@@ -1115,6 +1220,32 @@ test_enter_sends_the_prompt(void)
 	tmux_send(TUI_SESSION, "Enter");
 
 	/* The stub's answer arriving proves the turn actually went. */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+static void
+test_positional_prompt_sends_in_the_tui(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL,
+	                            "ask something");
+
+	/* Leftover argv is the first turn: no typing, no Enter. */
 	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
 
 	tmux_kill(TUI_SESSION);
@@ -1864,6 +1995,12 @@ main(int argc, char *argv[])
 	                test_dump_shows_the_grouped_tool_summary);
 	g_test_add_func("/ai-glib/ai-tui/dump-prompt-reaches-child",
 	                test_dump_reaches_the_child);
+	g_test_add_func("/ai-glib/ai-tui/positional-prompt-without-tty",
+	                test_positional_prompt_without_a_tty_runs_one_shot);
+	g_test_add_func("/ai-glib/ai-tui/prompt-from-stdin",
+	                test_prompt_from_stdin_runs_one_shot);
+	g_test_add_func("/ai-glib/ai-tui/positional-prompt-wins-over-stdin",
+	                test_positional_prompt_wins_over_stdin);
 	g_test_add_func("/ai-glib/ai-tui/dump-width", test_dump_width_wraps);
 	g_test_add_func("/ai-glib/ai-tui/dump-error",
 	                test_dump_reports_a_failing_provider);
@@ -1893,6 +2030,8 @@ main(int argc, char *argv[])
 
 	g_test_add_func("/ai-glib/ai-tui/keys/enter-sends",
 	                test_enter_sends_the_prompt);
+	g_test_add_func("/ai-glib/ai-tui/keys/positional-prompt-sends",
+	                test_positional_prompt_sends_in_the_tui);
 	g_test_add_func("/ai-glib/ai-tui/keys/alt-enter-is-a-newline",
 	                test_alt_enter_inserts_a_newline);
 	g_test_add_func("/ai-glib/ai-tui/keys/one-interrupt-stays",

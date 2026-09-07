@@ -12,12 +12,17 @@ file and shares everything else.
 
 ** Synopsis
 #+begin_src sh
-ai-tui [-p PROVIDER] [-m MODEL] [-s SYSTEM] [OPTIONS]
+ai-tui [-p PROVIDER] [-m MODEL] [-s SYSTEM] [OPTIONS] [PROMPT]
+echo "PROMPT" | ai-tui [OPTIONS]
 #+end_src
 
 #+begin_src sh
 ai-tui -p claude-code -m opus
+ai-tui "review the diff"
+echo "review the diff" | ai-tui
 #+end_src
+
+The prompt comes from leftover arguments if present, otherwise from stdin when stdin is not a terminal --- the same rule as [[file:cli.org][the =ai= CLI]]. A prompt without a terminal runs one turn and prints the transcript, as =--dump= does; ncurses cannot share a piped stdin. On a terminal, leftover text is the first turn: it is placed in the composer and sent. Use =--= before a prompt that begins with a dash.
 
 ** Independent Defaults
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted options behave exactly like =ai-tui -p default -m default=: use saved ai-tui defaults and ignore =AI_PROVIDER=. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
@@ -102,7 +107,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--list-themes=       | List built-in themes without starting a provider        |
 | =--no-animation=      | Disable decorative motion; elapsed time still updates  |
 | =--no-agents=         | Do not let the model start background agents             |
-| =--dump PROMPT=       | Run one turn with no terminal and print the transcript   |
+| =--dump PROMPT=       | Force one turn and print the transcript, even on a terminal |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
 | =--dry-run=           | Print the command a CLI provider would run, then exit    |
 | =--launch=            | Open the native CLI instead of the ai-glib harness      |
@@ -431,22 +436,27 @@ with a note saying so, rather than silently doing nothing.
 ** =--dump=, and testing
 #+begin_src sh
 ai-tui -p grok-build --dump "list the files here"
+ai-tui -p grok-build "list the files here"
+echo "list the files here" | ai-tui -p grok-build
 #+end_src
 
-Runs one turn with no terminal at all and prints the transcript as plain
-text. That is how the TUI is tested --- =tests/test-ai-tui.c= drives the
-whole path from argv through the NDJSON parser, the event stream, the
-folding and the summariser against a stub =grok=, with no network and no
-tty, and asserts the grouped summary line comes out with the narration in
-the right order around it.
+A prompt without a terminal --- leftover arguments, or stdin when it is a
+pipe --- runs one turn and prints the transcript as plain text. =--dump=
+is the same one-shot on a terminal, where leftover text would otherwise
+open the composer. That is how the TUI is tested --- =tests/test-ai-tui.c=
+drives the whole path from argv through the NDJSON parser, the event
+stream, the folding and the summariser against a stub =grok=, with no
+network and no tty, and asserts the grouped summary line comes out with
+the narration in the right order around it.
 
 It is also the right thing to reach for in a script:
 
 #+begin_src sh
 ai-tui -p claude-code --dump "summarise the diff" --width 72 > review.txt
+echo "summarise the diff" | ai-tui -p claude-code --width 72 > review.txt
 #+end_src
 
-Started without a terminal and without =--dump=, =ai-tui= says so and exits
+Started without a terminal and without a prompt, =ai-tui= says so and exits
 rather than starting ncurses on a pipe.
 
 ** Building

@@ -17,6 +17,7 @@
 
 #include <locale.h>
 #include <signal.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -408,9 +409,9 @@ typedef struct
 	gchar               *feedback;
 	AiStyleTag           feedback_style;
 
-    /* Set only by --dump, and quit by whichever callback finishes the
-     * turn. Polling the busy flag is not enough: a line that resolves to
-     * a built-in never sets it at all. */
+    /* Set for a one-shot turn (--dump, or a prompt with no terminal),
+     * and quit by whichever callback finishes it. Polling the busy flag
+     * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
 } App;
 
@@ -3445,6 +3446,14 @@ app_send(App *app)
                                      app->cancellable, on_input_sent, app);
 }
 
+/* First turn from leftover argv, once the loop is running. */
+static gboolean
+on_startup_send(gpointer user_data)
+{
+	app_send((App *)user_data);
+	return G_SOURCE_REMOVE;
+}
+
 /* ================================================================
  * Approval
  * ================================================================ */
@@ -3734,26 +3743,98 @@ build_provider(GError **error)
 	return build_provider_named(opt_provider, TRUE, error);
 }
 
+/*
+ * Leftover argv after option parsing, joined with spaces.
+ *
+ * `--` is skipped if g_option_context_parse() left it in place. Same
+ * rule `ai` and the launch modes use, so `ai-tui -- -p is a prompt`
+ * does not become a provider flag.
+ */
+static gchar *
+remaining_args_prompt(gint argc, gchar **argv)
+{
+	gint first;
+
+	first = argc > 1 && g_str_equal(argv[1], "--") ? 2 : 1;
+	if (argc <= first)
+		return NULL;
+
+	return g_strjoinv(" ", &argv[first]);
+}
+
+/*
+ * Read all of stdin into a newly-allocated NUL-terminated string.
+ * Returns an empty string on EOF with no data. (transfer full)
+ */
+static gchar *
+read_all_stdin(void)
+{
+	GString *buf = g_string_new(NULL);
+	gchar    chunk[4096];
+	gsize    n;
+
+	while ((n = fread(chunk, 1, sizeof chunk, stdin)) > 0)
+		g_string_append_len(buf, chunk, n);
+
+	return g_string_free(buf, FALSE);
+}
+
+/*
+ * Prompt from leftover argv, else stdin when stdin is not a terminal.
+ * Same rule as `ai`. Empty input is no prompt. (transfer full)
+ *
+ * Never called for --launch: the native CLI owns stdin.
+ */
+static gchar *
+resolve_prompt(gint argc, gchar **argv)
+{
+	g_autofree gchar *from_argv = remaining_args_prompt(argc, argv);
+
+	if (from_argv != NULL && from_argv[0] != '\0')
+		return (gchar *)g_steal_pointer(&from_argv);
+
+	if (!isatty(STDIN_FILENO))
+	{
+		gchar *from_stdin = read_all_stdin();
+
+		if (from_stdin != NULL)
+			g_strchomp(from_stdin);
+		if (from_stdin != NULL && from_stdin[0] == '\0')
+		{
+			g_free(from_stdin);
+			return NULL;
+		}
+		return from_stdin;
+	}
+
+	return NULL;
+}
+
 int
 main(int argc, char *argv[])
 {
     g_autoptr(GOptionContext) context = NULL;
     g_autoptr(GError) error = NULL;
+    g_autofree gchar *prompt = NULL;
     GObject *provider;
     App app;
 
     setlocale(LC_ALL, "");
 
-    context = g_option_context_new("- a terminal agent harness");
+    context = g_option_context_new("[PROMPT] - a terminal agent harness");
     g_option_context_add_main_entries(context, option_entries, NULL);
     g_option_context_set_summary(context,
         "Drives any ai-glib provider from a terminal, showing prose,\n"
         "reasoning and grouped tool calls as they happen.");
 	g_option_context_set_description(context,
 		"Examples:\n  ai --setup                 # configure ai-tui independently\n"
-		"  ai-tui -p default -m default\n\n"
+		"  ai-tui -p default -m default\n"
+		"  ai-tui \"review the diff\"\n"
+		"  echo \"review the diff\" | ai-tui\n\n"
 		"  ai-tui --launch -p claude -m opus\n"
 		"  ai-tui --launch-cmd-print -p default -m default \"hello\"\n\n"
+		"Prompt: leftover arguments, else stdin when it is not a terminal.\n"
+		"A prompt without a terminal runs one turn, as --dump does.\n"
 		"Omitted provider: AI_PROVIDER, then ai-tui defaults, then Claude.\n"
 		"Explicit default bypasses AI_PROVIDER. Omitted/default model uses the\n"
 		"saved ai-tui model only for its matching provider, otherwise native.\n"
@@ -3819,19 +3900,23 @@ main(int argc, char *argv[])
 
 	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
 	{
-		gint first = argc > 1 && g_str_equal(argv[1], "--") ? 2 : 1;
-		g_autofree gchar *prompt = argc > first ? g_strjoinv(" ", &argv[first]) : NULL;
-		gint status = ai_launch_run(provider, !opt_launch, opt_launch_cmd_print, prompt);
+		g_autofree gchar *launch_prompt = remaining_args_prompt(argc, argv);
+		gint status = ai_launch_run(provider, !opt_launch, opt_launch_cmd_print,
+		                            launch_prompt);
 
 		g_object_unref(provider);
 		return status;
 	}
 
+	/* Same sources as `ai`: leftover argv, else stdin when it is a pipe. */
+	prompt = resolve_prompt(argc, argv);
+
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);
 	g_signal_connect(ai_conversation_get_transcript(app.conversation), "items-changed",
 		G_CALLBACK(on_transcript_items_changed), &app);
-    app.input = g_string_new(NULL);
+    app.input = g_string_new(prompt);
+    app.cursor = (guint)app.input->len;
     app.history = g_ptr_array_new_with_free_func(g_free);
     app.history_pos = -1;
     app.selected = -1;
@@ -3921,7 +4006,8 @@ main(int argc, char *argv[])
         {
             AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(provider);
             g_autoptr(AiMessage) message =
-                ai_message_new_user(opt_dump != NULL ? opt_dump : "(prompt)");
+                ai_message_new_user(opt_dump != NULL ? opt_dump :
+                                    (prompt != NULL ? prompt : "(prompt)"));
             GList *messages = g_list_append(NULL, message);
 
             if (klass->build_argv == NULL)
@@ -3967,50 +4053,66 @@ main(int argc, char *argv[])
         return 0;
     }
 
-    /* --dump: one turn, no terminal. What the tests drive. */
-    if (opt_dump != NULL)
+    /*
+     * One-shot: --dump, or a prompt given without a terminal.
+     *
+     * Piping the prompt on stdin is how `ai` works; ncurses cannot share
+     * that fd, so a pipe with a prompt is this path rather than a fight
+     * for the terminal. --dump still forces a one-shot on a tty.
+     */
     {
-        g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
-        g_autofree gchar *text = NULL;
+        const gchar *one_shot = opt_dump != NULL ? opt_dump : NULL;
 
-        app.loop = loop;
-        app.dump_loop = loop;
+        if (one_shot == NULL && !isatty(STDIN_FILENO))
+            one_shot = prompt;
 
-        if (opt_no_expand)
+        if (one_shot != NULL)
         {
-            ai_conversation_send_async(app.conversation, opt_dump, NULL,
-                                       on_sent, &app);
+            g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+            g_autofree gchar *text = NULL;
+
+            app.loop = loop;
+            app.dump_loop = loop;
+
+            if (opt_no_expand)
+            {
+                ai_conversation_send_async(app.conversation, one_shot, NULL,
+                                           on_sent, &app);
+            }
+            else
+            {
+                ai_conversation_send_input_async(app.conversation, one_shot,
+                                                 NULL, on_input_sent, &app);
+            }
+
+            g_main_loop_run(loop);
+            app.dump_loop = NULL;
+
+            text = ai_transcript_to_text(
+                ai_conversation_get_transcript(app.conversation),
+                (guint)MAX(0, opt_width));
+
+            g_print("%s", text);
+
+            g_clear_object(&app.completion);
+            g_clear_object(&app.commands);
+            g_clear_object(&app.registry);
+            g_object_unref(app.conversation);
+            g_object_unref(provider);
+            g_string_free(app.input, TRUE);
+            g_ptr_array_unref(app.history);
+
+            return 0;
         }
-        else
-        {
-            ai_conversation_send_input_async(app.conversation, opt_dump, NULL,
-                                             on_input_sent, &app);
-        }
-
-        g_main_loop_run(loop);
-        app.dump_loop = NULL;
-
-        text = ai_transcript_to_text(
-            ai_conversation_get_transcript(app.conversation),
-            (guint)MAX(0, opt_width));
-
-        g_print("%s", text);
-
-        g_clear_object(&app.completion);
-        g_clear_object(&app.commands);
-        g_clear_object(&app.registry);
-        g_object_unref(app.conversation);
-        g_object_unref(provider);
-        g_string_free(app.input, TRUE);
-        g_ptr_array_unref(app.history);
-
-        return 0;
     }
 
     if (!isatty(STDIN_FILENO))
     {
-        g_printerr("ai-tui: stdin is not a terminal; use --dump PROMPT "
-                   "to run one turn non-interactively\n");
+        g_printerr("ai-tui: stdin is not a terminal; pass a prompt as an "
+                   "argument, pipe it on stdin, or use --dump PROMPT\n");
+        g_clear_object(&app.completion);
+        g_clear_object(&app.commands);
+        g_clear_object(&app.registry);
         g_object_unref(app.conversation);
         g_object_unref(provider);
         g_string_free(app.input, TRUE);
@@ -4112,6 +4214,8 @@ main(int argc, char *argv[])
     g_unix_signal_add(SIGINT, on_sigint, &app);
 
     app_redraw(&app);
+    if (prompt != NULL && prompt[0] != '\0')
+        g_idle_add(on_startup_send, &app);
     g_main_loop_run(app.loop);
 
 	fputs("\033[?2004l", stdout);
