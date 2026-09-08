@@ -1287,6 +1287,11 @@ suggest_names(AiCommandSet *self, const gchar *name)
  * none. A body's own command still sees the arguments --- as the shell's
  * positional parameters and `$ARGUMENTS`, which it cannot re-parse.
  *
+ * Skills also retain the complete, trimmed arguments as an explicit user
+ * request after the expanded body. Skill authors need not include argument
+ * placeholders, and positional templates must not discard extra context.
+ * This appended text does not undergo argument or shell substitution.
+ *
  * Returns: (transfer full) (nullable): the result, or %NULL on error
  */
 AiCommandResult *
@@ -1383,6 +1388,21 @@ ai_command_set_resolve(
                                      result->arguments,
                                      (const gchar *const *)argv,
                                      cwd, shell_allowed, cancellable);
+
+		/* Skills describe a procedure, not necessarily an argument template.
+		 * Preserve the full task even when the body uses only $1 or mentions
+		 * $ARGUMENTS in an example. Append after expansion so request text
+		 * cannot introduce executable shell substitutions. */
+		if (ai_resource_get_kind(resource) == AI_RESOURCE_SKILL &&
+		    result->arguments[0] != '\0')
+		{
+			gchar *prompt = g_strconcat(result->prompt,
+				"\n\nApply the skill instructions above to this user request:\n\n",
+				result->arguments, NULL);
+
+			g_free(result->prompt);
+			result->prompt = prompt;
+		}
     }
 
     result->outcome =

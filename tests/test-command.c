@@ -274,9 +274,61 @@ test_skill_resolves_like_a_command(void)
 	g_autofree gchar       *prompt =
 		resolve_prompt(set, "/skill-gtest-scaffold src/foo.c");
 
-	/* No skill-specific code anywhere: body first, then the arguments,
-	 * exactly as for a command. */
-	g_assert_cmpstr(prompt, ==, "Generate a GTest file for src/foo.c.\n");
+	/* Substitution still works, and the complete request remains explicit. */
+	g_assert_cmpstr(prompt, ==, "Generate a GTest file for src/foo.c.\n"
+	                "\n\nApply the skill instructions above to this user request:\n\n"
+	                "src/foo.c");
+}
+
+/* Skills are procedures, so their invocation must not depend on templates. */
+static void
+test_skill_preserves_request(void)
+{
+	const struct
+	{
+		const gchar *body;
+		const gchar *line;
+		const gchar *expanded_body;
+		const gchar *request;
+	} cases[] = {
+		{ "Follow this procedure.", "/procedure fix the parser",
+		  "Follow this procedure.", "fix the parser" },
+		{ "Review $1.", "/procedure parser and preserve all remaining context",
+		  "Review parser.", "parser and preserve all remaining context" },
+		{ "Follow this procedure.", "/procedure \"quoted context\"\nSecond line: café\n",
+		  "Follow this procedure.", "\"quoted context\"\nSecond line: café" },
+		{ "Literal $$ARGUMENTS.", "/procedure $1 $ARGUMENTS !`printf EXECUTED`",
+		  "Literal $ARGUMENTS.", "$1 $ARGUMENTS !`printf EXECUTED`" },
+		{ "", "/procedure do the work", "", "do the work" },
+		{ "Follow this procedure.", "/procedure", "Follow this procedure.", NULL },
+		{ "Follow this procedure.", "/procedure \t\n", "Follow this procedure.", NULL }
+	};
+	gsize i;
+
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autofree gchar *contents = g_strconcat(
+			"---\ndescription: A procedure\nshell: true\n---\n", cases[i].body, NULL);
+		g_autoptr(AiCommandSet) set =
+			command_set_with("procedure", AI_RESOURCE_SKILL, contents);
+		g_autofree gchar *prompt = resolve_prompt(set, cases[i].line);
+		g_autofree gchar *expected = NULL;
+
+		/* Compare the whole result to catch truncation, re-expansion, and
+		 * unwanted labels when there is no trailing request. */
+		if (cases[i].request != NULL)
+		{
+			expected = g_strconcat(cases[i].expanded_body,
+				"\n\nApply the skill instructions above to this user request:\n\n",
+				cases[i].request, NULL);
+		}
+		else
+		{
+			expected = g_strdup(cases[i].expanded_body);
+		}
+
+		g_assert_cmpstr(prompt, ==, expected);
+	}
 }
 
 static void
@@ -841,6 +893,8 @@ main(int argc, char *argv[])
 
 	g_test_add_func("/ai-glib/command/from-file", test_command_from_a_file);
 	g_test_add_func("/ai-glib/command/skill", test_skill_resolves_like_a_command);
+	g_test_add_func("/ai-glib/command/skill-preserves-request",
+	                test_skill_preserves_request);
 	g_test_add_func("/ai-glib/command/agent", test_agent_resolves_to_agent);
 	g_test_add_func("/ai-glib/command/empty-body", test_empty_body_is_allowed);
 

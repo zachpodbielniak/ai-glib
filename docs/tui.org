@@ -354,6 +354,8 @@ The =/= menu discovers =.agents/skills/<name>/SKILL.md= relative to the working 
 
 Filesystem watches refresh the menu automatically, including nested skill edits, additions, deletions and roots created after startup; no restart or extra keystroke is needed. =/reload= remains available for a manual rescan. This changes discovery and menu precedence, not the native skill resolution of wrapped CLI providers.
 
+For locally resolved skills, =/skill-name additional context= sends both the skill instructions and the complete trailing request, including when the skill has no argument placeholders. This also applies to =echo '/skill-name additional context' | ai-tui=. Use =/expand /skill-name additional context= to inspect the prompt without sending it, or =ai-tui --dump '/skill-name additional context'= to force a noninteractive turn.
+
 *** When a command is not found
 =/commands= with nothing to show prints every directory it searched,
 which is the answer to the question you are about to ask. If a file is

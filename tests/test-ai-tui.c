@@ -1000,6 +1000,28 @@ test_expand_shows_a_resolved_command(void)
 	sandbox_free(box);
 }
 
+/* Exercise discovery and expansion through the noninteractive TUI entry point. */
+static void
+test_expand_preserves_skill_request(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/expand /procedure fix the parser and add tests",
+	                        "-p", "grok-build", NULL };
+	Run *run;
+
+	sandbox_write(box, ".agents/skills/procedure/SKILL.md",
+	              "---\nname: procedure\n---\nFollow this procedure carefully.\n");
+	run = run_tui_in(box, args);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Follow this procedure carefully."));
+	g_assert_nonnull(strstr(run->stdout_data, "Apply the skill instructions above to this user request:"));
+	g_assert_nonnull(strstr(run->stdout_data, "fix the parser and add tests"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
 static void
 test_provider_command_shows_and_switches(void)
 {
@@ -1286,6 +1308,40 @@ test_positional_prompt_sends_in_the_tui(void)
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 	sandbox_free(box);
+}
+
+/* Reproduce a piped skill invocation and inspect what the provider receives. */
+static void
+test_piped_skill_preserves_request(void)
+{
+	Stub *stub;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *sent = NULL;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	sandbox_write(stub->dir, ".agents/skills/procedure/SKILL.md",
+	              "---\nname: procedure\n---\nFollow this procedure carefully.\n");
+	tmux_start_tui_piped(TUI_SESSION, stub->dir,
+	                     "/procedure fix the parser and add tests");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	/* The transcript alone retains the typed line even in a broken build;
+	 * assert against the child process's captured prompt instead. */
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	g_assert_true(g_file_get_contents(stdin_path, &sent, NULL, NULL));
+	g_assert_nonnull(strstr(sent, "Follow this procedure carefully."));
+	g_assert_nonnull(strstr(sent, "Apply the skill instructions above to this user request:"));
+	g_assert_nonnull(strstr(sent, "fix the parser and add tests"));
+
+	tmux_kill(TUI_SESSION);
+	sandbox_free(g_build_filename(stub->dir, ".agents", NULL));
+	stub_free(stub);
 }
 
 static void
@@ -2075,6 +2131,8 @@ main(int argc, char *argv[])
 	                test_commands_listing_names_the_search_paths);
 	g_test_add_func("/ai-glib/ai-tui/expand-command",
 	                test_expand_shows_a_resolved_command);
+	g_test_add_func("/ai-glib/ai-tui/expand-skill-request",
+	                test_expand_preserves_skill_request);
 	g_test_add_func("/ai-glib/ai-tui/provider-command",
 	                test_provider_command_shows_and_switches);
 	g_test_add_func("/ai-glib/ai-tui/provider-command-error",
@@ -2094,6 +2152,8 @@ main(int argc, char *argv[])
 	                test_positional_prompt_sends_in_the_tui);
 	g_test_add_func("/ai-glib/ai-tui/keys/piped-prompt-sends",
 	                test_piped_prompt_sends_in_the_tui);
+	g_test_add_func("/ai-glib/ai-tui/keys/piped-skill-preserves-request",
+	                test_piped_skill_preserves_request);
 	g_test_add_func("/ai-glib/ai-tui/keys/alt-enter-is-a-newline",
 	                test_alt_enter_inserts_a_newline);
 	g_test_add_func("/ai-glib/ai-tui/keys/one-interrupt-stays",

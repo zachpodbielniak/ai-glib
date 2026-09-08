@@ -116,6 +116,8 @@ A written procedure for a kind of work. Invoked the same way a command
 is, and --- unlike a command --- the *model* can load one for itself
 through the =skill= tool.
 
+When invoked as =/skill-name additional context=, the expanded skill body is followed by an explicit user-request section containing the complete trailing context, with only surrounding whitespace trimmed. Skills do not need =$ARGUMENTS= or positional placeholders to receive the task. Existing placeholders still expand, but the complete request is retained even if a template uses only =$1=. The appended request is not evaluated as shell syntax or substituted again; =@file= mentions are expanded by the normal conversation input pipeline. Invocations without context add no request section. File-backed commands and agents keep their existing template behavior.
+
 Two layouts, both understood:
 
 #+begin_example

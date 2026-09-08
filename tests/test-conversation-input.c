@@ -217,6 +217,39 @@ test_http_provider_resolves_commands(void)
 	outcome_clear(&outcome);
 }
 
+/* The provider must receive both the procedure and the user's actual task. */
+static void
+test_http_provider_preserves_skill_request(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiCommandSet) set =
+		command_set_with("review", AI_RESOURCE_SKILL,
+		                 "---\ndescription: Review code\n---\nFind bugs in the supplied code.");
+	g_autofree gchar *text = NULL;
+	Outcome outcome = { NULL, FALSE, NULL, NULL };
+
+	write_file("skill-input.c", "SKILL_INPUT_CONTENT\n");
+	ai_conversation_set_command_set(conversation, set);
+	ai_conversation_set_working_directory(conversation, sandbox);
+	ai_mock_provider_push_text(mock, "reviewed");
+	send_input(conversation, "/review inspect @skill-input.c and explain the crash", &outcome);
+
+	g_assert_no_error(outcome.error);
+	g_assert_true(outcome.ok);
+	g_assert_null(outcome.command);
+	g_assert_nonnull(strstr(last_user_message(conversation), "Find bugs in the supplied code."));
+	g_assert_nonnull(strstr(last_user_message(conversation), "user request:\n\ninspect "));
+	g_assert_nonnull(strstr(last_user_message(conversation), "SKILL_INPUT_CONTENT"));
+	g_assert_nonnull(strstr(last_user_message(conversation), "and explain the crash"));
+
+	/* Display the original invocation while sending its expanded request. */
+	text = transcript_text(conversation);
+	g_assert_nonnull(strstr(text, "/review inspect @skill-input.c and explain the crash"));
+	g_assert_null(strstr(text, "Find bugs in the supplied code."));
+	outcome_clear(&outcome);
+}
+
 static void
 test_mentions_inside_a_command_body_expand_once(void)
 {
@@ -850,6 +883,8 @@ main(int argc, char *argv[])
 	                test_http_provider_expands_mentions);
 	g_test_add_func("/ai-glib/input/http-resolves-commands",
 	                test_http_provider_resolves_commands);
+	g_test_add_func("/ai-glib/input/http-preserves-skill-request",
+	                test_http_provider_preserves_skill_request);
 	g_test_add_func("/ai-glib/input/body-mentions-once",
 	                test_mentions_inside_a_command_body_expand_once);
 	g_test_add_func("/ai-glib/input/builtin-not-sent",
