@@ -6,6 +6,7 @@
 #include <glib/gstdio.h>
 #include <yaml.h>
 #include <string.h>
+#include "../bin/ai-tui-history.h"
 
 #define CONFIG_FILE "config/ai-glib/config.yaml"
 #define SAVED_CONFIG \
@@ -634,6 +635,129 @@ test_process_timeout_stream(Box *box, gconstpointer data)
 	}
 }
 
+/* Native session fixtures are isolated from the developer's real Grok home. */
+static void
+write_history(Box *box, const gchar *id, const gchar *date, const gchar *log)
+{
+	g_autofree gchar *encoded = g_uri_escape_string(box->dir, NULL, FALSE);
+	g_autofree gchar *directory = g_build_filename(".grok", "sessions", encoded, id, NULL);
+	g_autofree gchar *summary_path = g_build_filename(directory, "summary.json", NULL);
+	g_autofree gchar *log_path = g_build_filename(directory, "updates.jsonl", NULL);
+	g_autofree gchar *summary = g_strdup_printf(
+		"{\"info\":{\"id\":\"%s\",\"cwd\":\"%s\"},\"updated_at\":\"%s\"}", id, box->dir, date);
+
+	box_write(box, summary_path, summary);
+	box_write(box, log_path, log);
+}
+
+#define HISTORY_EVENT(id, update) "{\"params\":{\"sessionId\":\"" id "\",\"update\":" update "}}\n"
+#define HISTORY_TEXT(id, kind, text) HISTORY_EVENT(id, "{\"sessionUpdate\":\"" kind "\",\"content\":{\"type\":\"text\",\"text\":\"" text "\"}}")
+
+/* Verify selection and no replay through the real binary, then inspect startup
+ * directly to prove restoration needs neither a submitted prompt nor a CLI. */
+static void
+test_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "grok-build", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "grok-build", "--dump", "fresh prompt", NULL };
+	const gchar *explicit_id[] = { "-p", "grok-build", "-c", "--set", "session-id=older", "--dump", "new prompt", NULL };
+	const gchar *disabled[] = { "-p", "grok-build", "-c", "--set", "session-persistence=false", "--dump", "new prompt", NULL };
+	g_autoptr(AiGrokBuildClient) provider = ai_grok_build_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *sent = NULL;
+	g_autofree gchar *argv = NULL;
+	AiTranscript *transcript = ai_conversation_get_transcript(conversation);
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_history(box, "older", "2026-09-06T12:00:00Z",
+		HISTORY_TEXT("older", "user_message_chunk", "older question"));
+	write_history(box, "latest", "2026-09-07T12:00:00Z",
+		HISTORY_TEXT("latest", "user_message_chunk", "previous question")
+		HISTORY_TEXT("latest", "agent_thought_chunk", "previous reasoning")
+		HISTORY_TEXT("latest", "agent_message_chunk", "previous ")
+		HISTORY_TEXT("latest", "agent_message_chunk", "answer")
+		HISTORY_EVENT("latest", "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"tool-1\",\"title\":\"read_file\",\"rawInput\":{\"target_file\":\"file.c\"}}")
+		HISTORY_EVENT("latest", "{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"tool-1\",\"status\":\"completed\",\"content\":[{\"content\":{\"text\":\"saved output\"}}]}")
+		HISTORY_TEXT("different-session", "agent_message_chunk", "must not appear"));
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "must not appear"));
+	sent = box_read(box, "grok.stdin");
+	argv = box_read(box, "grok.argv");
+	g_assert_null(strstr(sent, "previous question"));
+	g_assert_nonnull(strstr(sent, "new prompt"));
+	g_assert_nonnull(strstr(argv, "--resume\nlatest\n"));
+	g_assert_cmpint(run_box(box, TRUE, explicit_id, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, disabled, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "GROK_HOME", "");
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 4);
+	g_assert_cmpuint(history->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_null(ai_conversation_get_messages(conversation));
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "saved output");
+
+	/* A session in another project must never leak into this display. */
+	{
+		g_autofree gchar *other = g_build_filename(box->dir, "other-project", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_mkdir(other, 0700), ==, 0);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), other);
+		selected_path = ai_tui_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_null(selected_path);
+		g_assert_null(selected_id);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	}
+
+	/* Corruption is reported without publishing partial historical blocks. */
+	write_history(box, "latest", "2026-09-07T12:00:00Z",
+		HISTORY_TEXT("latest", "user_message_chunk", "partial history must not appear") "{broken\n");
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Could not load native session history"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_null(strstr(box->out, "partial history must not appear"));
+
+	/* The alternate home and hashed bucket follow the same native lookup. */
+	{
+		g_autofree gchar *encoded = g_uri_escape_string(box->dir, NULL, FALSE);
+		g_autofree gchar *old_home = g_build_filename(box->dir, ".grok", NULL);
+		g_autofree gchar *new_home = g_build_filename(box->dir, "native-home", NULL);
+		g_autofree gchar *old_bucket = g_build_filename(new_home, "sessions", encoded, NULL);
+		g_autofree gchar *new_bucket = g_build_filename(new_home, "sessions", "project-hash", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_rename(old_home, new_home), ==, 0);
+		g_assert_cmpint(g_rename(old_bucket, new_bucket), ==, 0);
+		box_write(box, "native-home/sessions/project-hash/.cwd", box->dir);
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "GROK_HOME", new_home);
+		selected_path = ai_tui_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_nonnull(selected_path);
+		g_assert_cmpstr(selected_id, ==, "latest");
+	}
+}
+
 /* Resolve siblings before subprocesses change cwd; release/debug both work. */
 int
 main(int argc, char *argv[])
@@ -664,6 +788,7 @@ main(int argc, char *argv[])
 	ADD("tui-resolution", test_tui_resolution);
 	ADD("process-timeout/default", test_process_timeout_default);
 	ADD("process-timeout/stream", test_process_timeout_stream);
+	ADD("native-history", test_native_history);
 #undef ADD
 	status = g_test_run();
 	g_free(ai_binary);

@@ -28,6 +28,7 @@
 #include <ai-glib.h>
 #include "ai-launch.h"
 #include "ai-tui-theme.h"
+#include "ai-tui-history.h"
 
 /* ================================================================
  * Options
@@ -4075,6 +4076,8 @@ main(int argc, char *argv[])
 
         return 0;
     }
+
+	ai_tui_history_restore(app.conversation, app.history);
 
     /*
      * One-shot: --dump, or a prompt given without a terminal.

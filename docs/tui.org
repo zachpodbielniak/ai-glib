@@ -30,6 +30,13 @@ Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =a
 ** CLI Process Deadline
 CLI providers default to =process-timeout-ms=0= in =ai-tui=, including after runtime provider switches, so the wrapper does not terminate a long-running turn after thirty minutes. At startup, =--set process-timeout-ms=600000= opts into a ten-minute deadline; =--set process-timeout-ms=0= explicitly disables it. As with other startup =--set= properties, an explicit override is not reapplied after a provider switch. Cancellation remains available. The library default remains 1800000 ms; HTTP, native CLI and tmux-specific timeouts are separate controls.
 
+** Restoring Grok Session History
+With =-p grok-build -c=, the transcript is populated before the first screen is drawn, without submitting a prompt or starting Grok. This also applies when grok-build is your saved provider default. User turns, assistant replies, reasoning and tool calls are read from Grok's native =updates.jsonl= log; previous user turns are available through input history. =--dump= includes the restored transcript before the new turn.
+
+Session selection is restricted to the provider's working directory and uses the most recent native activity timestamp. =--set session-id=ID= selects that session explicitly. The selected ID is passed to Grok with =--resume= so the next turn continues the history shown on screen. Historical prompts and tools are only rendered, never submitted or executed again. A fresh startup without a resume option does not load history, and =--set session-persistence=false= disables restoration.
+
+The reader honors the provider's =GROK_HOME= and =HOME= environment overrides, including Grok's hashed directory buckets. Missing sessions leave a fresh transcript. Unreadable or malformed selected logs produce a visible error without adding partial history; logs over 64 MiB are rejected with a visible display-limit error. Native launch and dry-run modes do not load history. This native history reader currently supports grok-build; other providers retain their existing continuation behavior.
+
 ** What it looks like
 *** Native CLI Alternative
 =ai-tui --launch= opens the underlying provider's own interactive interface instead of initializing ncurses or the ai-glib conversation. =--launch-cmd= prints that native command, and =--launch-cmd-print= prints its noninteractive text-output equivalent; neither command-printing option executes anything. Optional positional text is passed literally as an initial prompt. All three modes use ai-tui's independent saved provider/model defaults, including =-p default -m default=.
