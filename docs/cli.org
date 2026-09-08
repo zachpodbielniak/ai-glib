@@ -38,8 +38,14 @@ piping.
 | =--set PROP=VALUE=      | Set any provider property; repeatable (see below)                  |
 | =--dry-run=             | Print the command that would be spawned; do not run it             |
 | =--list-providers=      | List known provider names and exit                                 |
+| =--usage=              | Query current native CLI allowance/usage without a model prompt |
+| =--history=            | Query historical usage periods, newest first |
+| =--json=               | Serialize a usage/history report as versioned JSON |
+| =--report-limit N=     | Maximum historical periods (1..1000; default 20) |
 | =-i=, =--interactive=   | Interactive multi-turn REPL (keeps history)                        |
 | =-v=, =--version=       | Print version and exit                                             |
+
+See [[file:cli-reporting.org][CLI usage and history reports]] for provider support, the C API, JSON fields, and examples. Reports default to plain text and do not read stdin.
 
 ** Defaults Setup
 Run =ai --setup= to display current defaults and update one scope. Run it again to update another. It writes =~/.config/ai-glib/config.yaml= (or =$XDG_CONFIG_HOME/ai-glib/config.yaml=) only after confirmation. Existing provider settings and other scopes remain intact. Wizard prompts are on stdout; save errors are on stderr.

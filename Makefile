@@ -59,6 +59,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-embedder.h \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
+	$(SRCDIR)/core/ai-cli-report.h \
 	$(SRCDIR)/core/ai-tool-endpoint.h \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
@@ -141,6 +142,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
+	$(SRCDIR)/core/ai-cli-report.c \
+	$(SRCDIR)/core/ai-cli-report-native.c \
 	$(SRCDIR)/core/ai-tool-endpoint.c \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
@@ -318,6 +321,8 @@ $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in config.mk
 	     $< > $@
 
 # Tests
+# The CLI report tests execute the hermetic native-protocol fixture.
+$(OUTDIR)/tests/test-ai-cli: $(OUTDIR)/tests/test-cli-report
 # tests/test-ai-cli.c spawns the installed-shaped `ai` binary, so the test
 # run needs it built even when the caller only asked for tests.
 .PHONY: test

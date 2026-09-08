@@ -37,6 +37,7 @@ see their provider pages.
 - [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
 - [[file:tui.org][ai-tui]] - The terminal agent harness
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
+- [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON
 
 *** Providers
 - [[file:providers/index.org][Providers Overview]] - Common provider interface

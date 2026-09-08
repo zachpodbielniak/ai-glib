@@ -1,0 +1,95 @@
+#+title: CLI provider usage and history
+#+description: Read-only account reports through C and the ai command
+
+* Usage and historical usage
+=AiCliReport= normalizes native CLI account information independently of model turns. =AI_CLI_REPORT_USAGE= requests current allowance windows or billing totals. =AI_CLI_REPORT_HISTORY= requests historical usage periods; it does not export conversation messages. The library uses native reporting interfaces and leaves authentication with the installed provider CLI.
+
+* Command line
+#+begin_src bash
+ai -p codex-cli --usage
+ai -p codex-cli --history --report-limit 7 --json
+ai -p grok-build --usage --json
+ai -p claude-code --usage
+ai -p claude-code --history --json
+ai -p antigravity --usage --json
+#+end_src
+
+Text is the default. =--json= writes one schema-versioned JSON document to stdout. Both forms exit zero for a successfully obtained report, including a report explicitly marked partial. Query failures exit one; JSON failures contain an =error= object and an =availability= of =unsupported= or =error=. Argument/configuration errors occurring before a query use the normal CLI stderr diagnostics.
+
+Reporting requires a CLI provider. It accepts no prompt and never reads stdin, so an open pipe cannot accidentally become a model request. =--usage= and =--history= are mutually exclusive and cannot be combined with interactive, streaming, image, resume, launch, setup, or dry-run modes. =--report-limit= defaults to 20 and accepts 1 through 1000 historical periods. Histories are sorted newest first; a period can have several model rows. =--set process-timeout-ms=8000= lowers the native query deadline to eight seconds.
+
+* Provider support
+| Provider | Usage source | History source |
+|----------+--------------+----------------|
+| =codex-cli= | App-server =account/rateLimits/read=, including each named limit pool | App-server =account/usage/read= daily token buckets |
+| =grok-build= | ACP =_x.ai/billing= allowance percentage, dollar amounts when provided, on-demand and prepaid balances | Billing history periods, if the native response includes them |
+| =claude-code= and =claude-tmux= | Native interactive =/usage= panel | Local =stats-cache.json= daily model token totals |
+| =antigravity= | Native interactive =/usage= panel; native alias is =/quota= | Unsupported: no verified historical-usage interface integrated |
+| =opencode= and =cursor= | Unsupported in this API | Unsupported in this API |
+
+Unsupported does not mean zero usage. Account type, authentication, and native version can also make an otherwise supported source unavailable. Grok can return current allowance without historical billing periods. Codex service-backed account history is distinct from local session history. Claude's statistics cache must already exist; open native =/stats= to populate or refresh it. Cache reads honor =CLAUDE_CONFIG_DIR= and otherwise use =$HOME/.claude/stats-cache.json=. A missing cache is a file error, not an empty history.
+
+Native panel adapters need =tmux=. They create an isolated private server/socket, capture the panel, and stop it after the query; they do not attach to an existing user session. Workspace trust prompts fail with =AI_ERROR_PERMISSION_DENIED= and require the user to open the native CLI interactively in that directory. Authentication prompts or an unrecognized panel can time out. Provider chat permission-bypass settings are not passed to reporting panels.
+
+Panel text is a compatibility fallback rather than a stable provider protocol. Such reports are marked =partial=. Percentage direction is recorded only when the source says used, remaining, or left; unlabeled percentages remain direction-unknown. Reset descriptions remain =reset_text= rather than guessed timestamps. Native display changes can require adapter updates. Claude history is also =partial= because its cache can lag and its token totals do not imply subscription cost.
+
+* C API
+Include =<ai-glib.h>=. Queries are additive API on =AiCliClient=; existing provider and chat methods are unchanged.
+
+#+begin_src c
+/* Query a CLI-owned account without creating a model turn. */
+static gboolean
+print_codex_usage(GError **error)
+{
+	g_autoptr(AiCodexCliClient) client = ai_codex_cli_client_new();
+	g_autoptr(AiCliReport) report = NULL;
+	g_autofree gchar *json = NULL;
+
+	report = ai_cli_client_query_report(AI_CLI_CLIENT(client),
+		AI_CLI_REPORT_USAGE, 20, NULL, error);
+	if (report == NULL)
+		return FALSE;
+	json = ai_cli_report_to_json(report);
+	g_print("%s\n", json);
+	return TRUE;
+}
+#+end_src
+
+=ai_cli_client_query_report_async()= runs blocking native work on a worker and invokes the callback on the caller's thread-default main context. Complete it with =ai_cli_client_query_report_finish()=. Both sync and async forms accept =GCancellable=. Do not mutate a client while its asynchronous report query is pending.
+
+The query and finish methods return an owned =AiCliReport= or =NULL= with =GError=. =ai_cli_report_get_provider()= returns a borrowed canonical provider name; =ai_cli_report_get_kind()= returns the request kind. =ai_cli_report_dup_data()= returns an independent owned =JsonNode=; modifying its objects does not modify the report. =ai_cli_report_to_json()= and =ai_cli_report_to_text()= return allocated strings. Reports are captured snapshots, so serialization does not re-query a provider.
+
+Native queries honor the client's executable path, working directory, and environment. They do not apply model-turn options such as model, temperature, effort, resume, or permission bypass. Reporting uses the native CLI's default account/profile as configured by its environment; chat-specific profile flags are not forwarded. Deadlines default to 30 seconds and a smaller positive =process-timeout-ms= shortens them. JSON-RPC input is bounded to 4 MiB total and 1 MiB per frame; Claude cache reads are bounded to 4 MiB. Cleanup of the private tmux server can take up to two additional seconds.
+
+* JSON schema version 1
+Successful reports contain these fields:
+
+| Field | Meaning |
+|-------+---------|
+| =schema_version= | Integer 1; scripts should check before interpreting fields |
+| =provider=, =kind= | Canonical provider name and =usage= or =history= |
+| =source= | Native interface or local cache used |
+| =collected_at= | UTC ISO 8601 collection timestamp |
+| =availability= | =available= or =partial= |
+| =detail= | Explanation of source limits, otherwise null |
+| =plan= | Native plan/tier, otherwise null |
+| =source_updated_at= | Cache update date when known, otherwise null |
+| =truncated= | More source periods existed than the requested limit |
+| =entries= | Array of normalized quota windows or historical usage rows |
+
+Each entry has a =label= and =unit= (=percent=, =tokens=, or =USD=). All of the following keys are present and null when unknown: =used=, =limit=, =remaining=, =used_percent=, =remaining_percent=, =percent=, =window_minutes=, =start_at=, =end_at=, =reset_at=, =reset_text=, =model=, =input_tokens=, =output_tokens=, =total_tokens=, =cost_usd=, =included_cost_usd=, and =on_demand_cost_usd=. Unknown must not be interpreted as zero. JSON integer token counts remain integers, including values beyond JavaScript's exact-number range; consumers should use an integer-preserving parser.
+
+=used=, =limit=, and =remaining= are in the entry's unit. Percentage fields are always percentages, independent of that unit. =percent= preserves a panel's displayed percentage even if direction is unknown. =cost_usd= and the other cost fields are dollars, converted from native cents where applicable. The library does not infer prices from tokens or fabricate missing quota denominators. Source dates can be date-only or month-only values; exact Codex reset epochs are converted to UTC timestamps. =reset_text= preserves human descriptions without pretending they are exact times.
+
+A query error document contains =schema_version=, =provider=, =kind=, =availability=, and =error= with =domain=, =code=, and =message=. Do not use error messages as stable identifiers. RPC errors expose method and numeric code without echoing arbitrary backend payloads. C callers receive the corresponding =GError= instead of an error report object.
+
+* Build and validation
+Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libyaml-devel=, =ncurses-devel=, and =gobject-introspection-devel=. =tmux= is needed at runtime for Claude/Antigravity usage panels and their integration tests. No new library dependency is introduced.
+
+=tests/test-cli-report.c= uses its own executable as a strict native-protocol fixture, with no live account or network required. It tests normalization, exact integers, deep-copy ownership, native argv/method selection, transport failures and bounds, cancellation, cache reads, and private panel capture/trust refusal. =tests/test-ai-cli.c= verifies text/JSON output and errors while leaving stdin open. The full =make test= target also checks public-header installation and GIR warnings.
+
+* Native references
+- [[https://learn.chatgpt.com/docs/app-server][Codex app-server protocol: account rate limits and usage]]
+- [[https://github.com/xai-org/grok-build][Grok Build source: ACP billing and native usage commands]]
+- [[https://code.claude.com/docs/en/interactive-mode][Claude Code native interactive commands]]
+- [[https://www.antigravity.google/docs/cli/commands/usage][Antigravity usage and quota command]]

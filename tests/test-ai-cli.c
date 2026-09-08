@@ -19,6 +19,8 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
+#include <json-glib/json-glib.h>
+#include <unistd.h>
 
 /* Path to the binary under test, resolved in main(). */
 static gchar *ai_bin = NULL;
@@ -1178,6 +1180,77 @@ test_sandbox_option(void)
     }
 }
 
+/* Keep stdin open while querying: reporting must not wait for a chat prompt.
+ * The sibling fixture rejects model methods and verifies native argv. */
+static void
+test_cli_reports(void)
+{
+	g_autofree gchar *bin_dir = g_path_get_dirname(ai_bin);
+	g_autofree gchar *stub = g_build_filename(bin_dir, "..", "tests", "test-cli-report", NULL);
+	const gchar *modes[] = { "--usage", "--history", NULL };
+	guint i, format;
+	alarm(30);
+	for (i = 0; modes[i] != NULL; i++)
+	{
+		for (format = 0; format < 2; format++)
+		{
+			g_autoptr(GSubprocessLauncher) launcher = g_subprocess_launcher_new(
+				G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+			g_autoptr(GSubprocess) process = NULL;
+			g_autoptr(GError) error = NULL;
+			g_autoptr(GDataInputStream) stream = NULL;
+			g_autoptr(GString) output = g_string_new(NULL);
+			gchar *line;
+			const gchar *args[] = { ai_bin, "-p", "grok-build", modes[i], format ? "--json" : NULL, NULL };
+			g_subprocess_launcher_setenv(launcher, "GROK_PATH", stub, TRUE);
+			g_subprocess_launcher_setenv(launcher, "REPORT_TEST_METHOD", "_x.ai/billing", TRUE);
+			g_subprocess_launcher_setenv(launcher, "REPORT_TEST_RESULT",
+				"{\"config\":{\"creditUsagePercent\":38,\"history\":[{\"billingCycle\":{\"year\":2026,\"month\":8},\"totalUsed\":{\"val\":250}}]}}", TRUE);
+			process = g_subprocess_launcher_spawnv(launcher, args, &error);
+			g_assert_no_error(error);
+			stream = g_data_input_stream_new(g_subprocess_get_stdout_pipe(process));
+			/* The harness-wide alarm makes a prompt-read regression fail promptly. */
+			while ((line = g_data_input_stream_read_line(stream, NULL, NULL, &error)) != NULL)
+			{
+				g_string_append(output, line); g_string_append_c(output, '\n'); g_free(line);
+			}
+			g_assert_no_error(error);
+			g_assert_true(g_subprocess_wait_check(process, NULL, &error)); g_assert_no_error(error);
+			if (format)
+			{
+				g_autoptr(JsonParser) parser = json_parser_new();
+				JsonObject *obj;
+				g_assert_true(json_parser_load_from_data(parser, output->str, -1, &error));
+				g_assert_no_error(error); obj = json_node_get_object(json_parser_get_root(parser));
+				g_assert_cmpint(json_object_get_int_member(obj, "schema_version"), ==, 1);
+				g_assert_cmpstr(json_object_get_string_member(obj, "kind"), ==, modes[i] + 2);
+				g_assert_cmpuint(json_array_get_length(json_object_get_array_member(obj, "entries")), ==, 1);
+			}
+			else g_assert_nonnull(strstr(output->str, i ? "cost_usd: 2.5" : "used_percent: 38"));
+		}
+	}
+	alarm(0);
+}
+
+/* Unsupported providers return a machine-readable error, never fake zeros. */
+static void
+test_cli_report_errors(void)
+{
+	const gchar *unsupported[] = { "-p", "cursor", "--history", "--json", NULL };
+	const gchar *conflict[] = { "-p", "grok-build", "--usage", "prompt", NULL };
+	Run run = { 0 };
+	g_autoptr(JsonParser) parser = json_parser_new();
+	run_ai(unsupported, NULL, &run);
+	g_assert_cmpint(run.exit_status, ==, 1);
+	g_assert_true(json_parser_load_from_data(parser, run.stdout_data, -1, NULL));
+	g_assert_cmpstr(json_object_get_string_member(json_node_get_object(json_parser_get_root(parser)), "availability"), ==, "unsupported");
+	run_clear(&run);
+	run_ai(conflict, NULL, &run);
+	g_assert_cmpint(run.exit_status, !=, 0);
+	g_assert_nonnull(strstr(run.stderr_data, "no prompt"));
+	run_clear(&run);
+}
+
 int
 main(
 	int   argc,
@@ -1186,6 +1259,8 @@ main(
 	int status;
 
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/ai-glib/ai-cli/reports/output", test_cli_reports);
+	g_test_add_func("/ai-glib/ai-cli/reports/errors", test_cli_report_errors);
 
 	ai_bin = find_ai_binary(argv[0]);
 	if (ai_bin == NULL)

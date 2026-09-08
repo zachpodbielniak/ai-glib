@@ -61,6 +61,10 @@ static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
 static gboolean  opt_license         = FALSE;
 static gboolean  opt_setup           = FALSE;
+static gboolean  opt_usage           = FALSE;
+static gboolean  opt_history         = FALSE;
+static gboolean  opt_report_json     = FALSE;
+static gint      opt_report_limit    = 20;
 static gboolean  opt_launch          = FALSE;
 static gboolean  opt_launch_cmd      = FALSE;
 static gboolean  opt_launch_cmd_print = FALSE;
@@ -101,6 +105,14 @@ static gboolean  opt_image_list_models  = FALSE;
 static gboolean  opt_image_strict       = FALSE;
 
 static const GOptionEntry option_entries[] = {
+	{ "usage", 0, 0, G_OPTION_ARG_NONE, &opt_usage,
+	  "Read native CLI quota/usage without sending a model prompt", NULL },
+	{ "history", 0, 0, G_OPTION_ARG_NONE, &opt_history,
+	  "Read native CLI historical usage (not conversation text)", NULL },
+	{ "json", 0, 0, G_OPTION_ARG_NONE, &opt_report_json,
+	  "Emit usage/history as schema-versioned JSON", NULL },
+	{ "report-limit", 0, 0, G_OPTION_ARG_INT, &opt_report_limit,
+	  "Maximum historical periods (1..1000; default 20)", "N" },
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
 	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
@@ -1380,6 +1392,9 @@ main(int argc, char *argv[])
 		"  ai --list-image-models -p gemini\n"
 		"\n"
 		"Chat examples:\n"
+		"  ai -p grok-build --usage\n"
+		"  ai -p codex-cli --usage --json\n"
+		"  ai -p claude-code --history --report-limit 7 --json\n"
 		"  ai --launch -p claude -m opus     # open Claude Code directly\n"
 		"  ai --launch-cmd -p default -m default\n"
 		"  ai --launch-cmd-print -p grok-build \"explain this project\"\n"
@@ -1426,6 +1441,16 @@ main(int argc, char *argv[])
 	{
 		list_providers();
 		return 0;
+	}
+	if ((opt_usage && opt_history) ||
+	    (opt_report_json && !opt_usage && !opt_history) ||
+	    ((opt_usage || opt_history) && (argc > 1 || opt_launch || opt_launch_cmd ||
+	     opt_launch_cmd_print || opt_setup || opt_image_gen || opt_image_list_models ||
+	     opt_interactive || opt_dry_run || opt_stream || opt_continue)) ||
+	    opt_report_limit < 1 || opt_report_limit > 1000)
+	{
+		g_printerr("ai: select --usage or --history with no prompt or chat mode; --json requires a report and --report-limit must be 1..1000\n");
+		return 2;
 	}
 	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
 	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
@@ -1494,6 +1519,45 @@ main(int argc, char *argv[])
 	{
 		g_object_unref(provider);
 		return 2;
+	}
+	if (opt_usage || opt_history)
+	{
+		g_autoptr(AiCliReport) report = NULL;
+		g_autofree gchar *output = NULL;
+		if (AI_IS_CLI_CLIENT(provider))
+			report = ai_cli_client_query_report(AI_CLI_CLIENT(provider),
+				opt_usage ? AI_CLI_REPORT_USAGE : AI_CLI_REPORT_HISTORY,
+				(guint)opt_report_limit, NULL, &error);
+		else
+			g_set_error_literal(&error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+				"Usage/history reports require a CLI provider, such as claude-code, grok-build, or codex-cli");
+		if (report != NULL)
+			output = opt_report_json ? ai_cli_report_to_json(report) : ai_cli_report_to_text(report);
+		else
+		{
+			status = 1;
+			if (opt_report_json)
+			{
+				g_autoptr(JsonBuilder) builder = json_builder_new();
+				g_autoptr(JsonNode) root = NULL;
+				json_builder_begin_object(builder);
+				json_builder_set_member_name(builder, "schema_version"); json_builder_add_int_value(builder, 1);
+				json_builder_set_member_name(builder, "provider"); json_builder_add_string_value(builder, ai_provider_type_to_string(ptype));
+				json_builder_set_member_name(builder, "kind"); json_builder_add_string_value(builder, opt_usage ? "usage" : "history");
+				json_builder_set_member_name(builder, "availability"); json_builder_add_string_value(builder,
+					g_error_matches(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED) ? "unsupported" : "error");
+				json_builder_set_member_name(builder, "error"); json_builder_begin_object(builder);
+				json_builder_set_member_name(builder, "domain"); json_builder_add_string_value(builder, g_quark_to_string(error->domain));
+				json_builder_set_member_name(builder, "code"); json_builder_add_int_value(builder, error->code);
+				json_builder_set_member_name(builder, "message"); json_builder_add_string_value(builder, error->message);
+				json_builder_end_object(builder); json_builder_end_object(builder);
+				root = json_builder_get_root(builder); output = json_to_string(root, TRUE);
+			}
+			else g_printerr("ai: %s\n", error->message);
+		}
+		if (output != NULL) g_print("%s%s", output, g_str_has_suffix(output, "\n") ? "" : "\n");
+		g_object_unref(provider);
+		return status;
 	}
 	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
 	{
