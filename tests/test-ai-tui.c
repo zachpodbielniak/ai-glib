@@ -750,6 +750,44 @@ test_dump_shows_the_grouped_tool_summary(void)
 }
 
 static void
+test_dump_shows_grok_native_tool_summary(void)
+{
+	/*
+	 * Real grok emits read_file / search_replace / run_terminal_command,
+	 * not Write / Bash. The dump path has to summarise those the same way
+	 * Codex file_change / command_execution already do.
+	 */
+	const gchar *ndjson =
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"r1\",\"name\":\"read_file\","
+		"\"input\":{\"target_file\":\"src/a.c\"}}]}}\n"
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"e1\",\"name\":\"search_replace\","
+		"\"input\":{\"file_path\":\"src/b.c\",\"old_string\":\"one\\ntwo\","
+		"\"new_string\":\"one\\ntwo\\nthree\"}}]}}\n"
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"e1\",\"content\":\"ok\"}]}}\n"
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"run_terminal_command\","
+		"\"input\":{\"command\":\"make -j8\"}}]}}\n"
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c1\",\"content\":\"built\"}]}}\n"
+		"{\"type\":\"result\",\"result\":\"Done.\",\"session_id\":\"s1\"}\n";
+	const gchar *args[] = { "-p", "grok-build", "--dump", "build it", NULL };
+	Stub *stub = stub_new(ndjson);
+	Run *run = run_tui(args, "GROK_PATH", stub->stub);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data,
+	                        "Read a.c, edited b.c, ran make -j8  +3-2"));
+	g_assert_null(strstr(run->stdout_data, "Used 3 tools"));
+	g_assert_null(strstr(run->stdout_data, "Used 1 tool"));
+
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
 test_dump_reaches_the_child(void)
 {
 	/* The prompt is piped, so a run against an empty stdin would "succeed". */
@@ -2109,6 +2147,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/dump", test_dump_prints_the_transcript);
 	g_test_add_func("/ai-glib/ai-tui/dump-grouped-summary",
 	                test_dump_shows_the_grouped_tool_summary);
+	g_test_add_func("/ai-glib/ai-tui/dump-grok-native-summary",
+	                test_dump_shows_grok_native_tool_summary);
 	g_test_add_func("/ai-glib/ai-tui/dump-prompt-reaches-child",
 	                test_dump_reaches_the_child);
 	g_test_add_func("/ai-glib/ai-tui/positional-prompt-without-tty",

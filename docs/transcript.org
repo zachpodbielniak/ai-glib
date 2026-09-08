@@ -194,10 +194,14 @@ ai_tool_style_register (&style);
 #+end_src
 
 The built-in table already covers ai-glib's own lowercase tools (=bash=,
-=edit=, =write=, ...) and the capitalised ones the wrapped CLIs use (=Bash=,
-=Edit=, =Write=, =Task=, ...), because both end up in the same transcript.
-Matching is case-sensitive on purpose: =edit= is ours and =Edit= is
-claude-code's, and although they read alike today they need not.
+=edit=, =write=, ...), Claude Code's capitalised names (=Bash=, =Edit=,
+=Write=, =Task=, =Agent=, ...), Grok Build's snake_case names
+(=read_file=, =search_replace=, =run_terminal_command=, =list_dir=, ...)
+and Codex's (=file_change=, =command_execution=), because all of them end
+up in the same transcript. Matching is case-sensitive on purpose: =edit=
+is ours and =Edit= is claude-code's, and although they read alike today
+they need not. A PascalCase miss is retried as snake_case so a restored
+Grok session that stored =ReadFile= still reads as =Read file.c=.
 
 An unregistered tool still renders, under a generic verb for its category
 (=Used 1 tool=). A transcript that silently omitted a call would be lying

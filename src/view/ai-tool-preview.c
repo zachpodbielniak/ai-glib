@@ -359,7 +359,8 @@ _ai_tool_preview_append(AiToolCall *call, AiRenderedText *out, gboolean expanded
 	const gchar *result = ai_tool_call_get_result(call);
 	const gchar *patch;
 
-	if (path == NULL) path = ai_json_get_string(input, "path", NULL);
+	if (path == NULL) path = input_string(input, "target_file", "path");
+	if (path == NULL) path = ai_json_get_string(input, "target_directory", NULL);
 	if (category == AI_TOOL_CATEGORY_COMMAND)
 	{
 		g_auto(GStrv) commands = preview_lines(ai_json_get_string(input, "command", NULL), &preview.truncated);

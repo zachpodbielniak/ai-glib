@@ -114,7 +114,7 @@ The streaming signals are declared on =AiCliClient= and emitted by this client:
 | =delta=        | =const gchar*= | Each text delta                            |
 | =stream-end=   | =AiResponse*= | At EOF, with the assembled response         |
 
-=tool-use= is declared on the base class but is not emitted by this provider: grok runs its own tools inside the CLI and does not report them as ai-glib tool calls.
+Tool calls are reported on the =::event= stream as =AI_EVENT_TOOL_STARTED= / =TOOL_FINISHED=, using grok's wire names (=read_file=, =search_replace=, =run_terminal_command=, =list_dir=, ...). The view layer maps those onto the same grouped summaries Codex gets for =file_change= / =command_execution=. The legacy =tool-use= GObject signal on =AiCliClient= is not the path a frontend should watch; fold =AiEvent= values instead. See [[file:../events.org][the event stream]] and [[file:../transcript.org][the transcript]].
 
 ** Usage
 *** Basic Usage

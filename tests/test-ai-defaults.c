@@ -682,7 +682,7 @@ test_native_history(Box *box, gconstpointer data)
 		HISTORY_TEXT("latest", "agent_thought_chunk", "previous reasoning")
 		HISTORY_TEXT("latest", "agent_message_chunk", "previous ")
 		HISTORY_TEXT("latest", "agent_message_chunk", "answer")
-		HISTORY_EVENT("latest", "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"tool-1\",\"title\":\"read_file\",\"rawInput\":{\"target_file\":\"file.c\"}}")
+		HISTORY_EVENT("latest", "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"tool-1\",\"title\":\"Read `/tmp/file.c`\",\"kind\":\"read\",\"rawInput\":{\"variant\":\"ReadFile\",\"target_file\":\"file.c\"}}")
 		HISTORY_EVENT("latest", "{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"tool-1\",\"status\":\"completed\",\"content\":[{\"content\":{\"text\":\"saved output\"}}]}")
 		HISTORY_TEXT("different-session", "agent_message_chunk", "must not appear"));
 	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
@@ -713,6 +713,10 @@ test_native_history(Box *box, gconstpointer data)
 	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
 	g_assert_null(ai_conversation_get_messages(conversation));
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "read_file");
+	g_assert_cmpstr(ai_view_tool_block_get_summary(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Read file.c");
 	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "saved output");
 

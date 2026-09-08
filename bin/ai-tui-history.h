@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdlib.h>
+#include <string.h>
 #include <glib/gstdio.h>
 #include "core/ai-json-util.h"
 
@@ -123,6 +124,48 @@ ai_tui_history_find(AiCliClient *client, gchar **session_id)
 	return selected;
 }
 
+/*
+ * Grok's ACP history titles are prose ("Read `/path/file.c`"). The variant
+ * is the actual tool. Map those onto the streaming-messages-json names so a
+ * restored session and a live turn share the same summary wording.
+ */
+static const gchar *
+ai_tui_history_tool_name(JsonObject *update)
+{
+	JsonObject *raw = ai_json_get_object(update, "rawInput");
+	const gchar *variant = ai_json_get_string(raw, "variant", NULL);
+	const gchar *title = ai_json_get_string(update, "title", NULL);
+	const gchar *kind = ai_json_get_string(update, "kind", NULL);
+
+	if (variant != NULL && variant[0] != '\0')
+	{
+		if (g_str_equal(variant, "ReadFile")) return "read_file";
+		if (g_str_equal(variant, "SearchReplace")) return "search_replace";
+		if (g_str_equal(variant, "ListDir")) return "list_dir";
+		if (g_str_equal(variant, "Bash")) return "run_terminal_command";
+		if (g_str_equal(variant, "Write")) return "write";
+		if (g_str_equal(variant, "Grep")) return "grep";
+		if (g_str_equal(variant, "TodoWrite")) return "todo_write";
+		if (g_str_equal(variant, "TaskOutput")) return "get_command_or_subagent_output";
+		if (g_str_equal(variant, "SearchTool")) return "search_tool";
+		if (g_str_equal(variant, "WebSearch")) return "web_search";
+		if (g_str_equal(variant, "WebFetch")) return "web_fetch";
+		if (g_str_equal(variant, "UseTool"))
+		{
+			const gchar *tool_name = ai_json_get_string(raw, "tool_name", NULL);
+			if (tool_name != NULL && tool_name[0] != '\0') return tool_name;
+		}
+		return variant;
+	}
+	/* A title with spaces or backticks is a sentence, not a tool id. */
+	if (title != NULL && title[0] != '\0' &&
+	    strchr(title, ' ') == NULL && strchr(title, '`') == NULL)
+		return title;
+	if (kind != NULL && kind[0] != '\0')
+		return kind;
+	return "tool";
+}
+
 /* Fold text fragments without inventing new turns at each streamed chunk. */
 static void
 ai_tui_history_text(AiTranscript *transcript, const gchar *kind, const gchar *text,
@@ -216,7 +259,7 @@ ai_tui_history_read(const gchar *path, const gchar *session_id, GError **error)
 					if (call == NULL && id != NULL)
 					{
 						g_autoptr(AiToolUse) use = ai_tool_use_new(id,
-							ai_json_get_string(update, "title", "tool"), ai_json_get_node(update, "rawInput"));
+							ai_tui_history_tool_name(update), ai_json_get_node(update, "rawInput"));
 						if (tool_block == NULL)
 						{
 							g_autoptr(AiViewBlock) block = ai_view_tool_block_new();

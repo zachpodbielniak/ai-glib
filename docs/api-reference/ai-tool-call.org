@@ -99,13 +99,13 @@ Registrations are copied, so a stack literal is fine, and they win over the
 built-in table --- which is how a host overrides the shipped wording as well
 as adding to it.
 
-The built-ins cover ai-glib's own lowercase tools (=bash=, =read=, =write=,
-=edit=, =glob=, =grep=, =ls=, =web_fetch=, =web_search=) and the
-capitalised ones the wrapped CLIs use (=Bash=, =Read=, =Write=, =Edit=,
-=MultiEdit=, =Glob=, =Grep=, =WebFetch=, =WebSearch=, =Task=, =TodoWrite=,
-=NotebookEdit=), because both end up in the same transcript. Matching is
-case-sensitive on purpose: =edit= is ours and =Edit= is claude-code's, and
-although they read alike today they need not.
+The built-ins cover three families, because all three end up in the same transcript:
+
+- ai-glib's own lowercase tools (=bash=, =read=, =write=, =edit=, =glob=, =grep=, =ls=, =web_fetch=, =web_search=)
+- the capitalised names Claude Code streams (=Bash=, =Read=, =Write=, =Edit=, =MultiEdit=, =Glob=, =Grep=, =WebFetch=, =WebSearch=, =Task=, =TodoWrite=, =NotebookEdit=, =Agent=, =AskUserQuestion=, =ToolSearch=, =SendMessage=, =TaskStop=)
+- Grok Build's snake_case names (=read_file=, =search_replace=, =run_terminal_command=, =list_dir=, =delete_file=, ...) and Codex's (=file_change=, =command_execution=, =apply_patch=)
+
+Matching is case-sensitive on purpose: =edit= is ours and =Edit= is claude-code's, and although they read alike today they need not. A PascalCase miss is retried as snake_case, so Grok's ACP history variant =ReadFile= uses the same wording as the streamed =read_file=. Grok's =target_file= / =target_directory= keys are accepted as targets the same way Claude's =file_path= and OpenCode's =filePath= already were.
 
 A tool with no entry renders under a generic verb for its category
 (="Used 1 tool"=). A transcript that silently omitted a call would be lying

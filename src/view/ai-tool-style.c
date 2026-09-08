@@ -17,11 +17,12 @@ G_DEFINE_BOXED_TYPE(AiToolStyle, ai_tool_style,
 /*
  * The built-in vocabulary.
  *
- * Two families are covered. The lowercase names are ai-glib's own built-in
- * tools, the ones AiToolExecutor runs. The capitalised ones are what the
- * wrapped CLIs call theirs, and they arrive through those providers' event
- * streams -- a transcript showing a claude-code run sees "Edit", never
- * "edit". Both belong here because both end up in the same transcript.
+ * Three families are covered. The lowercase names are ai-glib's own built-in
+ * tools, the ones AiToolExecutor runs. The capitalised ones are Claude Code's
+ * (a transcript of a claude-code run sees "Edit", never "edit"). Grok Build
+ * streams snake_case (`read_file`, `search_replace`, `run_terminal_command`)
+ * and Codex streams `file_change` / `command_execution`. All of them belong
+ * here because all of them end up in the same transcript.
  *
  * target_key is the input parameter that names what the call acted on. It
  * is what turns "Edited 1 file" into "Edited ai-style.c", which is most of
@@ -64,7 +65,37 @@ static const AiToolStyle BUILTIN_STYLES[] = {
     { "WebSearch",    "Searched",  "query",   "queries",  AI_TOOL_CATEGORY_SEARCH,     "query",   FALSE },
     { "Task",         "Delegated", "task",    "tasks",    AI_TOOL_CATEGORY_TASK,       "description", FALSE },
     { "TodoWrite",    "Updated",   "todo",    "todos",    AI_TOOL_CATEGORY_TASK,       NULL,      FALSE },
-    { "Skill",        "Loaded",    "skill",   "skills",   AI_TOOL_CATEGORY_TASK,       "command", FALSE }
+    { "Skill",        "Loaded",    "skill",   "skills",   AI_TOOL_CATEGORY_TASK,       "command", FALSE },
+    { "Agent",        "Delegated", "task",    "tasks",    AI_TOOL_CATEGORY_TASK,       "description", FALSE },
+    { "AskUserQuestion", "Asked",  "question","questions",AI_TOOL_CATEGORY_TASK,       NULL,      FALSE },
+    { "ToolSearch",   "Searched",  "tool",    "tools",    AI_TOOL_CATEGORY_SEARCH,     "query",   FALSE },
+    { "SendMessage",  "Sent",      "message", "messages", AI_TOOL_CATEGORY_TASK,       "to",      FALSE },
+    { "TaskStop",     "Stopped",   "task",    "tasks",    AI_TOOL_CATEGORY_TASK,       "task_id", FALSE },
+
+    /*
+     * Grok Build's streaming-messages-json names. These are what actually
+     * arrive on the wire; the Claude-shaped Write/Bash names in the table
+     * above still match if a session happens to emit them.
+     */
+    { "read_file",              "Read",      "file",     "files",     AI_TOOL_CATEGORY_FILE_READ,  "target_file", FALSE },
+    { "search_replace",         "Edited",    "file",     "files",     AI_TOOL_CATEGORY_FILE_WRITE, "file_path",   TRUE  },
+    { "run_terminal_command",   "Ran",       "command",  "commands",  AI_TOOL_CATEGORY_COMMAND,    "command",     FALSE },
+    { "list_dir",               "Listed",    "path",     "paths",     AI_TOOL_CATEGORY_FILE_READ,  "target_directory", FALSE },
+    { "delete_file",            "Deleted",   "file",     "files",     AI_TOOL_CATEGORY_FILE_WRITE, "file_path",   FALSE },
+    { "edit_notebook",          "Edited",    "notebook", "notebooks", AI_TOOL_CATEGORY_FILE_WRITE, "target_notebook", TRUE },
+    { "get_task_output",        "Collected", "task",     "tasks",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "get_command_or_subagent_output", "Collected", "task", "tasks", AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "get_terminal_command_output", "Collected", "command", "commands", AI_TOOL_CATEGORY_COMMAND, NULL,          FALSE },
+    { "kill_task",              "Stopped",   "task",     "tasks",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "kill_command_or_subagent","Stopped",  "task",     "tasks",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "kill_terminal_command",  "Stopped",   "command",  "commands",  AI_TOOL_CATEGORY_COMMAND,    NULL,          FALSE },
+    { "wait_commands_or_subagents", "Waited for", "task", "tasks",    AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "spawn_subagent",         "Started",   "agent",    "agents",    AI_TOOL_CATEGORY_TASK,       "description", FALSE },
+    { "send_subagent_message",  "Messaged",  "agent",    "agents",    AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "enter_plan_mode",        "Entered",   "plan",     "plans",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "exit_plan_mode",         "Left",      "plan",     "plans",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "ask_user_question",      "Asked",     "question", "questions", AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
+    { "search_tool",            "Searched",  "tool",     "tools",     AI_TOOL_CATEGORY_SEARCH,     "query",       FALSE }
 };
 
 /*
@@ -191,17 +222,16 @@ ai_tool_style_register(const AiToolStyle *style)
  * case-sensitive on purpose: `edit` is ai-glib's own tool and `Edit` is
  * claude-code's, and although they read the same today they need not.
  *
+ * A PascalCase miss is retried as snake_case so Grok's ACP variant
+ * `ReadFile` uses the same wording as the streamed `read_file`.
+ *
  * Returns: (transfer none) (nullable): the entry, or %NULL if there is none
  */
-const AiToolStyle *
-ai_tool_style_lookup(const gchar *tool_name)
+/* Exact match against runtime registrations, then the built-in table. */
+static const AiToolStyle *
+lookup_exact(const gchar *tool_name)
 {
     gsize i;
-
-    if (tool_name == NULL || tool_name[0] == '\0')
-    {
-        return NULL;
-    }
 
     if (registered_styles != NULL)
     {
@@ -223,6 +253,82 @@ ai_tool_style_lookup(const gchar *tool_name)
     }
 
     return NULL;
+}
+
+/*
+ * Fold ACP/PascalCase names onto the snake_case entries they belong to.
+ *
+ * Grok's native history writes variant "ReadFile" while streaming-messages-json
+ * writes name "read_file". Both must hit the same wording; converting here
+ * keeps the table from listing every capitalisation.
+ */
+static gchar *
+snake_from_pascal(const gchar *name)
+{
+    GString *out;
+    const gchar *p;
+    gboolean saw_upper = FALSE;
+
+    for (p = name; *p != '\0'; p++)
+    {
+        if (g_ascii_isupper(*p))
+        {
+            saw_upper = TRUE;
+            break;
+        }
+    }
+
+    if (!saw_upper)
+    {
+        return NULL;
+    }
+
+    out = g_string_new(NULL);
+
+    for (p = name; *p != '\0'; p++)
+    {
+        if (g_ascii_isupper(*p) && out->len > 0)
+        {
+            gchar prev = out->str[out->len - 1];
+            gchar next = p[1];
+
+            if (g_ascii_islower(prev) ||
+                (g_ascii_isupper(prev) && g_ascii_islower(next)))
+            {
+                g_string_append_c(out, '_');
+            }
+        }
+
+        g_string_append_c(out, g_ascii_tolower(*p));
+    }
+
+    return g_string_free(out, FALSE);
+}
+
+const AiToolStyle *
+ai_tool_style_lookup(const gchar *tool_name)
+{
+    const AiToolStyle *found;
+    g_autofree gchar *snake = NULL;
+
+    if (tool_name == NULL || tool_name[0] == '\0')
+    {
+        return NULL;
+    }
+
+    found = lookup_exact(tool_name);
+    if (found != NULL)
+    {
+        return found;
+    }
+
+    snake = snake_from_pascal(tool_name);
+    if (snake != NULL && g_strcmp0(snake, tool_name) != 0)
+    {
+        found = lookup_exact(snake);
+    }
+
+    return found;
 }
 
 /**

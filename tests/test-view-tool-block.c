@@ -255,6 +255,69 @@ test_denied_counts_as_a_failure(void)
 }
 
 static void
+test_grok_native_names_summarise_like_codex(void)
+{
+	/*
+	 * Grok Build streams snake_case names (read_file, search_replace,
+	 * run_terminal_command), not Claude's Write/Bash. Those have to read
+	 * as a real summary, not "Used 3 tools".
+	 */
+	g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+	g_autofree gchar *summary = NULL;
+
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "r1", "read_file",
+	       "{\"target_file\": \"/src/a.c\"}");
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "e1", "search_replace",
+	       "{\"file_path\": \"/src/b.c\", \"old_string\": \"one\\ntwo\","
+	       " \"new_string\": \"one\\ntwo\\nthree\"}");
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "c1", "run_terminal_command",
+	       "{\"command\": \"make -j8\"}");
+
+	summary = summary_of(AI_VIEW_TOOL_BLOCK(block));
+	g_assert_cmpstr(summary, ==, "Read a.c, edited b.c, ran make -j8  +3-2");
+}
+
+static void
+test_grok_acp_variant_matches_streamed_name(void)
+{
+	/* Native history writes PascalCase variants; lookup folds them. */
+	g_autoptr(AiViewBlock) reads = ai_view_tool_block_new();
+	g_autoptr(AiViewBlock) mixed = ai_view_tool_block_new();
+	g_autofree gchar *listed = NULL;
+	g_autofree gchar *summary = NULL;
+
+	add_ok(AI_VIEW_TOOL_BLOCK(reads), "d1", "ListDir",
+	       "{\"variant\": \"ListDir\", \"target_directory\": \"/tmp/src\"}");
+	listed = summary_of(AI_VIEW_TOOL_BLOCK(reads));
+	g_assert_cmpstr(listed, ==, "Listed src");
+
+	add_ok(AI_VIEW_TOOL_BLOCK(mixed), "r1", "ReadFile",
+	       "{\"variant\": \"ReadFile\", \"target_file\": \"/tmp/file.c\"}");
+	add_ok(AI_VIEW_TOOL_BLOCK(mixed), "e1", "SearchReplace",
+	       "{\"variant\": \"SearchReplace\", \"file_path\": \"/tmp/b.c\","
+	       " \"old_string\": \"a\", \"new_string\": \"b\"}");
+	add_ok(AI_VIEW_TOOL_BLOCK(mixed), "c1", "Bash",
+	       "{\"variant\": \"Bash\", \"command\": \"make\"}");
+	summary = summary_of(AI_VIEW_TOOL_BLOCK(mixed));
+	g_assert_cmpstr(summary, ==, "Read file.c, edited b.c, ran make  +1-1");
+}
+
+static void
+test_claude_agent_and_tool_search_summarise(void)
+{
+	g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+	g_autofree gchar *summary = NULL;
+
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "a1", "Agent",
+	       "{\"description\": \"review the diff\", \"prompt\": \"go\"}");
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "s1", "ToolSearch",
+	       "{\"query\": \"web_fetch\"}");
+
+	summary = summary_of(AI_VIEW_TOOL_BLOCK(block));
+	g_assert_cmpstr(summary, ==, "Delegated review the diff, searched web_fetch");
+}
+
+static void
 test_unknown_tool_falls_back(void)
 {
 	/*
@@ -714,7 +777,8 @@ test_preview_dialects(void)
 		{ "file_change", "{\"changes\":[{\"path\":\"test.c\",\"diff\":\"@@ -1 +1 @@\\n-return 1;\\n+return 2;\"}]}", "return 2;" },
 		{ "file_change", "{\"changes\":[{\"path\":\"image.png\",\"diff\":\"Binary files a/image.png and b/image.png differ\\n\"}]}", "Binary files a/image.png and b/image.png differ" },
 		{ "Write", "{\"file_path\":\"test.c\",\"content\":\"int x;\"}", "previous content unavailable" },
-		{ "file_change", "{\"changes\":[{\"path\":\"test.c\",\"kind\":\"update\"}]}", "edit text unavailable" }
+		{ "file_change", "{\"changes\":[{\"path\":\"test.c\",\"kind\":\"update\"}]}", "edit text unavailable" },
+		{ "search_replace", "{\"file_path\":\"test.c\",\"old_string\":\"return 1;\",\"new_string\":\"return 2;\"}", "return 2;" }
 	};
 	guint i;
 	for (i = 0; i < G_N_ELEMENTS(cases); i++)
@@ -844,6 +908,12 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/tool-block/one-failure", test_one_failure_among_successes);
 	g_test_add_func("/ai-glib/tool-block/all-failed", test_all_failed);
 	g_test_add_func("/ai-glib/tool-block/denied", test_denied_counts_as_a_failure);
+	g_test_add_func("/ai-glib/tool-block/grok-native-names",
+	                test_grok_native_names_summarise_like_codex);
+	g_test_add_func("/ai-glib/tool-block/grok-acp-variants",
+	                test_grok_acp_variant_matches_streamed_name);
+	g_test_add_func("/ai-glib/tool-block/claude-agent-tools",
+	                test_claude_agent_and_tool_search_summarise);
 	g_test_add_func("/ai-glib/tool-block/unknown-tool", test_unknown_tool_falls_back);
 	g_test_add_func("/ai-glib/tool-block/registered-tool", test_registered_tool_is_used);
 	g_test_add_func("/ai-glib/tool-block/pending", test_pending_call_still_summarised);

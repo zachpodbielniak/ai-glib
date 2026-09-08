@@ -655,6 +655,54 @@ test_gb_tool_start_then_complete_args(void)
 }
 
 static void
+test_gb_native_tool_names(void)
+{
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	const gchar *lines[] = {
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"r1\",\"name\":\"read_file\","
+		"\"input\":{\"target_file\":\"a.c\"}}]}}",
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"e1\",\"name\":\"search_replace\","
+		"\"input\":{\"file_path\":\"b.c\",\"old_string\":\"a\","
+		"\"new_string\":\"b\"}}]}}",
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"run_terminal_command\","
+		"\"input\":{\"command\":\"make\"}}]}}",
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c1\",\"content\":\"built\"}]}}",
+		NULL
+	};
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+	AiEvent *read;
+	AiEvent *edit;
+	AiEvent *cmd;
+	AiEvent *done;
+
+	g_assert_cmpuint(count_kind(p, AI_EVENT_TOOL_STARTED), ==, 3);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_TOOL_FINISHED), ==, 1);
+
+	read = first_of(p, AI_EVENT_TOOL_STARTED);
+	g_assert_cmpstr(ai_tool_use_get_name(ai_event_get_tool_use(read)), ==, "read_file");
+	g_assert_cmpstr(ai_tool_use_get_input_string(ai_event_get_tool_use(read), "target_file"),
+	                ==, "a.c");
+
+	edit = g_ptr_array_index(p->events, 1);
+	g_assert_cmpstr(ai_tool_use_get_name(ai_event_get_tool_use(edit)), ==, "search_replace");
+
+	cmd = g_ptr_array_index(p->events, 2);
+	g_assert_cmpstr(ai_tool_use_get_name(ai_event_get_tool_use(cmd)),
+	                ==, "run_terminal_command");
+
+	done = first_of(p, AI_EVENT_TOOL_FINISHED);
+	g_assert_cmpstr(ai_event_get_tool_use_id(done), ==, "c1");
+	g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(done)),
+	                ==, "built");
+
+	parsed_free(p);
+}
+
+static void
 test_gb_error_line_fails(void)
 {
 	/*
@@ -1076,6 +1124,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/cli-events/gb/thinking", test_gb_thinking_delta);
 	g_test_add_func("/ai-glib/cli-events/gb/tool-args",
 	                test_gb_tool_start_then_complete_args);
+	g_test_add_func("/ai-glib/cli-events/gb/native-tool-names",
+	                test_gb_native_tool_names);
 	g_test_add_func("/ai-glib/cli-events/gb/error-line", test_gb_error_line_fails);
 	g_test_add_func("/ai-glib/cli-events/gb/result-is-error", test_gb_result_is_error);
 	g_test_add_func("/ai-glib/cli-events/gb/camel-and-snake",

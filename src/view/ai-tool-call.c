@@ -240,7 +240,8 @@ const gchar *
 ai_tool_call_get_target(AiToolCall *self)
 {
     const AiToolStyle *style;
-    const gchar *raw;
+    const gchar *raw = NULL;
+    gboolean as_path = FALSE;
 
     g_return_val_if_fail(AI_IS_TOOL_CALL(self), NULL);
 
@@ -253,28 +254,64 @@ ai_tool_call_get_target(AiToolCall *self)
 
     style = ai_tool_style_lookup(self->name);
 
-    if (style == NULL || style->target_key == NULL || self->tool_use == NULL)
+    if (self->tool_use == NULL)
     {
         return NULL;
     }
 
-    raw = ai_tool_use_get_input_string(self->tool_use, style->target_key);
-	/* OpenCode uses camelCase while local tools and Claude use snake_case. */
-	if (raw == NULL && (style->category == AI_TOOL_CATEGORY_FILE_READ ||
-		style->category == AI_TOOL_CATEGORY_FILE_WRITE))
-	{
-		raw = ai_tool_use_get_input_string(self->tool_use, "filePath");
-		if (raw == NULL) raw = ai_tool_use_get_input_string(self->tool_use, "file_path");
-		if (raw == NULL) raw = ai_tool_use_get_input_string(self->tool_use, "path");
-	}
+    if (style != NULL && style->target_key != NULL)
+        raw = ai_tool_use_get_input_string(self->tool_use, style->target_key);
+
+    /*
+     * Provider dialects disagree on the parameter name. Try the common ones
+     * rather than requiring every alias to list every key: Grok reads
+     * `target_file`, Claude `file_path`, OpenCode `filePath`.
+     */
+    if ((raw == NULL || raw[0] == '\0') &&
+        (style == NULL ||
+         style->category == AI_TOOL_CATEGORY_FILE_READ ||
+         style->category == AI_TOOL_CATEGORY_FILE_WRITE))
+    {
+        static const gchar *const file_keys[] = {
+            "filePath", "file_path", "target_file", "path",
+            "target_directory", "notebook_path", "target_notebook", NULL
+        };
+        gsize i;
+
+        for (i = 0; file_keys[i] != NULL && (raw == NULL || raw[0] == '\0'); i++)
+            raw = ai_tool_use_get_input_string(self->tool_use, file_keys[i]);
+        as_path = (raw != NULL && raw[0] != '\0');
+    }
+    if ((raw == NULL || raw[0] == '\0') &&
+        (style == NULL || style->category == AI_TOOL_CATEGORY_COMMAND))
+        raw = ai_tool_use_get_input_string(self->tool_use, "command");
+    if ((raw == NULL || raw[0] == '\0') &&
+        (style == NULL || style->category == AI_TOOL_CATEGORY_SEARCH))
+    {
+        raw = ai_tool_use_get_input_string(self->tool_use, "pattern");
+        if (raw == NULL || raw[0] == '\0')
+            raw = ai_tool_use_get_input_string(self->tool_use, "query");
+    }
+    if ((raw == NULL || raw[0] == '\0') &&
+        (style == NULL || style->category == AI_TOOL_CATEGORY_NETWORK))
+        raw = ai_tool_use_get_input_string(self->tool_use, "url");
+    if ((raw == NULL || raw[0] == '\0') &&
+        (style == NULL || style->category == AI_TOOL_CATEGORY_TASK))
+    {
+        raw = ai_tool_use_get_input_string(self->tool_use, "description");
+        if (raw == NULL || raw[0] == '\0')
+            raw = ai_tool_use_get_input_string(self->tool_use, "name");
+    }
 
     if (raw == NULL || raw[0] == '\0')
     {
         return NULL;
     }
 
-    if (style->category == AI_TOOL_CATEGORY_FILE_READ ||
-        style->category == AI_TOOL_CATEGORY_FILE_WRITE)
+    if (as_path ||
+        (style != NULL &&
+         (style->category == AI_TOOL_CATEGORY_FILE_READ ||
+          style->category == AI_TOOL_CATEGORY_FILE_WRITE)))
     {
         self->target = g_path_get_basename(raw);
     }
