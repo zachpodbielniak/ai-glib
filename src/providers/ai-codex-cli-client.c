@@ -10,6 +10,7 @@
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
+#include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-result.h"
 
@@ -191,6 +192,116 @@ usage_tokens(JsonObject *usage, const gchar *name)
     return (gint)count;
 }
 
+/* Capture a bounded diff once, at event receipt. Never run repository diff
+ * drivers, textconv filters, or a shell, and never read an unbounded pipe. */
+static gboolean
+capture_diff(
+	AiCliClient *client,
+	const gchar *path,
+	gboolean     added,
+	gint64       deadline,
+	gchar      **patch,
+	gboolean    *truncated
+){
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) process = NULL;
+	g_autoptr(GString) output = g_string_new(NULL);
+	GInputStream *stream;
+	const gchar *cwd = ai_cli_client_get_working_directory(client);
+	gboolean eof = FALSE;
+
+	*patch = NULL;
+	*truncated = FALSE;
+	if (g_get_monotonic_time() >= deadline) return FALSE;
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+	                                    G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+	if (cwd != NULL) g_subprocess_launcher_set_cwd(launcher, cwd);
+	g_subprocess_launcher_setenv(launcher, "GIT_OPTIONAL_LOCKS", "0", TRUE);
+	process = g_subprocess_launcher_spawn(launcher, NULL,
+		"git", "--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false",
+		"diff", "--no-ext-diff",
+		"--no-textconv", "--no-color", "--no-renames", "--unified=3",
+		added ? "--no-index" : "HEAD", "--", added ? "/dev/null" : path,
+		added ? path : NULL, NULL);
+	if (process == NULL) return FALSE;
+	stream = g_subprocess_get_stdout_pipe(process);
+	if (!G_IS_POLLABLE_INPUT_STREAM(stream) ||
+	    !g_pollable_input_stream_can_poll(G_POLLABLE_INPUT_STREAM(stream)))
+	{
+		g_subprocess_force_exit(process);
+		return FALSE;
+	}
+
+	/* Poll with a shared event deadline: eight changed files cannot cause
+	 * eight independent long stalls. Stop after 64 KiB of patch data. */
+	while (output->len < 65536 && g_get_monotonic_time() < deadline)
+	{
+		gchar buffer[4096];
+		g_autoptr(GError) error = NULL;
+		gssize size = g_pollable_input_stream_read_nonblocking(
+			G_POLLABLE_INPUT_STREAM(stream), buffer,
+			MIN(sizeof buffer, 65536 - output->len), NULL, &error);
+		if (size > 0) g_string_append_len(output, buffer, size);
+		else if (size == 0) { eof = TRUE; break; }
+		else if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+			g_usleep(1000);
+		else break;
+	}
+	if (!eof)
+	{
+		g_subprocess_force_exit(process);
+		*truncated = TRUE;
+	}
+	else
+	{
+		gint remaining = (gint)MAX(1, (deadline - g_get_monotonic_time()) / 1000);
+		if (!ai_subprocess_communicate_utf8_bounded(process, NULL, remaining,
+		                                          NULL, NULL, NULL, NULL) ||
+		    !g_subprocess_get_if_exited(process) ||
+		    g_subprocess_get_exit_status(process) > (added ? 1 : 0))
+			return FALSE;
+	}
+	if (output->len == 0) return FALSE;
+	*patch = g_string_free(g_steal_pointer(&output), FALSE);
+	return TRUE;
+}
+
+/* Codex exec reports paths and kinds, not edit hunks. Supplement successful
+ * events with explicitly labeled working-tree context, never pretend it is
+ * the exact patch. Provider-supplied diffs always take precedence. */
+static void
+capture_file_changes(AiCliClient *client, JsonObject *item)
+{
+	JsonArray *changes = ai_json_get_array(item, "changes");
+	gint64 deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
+	guint i;
+
+	if (changes == NULL ||
+	    g_strcmp0(ai_json_get_string(item, "status", NULL), "completed") != 0)
+		return;
+	for (i = 0; i < json_array_get_length(changes) && i < 8; i++)
+	{
+		JsonObject *change = ai_json_array_get_object(changes, i);
+		const gchar *path = ai_json_get_string(change, "path", NULL);
+		g_autofree gchar *patch = NULL;
+		gboolean truncated = FALSE;
+		gboolean added = FALSE;
+
+		if (path == NULL || *path == '\0' ||
+		    ai_json_get_string(change, "diff", NULL) != NULL) continue;
+		if (!capture_diff(client, path, FALSE, deadline, &patch, &truncated))
+		{
+			if (g_strcmp0(ai_json_get_string(change, "kind", NULL), "add") != 0 ||
+			    !capture_diff(client, path, TRUE, deadline, &patch, &truncated)) continue;
+			added = TRUE;
+		}
+		json_object_set_string_member(change, "diff", patch);
+		json_object_set_string_member(change, "diff_source",
+		                              added ? "current_file" : "working_tree");
+		json_object_set_boolean_member(change, "diff_truncated", truncated);
+	}
+}
+
 static gboolean
 parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
              GPtrArray *events, GError **error)
@@ -263,6 +374,8 @@ parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
             const gchar *id = ai_json_get_string(item, "id", NULL);
             g_autoptr(AiToolUse) tool = NULL;
             if (id == NULL) goto malformed;
+            if (completed && g_str_equal(kind, "file_change"))
+                capture_file_changes(client, item);
             tool = ai_tool_use_new(id, kind, ai_json_get_node(obj, "item"));
             if (g_str_equal(type, "item.started"))
                 g_ptr_array_add(events, ai_event_new_tool_started(tool));

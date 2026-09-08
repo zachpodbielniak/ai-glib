@@ -25,6 +25,7 @@
 #include "view/ai-view-tool-block.h"
 #include "view/ai-tool-style.h"
 #include "view/ai-tool-preview.h"
+#include "core/ai-json-util.h"
 
 struct _AiViewToolBlock
 {
@@ -58,13 +59,34 @@ tool_get_kind(AiViewBlock *block)
     return AI_VIEW_BLOCK_TOOL;
 }
 
-/*
- * Bucket the calls by category, in first-seen order.
- *
- * Order matters: "Edited 3 files, ran 2 commands" reads as a sequence of
- * what happened, so the categories have to appear in the order they were
- * first used rather than in enum order.
- */
+/* Codex reports one patch item for many paths; count its distinct files. */
+static guint
+call_item_count(AiToolCall *call)
+{
+	AiToolUse *use = ai_tool_call_get_tool_use(call);
+	JsonNode *node = use != NULL ? ai_tool_use_get_input(use) : NULL;
+	JsonArray *changes;
+	g_autoptr(GHashTable) paths = NULL;
+	guint i;
+
+	if (g_strcmp0(ai_tool_call_get_name(call), "file_change") != 0 ||
+	    node == NULL || !JSON_NODE_HOLDS_OBJECT(node))
+		return 1;
+	changes = ai_json_get_array(json_node_get_object(node), "changes");
+	if (changes == NULL) return 1;
+
+	paths = g_hash_table_new(g_str_hash, g_str_equal);
+	for (i = 0; i < json_array_get_length(changes); i++)
+	{
+		const gchar *path = ai_json_get_string(
+			ai_json_array_get_object(changes, i), "path", NULL);
+		if (path != NULL && *path != '\0')
+			g_hash_table_add(paths, (gpointer)path);
+	}
+	return MAX(1, g_hash_table_size(paths));
+}
+
+/* Bucket categories in first-seen order to preserve the action sequence. */
 static void
 collect_buckets(
     AiViewToolBlock *self,
@@ -104,7 +126,7 @@ collect_buckets(
                 : ai_tool_category_noun(category, TRUE);
         }
 
-        bucket->count++;
+        bucket->count += call_item_count(call);
         bucket->only = bucket->count == 1 ? call : NULL;
 
         if (ai_tool_call_get_state(call) == AI_TOOL_CALL_FAILED ||

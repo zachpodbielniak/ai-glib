@@ -316,6 +316,7 @@ append_patch(Preview *preview, const gchar *patch, const gchar *path)
 		const gchar *line = lines[i];
 		if (preview->shown >= preview->limit) { preview->truncated = TRUE; break; }
 		if (g_str_has_prefix(line, "*** ") || g_str_has_prefix(line, "@@") ||
+			g_str_has_prefix(line, "Binary files ") ||
 			g_str_has_prefix(line, "--- ") || g_str_has_prefix(line, "+++ "))
 		{
 			const gchar *file = strstr(line, " File: ");
@@ -419,7 +420,18 @@ _ai_tool_preview_append(AiToolCall *call, AiRenderedText *out, gboolean expanded
 				ai_rendered_text_append(out, "\n    File: ", AI_STYLE_TOOL_TARGET);
 				if (names[0] != NULL) append_code(out, names[0], NULL, &code);
 				patch = ai_json_get_string(change, "diff", NULL);
-				if (patch != NULL) append_patch(&preview, patch, file);
+				if (patch != NULL)
+				{
+					const gchar *source = ai_json_get_string(change, "diff_source", NULL);
+					if (g_strcmp0(source, "working_tree") == 0)
+						ai_rendered_text_append(out,
+							"\n    Working-tree diff against HEAD (may include earlier changes)", AI_STYLE_DIM);
+					else if (g_strcmp0(source, "current_file") == 0)
+						ai_rendered_text_append(out,
+							"\n    Current file content (no tracked baseline)", AI_STYLE_DIM);
+					append_patch(&preview, patch, file);
+					if (ai_json_get_boolean(change, "diff_truncated", FALSE)) preview.truncated = TRUE;
+				}
 				else ai_rendered_text_append(out, " (edit text unavailable)", AI_STYLE_DIM);
 				if (preview.shown >= preview.limit) { i++; break; }
 			}

@@ -486,6 +486,188 @@ static void test_precancelled(void)
     g_main_loop_unref(r.loop);
 }
 
+/* Build isolated Git fixtures without relying on the developer's identity,
+ * hooks, signing setup, or main checkout. */
+static void
+fixture_git(const gchar *dir, const gchar *const *arguments)
+{
+	g_autoptr(GSubprocessLauncher) launcher = g_subprocess_launcher_new(
+		G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+	g_autoptr(GSubprocess) process = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	guint i;
+
+	g_subprocess_launcher_set_cwd(launcher, dir);
+	g_ptr_array_add(argv, (gpointer)"git");
+	for (i = 0; arguments[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer)arguments[i]);
+	g_ptr_array_add(argv, NULL);
+	process = g_subprocess_launcher_spawnv(launcher,
+		(const gchar *const *)argv->pdata, NULL);
+	g_assert_nonnull(process);
+	g_assert_true(g_subprocess_wait_check(process, NULL, NULL));
+}
+
+/* Real filename-only Codex events must acquire a stable, labeled preview. */
+static void
+test_file_change_workspace_preview(void)
+{
+	const gchar *init[] = { "init", "-q", NULL };
+	const gchar *add[] = { "add", "--", "file[1].c", "deleted.c", NULL };
+	const gchar *commit[] = { "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+		"-c", "core.hooksPath=/dev/null", "commit", "--no-gpg-sign", "-qm", "baseline", NULL };
+	g_autofree gchar *dir = g_dir_make_tmp("ai-codex-preview-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(dir, "file[1].c", NULL);
+	g_autofree gchar *deleted = g_build_filename(dir, "deleted.c", NULL);
+	g_autofree gchar *added = g_build_filename(dir, "new file.c", NULL);
+	g_autoptr(AiCodexCliClient) client = ai_codex_cli_client_new();
+	g_autoptr(AiResponse) response = ai_response_new("", "test");
+	g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+	g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+	g_autofree gchar *before = NULL;
+	g_autofree gchar *after = NULL;
+	AiEvent *event;
+	AiToolCall *call;
+
+	g_assert_nonnull(dir);
+	fixture_git(dir, init);
+	g_assert_true(g_file_set_contents(path, "int before;\n", -1, NULL));
+	g_assert_true(g_file_set_contents(deleted, "int removed;\n", -1, NULL));
+	fixture_git(dir, add);
+	fixture_git(dir, commit);
+	g_assert_true(g_file_set_contents(path, "int after;\n", -1, NULL));
+	g_assert_cmpint(g_remove(deleted), ==, 0);
+	g_assert_true(g_file_set_contents(added, "int created;\n", -1, NULL));
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), dir);
+	g_assert_true(AI_CLI_CLIENT_GET_CLASS(client)->parse_stream_events(
+		AI_CLI_CLIENT(client),
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"patch\",\"type\":\"file_change\","
+		"\"status\":\"completed\",\"changes\":[{\"path\":\"file[1].c\",\"kind\":\"update\"},"
+		"{\"path\":\"deleted.c\",\"kind\":\"delete\"},{\"path\":\"new file.c\",\"kind\":\"add\"}]}}",
+		response, events, NULL));
+	g_assert_cmpuint(events->len, ==, 1);
+	event = g_ptr_array_index(events, 0);
+	call = ai_view_tool_block_add_call(AI_VIEW_TOOL_BLOCK(block), ai_event_get_tool_use(event));
+	ai_tool_call_finish(call, ai_event_get_tool_result(event));
+	g_object_set(block, "show-previews", TRUE, NULL);
+	ai_view_block_set_expanded(block, TRUE);
+	before = ai_view_block_render_text(block, 0);
+	g_assert_nonnull(strstr(before, "Changed 3 files"));
+	g_assert_nonnull(strstr(before, "Working-tree diff against HEAD (may include earlier changes)"));
+	g_assert_nonnull(strstr(before, "Current file content (no tracked baseline)"));
+	g_assert_nonnull(strstr(before, "int before;"));
+	g_assert_nonnull(strstr(before, "int after;"));
+	g_assert_nonnull(strstr(before, "int removed;"));
+	g_assert_nonnull(strstr(before, "int created;"));
+	g_assert_null(strstr(before, "edit text unavailable"));
+
+	/* Re-render after another edit: history must use the captured patch. */
+	g_assert_true(g_file_set_contents(path, "int later;\n", -1, NULL));
+	ai_view_tool_block_call_changed(AI_VIEW_TOOL_BLOCK(block));
+	after = ai_view_block_render_text(block, 0);
+	g_assert_cmpstr(before, ==, after);
+
+	{
+		g_autoptr(GSubprocess) cleanup = g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,
+			NULL, "rm", "-rf", "--", dir, NULL);
+		g_assert_true(g_subprocess_wait_check(cleanup, NULL, NULL));
+	}
+}
+
+/* Exact provider text wins; failed edits and missing repositories stay honest. */
+static void
+test_file_change_preview_fallbacks(void)
+{
+	const gchar *lines[] = {
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"p\",\"type\":\"file_change\",\"status\":\"completed\","
+		"\"changes\":[{\"path\":\"file.c\",\"diff\":\"@@ -1 +1 @@\\n-before\\n+after\"}]}}",
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"p\",\"type\":\"file_change\",\"status\":\"failed\","
+		"\"changes\":[{\"path\":\"file.c\",\"kind\":\"update\"}]}}",
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"p\",\"type\":\"file_change\",\"status\":\"completed\","
+		"\"changes\":[null,{\"path\":4},{\"path\":\"file.c\",\"kind\":\"update\"}]}}"
+	};
+	g_autofree gchar *dir = g_dir_make_tmp("ai-codex-no-git-XXXXXX", NULL);
+	guint i;
+
+	for (i = 0; i < G_N_ELEMENTS(lines); i++)
+	{
+		g_autoptr(AiCodexCliClient) client = ai_codex_cli_client_new();
+		g_autoptr(AiResponse) response = ai_response_new("", "test");
+		g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+		g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+		g_autofree gchar *text = NULL;
+		AiEvent *event;
+		AiToolCall *call;
+
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), dir);
+		g_assert_true(AI_CLI_CLIENT_GET_CLASS(client)->parse_stream_events(
+			AI_CLI_CLIENT(client), lines[i], response, events, NULL));
+		event = g_ptr_array_index(events, 0);
+		call = ai_view_tool_block_add_call(AI_VIEW_TOOL_BLOCK(block), ai_event_get_tool_use(event));
+		ai_tool_call_finish(call, ai_event_get_tool_result(event));
+		g_object_set(block, "show-previews", TRUE, NULL);
+		text = ai_view_block_render_text(block, 0);
+		g_assert_null(strstr(text, "Working-tree diff"));
+		g_assert_nonnull(strstr(text, i == 0 ? "after" : "edit text unavailable"));
+	}
+	g_assert_cmpint(g_rmdir(dir), ==, 0);
+}
+
+/* A broken or endlessly verbose Git must not hang or exhaust the frontend. */
+static void
+test_file_change_capture_limits(gconstpointer data)
+{
+	gboolean verbose = GPOINTER_TO_INT(data) != 0;
+	g_autofree gchar *dir = NULL;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *search_path = NULL;
+	g_autoptr(AiCodexCliClient) client = NULL;
+	g_autoptr(AiResponse) response = NULL;
+	g_autoptr(GPtrArray) events = NULL;
+	JsonObject *input;
+	JsonObject *change;
+	AiEvent *event;
+	gint64 started;
+
+	/* Isolate PATH changes and put the watchdog outside the blocked loop. */
+	if (!g_test_subprocess())
+	{
+		g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, G_TEST_SUBPROCESS_DEFAULT);
+		g_test_trap_assert_passed();
+		return;
+	}
+	dir = g_dir_make_tmp("ai-codex-diff-limit-XXXXXX", NULL);
+	script = g_build_filename(dir, "git", NULL);
+	search_path = g_strconcat(dir, G_SEARCHPATH_SEPARATOR_S, g_getenv("PATH"), NULL);
+	g_assert_true(g_file_set_contents(script, verbose
+		? "#!/bin/sh\nwhile :; do printf '+int changed;\\n'; done\n"
+		: "#!/bin/sh\nexec sleep 10\n", -1, NULL));
+	g_assert_cmpint(g_chmod(script, 0700), ==, 0);
+	g_setenv("PATH", search_path, TRUE);
+	client = ai_codex_cli_client_new();
+	response = ai_response_new("", "test");
+	events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), dir);
+	started = g_get_monotonic_time();
+	g_assert_true(AI_CLI_CLIENT_GET_CLASS(client)->parse_stream_events(
+		AI_CLI_CLIENT(client),
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"p\",\"type\":\"file_change\",\"status\":\"completed\","
+		"\"changes\":[{\"path\":\"file.c\",\"kind\":\"update\"}]}}",
+		response, events, NULL));
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 3 * G_USEC_PER_SEC);
+	event = g_ptr_array_index(events, 0);
+	input = json_node_get_object(ai_tool_use_get_input(ai_event_get_tool_use(event)));
+	change = json_array_get_object_element(json_object_get_array_member(input, "changes"), 0);
+	if (verbose)
+	{
+		g_assert_cmpuint(strlen(json_object_get_string_member(change, "diff")), <=, 65536);
+		g_assert_true(json_object_get_boolean_member(change, "diff_truncated"));
+	}
+	else g_assert_false(json_object_has_member(change, "diff"));
+	g_assert_cmpint(g_remove(script), ==, 0);
+	g_assert_cmpint(g_rmdir(dir), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -512,6 +694,10 @@ int main(int argc, char **argv)
     g_test_add_func("/codex/session-context", test_session_context);
     g_test_add_func("/codex/events/order", test_event_translation);
     g_test_add_func("/codex/events/tool-variants", test_tool_variants);
+	g_test_add_func("/codex/events/file-change-preview", test_file_change_workspace_preview);
+	g_test_add_func("/codex/events/file-change-fallbacks", test_file_change_preview_fallbacks);
+	g_test_add_data_func("/codex/events/file-change-timeout", GINT_TO_POINTER(0), test_file_change_capture_limits);
+	g_test_add_data_func("/codex/events/file-change-output-limit", GINT_TO_POINTER(1), test_file_change_capture_limits);
     g_test_add_func("/codex/protocol-edges", test_protocol_edges);
     g_test_add_func("/codex/process/precancelled", test_precancelled);
     g_test_add_func("/sandbox/claude-settings-file", test_claude_settings_file);

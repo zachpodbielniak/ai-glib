@@ -231,11 +231,13 @@ ensure_tool_block(AiConversation *self)
 static AiToolCall *
 find_call_for_result(
     AiConversation *self,
-    const gchar    *tool_use_id
+    const gchar    *tool_use_id,
+    AiViewToolBlock **owner
 ){
     guint n;
     guint i;
 
+    *owner = NULL;
     if (tool_use_id == NULL || tool_use_id[0] == '\0')
     {
         return NULL;
@@ -248,6 +250,7 @@ find_call_for_result(
 
         if (call != NULL)
         {
+            *owner = AI_VIEW_TOOL_BLOCK(self->open_tools);
             return call;
         }
     }
@@ -265,6 +268,7 @@ find_call_for_result(
 
             if (call != NULL)
             {
+                *owner = AI_VIEW_TOOL_BLOCK(block);
                 return call;
             }
         }
@@ -378,8 +382,9 @@ fold_event(
 
         case AI_EVENT_TOOL_FINISHED:
         {
+            AiViewToolBlock *owner = NULL;
             AiToolCall *call =
-                find_call_for_result(self, ai_event_get_tool_use_id(event));
+                find_call_for_result(self, ai_event_get_tool_use_id(event), &owner);
 
             if (call == NULL)
             {
@@ -390,17 +395,23 @@ fold_event(
                  */
                 AiViewToolBlock *block = ensure_tool_block(self);
 
+                owner = block;
                 call = ai_view_tool_block_add_call(block,
                                                    ai_event_get_tool_use(event));
             }
 
+            /* File-change events are cumulative snapshots. Completion can
+             * supply the edit text missing from the initial announcement. */
+            if (ai_event_get_tool_use(event) != NULL &&
+                g_strcmp0(ai_tool_use_get_name(ai_event_get_tool_use(event)),
+                          "file_change") == 0)
+                ai_tool_call_set_tool_use(call, ai_event_get_tool_use(event));
+
             ai_tool_call_finish(call, ai_event_get_tool_result(event));
 
-            if (self->open_tools != NULL)
-            {
-                ai_view_tool_block_call_changed(
-                    AI_VIEW_TOOL_BLOCK(self->open_tools));
-            }
+            /* Late completion must invalidate its original group, even if
+             * intervening prose has closed that group. */
+            ai_view_tool_block_call_changed(owner);
 
             /* Back to the model, which is where the wait now is. */
             set_activity(self, "Waiting for the model");

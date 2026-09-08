@@ -685,6 +685,23 @@ test_preview_commands(void)
 	g_assert_nonnull(strstr(text, "line-6"));
 }
 
+/* A single Codex patch can contain multiple files, plus malformed entries. */
+static void
+test_file_change_counts_paths(void)
+{
+	g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+	g_autofree gchar *summary = NULL;
+
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "patch", "file_change",
+	       "{\"changes\":[{\"path\":\"a.c\"},{\"path\":\"b.c\"},"
+	       "{\"path\":\"c.c\"},{\"path\":\"a.c\"},null,{\"path\":4}]}");
+	add_ok(AI_VIEW_TOOL_BLOCK(block), "cmd1", "command_execution", "{}");
+	add_failed(AI_VIEW_TOOL_BLOCK(block), "cmd2", "command_execution", "{}");
+	summary = summary_of(AI_VIEW_TOOL_BLOCK(block));
+	g_assert_nonnull(strstr(summary, "Changed 3 files, ran 2 commands"));
+	g_assert_nonnull(strstr(summary, "1 failed"));
+}
+
 static void
 test_preview_dialects(void)
 {
@@ -695,6 +712,7 @@ test_preview_dialects(void)
 		{ "multi_edit", "{\"path\":\"test.c\",\"edits\":[{\"old_string\":\"a\",\"new_string\":\"b\"},{\"old_string\":\"c\",\"new_string\":\"d\"}]}", "| d" },
 		{ "apply_patch", "{\"patchText\":\"*** Begin Patch\\n*** Update File: test.c\\n@@\\n-int x = 1;\\n+int x = 2;\\n*** End Patch\"}", "int x = 2;" },
 		{ "file_change", "{\"changes\":[{\"path\":\"test.c\",\"diff\":\"@@ -1 +1 @@\\n-return 1;\\n+return 2;\"}]}", "return 2;" },
+		{ "file_change", "{\"changes\":[{\"path\":\"image.png\",\"diff\":\"Binary files a/image.png and b/image.png differ\\n\"}]}", "Binary files a/image.png and b/image.png differ" },
 		{ "Write", "{\"file_path\":\"test.c\",\"content\":\"int x;\"}", "previous content unavailable" },
 		{ "file_change", "{\"changes\":[{\"path\":\"test.c\",\"kind\":\"update\"}]}", "edit text unavailable" }
 	};
@@ -851,5 +869,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/tool-block/cache-invalidated",
 	                test_changed_invalidates_the_render);
 
+	g_test_add_func("/ai-glib/tool-block/file-change-counts-paths",
+	                test_file_change_counts_paths);
 	return g_test_run();
 }

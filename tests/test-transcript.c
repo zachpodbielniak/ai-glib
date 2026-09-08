@@ -591,6 +591,38 @@ test_tool_finished_updates_the_call(void)
 	g_assert_cmpstr(ai_tool_call_get_result(call), ==, "a.c");
 }
 
+/* Completed file-change snapshots may contain diffs absent at start. */
+static void
+test_file_change_finished_refreshes_preview(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	g_autoptr(AiToolUse) initial = ai_tool_use_new_from_json_string("patch", "file_change",
+		"{\"changes\":[{\"path\":\"a.c\",\"kind\":\"update\"}]}");
+	g_autoptr(AiToolUse) complete = ai_tool_use_new_from_json_string("patch", "file_change",
+		"{\"changes\":[{\"path\":\"a.c\",\"diff\":\"@@ -1 +1 @@\\n-old\\n+new\"}]}");
+	g_autoptr(AiToolResult) result = ai_tool_result_new("patch", "done", FALSE);
+	g_autoptr(AiEvent) started = ai_event_new_tool_started(initial);
+	g_autoptr(AiEvent) finished = ai_event_new_tool_finished(complete, result);
+	g_autoptr(AiEvent) prose = ai_event_new_text_delta("Meanwhile");
+	g_autofree gchar *before = NULL;
+	g_autofree gchar *after = NULL;
+	AiViewBlock *block;
+
+	emit(mock, started);
+	block = ai_transcript_get_block(ai_conversation_get_transcript(c), 0);
+	g_object_set(block, "show-previews", TRUE, NULL);
+	before = ai_view_block_render_text(block, 0);
+	g_assert_nonnull(strstr(before, "edit text unavailable"));
+	emit(mock, prose);
+	emit(mock, finished);
+	after = ai_view_block_render_text(block, 0);
+	g_assert_null(strstr(after, "edit text unavailable"));
+	g_assert_nonnull(strstr(after, "@@ -1 +1 @@"));
+	g_assert_nonnull(strstr(after, "new"));
+	g_assert_cmpuint(ai_view_tool_block_get_n_calls(AI_VIEW_TOOL_BLOCK(block)), ==, 1);
+}
+
 static void
 test_tool_finished_after_new_prose(void)
 {
@@ -1257,6 +1289,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/fold/tool-interrupts-prose", test_tool_interrupts_prose);
 	g_test_add_func("/ai-glib/fold/tools-group", test_consecutive_tools_group);
 	g_test_add_func("/ai-glib/fold/tool-finished", test_tool_finished_updates_the_call);
+	g_test_add_func("/ai-glib/fold/file-change-finished-preview",
+	                test_file_change_finished_refreshes_preview);
 	g_test_add_func("/ai-glib/fold/tool-finished-late",
 	                test_tool_finished_after_new_prose);
 	g_test_add_func("/ai-glib/fold/unmatched-result",
