@@ -285,7 +285,7 @@ Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 | =session-id=          | string  | NULL     | Captured from =session_id=; sent as =--resume <id>= |
 | =session-persistence= | boolean | TRUE     | Whether to capture and resume chats at all |
 | =effort-level=        | string  | NULL     | *Not emitted* — Cursor bakes effort into the model id. Use =model-params= for bracket overrides. |
-| =process-timeout-ms=  | int     | 1800000  | Bounds the *synchronous* call |
+| =process-timeout-ms=  | int     | 1800000  | Bounds synchronous and shared streaming calls |
 
 Added by =AiCursorClient=:
 

@@ -554,7 +554,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
     /**
      * AiCliClient:process-timeout-ms:
      *
-     * Wall-clock deadline for one synchronous CLI subprocess run.
+     * Wall-clock deadline for one synchronous or shared streaming CLI subprocess run.
      * On expiry the child is killed and the call fails with
      * %AI_ERROR_TIMEOUT, so a wedged CLI (for example a half-open
      * network connection the child is blocked on) can never pin the
@@ -1146,7 +1146,7 @@ ai_cli_client_set_effort_level(
  * ai_cli_client_get_process_timeout_ms:
  * @self: an #AiCliClient
  *
- * Returns: the wall-clock deadline (in ms) applied to one synchronous
+ * Returns: the wall-clock deadline (in ms) applied to one synchronous or shared streaming
  *   CLI subprocess run, or 0 when disabled.  Default 1800000 (30 min).
  *
  * Since: 0.23.3
@@ -1167,7 +1167,7 @@ ai_cli_client_get_process_timeout_ms(AiCliClient *self)
  * @self: an #AiCliClient
  * @timeout_ms: deadline in milliseconds; 0 disables
  *
- * Bounds one synchronous CLI subprocess run.  On expiry the child is
+ * Bounds one synchronous or shared streaming CLI subprocess run.  On expiry the child is
  * killed and the call fails with %AI_ERROR_TIMEOUT.  Providers that
  * override chat_sync with their own orchestration (the tmux client)
  * bound their turns with their own knobs instead.

@@ -572,6 +572,8 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_CLI_CLIENT(provider))
 	{
 		AiCliClient *c = AI_CLI_CLIENT(provider);
+		/* Frontend turns may run indefinitely; --set can opt into a deadline. */
+		ai_cli_client_set_process_timeout_ms(c, 0);
 		if (opt_model != NULL)
 			ai_cli_client_set_model(c, opt_model);
 		if (opt_system != NULL)

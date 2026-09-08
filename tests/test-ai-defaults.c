@@ -568,6 +568,72 @@ test_http_fallback(Box *box, gconstpointer data)
 	assert_saved(box, "apps/ai/default_model", "");
 }
 
+/* Antigravity exposes the effective inherited deadline in its argv, letting
+ * both real frontends prove their default without waiting thirty minutes. */
+static void
+test_process_timeout_default(Box *box, gconstpointer data)
+{
+	guint tui;
+	guint i;
+	const gchar *values[] = { NULL, "process-timeout-ms=60000", "process-timeout-ms=0" };
+	const gchar *expected[] = { "--print-timeout 168h", "--print-timeout 1m", "--print-timeout 168h" };
+
+	(void)data;
+	for (tui = 0; tui < 2; tui++)
+	{
+		if (tui && !g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+			continue;
+		for (i = 0; i < G_N_ELEMENTS(values); i++)
+		{
+			const gchar *args[] = { "-p", "antigravity", "--dry-run", "prompt",
+				values[i] != NULL ? "--set" : NULL, values[i], NULL };
+
+			g_assert_cmpint(run_box(box, tui, args, NULL, NULL), ==, 0);
+			g_assert_nonnull(strstr(box->out, expected[i]));
+		}
+	}
+}
+
+/* A finite override must still terminate a real streaming subprocess; zero
+ * and the frontend default must let the same delayed response complete. */
+static void
+test_process_timeout_stream(Box *box, gconstpointer data)
+{
+	g_autofree gchar *script = box_read(box, "grok");
+	g_autofree gchar *delayed = g_strconcat("#!/bin/bash\n/usr/bin/sleep 1\n", script, NULL);
+	const gchar *values[] = { NULL, "process-timeout-ms=100", "process-timeout-ms=0" };
+	guint tui;
+	guint i;
+
+	(void)data;
+	box_write(box, "grok", delayed);
+	for (tui = 0; tui < 2; tui++)
+	{
+		if (tui && !g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+			continue;
+		for (i = 0; i < G_N_ELEMENTS(values); i++)
+		{
+			const gchar *args[] = { "-p", "grok-build", tui ? "--dump" : "--stream", "prompt",
+				values[i] != NULL ? "--set" : NULL, values[i], NULL };
+			gint status = run_box(box, tui, args, NULL, NULL);
+
+			if (i == 1)
+			{
+				/* ai's streaming path currently reports errors on stderr
+				 * without propagating them to its exit status. */
+				g_assert_true(strstr(box->out, "100 ms deadline") != NULL ||
+					strstr(box->err, "100 ms deadline") != NULL);
+				g_assert_null(strstr(box->out, "grok reply"));
+			}
+			else
+			{
+				g_assert_cmpint(status, ==, 0);
+				g_assert_nonnull(strstr(box->out, "grok reply"));
+			}
+		}
+	}
+}
+
 /* Resolve siblings before subprocesses change cwd; release/debug both work. */
 int
 main(int argc, char *argv[])
@@ -596,6 +662,8 @@ main(int argc, char *argv[])
 	ADD("setup/library-independent", test_library_independent);
 	ADD("ai-resolution", test_ai_resolution);
 	ADD("tui-resolution", test_tui_resolution);
+	ADD("process-timeout/default", test_process_timeout_default);
+	ADD("process-timeout/stream", test_process_timeout_stream);
 #undef ADD
 	status = g_test_run();
 	g_free(ai_binary);

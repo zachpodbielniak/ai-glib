@@ -36,7 +36,7 @@ streaming mode.
 | =session-id=          | string  | NULL    | Captured from responses, replayed to resume                     |
 | =session-persistence= | boolean | TRUE    | Whether to capture and resume sessions at all                   |
 | =effort-level=        | string  | "medium" | Reasoning effort; spelled differently by each CLI (see below)   |
-| =process-timeout-ms=  | int     | 1800000 | Bounds the *synchronous* call. 0 disables the bound             |
+| =process-timeout-ms=  | int     | 1800000 | Bounds synchronous and shared streaming calls. 0 disables the bound             |
 
 *** The working directory is the security boundary
 Every permission mode that can write can write anywhere the process can
@@ -59,12 +59,9 @@ One property, three spellings:
 | cursor      | (none)               | Effort is baked into the model id; =model-params= holds bracket overrides |
 
 *** Timeouts
-=process-timeout-ms= bounds =ai_cli_client_chat_sync()= only. The async and
-streaming paths are built on =g_subprocess_communicate_utf8_async()= and run
-unbounded; pass a =GCancellable= if you need to be able to stop them.
+=process-timeout-ms= bounds =ai_cli_client_chat_sync()= and the shared streaming subprocess reader. Expiry kills the child and returns =AI_ERROR_TIMEOUT=. Zero disables this deadline; a =GCancellable= can still stop the run. Providers using their own orchestration, such as tmux, have separate timeout controls.
 
-A zero default would mean an unbounded wait, which is the hang class that
-can pin a caller forever — hence the 30-minute default rather than none.
+The library default is 1800000 ms (30 minutes). The =ai= and =ai-tui= binaries override it to 0 for CLI providers before applying explicit =--set process-timeout-ms=N= options. Runtime provider switches in =ai-tui= also use 0, without reapplying startup property overrides.
 
 *** Native sessions during =AiConversation= switching
 The =session-id= property is continuity inside one CLI, not the portable

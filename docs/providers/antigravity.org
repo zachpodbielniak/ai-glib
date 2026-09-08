@@ -97,7 +97,7 @@ Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 | =session-id=          | string  | NULL                       | Captured from =conversation_id=; sent as =--conversation= |
 | =session-persistence= | boolean | TRUE                       | Whether to capture and resume conversations at all      |
 | =effort-level=        | string  | =medium=                   | =--effort= (low, medium, high)                          |
-| =process-timeout-ms=  | int     | 1800000                    | Bounds the *synchronous* call; also drives =--print-timeout= |
+| =process-timeout-ms=  | int     | 1800000                    | Bounds synchronous and shared streaming calls; also drives =--print-timeout= |
 
 Added by =AiAntigravityClient=:
 

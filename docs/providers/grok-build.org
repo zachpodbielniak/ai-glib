@@ -84,7 +84,7 @@ Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 | =session-id=          | string  | NULL      | Captured from the response; sent as =--resume=            |
 | =session-persistence= | boolean | TRUE      | Whether to capture and resume sessions at all             |
 | =effort-level=        | string  | =medium=  | =--reasoning-effort=                                      |
-| =process-timeout-ms=  | int     | 1800000   | Bounds the *synchronous* call; 0 disables the bound       |
+| =process-timeout-ms=  | int     | 1800000   | Bounds synchronous and shared streaming calls; 0 disables the bound       |
 
 Added by =AiGrokBuildClient=:
 
@@ -245,8 +245,7 @@ ai_streamable_chat_stream_async(
 #+end_src
 
 *** Synchronous Calls
-The inherited =ai_cli_client_chat_sync()= runs the turn to completion and is
-the only path bounded by =process-timeout-ms=:
+The inherited =ai_cli_client_chat_sync()= runs the turn to completion, bounded by =process-timeout-ms= just like the shared streaming reader:
 
 #+begin_src C
 g_autoptr(GError) error = NULL;
@@ -396,7 +395,7 @@ rather than turned on for everyone.
 - *Caller-defined tools are not supported.* =tools= is ignored on both =chat_async= and =chat_stream_async=: grok runs its own tools inside the CLI. Use an HTTP provider with =AiToolExecutor= if you need to define tools yourself.
 - *No vision.* =AiImageContent= in a message is not sent; the prompt is flattened to text.
 - *Rule lists are comma-separated*, so a permission rule that itself contains a comma cannot be expressed through =allowed-tools= / =disallowed-tools=. Rules with spaces and parentheses are fine — only the comma is reserved.
-- *=process-timeout-ms= bounds the synchronous path only.* The async and streaming paths, like the other CLI providers', run unbounded; pass a =GCancellable= if you need to be able to stop them.
+- *=process-timeout-ms= bounds synchronous and shared streaming calls.* The library default is thirty minutes; =ai= and =ai-tui= default to 0 (disabled). Use =--set process-timeout-ms=N= to opt into a frontend deadline. Cancellation remains available.
 - *Sessions are per-client.* The captured id lives on the client object, not on disk; a new process starts a new session unless you carry the id across yourself with =ai_cli_client_set_session_id()=.
 
 ** Error Handling
@@ -434,7 +433,7 @@ if (error != NULL)
 | =AI_ERROR_CLI_NOT_FOUND=      | =grok= is not at =executable-path=, =GROK_PATH= or on =$PATH= |
 | =AI_ERROR_CLI_EXECUTION=      | grok reported an error object, an =is_error= result, or exited non-zero with no parseable output |
 | =AI_ERROR_CLI_PARSE_ERROR=    | stdout was empty, or held nothing that parses as a JSON object |
-| =AI_ERROR_TIMEOUT=            | The synchronous call exceeded =process-timeout-ms=            |
+| =AI_ERROR_TIMEOUT=            | The call exceeded =process-timeout-ms=            |
 | =AI_ERROR_INVALID_REQUEST=    | The argv could not be built                                   |
 | =AI_ERROR_INVALID_RESPONSE=   | A stream ended without producing a response                   |
 
@@ -447,7 +446,7 @@ if (error != NULL)
 | "CLI error: unknown model id"                      | Run =grok models= — the id list is server-side and moves                     |
 | "Could not parse a JSON object from CLI output"    | Something else is writing to grok's stdout; check with =--debug-file=        |
 | Empty answer, warning about re-prompting           | The model ended on tool calls; the client asked it for a summary and is reporting what came back |
-| The run hangs                                      | The async and streaming paths are not bounded by =process-timeout-ms= — use a =GCancellable=, or the sync path |
+| The run hangs                                      | Set a positive =process-timeout-ms= or use a =GCancellable= |
 
 Reproduce the exact command outside the library with:
 

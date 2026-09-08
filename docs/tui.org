@@ -27,6 +27,9 @@ The prompt comes from leftover arguments if present, otherwise from stdin when s
 ** Independent Defaults
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted options behave exactly like =ai-tui -p default -m default=: use saved ai-tui defaults and ignore =AI_PROVIDER=. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
 
+** CLI Process Deadline
+CLI providers default to =process-timeout-ms=0= in =ai-tui=, including after runtime provider switches, so the wrapper does not terminate a long-running turn after thirty minutes. At startup, =--set process-timeout-ms=600000= opts into a ten-minute deadline; =--set process-timeout-ms=0= explicitly disables it. As with other startup =--set= properties, an explicit override is not reapplied after a provider switch. Cancellation remains available. The library default remains 1800000 ms; HTTP, native CLI and tmux-specific timeouts are separate controls.
+
 ** What it looks like
 *** Native CLI Alternative
 =ai-tui --launch= opens the underlying provider's own interactive interface instead of initializing ncurses or the ai-glib conversation. =--launch-cmd= prints that native command, and =--launch-cmd-print= prints its noninteractive text-output equivalent; neither command-printing option executes anything. Optional positional text is passed literally as an initial prompt. All three modes use ai-tui's independent saved provider/model defaults, including =-p default -m default=.

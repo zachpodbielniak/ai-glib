@@ -47,6 +47,9 @@ piping.
 
 See [[file:cli-reporting.org][CLI usage and history reports]] for provider support, the C API, JSON fields, and examples. Reports default to plain text and do not read stdin.
 
+** CLI Process Deadline
+CLI chat runs default to =process-timeout-ms=0= in =ai=: the wrapper does not terminate a turn after thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline, or explicitly use =--set process-timeout-ms=0= to disable it. This applies to synchronous and shared streaming subprocess runs; cancellation remains available. The library default remains 1800000 ms. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls.
+
 ** Defaults Setup
 Run =ai --setup= to display current defaults and update one scope. Run it again to update another. It writes =~/.config/ai-glib/config.yaml= (or =$XDG_CONFIG_HOME/ai-glib/config.yaml=) only after confirmation. Existing provider settings and other scopes remain intact. Wizard prompts are on stdout; save errors are on stderr.
 
