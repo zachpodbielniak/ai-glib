@@ -80,8 +80,28 @@ Sources: [[file:../deps/mcp-glib/tests/test-server-wire.c][wire regression tests
 
 * Integrated resolution
 
-The integration pins =5c6809ffd689ad22d02659b19585a7a4949491db=, which includes hardening commit =bdee88b6dfa31e601c8dcc0376c8f07c1a2088fd=. The findings above are the historical audit of the newly added revision, not unresolved defects in the pinned implementation.
+The initial integration pinned =5c6809ffd689ad22d02659b19585a7a4949491db=, which includes hardening commit =bdee88b6dfa31e601c8dcc0376c8f07c1a2088fd=. The findings above are the historical audit of the newly added revision, not unresolved defects in the pinned implementation.
 
 The updated dependency enforces initialize/initialized ordering and typed metadata, rejects existing socket paths, checks inode identity before removing its own socket, bounds output to 16 MiB and 256 queued frames, drains canceled writes, makes Unix output nonblocking, limits Unix clients to 32 with a 10-second handshake deadline, and protects session removal against reentrant callbacks. Malformed JSON receives =-32700= with a null request ID and leaves the connection usable. The dependency suite passes 418 tests after these changes.
 
 The host supplies the remaining application protections: exact opt-in grants, nested argument validation before mutation, private owned directories, 1 MiB input frames, asynchronous foreground turns, bounded transcript pages/results, at most 128 tracked agents, graceful cancellation, endpoint rollback, and bounded stdio bridging. Application tests verify those behaviors separately from the dependency's protocol tests. The host uses the hardened =session-created= hook solely to register tools and set the frame bound.
+
+* Follow-up review and fixes
+
+The second review reproduced additional failures before changing production code. Each row has regression coverage in the updated dependency or application suite.
+
+| Component | Confirmed defect | Resolution |
+|-----------+------------------+------------|
+| Host tool callbacks | A retained MCP server could invoke a tool through a freed host pointer; AddressSanitizer reproduced the crash | Weak host bindings, temporary strong references during invocation, and object-bound transport signals |
+| Live TUI shutdown | SIGTERM/SIGHUP handlers existed only when herdr was active, bypassing MCP cancellation/socket cleanup otherwise | Install handlers for MCP sessions and drain shutdown before releasing App or curses state; test through a real PTY |
+| Server outbound requests | Disconnect/stop left roots and sampling requests pending indefinitely | Complete and release pending requests on disconnect, transport error, and stop |
+| Client/server request completion | Per-call cancellation and transport send errors could leave callers waiting forever | Track send completion and context-bound cancellation with once-only task retirement; protect initialize/reconnect ownership |
+| Tool replacement | Removing an asynchronous tool or replacing it synchronously left its old asynchronous handler callable | Replace/remove both handler registries and their destroy notifications |
+| JSON-RPC IDs | Fractional numeric IDs lost precision and returned as strings | Round-trip numeric type and parsed double precision |
+| Protocol errors | Valid JSON with an invalid JSON-RPC envelope returned parse error =-32700= | Return invalid request =-32600=; reserve =-32700= for malformed JSON |
+
+Relevant dependency tests are [[file:../deps/mcp-glib/tests/test-request-lifecycle.c][request cancellation/send failure]], [[file:../deps/mcp-glib/tests/test-client-handshake.c][handshake/reconnect]], [[file:../deps/mcp-glib/tests/test-server-wire.c][server disconnect and handler replacement]], and [[file:../deps/mcp-glib/tests/test-message.c][numeric ID round-tripping]]. Host lifetime and real terminal cleanup are covered by [[file:../tests/test-mcp-host.c][host tests]] and [[file:../tests/test-mcp-cli.c][subprocess tests]].
+
+Request cancellation completes the local call; it does not promise to cancel work already accepted by the peer. The transport finishes an in-flight frame rather than truncating NDJSON. These are deliberate limits, documented in the dependency server guide.
+
+The reviewed dependency is pinned at =ccad2035d84fb081e5ca24c8cc2822c623e6161d= and published on its =master= branch, including the earlier hardening commits. Its complete suite passes 430 tests; 67 targeted lifecycle, handshake, wire, and message tests also pass AddressSanitizer/UndefinedBehaviorSanitizer with leak detection. The application's full regression suite and GIR warning check pass; targeted host and subprocess tests pass sanitizers, with leak detection enabled for the host unit suite.
