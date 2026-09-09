@@ -1289,11 +1289,11 @@ draw_chrome(App *app)
 			theme_attr(PAIR_ACCENT));
 	chrome_text(1, 2, app->content_width - 3, ai_conversation_get_working_directory(app->conversation), attr_for_tag(AI_STYLE_DIM));
 	chrome_text(LINES - 1, 1, COLS - 2,
-		app->searching ? "Enter next | Up / Shift-Enter previous | ^U clear | Esc close" :
-		app->candidates != NULL ? "Tab / arrows choose | Enter accept | Esc dismiss | ^O help" :
-		COLS < 65 ? "Enter send  ^O help  ^C stop" :
-		COLS < 100 ? "Enter send | ^F find | ^O help | ^T theme | ^P panel" :
-		"Enter send  Alt-Enter newline  ^G editor  ^F search  ^O help  ^T theme  ^P panel  ^L latest",
+		app->searching ? "RET next | <up> / S-RET previous | C-u clear | ESC close" :
+		app->candidates != NULL ? "TAB / arrows choose | RET accept | ESC dismiss | C-o help" :
+		COLS < 65 ? "RET send  C-o help  C-c stop" :
+		COLS < 100 ? "RET send | C-f find | C-o help | C-t theme | C-p panel" :
+		"RET send  M-RET newline  C-g editor  C-f search  C-o help  C-t theme  C-p panel  C-l latest",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
 	attrset(theme_attr(PAIR_SURFACE));

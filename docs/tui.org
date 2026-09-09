@@ -80,9 +80,11 @@ The interface uses Catppuccin Mocha by default: a high-contrast identity badge, 
  ╭─ YOUR TURN ─────────────────────────────────────────────────────╮
  │ Your turn · type a reply, or / commands  @ files                │
  ╰───────────────────────────────────────────────────────── 1/1 ───╯
- Enter send | ^F find | ^O help | ^T theme | ^P panel
+ RET send | C-f find | C-o help | C-t theme | C-p panel
 
 #+end_example
+
+The bottom keybinding hints use Emacs notation: =RET= is Return, =M-RET= is Alt-Return, =C-g= is Control-g, and =S-RET= is Shift-Return. =TAB=, =ESC=, and =<up>= name the Tab, Escape, and up-arrow keys.
 
 The alternation is the point. Narration, a collapsed group of what the model
 actually did, more narration --- rather than a wall of tool output with the
