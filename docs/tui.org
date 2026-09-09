@@ -104,6 +104,22 @@ The composer's lower border shows =read-only= in the theme's green or =skip-perm
 
 The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four switch in both directions, including sessions started with =--skip-permissions=.
 
+These encodings must reach ai-tui. Older gst builds generate =ESC [ 1 ; 2 Z= for XKB's =ISO_Left_Tab= with Shift; herdr 0.8.2 discards that sequence, even though ai-tui accepts it directly. The correction belongs in gst's legacy encoder, which must emit canonical =ESC [ Z= and advertise it as terminfo =kcbt=. Rebuild and restart gst with that correction. A standalone tmux test that sends bytes directly to ai-tui bypasses herdr's parser and cannot verify this nested-terminal failure.
+
+For a running gst → tmux → herdr session, tmux can temporarily translate the old bytes before herdr sees them. Choose an unused user-key slot first (the example uses 100); these commands change the current tmux server, not its configuration file:
+
+#+begin_src bash
+tmux set-option -s 'user-keys[100]' $'\e[1;2Z'
+tmux bind-key -n User100 send-keys BTab
+#+end_src
+
+After restarting with the corrected gst, remove that temporary mapping:
+
+#+begin_src bash
+tmux unbind-key -n User100
+tmux set-option -su 'user-keys[100]'
+#+end_src
+
 Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. For wrapped CLIs, a change affects subsequent invocations, including resumed turns; already-running tools and background agents retain their existing permissions. Search, approval dialogs and bracketed paste retain their own input handling.
 
 =read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. CLIs without a =skip-permissions= property report that switching is unsupported.
