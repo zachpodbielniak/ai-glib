@@ -43,6 +43,7 @@ typedef struct
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "help",     "List every command, skill and agent",        NULL },
     { "clear",    "Empty the transcript and the history",       NULL },
+    { "reset",    "Start a fresh session and return to the splash screen", NULL },
     { "quit",     "Leave",                                      NULL },
     { "model",    "Show or change the model",                   "[model]" },
     { "provider", "Show or change the provider",                "[provider]" },

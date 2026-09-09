@@ -2298,6 +2298,8 @@ show_expansion(App *app, const gchar *line)
  * means; this file only knows what to do about it. Growing the set is a
  * struct literal there plus a case here, and nothing in between.
  */
+static void app_reset(App *app);
+
 static void
 handle_builtin(App *app, AiCommandResult *result)
 {
@@ -2323,6 +2325,10 @@ handle_builtin(App *app, AiCommandResult *result)
         ai_conversation_clear(app->conversation);
         app->selected = -1;
         app->follow = TRUE;
+    }
+    else if (g_strcmp0(name, "reset") == 0)
+    {
+        app_reset(app);
     }
     else if (g_strcmp0(name, "help") == 0)
     {
@@ -3773,6 +3779,102 @@ on_approval_requested(
     app_schedule_redraw(app);
 
     return answer;
+}
+
+/**
+ * app_reset:
+ * @app: the terminal application
+ *
+ * Replace session-owned state while keeping the user's current settings.
+ * Called after built-in resolution, with no foreground turn in flight.
+ * Old background callbacks are detached before cancellation so they cannot
+ * repopulate the splash screen when their asynchronous cleanup completes.
+ */
+static void
+app_reset(App *app)
+{
+	g_autoptr(AiConversation) previous = NULL;
+	g_autoptr(AiBrigade) brigade = NULL;
+	GObject *provider;
+
+	previous = app->conversation;
+	provider = ai_conversation_get_provider(previous);
+	g_signal_handlers_disconnect_by_data(previous, app);
+	g_signal_handlers_disconnect_by_data(ai_conversation_get_transcript(previous), app);
+	if (ai_conversation_get_brigade(previous) != NULL)
+	{
+		brigade = g_object_ref(ai_conversation_get_brigade(previous));
+		ai_conversation_set_brigade(previous, NULL);
+		ai_brigade_cancel_all(brigade);
+	}
+
+	/* A missing ID alone is insufficient when --continue was selected. */
+	if (AI_IS_CLI_CLIENT(provider))
+	{
+		ai_cli_client_set_session_id(AI_CLI_CLIENT(provider), NULL);
+		if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "continue-session") != NULL)
+			g_object_set(provider, "continue-session", FALSE, NULL);
+	}
+
+	/* A new executor also forgets tool approvals, todos and agent results. */
+	app->conversation = ai_conversation_new(provider);
+	ai_conversation_set_system_prompt(app->conversation, ai_conversation_get_system_prompt(previous));
+	ai_conversation_set_working_directory(app->conversation, ai_conversation_get_working_directory(previous));
+	ai_conversation_set_max_tokens(app->conversation, ai_conversation_get_max_tokens(previous));
+	ai_conversation_set_stream(app->conversation, ai_conversation_get_stream(previous));
+	ai_conversation_set_local_tools(app->conversation, ai_conversation_get_local_tools(previous));
+	ai_conversation_set_command_set(app->conversation, app->commands);
+	if (!opt_no_agents)
+	{
+		ai_conversation_enable_background_agents(app->conversation, AGENT_MAX_CONCURRENT);
+		g_signal_connect(app->conversation, "agent-finished", G_CALLBACK(on_agent_finished), app);
+	}
+	g_signal_connect(ai_conversation_get_transcript(app->conversation), "items-changed",
+		G_CALLBACK(on_transcript_items_changed), app);
+	g_signal_connect_swapped(app->conversation, "notify::busy", G_CALLBACK(app_sync_herdr), app);
+	if (app->running)
+	{
+		g_signal_connect_swapped(ai_conversation_get_transcript(app->conversation), "block-changed",
+			G_CALLBACK(on_transcript_changed), app);
+		g_signal_connect(app->conversation, "approval-requested", G_CALLBACK(on_approval_requested), app);
+		g_signal_connect(app->conversation, "notify::busy", G_CALLBACK(on_busy_changed), app);
+		g_signal_connect_swapped(app->conversation, "notify::activity", G_CALLBACK(app_schedule_redraw), app);
+	}
+
+	/* Forget drafts and navigation as well as the visible conversation. */
+	g_ptr_array_set_size(app->history, 0);
+	g_string_truncate(app->input, 0);
+	g_clear_pointer(&app->history_draft, g_free);
+	g_clear_pointer(&app->kill_buffer, g_free);
+	g_clear_pointer(&app->row_cache, g_ptr_array_unref);
+	g_clear_pointer(&app->feedback, g_free);
+	g_clear_object(&app->cancellable);
+	completion_close(app);
+	app->completion_dismissed = FALSE;
+	if (app->search != NULL) g_string_truncate(app->search, 0);
+	app->searching = FALSE;
+	app->search_row = -1;
+	app->search_matches = 0;
+	app->cursor = 0;
+	app->input_first = 0;
+	app->history_pos = -1;
+	app->scroll = 0;
+	app->row_count = 0;
+	app->selected = -1;
+	app->follow = TRUE;
+	app->awaiting_since = 0;
+	app->feedback_until = 0;
+	app->spinner_frame = 0;
+	app->intro_started = g_get_monotonic_time();
+	app->approve_all = opt_yes;
+	app->approval_answer = AI_TOOL_APPROVAL_DEFAULT;
+	if (app->interrupt_id != 0)
+	{
+		g_source_remove(app->interrupt_id);
+		app->interrupt_id = 0;
+	}
+	sync_spinner(app);
+	app_sync_herdr(app);
 }
 
 /* ================================================================
