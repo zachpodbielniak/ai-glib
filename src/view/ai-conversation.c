@@ -30,6 +30,7 @@
 #include "core/ai-client.h"
 #include "core/ai-error.h"
 #include "core/ai-event-source.h"
+#include "core/ai-native-session.h"
 #include "core/ai-streamable.h"
 #include "model/ai-message.h"
 
@@ -43,6 +44,22 @@ struct _AiConversation
     GList          *messages;         /* AiMessage, owned */
 
     gchar          *system_prompt;
+
+    /*
+     * The digest of a CLI provider's own transcript, harvested when the
+     * conversation moved off that provider.  Prepended to the system
+     * prompt on every later turn rather than folded into @messages: it
+     * is a text projection, not portable content blocks, and a turn that
+     * mixed the two would send the same exchange in two shapes.
+     *
+     * Kept rather than consumed once, because it stays true --- the new
+     * provider needs it on turn nine as much as on turn one, and a CLI
+     * target sends only the newest message once it has a session id.
+     */
+    gchar          *carried_context;
+    gboolean        import_native_context;
+    guint           native_context_limit;
+
     gint            max_tokens;
     gboolean        stream;
     gboolean        local_tools;
@@ -116,6 +133,9 @@ enum
     PROP_PASSTHROUGH_COMMANDS,
     PROP_ACTIVITY,
     PROP_BRIGADE,
+    PROP_IMPORT_NATIVE_CONTEXT,
+    PROP_NATIVE_CONTEXT_LIMIT,
+    PROP_CARRIED_CONTEXT,
     N_PROPS
 };
 
@@ -723,6 +743,41 @@ ai_conversation_get_activity_elapsed(AiConversation *self)
     return g_get_monotonic_time() - self->activity_started_us;
 }
 
+/*
+ * effective_system_prompt: the system prompt a turn actually sends.
+ *
+ * The carried digest goes ahead of the host's own instructions rather
+ * than after, so "you are a terse code reviewer" is the last thing the
+ * model reads and keeps its force over a transcript that may be tens of
+ * kilobytes.
+ *
+ * A separate string rather than something folded into @messages: the
+ * digest is a text projection, not portable content blocks, and a turn
+ * that mixed the two would send the same exchange in two shapes. It is
+ * also why this is recomputed per turn instead of being written into
+ * :system-prompt --- a host reading that property back must see what it
+ * set, not what ai-glib appended to it.
+ *
+ * Returns NULL when there is neither, which every provider already
+ * treats as "no system prompt".
+ */
+static gchar *
+effective_system_prompt(AiConversation *self)
+{
+    if (self->carried_context == NULL)
+    {
+        return g_strdup(self->system_prompt);
+    }
+
+    if (self->system_prompt == NULL || self->system_prompt[0] == '\0')
+    {
+        return g_strdup(self->carried_context);
+    }
+
+    return g_strconcat(self->carried_context, "\n", self->system_prompt,
+                       NULL);
+}
+
 /**
  * ai_conversation_send_full_async:
  * @self: an #AiConversation
@@ -752,6 +807,7 @@ ai_conversation_send_full_async(
 ){
     GTask *task;
     g_autoptr(AiViewBlock) turn = NULL;
+    g_autofree gchar *system_prompt = NULL;
 
     g_return_if_fail(AI_IS_CONVERSATION(self));
 
@@ -798,13 +854,15 @@ ai_conversation_send_full_async(
     set_activity(self, "Waiting for the model");
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BUSY]);
 
+    system_prompt = effective_system_prompt(self);
+
     if (self->local_tools)
     {
         ai_tool_executor_set_stream(self->executor, self->stream);
         ai_tool_executor_run_full_async(self->executor,
                                         AI_PROVIDER(self->provider),
                                         self->messages,
-                                        self->system_prompt,
+                                        system_prompt,
                                         self->max_tokens,
                                         0,   /* the executor's own default */
                                         self->cancellable,
@@ -817,7 +875,7 @@ ai_conversation_send_full_async(
     {
         ai_streamable_chat_stream_async(AI_STREAMABLE(self->provider),
                                         self->messages,
-                                        self->system_prompt,
+                                        system_prompt,
                                         self->max_tokens,
                                         NULL,
                                         self->cancellable,
@@ -828,7 +886,7 @@ ai_conversation_send_full_async(
 
     ai_provider_chat_async(AI_PROVIDER(self->provider),
                            self->messages,
-                           self->system_prompt,
+                           system_prompt,
                            self->max_tokens,
                            NULL,
                            self->cancellable,
@@ -1224,6 +1282,7 @@ ai_conversation_finalize(GObject *object)
     g_clear_object(&self->cancellable);
     g_clear_object(&self->command_set);
     g_clear_pointer(&self->system_prompt, g_free);
+    g_clear_pointer(&self->carried_context, g_free);
     g_clear_pointer(&self->working_directory, g_free);
     g_clear_pointer(&self->tool_endpoint, ai_agent_endpoint_free);
     g_clear_pointer(&self->activity, g_free);
@@ -1277,6 +1336,15 @@ ai_conversation_get_property(
         case PROP_ACTIVITY:
             g_value_set_string(value, self->activity);
             break;
+        case PROP_IMPORT_NATIVE_CONTEXT:
+            g_value_set_boolean(value, self->import_native_context);
+            break;
+        case PROP_NATIVE_CONTEXT_LIMIT:
+            g_value_set_uint(value, self->native_context_limit);
+            break;
+        case PROP_CARRIED_CONTEXT:
+            g_value_set_string(value, self->carried_context);
+            break;
         case PROP_BRIGADE:
             g_value_set_object(value, self->brigade);
             break;
@@ -1319,6 +1387,14 @@ ai_conversation_set_property(
         case PROP_PASSTHROUGH_COMMANDS:
             ai_conversation_set_passthrough_commands(
                 self, g_value_get_boolean(value));
+            break;
+        case PROP_IMPORT_NATIVE_CONTEXT:
+            ai_conversation_set_import_native_context(
+                self, g_value_get_boolean(value));
+            break;
+        case PROP_NATIVE_CONTEXT_LIMIT:
+            ai_conversation_set_native_context_limit(
+                self, g_value_get_uint(value));
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -1491,6 +1567,46 @@ ai_conversation_class_init(AiConversationClass *klass)
         g_param_spec_object("brigade", NULL, NULL, AI_TYPE_BRIGADE,
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiConversation:import-native-context:
+     *
+     * Whether leaving a CLI provider harvests its own transcript.
+     *
+     * Defaults to %TRUE, because a switch that silently drops the
+     * wrapped program's work is the surprising behaviour, not the safe
+     * one.  Turn it off for a host that must guarantee nothing is read
+     * from disk beyond what it supplied.
+     */
+    properties[PROP_IMPORT_NATIVE_CONTEXT] =
+        g_param_spec_boolean("import-native-context", NULL, NULL, TRUE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConversation:native-context-limit:
+     *
+     * A byte ceiling on the carried digest, or 0 for none.
+     *
+     * Applied per harvest and again to the accumulated total, so a
+     * conversation that has changed provider four times does not arrive
+     * with a system prompt larger than the context window.
+     */
+    properties[PROP_NATIVE_CONTEXT_LIMIT] =
+        g_param_spec_uint("native-context-limit", NULL, NULL,
+                          0, G_MAXUINT, 64 * 1024,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConversation:carried-context:
+     *
+     * The digest carried from providers this conversation has left.
+     *
+     * Read-only, and %NULL until a switch away from a CLI provider
+     * harvests something.  A frontend watches it to report what moved.
+     */
+    properties[PROP_CARRIED_CONTEXT] =
+        g_param_spec_string("carried-context", NULL, NULL, NULL,
+                            G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -1550,6 +1666,8 @@ ai_conversation_init(AiConversation *self)
     self->max_tokens = 4096;
     self->stream = TRUE;
     self->local_tools = FALSE;
+    self->import_native_context = TRUE;
+    self->native_context_limit = 64 * 1024;
 
     g_signal_connect(self->executor, "approval-requested",
                      G_CALLBACK(on_executor_approval), self);
@@ -1649,6 +1767,125 @@ ai_conversation_get_provider(AiConversation *self)
     return self->provider;
 }
 
+/*
+ * harvest_native_context: fold the outgoing CLI provider's own transcript
+ * into the digest carried to the next provider.
+ *
+ * This is the whole point of the switch being lossless.  A CLI wrapper
+ * runs its tools in its own process, so @messages holds the prompt sent
+ * and the final text returned and nothing in between; a session resumed
+ * with `--continue` adds a backlog this conversation never saw at all.
+ * Switching on @messages alone hands the new provider a conversation it
+ * only half received, and a model answering confidently from that reads
+ * as a bad model rather than as missing context.
+ *
+ * Failure is never fatal and never loud.  A provider with no readable
+ * store, a first turn that has not run yet, a transcript past the size
+ * bound: all ordinary, all g_debug, and all leave the switch to proceed
+ * on the portable history exactly as it did before this existed.  The
+ * alternative --- refusing to change provider because a file could not
+ * be read --- would be a worse answer to every one of them.
+ *
+ * Appended rather than replaced, so a conversation that has already
+ * moved claude-code -> openai -> grok-build still carries the first
+ * hop's history.  The accumulated digest is bounded as a whole.
+ */
+static void
+harvest_native_context(AiConversation *self)
+{
+    g_autoptr(AiNativeSession) session = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *digest = NULL;
+
+    if (!self->import_native_context
+        || self->provider == NULL
+        || !AI_IS_CLI_CLIENT(self->provider))
+    {
+        return;
+    }
+
+    session = ai_cli_client_read_native_session(AI_CLI_CLIENT(self->provider),
+                                                &error);
+
+    if (session == NULL)
+    {
+        g_debug("no native context carried from %s: %s",
+                ai_provider_get_name(AI_PROVIDER(self->provider)),
+                error->message);
+        return;
+    }
+
+    /*
+     * Excluding the portable history is not an optimisation.  Sending an
+     * exchange as an #AiMessage and again inside the digest reads to the
+     * model as the user having asked the same thing twice, and it is the
+     * turns this conversation *did* see --- the recent ones --- that
+     * would be duplicated.
+     */
+    digest = ai_native_session_to_context_text_full(session, self->messages,
+                                                    self->native_context_limit);
+
+    if (digest == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Toggling between two providers must not say the same thing twice.
+     * A->B->A->B re-reads a transcript that has not changed, and the
+     * exclusion list is the portable history rather than what was
+     * carried before, so nothing else would stop the digest being
+     * appended on every hop until the prompt was mostly repetition.
+     */
+    if (self->carried_context != NULL
+        && strstr(self->carried_context, digest) != NULL)
+    {
+        return;
+    }
+
+    if (self->carried_context != NULL)
+    {
+        gchar *joined = g_strconcat(self->carried_context, "\n", digest,
+                                    NULL);
+
+        g_free(self->carried_context);
+        self->carried_context = joined;
+    }
+    else
+    {
+        self->carried_context = g_steal_pointer(&digest);
+    }
+
+    /*
+     * Bound the accumulation, not just each hop.  Four switches at 64 KiB
+     * apiece is a system prompt larger than most context windows, and the
+     * failure would arrive as the provider rejecting the turn rather than
+     * as anything pointing here.
+     */
+    if (self->native_context_limit > 0
+        && strlen(self->carried_context) > self->native_context_limit)
+    {
+        gchar *tail = g_strdup(self->carried_context
+                               + strlen(self->carried_context)
+                               - self->native_context_limit);
+        const gchar *start = tail;
+
+        /* Never cut mid-character: the result goes into a prompt. */
+        while (*start != '\0' && (*start & 0xc0) == 0x80)
+        {
+            start++;
+        }
+
+        g_free(self->carried_context);
+        self->carried_context = g_strconcat(
+            "[Older carried context was trimmed to fit.]\n", start, NULL);
+        g_free(tail);
+    }
+
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_CARRIED_CONTEXT]);
+}
+
 /**
  * ai_conversation_set_provider:
  * @self: an #AiConversation
@@ -1733,6 +1970,14 @@ ai_conversation_set_provider(
         }
     }
 
+    /*
+     * After every check that can still refuse the switch, so a rejected
+     * endpoint does not leave a digest behind for a provider the
+     * conversation never moved to --- and before the provider pointer
+     * changes, because it reads the outgoing one.
+     */
+    harvest_native_context(self);
+
     old_passthrough = ai_conversation_get_passthrough_commands(self);
 
     if (self->event_id != 0)
@@ -1765,6 +2010,134 @@ ai_conversation_set_provider(
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PROVIDER]);
 
     return TRUE;
+}
+
+
+/**
+ * ai_conversation_get_import_native_context:
+ * @self: an #AiConversation
+ *
+ * Returns: whether leaving a CLI provider harvests its transcript
+ */
+gboolean
+ai_conversation_get_import_native_context(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+
+    return self->import_native_context;
+}
+
+/**
+ * ai_conversation_set_import_native_context:
+ * @self: an #AiConversation
+ * @enabled: %TRUE to harvest
+ *
+ * Sets whether ai_conversation_set_provider() reads the outgoing CLI
+ * provider's own transcript.
+ *
+ * Changing this does not retract a digest already carried; use
+ * ai_conversation_clear_carried_context() for that.
+ */
+void
+ai_conversation_set_import_native_context(
+    AiConversation *self,
+    gboolean        enabled
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    enabled = !!enabled;
+
+    if (self->import_native_context == enabled)
+    {
+        return;
+    }
+
+    self->import_native_context = enabled;
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_IMPORT_NATIVE_CONTEXT]);
+}
+
+/**
+ * ai_conversation_get_native_context_limit:
+ * @self: an #AiConversation
+ *
+ * Returns: the byte ceiling on the carried digest, or 0 for none
+ */
+guint
+ai_conversation_get_native_context_limit(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), 0);
+
+    return self->native_context_limit;
+}
+
+/**
+ * ai_conversation_set_native_context_limit:
+ * @self: an #AiConversation
+ * @limit: the ceiling in bytes, or 0 for none
+ *
+ * Sets how much carried context a turn may carry.
+ */
+void
+ai_conversation_set_native_context_limit(
+    AiConversation *self,
+    guint           limit
+){
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    if (self->native_context_limit == limit)
+    {
+        return;
+    }
+
+    self->native_context_limit = limit;
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_NATIVE_CONTEXT_LIMIT]);
+}
+
+/**
+ * ai_conversation_get_carried_context:
+ * @self: an #AiConversation
+ *
+ * The digest harvested from providers this conversation has left.
+ *
+ * Prepended to #AiConversation:system-prompt on every turn.  Exposed so
+ * a frontend can say what a switch actually carried, and so a host can
+ * inspect what it is about to send.
+ *
+ * Returns: (transfer none) (nullable): the digest, or %NULL
+ */
+const gchar *
+ai_conversation_get_carried_context(AiConversation *self)
+{
+    g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+
+    return self->carried_context;
+}
+
+/**
+ * ai_conversation_clear_carried_context:
+ * @self: an #AiConversation
+ *
+ * Discards the carried digest.
+ *
+ * The counterpart to the harvest being automatic: a host that decides
+ * the imported history is unwanted --- or too expensive to send on every
+ * turn --- can drop it without clearing the conversation.
+ */
+void
+ai_conversation_clear_carried_context(AiConversation *self)
+{
+    g_return_if_fail(AI_IS_CONVERSATION(self));
+
+    if (self->carried_context == NULL)
+    {
+        return;
+    }
+
+    g_clear_pointer(&self->carried_context, g_free);
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_CARRIED_CONTEXT]);
 }
 
 /**

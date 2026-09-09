@@ -40,6 +40,7 @@ struct _AiMockProvider
     guint   stream_calls;   /* how many went down the streaming path */
     guint   delay_ms;
     GList  *last_messages;  /* AiMessage, owned snapshot */
+    gchar  *last_system_prompt;
 };
 
 static void ai_mock_provider_provider_init (AiProviderInterface *iface);
@@ -70,6 +71,7 @@ ai_mock_provider_finalize (GObject *object)
 
     g_queue_free_full(self->script, scripted_free);
     g_free(self->fallback);
+    g_clear_pointer(&self->last_system_prompt, g_free);
     g_list_free_full(self->last_messages, g_object_unref);
 
     G_OBJECT_CLASS(ai_mock_provider_parent_class)->finalize(object);
@@ -252,9 +254,12 @@ mock_chat_async (AiProvider *provider, GList *messages,
     DeferredReply *d;
     GList *iter;
 
-    (void)system_prompt; (void)max_tokens; (void)tools;
+    (void)max_tokens; (void)tools;
 
     self->call_count++;
+    g_free(self->last_system_prompt);
+    self->last_system_prompt = g_strdup(system_prompt);
+
     g_list_free_full(self->last_messages, g_object_unref);
     self->last_messages = NULL;
     for (iter = messages; iter != NULL; iter = iter->next)
@@ -421,6 +426,27 @@ ai_mock_provider_get_stream_call_count (AiMockProvider *self)
     g_return_val_if_fail (AI_IS_MOCK_PROVIDER (self), 0);
 
     return self->stream_calls;
+}
+
+/**
+ * ai_mock_provider_get_last_system_prompt:
+ * @self: an #AiMockProvider
+ *
+ * The system prompt of the most recent turn.
+ *
+ * Captured because the system prompt is where #AiConversation puts
+ * carried native context, and a test asserting only on the conversation's
+ * own getter would pass against an implementation that harvested
+ * perfectly and then never sent it.
+ *
+ * Returns: (transfer none) (nullable): the prompt, or %NULL
+ */
+const gchar *
+ai_mock_provider_get_last_system_prompt (AiMockProvider *self)
+{
+    g_return_val_if_fail (AI_IS_MOCK_PROVIDER (self), NULL);
+
+    return self->last_system_prompt;
 }
 
 /**

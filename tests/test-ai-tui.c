@@ -1112,6 +1112,175 @@ test_provider_command_failure_keeps_current(void)
 	sandbox_free(box);
 }
 
+/*
+ * Switching provider mid-session must say when the wrapped program's own
+ * history came along.  That import lands in the system prompt, which the
+ * transcript never shows, so without the line it is invisible --- and it
+ * is the whole difference between the new provider knowing what the last
+ * one did and guessing.
+ *
+ * HOME is the sandbox, so the transcript below is the only one the
+ * harvest can find.
+ */
+static void
+test_provider_switch_reports_carried_history(void)
+{
+	gchar *box = sandbox_new();
+	g_autofree gchar *encoded = g_strdup(box);
+	g_autofree gchar *projects = NULL;
+	g_autofree gchar *transcript = NULL;
+	const gchar *args[] = {
+		"--dump", "/provider claude", "-p", "claude-code", NULL
+	};
+	Run *run;
+	gsize i;
+
+	/* claude replaces every separator, dot and underscore with a dash. */
+	for (i = 0; encoded[i] != '\0'; i++)
+	{
+		if (encoded[i] == '/' || encoded[i] == '.' || encoded[i] == '_')
+		{
+			encoded[i] = '-';
+		}
+	}
+
+	projects = g_build_filename(box, ".claude", "projects", encoded, NULL);
+	g_assert_cmpint(g_mkdir_with_parents(projects, 0700), ==, 0);
+
+	transcript = g_build_filename(projects, "s.jsonl", NULL);
+	g_assert_true(g_file_set_contents(transcript,
+		"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
+		"[{\"type\":\"text\",\"text\":\"remember amber\"}]}}\n"
+		"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\","
+		"\"content\":[{\"type\":\"tool_use\",\"id\":\"c1\","
+		"\"name\":\"read_file\",\"input\":{\"path\":\"p.c\"}}]}}\n",
+		-1, NULL));
+
+	run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "Provider switched to"));
+	g_assert_nonnull(strstr(run->stdout_data, "Carried"));
+	g_assert_nonnull(strstr(run->stdout_data, "tool calls"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* With nothing on disk, the switch still succeeds and says nothing about
+ * carrying anything.  A first turn that has not run is ordinary. */
+static void
+test_provider_switch_without_history_is_quiet(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/provider claude", "-p", "claude-code", NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "Provider switched to"));
+	g_assert_null(strstr(run->stdout_data, "Carried"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* /context with nothing carried says so rather than printing an empty
+ * report. */
+static void
+test_context_command_reports_nothing(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/context", "-p", "grok-build", NULL };
+	Run *run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "No context carried"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* And rejects an argument it does not understand, rather than silently
+ * treating it as `clear`. */
+static void
+test_context_command_rejects_an_argument(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/context wipe", "-p", "grok-build", NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "takes no argument"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/*
+ * `clear` with nothing carried says so rather than reporting a drop that
+ * did not happen.  The post-harvest clear is covered end-to-end at the
+ * library level in tests/test-native-context.c, where a switch can
+ * actually be made first --- --dump runs one line.
+ */
+static void
+test_context_command_clear_when_empty(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/context clear", "-p", "grok-build", NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_nonnull(strstr(run->stdout_data, "No carried context to drop"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* /model with no argument reports; with one it says what changed, since
+ * a bad id is only rejected on the next turn and the report is what makes
+ * that explicable. */
+static void
+test_model_command_reports(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *show[] = { "--dump", "/model", "-p", "grok-build", NULL };
+	const gchar *change[] = {
+		"--dump", "/model grok-4-6", "-p", "grok-build", "-m", "grok-4-1",
+		NULL
+	};
+	Run *run = run_tui_in(box, show);
+
+	g_assert_nonnull(strstr(run->stdout_data, "Model:"));
+	run_free(run);
+
+	run = run_tui_in(box, change);
+	g_assert_nonnull(strstr(run->stdout_data, "Model switched from"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4-6"));
+	g_assert_nonnull(strstr(run->stdout_data, "Context preserved"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* Setting the model to what it already is is not a "switch". */
+static void
+test_model_command_no_op(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/model grok-4-1", "-p", "grok-build", "-m", "grok-4-1",
+		NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_null(strstr(run->stdout_data, "Model switched"));
+	g_assert_nonnull(strstr(run->stdout_data, "Model: grok-4-1"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
 static void
 test_expand_inlines_a_mention(void)
 {
@@ -2395,6 +2564,18 @@ main(int argc, char *argv[])
 	                test_provider_command_shows_and_switches);
 	g_test_add_func("/ai-glib/ai-tui/provider-command-error",
 	                test_provider_command_failure_keeps_current);
+	g_test_add_func("/ai-glib/ai-tui/provider-carries-history",
+	                test_provider_switch_reports_carried_history);
+	g_test_add_func("/ai-glib/ai-tui/provider-no-history",
+	                test_provider_switch_without_history_is_quiet);
+	g_test_add_func("/ai-glib/ai-tui/context-empty",
+	                test_context_command_reports_nothing);
+	g_test_add_func("/ai-glib/ai-tui/context-bad-argument",
+	                test_context_command_rejects_an_argument);
+	g_test_add_func("/ai-glib/ai-tui/context-clear-empty",
+	                test_context_command_clear_when_empty);
+	g_test_add_func("/ai-glib/ai-tui/model-reports", test_model_command_reports);
+	g_test_add_func("/ai-glib/ai-tui/model-no-op", test_model_command_no_op);
 	g_test_add_func("/ai-glib/ai-tui/expand-mention",
 	                test_expand_inlines_a_mention);
 	g_test_add_func("/ai-glib/ai-tui/expand-unknown",

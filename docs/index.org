@@ -35,6 +35,7 @@ see their provider pages.
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
 - [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
+- [[file:native-session.org][Native session import]] - Read a wrapped CLI's own transcript so a switch does not lose it
 - [[file:tui.org][ai-tui]] - The terminal agent harness
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 - [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON

@@ -769,8 +769,14 @@ test_native_history(Box *box, gconstpointer data)
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
 	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "read_file");
-	g_assert_cmpstr(ai_view_tool_block_get_summary(
-		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Read file.c");
+	/* get_summary() is (transfer full); asserting on it inline leaked
+	 * the string on every run of the ASAN build. */
+	{
+		g_autofree gchar *summary = ai_view_tool_block_get_summary(
+			AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)));
+
+		g_assert_cmpstr(summary, ==, "Read file.c");
+	}
 	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "saved output");
 
@@ -903,8 +909,12 @@ test_codex_native_history(Box *box, gconstpointer data)
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "command_execution");
 	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 1)), ==, "file_change");
-	g_assert_cmpstr(ai_view_tool_block_get_summary(
-		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Ran make, changed file.c");
+	{
+		g_autofree gchar *summary = ai_view_tool_block_get_summary(
+			AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)));
+
+		g_assert_cmpstr(summary, ==, "Ran make, changed file.c");
+	}
 	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "ok");
 
@@ -1072,8 +1082,13 @@ test_claude_native_history(Box *box, gconstpointer data)
 	g_assert_cmpuint(ai_transcript_get_n_blocks(ai_conversation_get_transcript(conversation)), ==, 4);
 	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(code)), ==, "latest");
-	g_assert_cmpstr(ai_view_tool_block_get_summary(AI_VIEW_TOOL_BLOCK(
-		ai_transcript_get_block(ai_conversation_get_transcript(conversation), 3))), ==, "Read file.c");
+	{
+		g_autofree gchar *summary = ai_view_tool_block_get_summary(
+			AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(
+				ai_conversation_get_transcript(conversation), 3)));
+
+		g_assert_cmpstr(summary, ==, "Read file.c");
+	}
 
 	ai_cli_client_set_env(AI_CLI_CLIENT(tmux), "HOME", box->dir);
 	ai_cli_client_set_working_directory(AI_CLI_CLIENT(tmux), box->dir);
@@ -1159,8 +1174,13 @@ test_opencode_native_history(Box *box, gconstpointer data)
 	g_assert_cmpuint(ai_transcript_get_n_blocks(ai_conversation_get_transcript(conversation)), ==, 4);
 	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
-	g_assert_cmpstr(ai_view_tool_block_get_summary(AI_VIEW_TOOL_BLOCK(
-		ai_transcript_get_block(ai_conversation_get_transcript(conversation), 3))), ==, "Ran make");
+	{
+		g_autofree gchar *summary = ai_view_tool_block_get_summary(
+			AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(
+				ai_conversation_get_transcript(conversation), 3)));
+
+		g_assert_cmpstr(summary, ==, "Ran make");
+	}
 }
 
 static void

@@ -37,6 +37,7 @@
 #include "core/ai-tool-endpoint-consumer.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-cli-report.h"
+#include "core/ai-native-session.h"
 #include "core/ai-prompt-scorer.h"
 
 /* View layer: a UI-agnostic model of a conversation */
