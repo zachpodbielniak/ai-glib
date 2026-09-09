@@ -60,6 +60,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-client.h \
 	$(SRCDIR)/core/ai-cli-client.h \
 	$(SRCDIR)/core/ai-cli-report.h \
+	$(SRCDIR)/core/ai-native-session.h \
 	$(SRCDIR)/core/ai-tool-endpoint.h \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
@@ -143,6 +144,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
 	$(SRCDIR)/core/ai-cli-report.c \
+	$(SRCDIR)/core/ai-native-session.c \
 	$(SRCDIR)/core/ai-cli-report-native.c \
 	$(SRCDIR)/core/ai-tool-endpoint.c \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.c \
