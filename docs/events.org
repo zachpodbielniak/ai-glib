@@ -59,6 +59,12 @@ Three things that table is really saying:
   #AiProvider works; it simply produces its answer in one piece. The
   transcript it reads does contain every tool call, and the wait loop already
   polls that file, so this is a gap rather than an impossibility.
+- *=claude-code= does not turn every =system= line into =AI_EVENT_STATUS=.*
+  =thinking_tokens=, =task_started=, =task_notification= and the rest of
+  the CLI's process chatter are dropped; only =init=, =informational=,
+  compaction, and shutdown are status. Conversation appends each STATUS as
+  its own transcript block, so a heartbeat that leaked through would
+  paint the same ="○ claude: thinking_tokens"= line over and over.
 
 ** Ordering and guarantees
 - Events arrive *in the order they occurred*, and always on the thread

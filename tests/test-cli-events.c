@@ -432,6 +432,141 @@ test_cc_system_init_captures_session(void)
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)),
 	                ==, "sess-abc");
 	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 1);
+	g_assert_cmpstr(ai_event_get_text(first_of(p, AI_EVENT_STATUS)),
+	                ==, "claude: init");
+
+	parsed_free(p);
+}
+
+static void
+test_cc_system_heartbeats_are_not_status(void)
+{
+	/*
+	 * Claude Code emits these as type=system while the model is
+	 * thinking or a background task is running. They used to become
+	 * "claude: thinking_tokens" STATUS events, one per heartbeat,
+	 * which the TUI painted as a stack of "○ claude: …" lines.
+	 *
+	 * Session id still has to land: a run interrupted mid-think
+	 * must be resumable even if we drop the chatter.
+	 */
+	static const gchar * const lines[] = {
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\","
+		"\"session_id\":\"sess-hb\",\"estimated_tokens\":12}",
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\","
+		"\"session_id\":\"sess-hb\",\"estimated_tokens\":48}",
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\","
+		"\"session_id\":\"sess-hb\",\"estimated_tokens\":96}",
+		"{\"type\":\"system\",\"subtype\":\"task_started\","
+		"\"task_id\":\"t1\",\"description\":\"run tests\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_notification\","
+		"\"task_id\":\"t1\",\"status\":\"completed\","
+		"\"summary\":\"ok\",\"output_file\":\"/tmp/out\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_progress\","
+		"\"task_id\":\"t1\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_updated\","
+		"\"task_id\":\"t1\"}",
+		"{\"type\":\"system\",\"subtype\":\"hook_started\"}",
+		"{\"type\":\"system\",\"subtype\":\"hook_progress\"}",
+		"{\"type\":\"system\",\"subtype\":\"hook_response\"}",
+		"{\"type\":\"system\",\"subtype\":\"plugin_install\","
+		"\"status\":\"started\"}",
+		"{\"type\":\"system\",\"subtype\":\"files_persisted\"}",
+		"{\"type\":\"system\",\"subtype\":\"status\",\"status\":null}",
+		"{\"type\":\"system\",\"subtype\":\"nonesuch_future_heartbeat\"}",
+		NULL
+	};
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(p->events->len, ==, 0);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)),
+	                ==, "sess-hb");
+
+	parsed_free(p);
+}
+
+static void
+test_cc_system_heartbeats_do_not_hide_later_text(void)
+{
+	/* Dropping chatter must not swallow the answer that follows. */
+	static const gchar * const lines[] = {
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\","
+		"\"estimated_tokens\":8}",
+		"{\"type\":\"system\",\"subtype\":\"task_started\","
+		"\"task_id\":\"t1\",\"description\":\"make test\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_notification\","
+		"\"task_id\":\"t1\",\"status\":\"completed\"}",
+		"{\"type\":\"assistant\",\"message\":{\"content\":["
+		"{\"type\":\"text\",\"text\":\"Both pass.\"}]}}",
+		NULL
+	};
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+	g_autofree gchar *text = all_text(p);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_TEXT_DELTA), ==, 1);
+	g_assert_cmpstr(text, ==, "Both pass.");
+
+	parsed_free(p);
+}
+
+static void
+test_cc_system_informational_is_status(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	Parsed *p = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"system\",\"subtype\":\"informational\","
+		"\"level\":\"warning\",\"content\":\"Approaching context limit\"}");
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 1);
+	g_assert_cmpstr(ai_event_get_text(first_of(p, AI_EVENT_STATUS)),
+	                ==, "Approaching context limit");
+
+	parsed_free(p);
+}
+
+static void
+test_cc_system_informational_without_content_is_silent(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	Parsed *p = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"system\",\"subtype\":\"informational\","
+		"\"level\":\"info\"}");
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(p->events->len, ==, 0);
+
+	parsed_free(p);
+}
+
+static void
+test_cc_system_compact_and_shutdown_are_status(void)
+{
+	static const gchar * const lines[] = {
+		"{\"type\":\"system\",\"subtype\":\"status\","
+		"\"status\":\"compacting\"}",
+		"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}",
+		"{\"type\":\"system\",\"subtype\":\"worker_shutting_down\","
+		"\"reason\":\"host_exit\"}",
+		NULL
+	};
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 3);
+	g_assert_cmpstr(ai_event_get_text(g_ptr_array_index(p->events, 0)),
+	                ==, "Compacting context");
+	g_assert_cmpstr(ai_event_get_text(g_ptr_array_index(p->events, 1)),
+	                ==, "Context compacted");
+	g_assert_cmpstr(ai_event_get_text(g_ptr_array_index(p->events, 2)),
+	                ==, "claude: shutting down (host_exit)");
 
 	parsed_free(p);
 }
@@ -1105,6 +1240,16 @@ main(int argc, char *argv[])
 	                test_cc_multiple_tool_results_one_line);
 	g_test_add_func("/ai-glib/cli-events/cc/system-init",
 	                test_cc_system_init_captures_session);
+	g_test_add_func("/ai-glib/cli-events/cc/system-heartbeats",
+	                test_cc_system_heartbeats_are_not_status);
+	g_test_add_func("/ai-glib/cli-events/cc/system-heartbeats-then-text",
+	                test_cc_system_heartbeats_do_not_hide_later_text);
+	g_test_add_func("/ai-glib/cli-events/cc/system-informational",
+	                test_cc_system_informational_is_status);
+	g_test_add_func("/ai-glib/cli-events/cc/system-informational-empty",
+	                test_cc_system_informational_without_content_is_silent);
+	g_test_add_func("/ai-glib/cli-events/cc/system-compact-shutdown",
+	                test_cc_system_compact_and_shutdown_are_status);
 	g_test_add_func("/ai-glib/cli-events/cc/session-persistence-off",
 	                test_cc_session_persistence_off);
 	g_test_add_func("/ai-glib/cli-events/cc/usage-and-cost",

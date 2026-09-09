@@ -290,6 +290,32 @@ claude --print --output-format stream-json --verbose \
     "user prompt"
 #+end_src
 
+The CLI writes one JSON object per line. =type= is =assistant=, =user=,
+=stream_event=, =result=, or =system=. =system= is not one kind of
+event: =subtype= distinguishes session start from process chatter.
+
+=AI_EVENT_STATUS= is "something worth telling a human", so only these
+subtypes become a status line:
+
+| =subtype=              | Status text                                      |
+|------------------------+--------------------------------------------------|
+| =init=                 | =claude: init=                                   |
+| =informational=        | the =content= banner, omitted if empty           |
+| =status= + compacting  | =Compacting context=                             |
+| =compact_boundary=     | =Context compacted=                              |
+| =worker_shutting_down= | =claude: shutting down= (with =reason= if given) |
+
+Everything else is dropped. Claude Code emits =thinking_tokens= on a
+timer while the model is reasoning, and =task_started= /
+=task_notification= / =task_progress= for background work; relaying
+those as ="claude: thinking_tokens"= painted the same spinner line into
+the transcript on every heartbeat. Unknown subtypes are dropped on
+purpose --- a denylist would lag every new heartbeat the CLI adds.
+
+Session id is still captured from any =system= line that carries one,
+including the dropped heartbeats, so a run interrupted mid-think can
+still be resumed.
+
 ** Response Format
 The Claude Code CLI returns JSON in the following format:
 
