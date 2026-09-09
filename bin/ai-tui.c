@@ -1508,7 +1508,7 @@ on_redraw_idle(gpointer user_data)
     App *app = user_data;
 
     app->redraw_id = 0;
-    app_redraw(app);
+    if (app->running) app_redraw(app);
 
     return G_SOURCE_REMOVE;
 }
@@ -3242,7 +3242,7 @@ on_key_settle(gpointer user_data)
     App *app = user_data;
 
     app->settle_id = 0;
-    drain_keys(app);
+    if (app->running) drain_keys(app);
 
     return G_SOURCE_REMOVE;
 }
@@ -3253,6 +3253,8 @@ on_key(gint fd, GIOCondition condition, gpointer user_data)
     App *app = user_data;
 
     (void)fd;
+	/* Shutdown may drain the main context for provider cancellation. */
+	if (!app->running) return G_SOURCE_REMOVE;
 	if (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL))
 	{
 		app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
@@ -3276,6 +3278,7 @@ on_resize(gpointer user_data)
 {
     App *app = user_data;
 	struct winsize size;
+	if (!app->running) return G_SOURCE_REMOVE;
 
 	/* GLib owns SIGWINCH, so ncurses' internal resize flag is not set.
 	 * Explicitly synchronize its screen geometry with the actual PTY. */
@@ -4606,7 +4609,7 @@ main(int argc, char *argv[])
 		herdr = ai_tui_herdr_new(g_getenv("HERDR_ENV"),
 			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID"));
 	app.herdr = herdr;
-	if (herdr != NULL)
+	if (herdr != NULL || mcp_host != NULL)
 	{
 		g_unix_signal_add(SIGTERM, on_herdr_shutdown, &app);
 		g_unix_signal_add(SIGHUP, on_herdr_shutdown, &app);
@@ -4652,6 +4655,8 @@ main(int argc, char *argv[])
 
             g_main_loop_run(loop);
             app.dump_loop = NULL;
+			/* Cancellation callbacks still reference App and its conversation. */
+			if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
 
             text = ai_transcript_to_text(
                 ai_conversation_get_transcript(app.conversation),
@@ -4782,6 +4787,15 @@ main(int argc, char *argv[])
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
     g_main_loop_run(app.loop);
+	/* MCP stop drains callbacks, including UI and input sources. Do that
+	 * while the terminal and App-owned fields are still valid. */
+	app.running = FALSE;
+	if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
+	if (app.redraw_id != 0)
+	{
+		g_source_remove(app.redraw_id);
+		app.redraw_id = 0;
+	}
 
 	fputs("\033[?2004l", stdout);
 	fflush(stdout);

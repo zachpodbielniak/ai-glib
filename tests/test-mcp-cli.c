@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #endif
 #include <glib.h>
+#include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <gio/gunixinputstream.h>
@@ -16,6 +17,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pty.h>
 #include "core/ai-subprocess-util.h"
 
 #define DEADLINE_MS (8000)
@@ -33,6 +35,7 @@ static gchar *ai_executable;
 static gchar *tui_executable;
 static gchar *fixture_directory;
 static const gchar *stub_pid_path;
+static gint terminal_slave = -1;
 
 typedef struct
 {
@@ -79,6 +82,7 @@ static GSubprocess *
 spawn_process(const gchar * const *argv, const gchar *mode)
 {
 	g_autoptr(GSubprocessLauncher) launcher = g_subprocess_launcher_new(
+		terminal_slave >= 0 ? G_SUBPROCESS_FLAGS_NONE :
 		G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
 	g_autoptr(GError) error = NULL;
 	GSubprocess *process;
@@ -89,6 +93,13 @@ spawn_process(const gchar * const *argv, const gchar *mode)
 		g_subprocess_launcher_setenv(launcher, "AI_MCP_TEST_PID_FILE", stub_pid_path, TRUE);
 	g_subprocess_launcher_setenv(launcher, "NO_COLOR", "1", TRUE);
 	g_subprocess_launcher_setenv(launcher, "TERM", "dumb", TRUE);
+	if (terminal_slave >= 0)
+	{
+		g_subprocess_launcher_setenv(launcher, "TERM", "xterm-256color", TRUE);
+		g_subprocess_launcher_take_stdin_fd(launcher, dup(terminal_slave));
+		g_subprocess_launcher_take_stdout_fd(launcher, dup(terminal_slave));
+		g_subprocess_launcher_take_stderr_fd(launcher, dup(terminal_slave));
+	}
 	if (fixture_directory != NULL)
 	{
 		g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", fixture_directory, TRUE);
@@ -870,6 +881,76 @@ check_agent_shutdown(const gchar *binary, gboolean cancel_first)
 	g_assert_false(running);
 }
 
+/* Drain terminal output while waiting so sanitizer diagnostics cannot fill the PTY. */
+static gboolean
+drain_terminal(gint fd, GIOCondition condition, gpointer data)
+{
+	GString *output = data;
+	gchar buffer[4096];
+	gssize size;
+	(void)condition;
+	while ((size = read(fd, buffer, sizeof buffer)) > 0)
+		g_string_append_len(output, buffer, size);
+	return G_SOURCE_CONTINUE;
+}
+
+/* Exercise actual curses cleanup with a foreground provider still active. */
+static void
+test_terminal_shutdown(void)
+{
+	g_autofree gchar *socket_path = g_build_filename(fixture_directory, "terminal.sock", NULL);
+	const gchar *argv[] = { tui_executable, "-p", "claude-code", "--no-animation", "--no-herdr",
+		"--mcp-tools", "conversation_status", "--mcp-socket", socket_path,
+		"--mcp-no-inject", "Wait for shutdown", NULL };
+	g_autofree gchar *pid_path = g_build_filename(fixture_directory, "terminal-provider.pid", NULL);
+	g_autofree gchar *pid_text = NULL;
+	g_autoptr(GSubprocess) process = NULL;
+	g_autoptr(GString) output = g_string_new(NULL);
+	struct winsize size = { 24, 100, 0, 0 };
+	gint master;
+	guint source;
+	gint64 deadline;
+	pid_t pid;
+	gboolean successful;
+	gboolean running;
+
+	g_assert_cmpint(openpty(&master, &terminal_slave, NULL, NULL, &size), ==, 0);
+	g_assert_cmpint(fcntl(master, F_SETFL, O_NONBLOCK), ==, 0);
+	stub_pid_path = pid_path;
+	process = spawn_process(argv, "wait");
+	stub_pid_path = NULL;
+	close(terminal_slave);
+	terminal_slave = -1;
+	source = g_unix_fd_add(master, G_IO_IN | G_IO_HUP, drain_terminal, output);
+	deadline = g_get_monotonic_time() + DEADLINE_MS * 1000;
+	while (!g_file_test(pid_path, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < deadline)
+	{
+		g_main_context_iteration(NULL, FALSE);
+		g_usleep(1000);
+	}
+	g_assert_true(g_file_get_contents(pid_path, &pid_text, NULL, NULL));
+	pid = (pid_t)g_ascii_strtoll(pid_text, NULL, 10);
+	g_assert_cmpint(pid, >, 1);
+	g_subprocess_send_signal(process, SIGTERM);
+	wait_without_reading(process);
+	drain_terminal(master, 0, output);
+	g_source_remove(source);
+	close(master);
+	successful = g_subprocess_get_successful(process);
+	if (!successful) g_test_message("Terminal shutdown output: %s", output->str);
+	deadline = g_get_monotonic_time() + 2 * G_TIME_SPAN_SECOND;
+	do
+	{
+		running = fixture_process_running(pid);
+		if (running) g_usleep(10000);
+	} while (running && g_get_monotonic_time() < deadline);
+	if (running) kill(pid, SIGTERM);
+	g_unlink(pid_path);
+	g_assert_true(successful);
+	g_assert_false(running);
+	g_assert_false(g_file_test(socket_path, G_FILE_TEST_EXISTS));
+}
+
 static void
 test_agent_shutdown_active(gconstpointer data)
 {
@@ -946,6 +1027,7 @@ main(int argc, char **argv)
 #undef ADD_CASE
 	}
 	g_test_add_func("/mcp/cli/tui/dump", test_tui_dump);
+	g_test_add_func("/mcp/cli/tui/terminal-shutdown", test_terminal_shutdown);
 	result = g_test_run();
 	remove_fixture(fixture_directory);
 	g_free(fixture_directory);

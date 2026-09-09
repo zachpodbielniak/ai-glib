@@ -130,3 +130,9 @@ Both host transports cap input frames at 1 MiB. The dependency caps each client'
 Shutdown stops accepting requests, cancels work, and drains asynchronous cleanup for up to three seconds. The local worker exposes =ai_local_worker_get_pending_count()= because an agent can already report =cancelled= while its provider cleanup is still pending. CLI communication failures terminate the child process; closing its pipes alone is insufficient. A provider that does not finish cancellation within the shutdown bound produces a diagnostic on stderr. Subprocess regressions verify that active agents and agents cancelled immediately before EOF leave no live provider child in either executable.
 
 Explicit Claude MCP JSON files and explicit =OPENCODE_CONFIG= JSON files are merged into the private generated configuration, retaining their other servers/settings while reserving =ai_host= for this session. Explicit files must be regular JSON files no larger than 1 MiB; unreadable or invalid files fail injection rather than silently dropping caller settings. Provider-native global/project configuration merging still applies. No explicit caller file is rewritten.
+
+* Follow-up review regressions
+
+MCP tool registrations hold weak host references and acquire a temporary strong reference only while executing. A retained server or delayed transport callback cannot dereference a destroyed host; calls after host destruction return a closed-session tool error. This avoids both dangling callback data and a host/server reference cycle.
+
+Live TUI sessions with MCP handle SIGTERM and SIGHUP even when herdr is absent. Provider cancellation and MCP shutdown complete before terminal/application storage is released. Pending redraw and keyboard callbacks do not process new work after shutdown begins. A real PTY regression terminates an active provider turn, verifies successful TUI exit, and checks that the provider child and Unix socket are gone.

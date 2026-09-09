@@ -354,11 +354,34 @@ test_config_merge(void)
 	g_rmdir(directory);
 }
 
+/* Sessions can remain referenced by asynchronous transport callbacks after stop. */
+static void
+test_server_outlives_host(void)
+{
+	g_autoptr(AiOllamaClient) provider = ai_ollama_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(AiMcpHost) host = NULL;
+	g_autoptr(McpServer) server = NULL;
+	g_autoptr(McpToolResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *tools[] = { "todo_read", NULL };
+
+	host = ai_mcp_host_new(conversation, "lifetime", tools, FALSE, &error);
+	g_assert_no_error(error);
+	server = ai_mcp_host_create_server(host);
+	g_clear_object(&host);
+	result = mcp_server_invoke_tool(server, "todo_read", NULL, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(result);
+	g_assert_true(mcp_tool_result_get_is_error(result));
+}
+
 int
 main(int argc, char **argv)
 {
 	static const gchar * const status_only[] = { "conversation_status", NULL };
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/mcp/host/server-outlives-host", test_server_outlives_host);
 	g_test_add("/mcp/host/shared-todos", Fixture, NULL, setup, test_shared_todos, teardown);
 	g_test_add("/mcp/host/invalid-atomic", Fixture, NULL, setup, test_invalid_atomic, teardown);
 	g_test_add("/mcp/host/bounds", Fixture, NULL, setup, test_bounds, teardown);

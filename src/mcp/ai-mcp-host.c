@@ -218,9 +218,9 @@ create_tool(AiMcpHost *self, const gchar *name)
 static McpToolResult *
 invoke_tool(McpServer *server, const gchar *name, JsonObject *arguments, gpointer user_data)
 {
-	AiMcpHost *self = AI_MCP_HOST(user_data);
-	AiConversation *conversation = self->conversation;
-	AiToolExecutor *executor = ai_conversation_get_executor(conversation);
+	g_autoptr(AiMcpHost) self = g_weak_ref_get((GWeakRef *)user_data);
+	AiConversation *conversation;
+	AiToolExecutor *executor;
 	g_autoptr(AiTool) tool = NULL;
 	g_autoptr(JsonNode) input = json_node_new(JSON_NODE_OBJECT);
 	g_autoptr(JsonNode) schema = NULL;
@@ -229,6 +229,9 @@ invoke_tool(McpServer *server, const gchar *name, JsonObject *arguments, gpointe
 	g_autoptr(GError) error = NULL;
 	(void)server;
 
+	if (self == NULL) return text_result("Host session has closed", TRUE);
+	conversation = self->conversation;
+	executor = ai_conversation_get_executor(conversation);
 	if (self->stopping || !g_hash_table_contains(self->allowed, name))
 		return text_result("Tool is not enabled", TRUE);
 	tool = create_tool(self, name);
@@ -354,6 +357,16 @@ invoke_tool(McpServer *server, const gchar *name, JsonObject *arguments, gpointe
 	return object_result(output);
 }
 
+/* Weak bindings permit independently retained sessions without a host/server
+ * reference cycle, and keep an invocation alive only for its actual duration. */
+static void
+host_binding_free(gpointer data)
+{
+	GWeakRef *binding = data;
+	g_weak_ref_clear(binding);
+	g_free(binding);
+}
+
 /* Publish the exact grant for every connection, so reconnects cannot widen it. */
 static void
 register_tools(AiMcpHost *self, McpServer *server)
@@ -365,6 +378,7 @@ register_tools(AiMcpHost *self, McpServer *server)
 		g_autoptr(AiTool) definition = NULL;
 		g_autoptr(McpTool) tool = NULL;
 		g_autoptr(JsonNode) schema = NULL;
+		GWeakRef *binding;
 		if (!g_hash_table_contains(self->allowed, catalog[i])) continue;
 		definition = create_tool(self, catalog[i]);
 		if (definition == NULL) continue;
@@ -372,7 +386,9 @@ register_tools(AiMcpHost *self, McpServer *server)
 		schema = ai_tool_get_parameters_json(definition);
 		json_object_set_boolean_member(json_node_get_object(schema), "additionalProperties", FALSE);
 		mcp_tool_set_input_schema(tool, schema);
-		mcp_server_add_tool(server, tool, invoke_tool, self, NULL);
+		binding = g_new0(GWeakRef, 1);
+		g_weak_ref_init(binding, self);
+		mcp_server_add_tool(server, tool, invoke_tool, binding, host_binding_free);
 		g_string_append_printf(instructions, "%s ", catalog[i]);
 	}
 	g_string_append(instructions, ". Use host todo_write for TODOS and host agent_* for AGENTS when enabled; these update the visible application. Do not substitute the CLI harness plan/TODO or subagent tools. Do not call conversation_send to send yourself a message; it is for external controllers.");
@@ -454,8 +470,8 @@ ai_mcp_host_start(AiMcpHost *self, const gchar *socket_path, gboolean stdio, GEr
 		mcp_stdio_transport_set_max_line_bytes(transport, 1024 * 1024);
 		self->stdio_server = ai_mcp_host_create_server(self);
 		mcp_server_set_transport(self->stdio_server, MCP_TRANSPORT(transport));
-		g_signal_connect(transport, "state-changed", G_CALLBACK(stdio_state_changed), self);
-		g_signal_connect(self->stdio_server, "client-disconnected", G_CALLBACK(stdio_disconnected), self);
+		g_signal_connect_object(transport, "state-changed", G_CALLBACK(stdio_state_changed), self, 0);
+		g_signal_connect_object(self->stdio_server, "client-disconnected", G_CALLBACK(stdio_disconnected), self, 0);
 		mcp_server_start_async(self->stdio_server, NULL, server_started, g_object_ref(self));
 		return TRUE;
 	}
@@ -481,7 +497,7 @@ ai_mcp_host_start(AiMcpHost *self, const gchar *socket_path, gboolean stdio, GEr
 		return FALSE;
 	}
 	self->socket_server = mcp_unix_socket_server_new(self->name, "1.0.0", self->socket_path);
-	g_signal_connect(self->socket_server, "session-created", G_CALLBACK(session_created), self);
+	g_signal_connect_object(self->socket_server, "session-created", G_CALLBACK(session_created), self, 0);
 	if (!mcp_unix_socket_server_start(self->socket_server, error))
 	{
 		g_clear_object(&self->socket_server);
