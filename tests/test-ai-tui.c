@@ -2089,6 +2089,8 @@ main(int argc, char *argv[])
 {
 	gint status;
 
+	/* Spawned fixtures must never register in the developer's real herdr pane. */
+	g_unsetenv("HERDR_ENV");
 	g_test_init(&argc, &argv, NULL);
 	/* Never inherit the developer's tmux options or touch their sessions. */
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());

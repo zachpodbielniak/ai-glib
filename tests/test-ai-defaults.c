@@ -771,6 +771,8 @@ main(int argc, char *argv[])
 	g_autofree gchar *dir = NULL;
 	gint status;
 
+	/* Spawned fixtures must never register in the developer's real herdr pane. */
+	g_unsetenv("HERDR_ENV");
 	g_test_init(&argc, &argv, NULL);
 	self = g_file_read_link("/proc/self/exe", NULL);
 	absolute = g_canonicalize_filename(self != NULL ? self : argv[0], NULL);
