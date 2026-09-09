@@ -31,6 +31,7 @@
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
+#include "ai-tui-panel.h"
 
 /* ================================================================
  * Options
@@ -1301,13 +1302,13 @@ draw_chrome(App *app)
 	attrset(theme_attr(PAIR_SURFACE));
 	for (y = 2; y < LINES - 1; y++) mvhline(y, app->content_width, ' ', COLS - app->content_width);
 	y = 3;
-	chrome_text(y++, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
-	chrome_text(y++, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE));
-	chrome_text(y++, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD);
-	chrome_text(++y, x, 28, "APPEARANCE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
-	chrome_text(++y, x, 28, THEMES[theme_index].name, theme_attr(PAIR_SURFACE));
-	chrome_text(++y, x, 28, theme_colour ? "^T cycle / ^P hide" : "No color / ^P hide", theme_attr(PAIR_SURFACE));
-	chrome_text(y += 2, x, 28, "LATEST REPORTED USAGE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
+	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
+	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+	y = panel_text(y + 1, x, 28, "APPEARANCE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+	y = panel_text(y, x, 28, THEMES[theme_index].name, theme_attr(PAIR_SURFACE), FALSE);
+	y = panel_text(y, x, 28, theme_colour ? "^T cycle / ^P hide" : "No color / ^P hide", theme_attr(PAIR_SURFACE), FALSE);
+	y = panel_text(y + 1, x, 28, "LATEST REPORTED USAGE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	{
 		AiTranscript *transcript = ai_conversation_get_transcript(app->conversation);
 		gint i;
@@ -1321,7 +1322,7 @@ draw_chrome(App *app)
 				break;
 			}
 		}
-		chrome_text(++y, x, 28, usage, theme_attr(PAIR_SURFACE));
+		y = panel_text(y, x, 28, usage, theme_attr(PAIR_SURFACE), FALSE);
 	}
 	{
 		AiToolExecutor *exec = ai_conversation_get_executor(app->conversation);
@@ -1331,8 +1332,8 @@ draw_chrome(App *app)
 		g_autofree gchar *todo_heading = g_strdup_printf("TODOS / %u", n);
 		g_autofree gchar *agent_heading = g_strdup_printf("AGENTS / %u", g_list_length(agents));
 		GList *iter;
-		chrome_text(y += 2, x, 28, todo_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
-		if (n == 0) chrome_text(++y, x, 28, "No todos yet /todos", theme_attr(PAIR_SURFACE));
+		y = panel_text(y + 1, x, 28, todo_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+		if (n == 0) y = panel_text(y, x, 28, "No todos yet /todos", theme_attr(PAIR_SURFACE), FALSE);
 		for (i = 0; i < n && i < 3 && y < LINES - 5; i++)
 		{
 			const gchar *label = NULL;
@@ -1340,14 +1341,14 @@ draw_chrome(App *app)
 			g_autofree gchar *line = NULL;
 			ai_tool_executor_get_todo_fields(exec, i, &label, &state);
 			line = g_strdup_printf("%s: %s", ai_todo_state_to_string(state), label);
-			chrome_text(++y, x, 28, line, theme_attr(PAIR_SURFACE));
+			y = panel_text(y, x, 28, line, theme_attr(PAIR_SURFACE), TRUE);
 		}
-		chrome_text(y += 2, x, 28, agent_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
-		if (agents == NULL) chrome_text(++y, x, 28, brigade == NULL ? "Disabled (--no-agents)" : "No agents running /running", theme_attr(PAIR_SURFACE));
+		y = panel_text(y + 1, x, 28, agent_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+		if (agents == NULL) y = panel_text(y, x, 28, brigade == NULL ? "Disabled (--no-agents)" : "No agents running /running", theme_attr(PAIR_SURFACE), FALSE);
 		for (iter = agents; iter != NULL && y < LINES - 3; iter = iter->next)
 		{
 			g_autofree gchar *line = g_strdup_printf("%s: %s", ai_agent_get_id(iter->data), ai_agent_state_to_string(ai_agent_get_state(iter->data)));
-			chrome_text(++y, x, 28, line, theme_attr(PAIR_SURFACE));
+			y = panel_text(y, x, 28, line, theme_attr(PAIR_SURFACE), TRUE);
 		}
 		if (y < LINES - 6)
 		{
@@ -1355,10 +1356,10 @@ draw_chrome(App *app)
 			g_autofree gchar *tools = local
 				? g_strdup_printf("%u local tools /tools", g_list_length(ai_tool_executor_get_tools(exec)))
 				: g_strdup(AI_IS_CLI_CLIENT(provider) ? "Managed by provider CLI" : "Local tools disabled");
-			chrome_text(y += 2, x, 28, "TOOLS", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD);
-			chrome_text(++y, x, 28, tools, theme_attr(PAIR_SURFACE));
+			y = panel_text(y + 1, x, 28, "TOOLS", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+			y = panel_text(y, x, 28, tools, theme_attr(PAIR_SURFACE), FALSE);
 			if (local)
-				chrome_text(++y, x, 28, app->approve_all ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE));
+				y = panel_text(y, x, 28, app->approve_all ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE), FALSE);
 		}
 	}
 }

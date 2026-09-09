@@ -247,6 +247,13 @@ BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
 $(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
 $(OUTDIR)/bin/ai-tui: LDFLAGS += $(NCURSES_LIBS) -lsqlite3
 $(OUTDIR)/tests/test-ai-defaults: LDFLAGS += -lsqlite3
+ifeq ($(HAVE_NCURSES),1)
+$(OUTDIR)/tests/test-ai-tui-panel: CFLAGS += $(NCURSES_CFLAGS)
+$(OUTDIR)/tests/test-ai-tui-panel: LDFLAGS += $(NCURSES_LIBS)
+$(OUTDIR)/tests/test-ai-tui-panel: bin/ai-tui-panel.h
+else
+TEST_SOURCES := $(filter-out $(TESTDIR)/test-ai-tui-panel.c,$(TEST_SOURCES))
+endif
 
 # Include common rules
 include rules.mk
