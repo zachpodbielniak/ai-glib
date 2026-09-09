@@ -46,6 +46,30 @@ ai_conversation_set_provider(
     GError         **error
 );
 
+gboolean
+ai_conversation_get_import_native_context(AiConversation *self);
+
+void
+ai_conversation_set_import_native_context(
+	AiConversation *self,
+	gboolean        enabled
+);
+
+guint
+ai_conversation_get_native_context_limit(AiConversation *self);
+
+void
+ai_conversation_set_native_context_limit(
+	AiConversation *self,
+	guint           limit
+);
+
+const gchar *
+ai_conversation_get_carried_context(AiConversation *self);
+
+void
+ai_conversation_clear_carried_context(AiConversation *self);
+
 GList *
 ai_conversation_get_messages(AiConversation *self);
 

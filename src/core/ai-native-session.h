@@ -69,6 +69,13 @@ ai_native_session_to_context_text(
 	gsize            max_bytes
 );
 
+gchar *
+ai_native_session_to_context_text_full(
+	AiNativeSession *self,
+	GList           *exclude,
+	gsize            max_bytes
+);
+
 AiNativeSessionKind
 ai_native_session_kind_for_provider(const gchar *provider);
 

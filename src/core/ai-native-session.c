@@ -1610,7 +1610,52 @@ ai_native_session_get_dropped(AiNativeSession *self)
  * @self: an #AiNativeSession
  * @max_bytes: a byte ceiling for the result, or 0 for no limit
  *
+ * Renders the whole history as labelled text for a system prompt.
+ *
+ * Equivalent to ai_native_session_to_context_text_full() with no
+ * exclusions.
+ *
+ * Returns: (transfer full) (nullable): the digest, or %NULL if empty
+ */
+gchar *
+ai_native_session_to_context_text(
+	AiNativeSession *self,
+	gsize            max_bytes
+){
+	return ai_native_session_to_context_text_full(self, NULL, max_bytes);
+}
+
+/*
+ * message_key: the identity used to recognise a message already held.
+ *
+ * Role and text, because that is all a caller's portable history and a
+ * native transcript reliably share: ids, timestamps and block structure
+ * differ between the two records of the same exchange.
+ */
+static gchar *
+message_key(AiMessage *message)
+{
+	g_autofree gchar *text = ai_message_get_text(message);
+
+	return g_strdup_printf("%d\n%s", (gint)ai_message_get_role(message),
+	                       text != NULL ? text : "");
+}
+
+/**
+ * ai_native_session_to_context_text_full:
+ * @self: an #AiNativeSession
+ * @exclude: (nullable) (element-type AiMessage): history the caller already has
+ * @max_bytes: a byte ceiling for the result, or 0 for no limit
+ *
  * Renders the history as labelled text for a system prompt.
+ *
+ * Any message matching one in @exclude by role and text is left out. A
+ * caller that already holds part of this conversation as portable
+ * #AiMessage history would otherwise send it twice --- once as messages
+ * and once inside the digest --- which reads to the model as the user
+ * having asked the same thing twice.  What survives the filter is
+ * exactly the part the caller never saw: the CLI's own tool calls, and
+ * any backlog from a session it resumed.
  *
  * When the rendering exceeds @max_bytes the *oldest* messages are
  * dropped, not the newest, and a marker says so.  Recency is what a
@@ -1622,11 +1667,13 @@ ai_native_session_get_dropped(AiNativeSession *self)
  * Returns: (transfer full) (nullable): the digest, or %NULL if empty
  */
 gchar *
-ai_native_session_to_context_text(
+ai_native_session_to_context_text_full(
 	AiNativeSession *self,
+	GList           *exclude,
 	gsize            max_bytes
 ){
 	g_autoptr(GPtrArray) rendered = NULL;
+	g_autoptr(GHashTable) known = NULL;
 	g_autoptr(GString)   out = NULL;
 	GList               *iter;
 	gsize                total = 0;
@@ -1640,15 +1687,33 @@ ai_native_session_to_context_text(
 		return NULL;
 	}
 
+	known = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+	for (iter = exclude; iter != NULL; iter = iter->next)
+	{
+		if (AI_IS_MESSAGE(iter->data))
+		{
+			g_hash_table_add(known, message_key(AI_MESSAGE(iter->data)));
+		}
+	}
+
 	rendered = g_ptr_array_new_with_free_func(g_free);
 
 	for (iter = self->messages; iter != NULL; iter = iter->next)
 	{
 		AiMessage        *message = AI_MESSAGE(iter->data);
 		g_autofree gchar *text = ai_message_get_text(message);
+		g_autofree gchar *key = NULL;
 		const gchar      *label;
 
 		if (text == NULL || text[0] == '\0')
+		{
+			continue;
+		}
+
+		key = message_key(message);
+
+		if (g_hash_table_contains(known, key))
 		{
 			continue;
 		}

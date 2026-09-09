@@ -715,8 +715,14 @@ test_native_history(Box *box, gconstpointer data)
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
 	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "read_file");
-	g_assert_cmpstr(ai_view_tool_block_get_summary(
-		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Read file.c");
+	/* get_summary() is (transfer full); asserting on it inline leaked
+	 * the string on every run of the ASAN build. */
+	{
+		g_autofree gchar *summary = ai_view_tool_block_get_summary(
+			AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)));
+
+		g_assert_cmpstr(summary, ==, "Read file.c");
+	}
 	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
 		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "saved output");
 
