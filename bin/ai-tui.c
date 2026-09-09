@@ -387,6 +387,7 @@ typedef struct
 	gint approval_answer;
 	gboolean sending;
 	gboolean pasting;
+	gboolean skip_permissions;
 
     GString        *input;
     guint           cursor;        /* byte offset into input */
@@ -1199,6 +1200,16 @@ draw_input(App *app)
 		if (width > 40) mvwaddstr(app->input_win, getmaxy(app->input_win) - 1,
 			width - (gint)strlen(position) - 2, position);
 	}
+	/* Keep permissions on the stationary lower border, clear of the
+	 * activity sweep and row counter. Narrow panes retain the full mode. */
+	{
+		g_autofree gchar *mode = g_strdup_printf(" %s%s ",
+			app->skip_permissions ? "skip-permissions" : "read-only",
+			width >= 54 ? " | S-TAB" : "");
+		wattrset(app->input_win, attr_for_tag(app->skip_permissions
+			? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK) | A_BOLD);
+		mvwaddstr(app->input_win, getmaxy(app->input_win) - 1, 2, mode);
+	}
 	memset(&pen, 0, sizeof pen);
 	pen.win = app->input_win;
 	pen.width = MAX(1, width - INPUT_GUTTER - 2);
@@ -1359,7 +1370,7 @@ draw_chrome(App *app)
 			y = panel_text(y + 1, x, 28, "TOOLS", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 			y = panel_text(y, x, 28, tools, theme_attr(PAIR_SURFACE), FALSE);
 			if (local)
-				y = panel_text(y, x, 28, app->approve_all ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE), FALSE);
+				y = panel_text(y, x, 28, app->approve_all || app->skip_permissions ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE), FALSE);
 		}
 	}
 }
@@ -1905,6 +1916,7 @@ show_help(App *app)
     g_string_append(out,
                     "\nKeys\n"
 					"  ^O help / ^T cycle theme / ^P panel / ^L latest\n"
+					"  Shift-Tab    toggle read-only / skip-permissions\n"
 					"  ^F search transcript (case-sensitive matching rows)\n"
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
@@ -3130,8 +3142,35 @@ drain_keys(App *app)
                 break;
 
             case KEY_BTAB:  /* Shift-Tab */
-                completion_select(app, -1);
+            {
+				GObject *provider = ai_conversation_get_provider(app->conversation);
+				GParamSpec *property = g_object_class_find_property(
+					G_OBJECT_GET_CLASS(provider), "skip-permissions");
+				gboolean busy = app->sending || ai_conversation_get_busy(app->conversation);
+				g_autofree gchar *notice = NULL;
+
+				/* Wrapped tools belong to the child. Changing its property
+				 * affects the next invocation, never an existing process. */
+				if (AI_IS_CLI_CLIENT(provider) && property == NULL)
+				{
+					ui_feedback(app, "This provider does not support permission switching", AI_STYLE_ERROR);
+					break;
+				}
+				app->skip_permissions = !app->skip_permissions;
+				if (property != NULL)
+					g_object_set(provider, "skip-permissions", app->skip_permissions, NULL);
+				/* Provider replacement inherits the live choice, not argv's
+				 * original value. Session reset reuses the same provider. */
+				opt_skip_permissions = app->skip_permissions;
+				completion_close(app);
+				app->completion_dismissed = TRUE;
+				notice = g_strdup_printf("Mode: %s%s",
+					app->skip_permissions ? "skip-permissions" : "read-only",
+					busy && AI_IS_CLI_CLIENT(provider) ? " (next turn; running tools unchanged)" : "");
+				ui_feedback(app, notice, app->skip_permissions
+					? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK);
                 break;
+            }
 
             case 14:  /* ^N: cycle tool and thinking blocks */
                 completion_close(app);
@@ -3855,7 +3894,7 @@ on_approval_requested(
 
     (void)conversation;
 
-    if (app->approve_all)
+    if (app->approve_all || app->skip_permissions)
     {
         return AI_TOOL_APPROVAL_ALLOW;
     }
@@ -4211,11 +4250,11 @@ build_provider_named(
         g_object_set(provider, "continue-session", TRUE, NULL);
     }
 
-    if (opt_skip_permissions &&
+    if ((!initial || opt_skip_permissions) &&
         g_object_class_find_property(G_OBJECT_GET_CLASS(provider),
                                      "skip-permissions") != NULL)
     {
-        g_object_set(provider, "skip-permissions", TRUE, NULL);
+        g_object_set(provider, "skip-permissions", opt_skip_permissions, NULL);
     }
 
     if (initial && !apply_property_overrides(provider, error))
@@ -4452,6 +4491,11 @@ main(int argc, char *argv[])
 
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);
+	/* --set remains authoritative at startup; show the effective flag. */
+	app.skip_permissions = opt_skip_permissions;
+	if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "skip-permissions") != NULL)
+		g_object_get(provider, "skip-permissions", &app.skip_permissions, NULL);
+	opt_skip_permissions = app.skip_permissions;
 	g_signal_connect(ai_conversation_get_transcript(app.conversation), "items-changed",
 		G_CALLBACK(on_transcript_items_changed), &app);
     app.input = g_string_new(prompt);
@@ -4738,6 +4782,9 @@ main(int argc, char *argv[])
      */
     define_key("\033[13;2u", KEY_SHIFT_ENTER);
     define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
+	define_key("\033[Z", KEY_BTAB);
+	define_key("\033[9;2u", KEY_BTAB);
+	define_key("\033[27;2;9~", KEY_BTAB);
 	define_key("\033[200~", KEY_PASTE_START);
 	define_key("\033[201~", KEY_PASTE_END);
 	/* This terminal input mode has no curses wrapper; colors and drawing

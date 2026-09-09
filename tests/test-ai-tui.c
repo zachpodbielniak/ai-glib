@@ -1590,6 +1590,75 @@ test_enter_sends_the_prompt(void)
 	sandbox_free(box);
 }
 
+/**
+ * test_permission_modes:
+ * @data: nonzero to start with permission bypass enabled
+ *
+ * Exercise real terminal keys and inspect the child's effective argv through
+ * its reply. Toggling must preserve drafts and survive a session reset.
+ */
+static void
+test_permission_modes(gconstpointer data)
+{
+	Stub *stub;
+	gboolean initial_skip = GPOINTER_TO_INT(data) != 0;
+	guint i;
+	const gchar *script =
+		"#!/bin/bash\n"
+		"mode=child-guarded\n"
+		"for arg in \"$@\"\n"
+		"do\n"
+		"    if [[ ${arg} == bypassPermissions ]]\n"
+		"    then\n"
+		"        mode=child-bypass\n"
+		"    fi\n"
+		"done\n"
+		"cat >/dev/null\n"
+		"printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}}\\n' \"${mode}\"\n"
+		"printf '{\"type\":\"result\",\"result\":\"%s\"}\\n' \"${mode}\"\n";
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+	stub = stub_new("");
+	g_assert_true(g_file_set_contents(stub->stub, script, -1, NULL));
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL,
+		initial_skip ? "--skip-permissions --no-animation" : "--no-animation");
+	g_assert_true(tmux_wait_for(TUI_SESSION, initial_skip
+		? "skip-permissions | S-TAB" : "read-only | S-TAB"));
+
+	for (i = 0; i < 2; i++)
+	{
+		gboolean skip = i == 0 ? !initial_skip : initial_skip;
+
+		/* A completion menu must not consume the new global composer key. */
+		tmux_send(TUI_SESSION, "/pro");
+		tmux_send(TUI_SESSION, "BTab");
+		g_assert_true(tmux_wait_for(TUI_SESSION, skip
+			? "skip-permissions | S-TAB" : "read-only | S-TAB"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "/pro"));
+		tmux_send(TUI_SESSION, "C-u");
+		tmux_send(TUI_SESSION, "/reset");
+		tmux_send(TUI_SESSION, "Escape");
+		g_usleep(150000);
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "COMPOSE"));
+		tmux_send(TUI_SESSION, "/provider grok-build");
+		tmux_send(TUI_SESSION, "Escape");
+		g_usleep(150000);
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "Provider switched"));
+		tmux_send(TUI_SESSION, "verify mode");
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, skip ? "child-bypass" : "child-guarded"));
+	}
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 static void
 test_positional_prompt_sends_in_the_tui(void)
 {
@@ -2701,6 +2770,10 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/editor-abort",
 	                test_an_aborted_edit_keeps_the_prompt);
 
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-default",
+		GINT_TO_POINTER(0), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-skip",
+		GINT_TO_POINTER(1), test_permission_modes);
 	status = g_test_run();
 	if (tmux_available())
 	{

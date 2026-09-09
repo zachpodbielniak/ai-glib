@@ -99,6 +99,13 @@ The frame also breathes for about 2.5 seconds as the turn is handed over: the bo
 
 The state is derived rather than remembered, so it always describes what is actually true: it ends the moment there is anything in the composer, and it returns if you clear the line again without sending. A search or approval overlay is its own, louder request for input and owns the frame while it is up. Terminals without color show the waiting frame in bold, since a state nobody can see is not a state.
 
+*** Permission modes
+The composer's lower border shows =read-only= in the theme's green or =skip-permissions= in its yellow, with =S-TAB= as the switching hint. =Shift-Tab= toggles the mode without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
+
+Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. For wrapped CLIs, a change affects subsequent invocations, including resumed turns; already-running tools and background agents retain their existing permissions. Search, approval dialogs and bracketed paste retain their own input handling.
+
+=read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. CLIs without a =skip-permissions= property report that switching is unsupported.
+
 *** Motion and feedback
 A brief startup sweep introduces the composer. While a turn runs, a small two-tone highlight travels along the composer's top border alongside the existing activity spinner. It never covers the prompt, shifts the layout, or delays text and keyboard input. Search and approval overlays suppress the border sweep. Once the turn finishes, the border briefly indicates success, failure, or cancellation, and the status strip names the outcome. Theme and panel changes also give short status feedback without adding messages to the transcript or model context.
 
@@ -129,7 +136,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--max-tokens=        | Cap per response, default 4096                           |
 | =--no-stream=         | Wait for each whole turn instead of streaming it         |
 | =-c=, =--continue=    | Continue the provider's most recent session              |
-| =--skip-permissions=  | Let a wrapped CLI run its tools without asking           |
+| =--skip-permissions=  | Start in bypass mode; =Shift-Tab= switches it at runtime |
 | =--local-tools=       | Run tools in this process (HTTP providers only)          |
 | =-y=, =--yes=         | Approve every local tool call without asking             |
 | =--set PROP=VALUE=    | Set any provider property; repeatable                    |
@@ -167,6 +174,7 @@ one that refuses to start.
 | =C-u=                      | Clear the input                                   |
 | =PgUp= / =PgDn=            | Scroll the transcript, or page the completion menu |
 | =Tab=                      | Take a completion, or step to the next            |
+| =Shift-Tab=                | Toggle read-only / skip-permissions               |
 | =Escape=                   | Dismiss the completion menu                       |
 | =C-n=                      | Select the next tool or reasoning block           |
 | =C-b=                      | Expand or collapse the selected block             |
@@ -296,7 +304,7 @@ an =@= anywhere lists paths.
 | =Up= / =Down=      | Move the highlight, wrapping at both ends       |
 | =PgUp= / =PgDn=    | Move it a page at a time                        |
 | =Tab=              | Take what is on offer, or step to the next      |
-| =Shift-Tab=        | Step back                                       |
+| =Shift-Tab=        | Toggle permission mode and dismiss the menu     |
 | =Enter=            | Accept the highlighted candidate                |
 | =Escape=           | Dismiss, until the line changes again           |
 
