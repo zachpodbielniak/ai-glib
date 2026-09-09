@@ -335,6 +335,14 @@ ai_local_worker_cancel (
     return TRUE;
 }
 
+guint
+ai_local_worker_get_pending_count (AiLocalWorker *self)
+{
+	g_return_val_if_fail(AI_IS_LOCAL_WORKER(self), 0);
+	/* Terminal agent state precedes completion of asynchronous cancellation. */
+	return g_hash_table_size(self->runs);
+}
+
 static void
 ai_local_worker_worker_init (AiAgentWorkerInterface *iface)
 {

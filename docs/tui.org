@@ -615,3 +615,7 @@ installed =ai-tui= has no runtime dependency on =libai-glib=.
 - [[file:events.org][The event stream]] --- what each provider can report
 - [[file:cli.org][The =ai= CLI]] --- one-shot prompts and scripting
 - [[file:tool-executor.org][Tool Executor]] --- what =--local-tools= runs
+
+** MCP control and model-visible panels
+
+=ai-tui --mcp-tools todo_write,agent_spawn,agent_status,agent_result= starts a private MCP socket and injects it into supported CLI providers. The selected host tools update the actual TODOS and AGENTS panels; system-prompt guidance tells the model to use them instead of its native harness equivalents. =--mcp-no-inject= retains external control alone. =--mcp-server= runs headlessly over stdio, and =--mcp-all-tools= explicitly grants the complete catalog, including conversation control. See [[file:mcp.org][MCP hosting and provider integration]] for external-controller examples, opt-in policy, limits, and provider support.

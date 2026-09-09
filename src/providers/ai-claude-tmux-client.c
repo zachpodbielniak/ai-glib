@@ -54,6 +54,8 @@ struct _AiClaudeTmuxClient
     gint      startup_timeout_ms;   /* default 30 sec */
     gboolean  skip_permissions;     /* --dangerously-skip-permissions */
     gchar    *mcp_config_path;      /* nullable: --mcp-config <path> */
+    gchar    *saved_mcp_config_path;
+    gboolean endpoint_config_active;
     gboolean  keep_artifacts;       /* leave prompt/sentinel on disk */
     gboolean  debug_preserve_tmux;   /* keep tmux session + artifacts alive */
     gint      prompt_resend_interval_ms; /* wait-for-user-entry window before
@@ -1470,6 +1472,7 @@ ai_claude_tmux_client_finalize(GObject *object)
     g_free(self->claude_project_dir);
     g_free(self->mcp_config_path);
 
+    g_free(self->saved_mcp_config_path);
     G_OBJECT_CLASS(ai_claude_tmux_client_parent_class)->finalize(object);
 }
 
@@ -1534,14 +1537,20 @@ ai_claude_tmux_client_endpoint_applied(
 
     (void)error;
 
+    /* Preserve the caller's property across replacement and revocation. */
+    if (self->endpoint_config_active)
+    {
+        ai_claude_tmux_client_set_mcp_config_path(self, self->saved_mcp_config_path);
+        g_clear_pointer(&self->saved_mcp_config_path, g_free);
+        self->endpoint_config_active = FALSE;
+    }
+
     if (endpoint != NULL
         && g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG) == 0)
     {
+        self->saved_mcp_config_path = g_strdup(self->mcp_config_path);
+        self->endpoint_config_active = TRUE;
         ai_claude_tmux_client_set_mcp_config_path(self, endpoint->value);
-    }
-    else
-    {
-        ai_claude_tmux_client_set_mcp_config_path(self, NULL);
     }
 
     return TRUE;

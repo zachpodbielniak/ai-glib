@@ -1,0 +1,132 @@
+#+title: MCP hosting and CLI provider integration
+#+description: Opt-in control of ai and ai-tui through the Model Context Protocol
+#+authors: ai-glib contributors
+#+categories: ai-glib mcp cli tui
+#+created: 2026-09-09T00:00:00-04:00
+#+updated: 2026-09-09T00:00:00-04:00
+#+version: 1
+
+* Overview
+
+=ai= and =ai-tui= can expose their conversation, TODO list, and background agents as MCP tools. A standalone stdio server allows another application to drive either program. A Unix socket server controls a running TUI without taking its terminal input/output. CLI providers connect back to that live socket through a generated stdio bridge, so their tool calls update the actual TODOS and AGENTS panels.
+
+MCP is opt-in. With no =--mcp-= arguments the existing application behavior is unchanged. Starting a server does not enable tools: select names with =--mcp-tools= or explicitly grant the complete host surface with =--mcp-all-tools=. Selection applies to discovery and invocation, including clients that guess an unadvertised name. All sessions connecting to one server share the same grant and conversation; the server is a local, same-user control interface, not a multi-tenant service.
+
+* Build
+
+Initialize both submodules before building:
+
+#+begin_src bash
+git submodule update --init --recursive
+make all
+make tests
+make test
+#+end_src
+
+Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =json-glib-devel=, =libsoup3-devel=, =libdex-devel=, =libxml2-devel=, =libyaml-devel=, =ncurses-devel=, and =gobject-introspection-devel=. The bundled =deps/mcp-glib= archive is built and linked automatically; no separately installed MCP library or bridge utility is required. Both installed applications can bridge their own sockets. On Immutablue, add missing packages to the image build.
+
+* Command-line modes
+
+| Argument | Behavior |
+|----------+----------|
+| =--mcp-server= | Headless MCP server over stdin/stdout; no prompt or ncurses |
+| =--mcp-socket PATH= | Unix socket listener; combined with =--mcp-server= selects headless socket mode instead of stdio |
+| =--mcp-tools NAMES= | Enable comma-separated tool names; repeat to combine selections |
+| =--mcp-all-tools= | Enable all eleven host tools, including turn control and agent spawning |
+| =--mcp-list-tools= | List the complete tool catalog and exit before loading a provider |
+| =--mcp-no-inject= | Allow external MCP clients without configuring the selected CLI provider |
+| =--mcp-connect PATH= | Bridge stdio to an existing absolute Unix socket path; no provider is loaded |
+
+=ai= requires =--mcp-server= or =--mcp-socket= when selecting tools. In =ai-tui=, a tool selection alone starts a private live socket and injects it into supported CLI providers. =ai-tui --mcp-socket= keeps the visible TUI unless =--mcp-server= is also supplied. =ai --mcp-socket= is headless. Servers and bridges accept no positional prompt. Native launch, setup, image generation, and report modes cannot be combined with MCP hosting. =ai-tui --dump= supports live MCP injection for a single foreground turn, but cannot be combined with =--mcp-server=.
+
+=--provider=, =--model=, =--system=, =--max-tokens=, and provider =--set= arguments configure server-side turns using the normal application defaults. =ai-tui --no-agents= conflicts with enabling agent tools, including =--mcp-all-tools=; select only conversation/TODO tools instead. An unknown name, empty selection component, unavailable agent tool, or incompatible mode is an error, not a silently reduced grant.
+
+** Start a standalone server
+
+#+begin_src bash
+ai --mcp-server -p ollama --mcp-tools conversation_status,conversation_send,conversation_transcript,conversation_cancel
+ai-tui --mcp-server -p ollama --mcp-all-tools --mcp-no-inject
+#+end_src
+
+Configure an MCP client to launch that executable and argument vector. Stdout carries only newline-delimited JSON-RPC; diagnostics go to stderr. Complete the MCP initialize/initialized handshake before listing or calling tools. Keep stdin open while awaiting results. Closing the client or sending SIGINT/SIGTERM stops the server and cancels the active turn.
+
+** Give a CLI model visible TODO and agent tools
+
+#+begin_src bash
+ai-tui -p claude-code --mcp-tools todo_write,todo_read,agent_spawn,agent_status,agent_result,agent_cancel
+ai-tui -p codex-cli --mcp-tools todo_write,agent_spawn,agent_status,agent_result
+#+end_src
+
+The model receives the selected tool names and instructions to use host =todo_write= for TODOS and host =agent_*= for AGENTS instead of its CLI harness's plan/TODO/subagent tools. This guidance is appended to the user's system prompt and also returned in the MCP initialization instructions. Codex resumed sessions receive refreshed guidance when the host endpoint is active. This is instruction, not a claim that unrelated native tools have been disabled; the MCP allowlist controls only this host's tools.
+
+=--mcp-no-inject= suppresses provider injection and its system-prompt addition while retaining external control. Native CLI permission settings still govern whether a CLI may connect to or call MCP tools. MCP registration does not implicitly enable =--skip-permissions= or approve unrelated provider tools.
+
+** Control a running TUI from another application
+
+#+begin_src bash
+mcp_runtime_dir="$(mktemp -d)"
+ai-tui -p ollama --mcp-socket "${mcp_runtime_dir}/host.sock" --mcp-tools conversation_status,conversation_send,conversation_cancel,conversation_transcript,todo_read
+#+end_src
+
+Configure the other application's MCP server command as =ai-tui --mcp-connect /absolute/private-directory/host.sock=. The live TUI prints its actual socket path to stderr at startup, including when one was allocated automatically. The socket parent must already be an owned private directory with no group/other permissions; an existing leaf is never removed or replaced. The listener removes its own socket on orderly shutdown. Remove the explicitly created directory after exiting the TUI.
+
+Multiple controllers can connect, read the same state, and submit updates. Only one foreground turn can run at a time. A concurrent send or clear returns an MCP tool error; controllers should poll status before retrying. An external turn is sent verbatim, so text such as =/new= or =@path= is not expanded into host commands. Use the explicit control tools for control operations.
+
+* Tool reference
+
+All tools take an object. Unknown fields, wrong JSON types, missing required fields, invalid enumerations, and oversized input fail before changing host state. Strings are limited to 65,536 bytes. TODO lists are limited to 256 entries. Failures use MCP =isError=true= results with actionable text; an unenabled tool is a protocol-level unknown-tool error. A rejected call does not end the connection.
+
+| Tool | Arguments | Effect/result |
+|------+-----------+---------------|
+| =conversation_status= | None | Provider display name, =busy=, activity, =operation_id=, =operation_state=, optional error, TODO count, live agent count |
+| =conversation_send= | Required nonempty =prompt= string | Starts an asynchronous user turn and immediately returns =operation_id= and =state: accepted= |
+| =conversation_cancel= | None | Requests cancellation of the current turn; poll status until idle |
+| =conversation_clear= | None | Clears the idle conversation and TODOs; leaves background agents tracked |
+| =conversation_transcript= | Optional =offset= integer, optional =limit= integer | Message page: =messages= with index/role/text, =next_offset=, =has_more= |
+| =todo_read= | None | Current complete =todos= array |
+| =todo_write= | Required =todos= array | Atomically replaces the actual host TODO list and updates the transcript/panel |
+| =agent_spawn= | Required =prompt=; optional =description=, =agent=, =provider=, =model= | Starts a real background agent through the conversation's brigade; returns its ID |
+| =agent_status= | Optional =agent_id= | Reads a named agent or all agents, including progress/state |
+| =agent_result= | Required =agent_id= | Collects a finished agent's result |
+| =agent_cancel= | Required =agent_id= | Cancels a named background agent; =all= cancels active and queued agents |
+
+A TODO item requires =content= and =status= strings; =status= is exactly =pending=, =in_progress=, or =completed=. Optional =active_form= supplies the label used while working. Use an empty array to clear the list. An invalid item rejects the whole replacement and preserves the previous list.
+
+=conversation_transcript= defaults to offset 0 and limit 20, allows limits 1..100, and bounds returned text. A message exceeding 65,536 bytes is truncated at a UTF-8 boundary and marked =truncated=true=. Pages stop after roughly 64 KiB of accumulated text; follow =next_offset= while =has_more= is true. This is the conversation's text messages, not a full export of tool attachments or reasoning blocks. TODO and agent state have their own tools.
+
+=operation_id= identifies the most recent turn accepted through MCP, not an enduring job database or every keyboard-initiated turn. =busy= always reflects the live conversation. Once the MCP operation finishes, =operation_state= becomes =completed= or =failed= and the latest error is available. A successful start acknowledgement is not a completed model response. Retrieve messages only after checking status. =conversation_send= is for external controllers; a model already answering in this conversation must not send itself a second turn.
+
+Agent tools use the existing executor and brigade, so AGENTS displays real processes/model calls rather than model-reported placeholders. When =provider= is omitted, the host supplies its current provider type and model and the factory constructs a separate provider instance. Provider environment/config defaults apply to that instance; arbitrary foreground =--set= overrides are not copied. Explicit =provider= and =model= choose another backend. Named =agent= definitions use the normal resource registry and its tool allowlist. Background concurrency is four; further work queues. =--mcp-all-tools= includes agent spawning and therefore authorizes additional model calls. Blocking =agent_wait= and general filesystem/shell tools are not exposed by this host; poll =agent_status=, and use the provider's ordinary execution tools for project work.
+
+* Provider delivery and lifetime
+
+| Provider | Scoped delivery |
+|----------+-----------------|
+| Claude Code | Temporary Claude MCP JSON through =--mcp-config= |
+| Claude Code tmux | Temporary Claude MCP JSON through its existing endpoint consumer |
+| OpenCode | Temporary OpenCode MCP JSON through =OPENCODE_CONFIG= |
+| Grok Build | Temporary =GROK_HOME= overlay with a TOML MCP fragment |
+| Codex CLI | Validated dotted TOML assignments emitted as per-invocation =-c= overrides |
+| Cursor | Automatic injection unsupported; =--plugin-dir= MCP loading is account-gated in the inspected native CLI |
+| Antigravity | Automatic injection unsupported; inspected native CLI offers persistent MCP management rather than a per-invocation override |
+| HTTP providers | No subprocess injection; external MCP control remains available |
+
+Generated configurations use the server key =ai_host= and an absolute executable path with arguments =--mcp-connect= and the socket path. JSON/TOML escaping preserves spaces and special characters without a shell command string. Files live in a private temporary directory and are removed after the endpoint is revoked. Provider consumers restore caller configuration when an endpoint is revoked or replaced. =/new= rebinds existing socket sessions to the replacement conversation; supported =/provider= changes regenerate the correct dialect and preserve the host grant. A switch to a provider without a reliable injection path is rejected when injection is requested.
+
+The bridge is intentionally local. There is no HTTP listener, public TCP port, bearer-token scheme, or remote multi-user authorization. Possession of access to the private socket grants the enabled tools. No network listener starts by default. The MCP grant does not sandbox the underlying provider, agent, or host OS. Abrupt process termination can leave a private temporary directory; the next process creates a new directory rather than deleting or reusing an unknown socket.
+
+* Implementation and verification
+
+The private application adapter is =src/mcp/ai-mcp-host.c=; =bin/ai-mcp-options.h= keeps every MCP argument identical between the two frontends. The adapter registers tools against the existing =AiConversation=, =AiToolExecutor=, and =AiBrigade= rather than maintaining parallel TODO or agent state. Long foreground model calls return immediately and complete via the GLib main loop, allowing cancellation and other MCP connections to remain responsive.
+
+=tests/test-mcp-host.c= checks grants, schema validation, atomic TODO replacement, shared panels, bounds, socket-path handling, rebinding, and provider switching. =tests/test-mcp-cli.c= launches the real binaries with a C provider fixture, validates both server transports and the real stdio bridge, and proves injected TODO calls reach the TUI transcript. =tests/test-mcp-provider-delivery.c= checks provider dialects, scoped configuration restoration, invalid configuration rejection, and Codex resumed guidance. The full =make test= target also runs existing provider, CLI, TUI, and introspection regressions.
+
+The bundled dependency review and hardening rationale are recorded in [[file:mcp-submodule-review.org][MCP submodule review]]. Protocol and transport regression tests live in =deps/mcp-glib/tests/=.
+
+** Resource limits and shutdown
+
+Both host transports cap input frames at 1 MiB. The dependency caps each client's queued output at 16 MiB and 256 messages; saturation closes that connection rather than allowing unbounded accumulation. The socket server allows 32 simultaneous clients and requires initialization within 10 seconds. Plain tool results are truncated at a UTF-8 boundary after 1 MiB; JSON state results exceeding that bound return an error instead of invalid truncated JSON. Agent spawning allows at most 128 tracked agents; collect completed results to remove their records and free capacity. Normal host shutdown cancels the foreground turn and all tracked background work.
+
+Shutdown stops accepting requests, cancels work, and drains asynchronous cleanup for up to three seconds. The local worker exposes =ai_local_worker_get_pending_count()= because an agent can already report =cancelled= while its provider cleanup is still pending. CLI communication failures terminate the child process; closing its pipes alone is insufficient. A provider that does not finish cancellation within the shutdown bound produces a diagnostic on stderr. Subprocess regressions verify that active agents and agents cancelled immediately before EOF leave no live provider child in either executable.
+
+Explicit Claude MCP JSON files and explicit =OPENCODE_CONFIG= JSON files are merged into the private generated configuration, retaining their other servers/settings while reserving =ai_host= for this session. Explicit files must be regular JSON files no larger than 1 MiB; unreadable or invalid files fail injection rather than silently dropping caller settings. Provider-native global/project configuration merging still applies. No explicit caller file is rewritten.

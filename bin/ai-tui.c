@@ -27,6 +27,7 @@
 
 #include <ai-glib.h>
 #include "ai-launch.h"
+#include "ai-mcp-options.h"
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
@@ -360,6 +361,7 @@ static const gchar *SPINNER_FRAMES[] = {
 typedef struct
 {
     AiConversation *conversation;
+	AiMcpHost *mcp_host;
 	AiTuiHerdr *herdr;
     GMainLoop      *loop;
     GCancellable   *cancellable;
@@ -2513,8 +2515,9 @@ handle_builtin(App *app, AiCommandResult *result)
             replacement = build_provider_named(requested, FALSE, &error);
 
             if (replacement == NULL
-                || !ai_conversation_set_provider(app->conversation,
-                                                 replacement, &error))
+                || !(app->mcp_host != NULL
+                    ? ai_mcp_host_set_provider(app->mcp_host, replacement, mcp_executable, !opt_mcp_no_inject, &error)
+                    : ai_conversation_set_provider(app->conversation, replacement, &error)))
             {
                 say(app, "Provider unchanged: %s",
                     error != NULL ? error->message : "switch failed");
@@ -3899,11 +3902,32 @@ static void
 app_reset(App *app)
 {
 	g_autoptr(AiConversation) previous = NULL;
+	g_autoptr(AiConversation) replacement = NULL;
 	g_autoptr(AiBrigade) brigade = NULL;
 	GObject *provider;
 
-	previous = app->conversation;
+	previous = g_object_ref(app->conversation);
 	provider = ai_conversation_get_provider(previous);
+	/* Prepare and bind before discarding any live application state. A
+	 * failed config write must leave /new and its MCP clients unchanged. */
+	replacement = ai_conversation_new(provider);
+	ai_conversation_set_system_prompt(replacement, ai_conversation_get_system_prompt(previous));
+	ai_conversation_set_working_directory(replacement, ai_conversation_get_working_directory(previous));
+	ai_conversation_set_max_tokens(replacement, ai_conversation_get_max_tokens(previous));
+	ai_conversation_set_stream(replacement, ai_conversation_get_stream(previous));
+	ai_conversation_set_local_tools(replacement, ai_conversation_get_local_tools(previous));
+	ai_conversation_set_command_set(replacement, app->commands);
+	if (!opt_no_agents)
+		ai_conversation_enable_background_agents(replacement, AGENT_MAX_CONCURRENT);
+	if (app->mcp_host != NULL)
+	{
+		g_autoptr(GError) mcp_error = NULL;
+		if (!ai_mcp_host_bind(app->mcp_host, replacement, mcp_executable, !opt_mcp_no_inject, &mcp_error))
+		{
+			say(app, "Session unchanged: MCP reset failed: %s", mcp_error->message);
+			return;
+		}
+	}
 	g_signal_handlers_disconnect_by_data(previous, app);
 	g_signal_handlers_disconnect_by_data(ai_conversation_get_transcript(previous), app);
 	if (ai_conversation_get_brigade(previous) != NULL)
@@ -3922,16 +3946,9 @@ app_reset(App *app)
 	}
 
 	/* A new executor also forgets tool approvals, todos and agent results. */
-	app->conversation = ai_conversation_new(provider);
-	ai_conversation_set_system_prompt(app->conversation, ai_conversation_get_system_prompt(previous));
-	ai_conversation_set_working_directory(app->conversation, ai_conversation_get_working_directory(previous));
-	ai_conversation_set_max_tokens(app->conversation, ai_conversation_get_max_tokens(previous));
-	ai_conversation_set_stream(app->conversation, ai_conversation_get_stream(previous));
-	ai_conversation_set_local_tools(app->conversation, ai_conversation_get_local_tools(previous));
-	ai_conversation_set_command_set(app->conversation, app->commands);
+	g_set_object(&app->conversation, replacement);
 	if (!opt_no_agents)
 	{
-		ai_conversation_enable_background_agents(app->conversation, AGENT_MAX_CONCURRENT);
 		g_signal_connect(app->conversation, "agent-finished", G_CALLBACK(on_agent_finished), app);
 	}
 	g_signal_connect(ai_conversation_get_transcript(app->conversation), "items-changed",
@@ -4319,16 +4336,20 @@ main(int argc, char *argv[])
     g_autoptr(AiTuiHerdr) herdr = NULL;
     GObject *provider;
     App app;
+	AiMcpHost *mcp_host __attribute__((cleanup(mcp_cleanup))) = NULL;
 
     setlocale(LC_ALL, "");
 
     context = g_option_context_new("[PROMPT] - a terminal agent harness");
     g_option_context_add_main_entries(context, option_entries, NULL);
+	g_option_context_add_main_entries(context, mcp_option_entries, NULL);
     g_option_context_set_summary(context,
         "Drives any ai-glib provider from a terminal, showing prose,\n"
         "reasoning and grouped tool calls as they happen.");
 	g_option_context_set_description(context,
 		"Examples:\n  ai --setup                 # configure ai-tui independently\n"
+		"  ai-tui --mcp-tools todo_write,agent_spawn,agent_status,agent_result\n"
+		"  ai-tui --mcp-server --mcp-all-tools --mcp-no-inject\n"
 		"  ai-tui -p default -m default\n"
 		"  ai-tui \"review the diff\"\n"
 		"  echo \"review the diff\" | ai-tui\n\n"
@@ -4347,6 +4368,11 @@ main(int argc, char *argv[])
         g_printerr("ai-tui: %s\n", error->message);
         return 1;
     }
+
+	{
+		gint mcp_status = mcp_early(argc, argv[0], opt_launch || opt_launch_cmd || opt_launch_cmd_print || (opt_mcp_server && (opt_dump != NULL || opt_dry_run)), &error);
+		if (mcp_status >= 0) { if (error != NULL) g_printerr("ai-tui: %s\n", error->message); return mcp_status; }
+	}
 
     if (opt_version)
     {
@@ -4408,6 +4434,13 @@ main(int argc, char *argv[])
 
 		g_object_unref(provider);
 		return status;
+	}
+
+	if (opt_mcp_server)
+	{
+		gint mcp_status = mcp_headless(provider, "ai-tui", opt_system, opt_max_tokens, !opt_no_stream, opt_no_agents);
+		g_object_unref(provider);
+		return mcp_status;
 	}
 
 	/* Same sources as `ai`: leftover argv, else stdin when it is a pipe. */
@@ -4489,6 +4522,19 @@ main(int argc, char *argv[])
                          G_CALLBACK(on_agent_finished), &app);
     }
 
+	if (mcp_requested())
+	{
+		mcp_host = ai_mcp_host_new(app.conversation, "ai-tui", (const gchar * const *)opt_mcp_tools, opt_mcp_all_tools, &error);
+		if (mcp_host == NULL || !ai_mcp_host_start(mcp_host, opt_mcp_socket, FALSE, &error) ||
+		    !ai_mcp_host_bind(mcp_host, app.conversation, mcp_executable, !opt_mcp_no_inject, &error))
+		{
+			g_printerr("ai-tui: %s\n", error->message);
+			return 2;
+		}
+		app.mcp_host = mcp_host;
+		g_printerr("ai-tui MCP socket: %s\n", ai_mcp_host_get_socket_path(mcp_host));
+	}
+
     /*
      * --dry-run: what the CLI provider would actually run.
      *
@@ -4520,7 +4566,7 @@ main(int argc, char *argv[])
             else
             {
                 g_auto(GStrv) command = klass->build_argv(
-                    AI_CLI_CLIENT(provider), messages, opt_system,
+                    AI_CLI_CLIENT(provider), messages, ai_conversation_get_system_prompt(app.conversation),
                     opt_max_tokens, !opt_no_stream);
                 g_autofree gchar *resolved =
                     ai_cli_client_resolve_executable(AI_CLI_CLIENT(provider),

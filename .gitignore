@@ -69,3 +69,6 @@ coverage/
 
 # Worktrees for feature and bugfix work.
 trees/
+
+# Local acceptance ledgers and agent coordination.
+.unlazy/

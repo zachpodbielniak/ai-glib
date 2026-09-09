@@ -25,6 +25,7 @@ struct _AiBrigade
 
     guint          max_concurrent;
     gboolean       pumping;
+    guint          cancelling;
 
     /* Agents admitted but not yet started, with the prompt each is
      * waiting to be given.  A queued agent has to keep its prompt
@@ -448,6 +449,7 @@ ai_brigade_can_start (AiBrigade *self)
 {
     g_return_val_if_fail(AI_IS_BRIGADE(self), FALSE);
 
+    if (self->cancelling != 0) return FALSE;
     if (ai_budget_exceeded(self->budget, NULL)) return FALSE;
     if (self->max_concurrent == 0) return TRUE;
     return ai_brigade_count_live(self) < self->max_concurrent;
@@ -496,7 +498,7 @@ brigade_dispatch (AiBrigade *self, AiAgent *agent, const gchar *prompt)
 static void
 brigade_pump_queue (AiBrigade *self)
 {
-    if (self->pumping) return;
+    if (self->pumping || self->cancelling != 0) return;
     self->pumping = TRUE;
 
     while (!g_queue_is_empty(self->queue) && ai_brigade_can_start(self))
@@ -719,24 +721,36 @@ ai_brigade_generate_id (AiBrigade *self, const gchar *prefix)
 guint
 ai_brigade_cancel_all (AiBrigade *self)
 {
-    g_autoptr(GList) agents = NULL;
-    GList *l;
+    g_autoptr(GPtrArray) agents = g_ptr_array_new_with_free_func(g_object_unref);
+    GHashTableIter iter;
+    gpointer value;
+    guint i;
     guint n = 0;
 
     g_return_val_if_fail(AI_IS_BRIGADE(self), 0);
 
-    /* Snapshot before cancelling: ::state-changed handlers can remove
-     * agents, and mutating the table mid-iteration is undefined. */
-    agents = g_hash_table_get_values(self->agents);
-    for (l = agents; l != NULL; l = l->next)
+    /* Hold every agent, not just its list node: terminal callbacks can
+     * remove other entries as well as their own. Suspend queue dispatch
+     * through nested cancellation calls so freeing a slot cannot start
+     * work that this very operation is trying to cancel. */
+    self->cancelling++;
+    g_hash_table_iter_init(&iter, self->agents);
+    while (g_hash_table_iter_next(&iter, NULL, &value))
+        g_ptr_array_add(agents, g_object_ref(value));
+    for (i = 0; i < agents->len; i++)
     {
-        AiAgent *a = AI_AGENT(l->data);
-        if (ai_agent_state_is_live(ai_agent_get_state(a)))
+        AiAgent *a = AI_AGENT(g_ptr_array_index(agents, i));
+        AiAgentState state = ai_agent_get_state(a);
+        if (ai_agent_state_is_live(state) || state == AI_AGENT_STATE_QUEUED)
         {
             ai_agent_cancel(a);
             n++;
         }
     }
+    self->cancelling--;
+    /* Discard cancelled queue entries and their prompts; any genuinely
+     * new work admitted by a callback may run after this snapshot ends. */
+    brigade_pump_queue(self);
     return n;
 }
 

@@ -138,6 +138,7 @@ clean-all:
 	rm -rf $(BUILDDIR)
 	rm -f $(PROJECT_NAME)-1.0.pc
 	$(MAKE) -C $(YAML_GLIB_DIR) clean-all DEBUG=0 ASAN=0 UBSAN=0 2>/dev/null || true
+	$(MAKE) -C $(MCP_GLIB_DIR) clean
 
 # Distclean is an alias for clean-all
 .PHONY: distclean

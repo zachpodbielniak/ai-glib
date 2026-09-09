@@ -1517,6 +1517,8 @@ on_retry_communicate_complete(
 						   &stdout_data, &stderr_data,
 						   &error))
 	{
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
 		goto fallback;
 	}
 
@@ -1636,6 +1638,8 @@ on_chat_communicate_complete(
 						   &stdout_data, &stderr_data,
 						   &error))
 	{
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
 		g_task_return_error(data->task, g_steal_pointer(&error));
 		chat_async_data_free(data);
 		return;

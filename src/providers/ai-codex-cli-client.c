@@ -21,6 +21,7 @@ struct _AiCodexCliClient
     gchar *additional_directories;
     gchar *profile;
     gchar *turn_system_prompt;
+    gchar **mcp_overrides;
     gboolean skip_permissions;
     gboolean continue_session;
     gboolean search;
@@ -115,6 +116,13 @@ build_argv(AiCliClient *client, GList *messages, const gchar *system_prompt,
     if (self->search) arg(args, "--search");
     if (self->profile != NULL && *self->profile)
     { arg(args, "--profile"); arg(args, self->profile); }
+    if (self->mcp_overrides != NULL)
+    {
+        guint i;
+        /* Global overrides also apply when exec resumes a saved session. */
+        for (i = 0; self->mcp_overrides[i] != NULL; i++)
+        { arg(args, "-c"); arg(args, self->mcp_overrides[i]); }
+    }
     arg(args, "exec");
     arg(args, "--json");
     arg(args, "--skip-git-repo-check");
@@ -166,7 +174,7 @@ build_stdin(AiCliClient *client, GList *messages)
     GList *l;
     if (system == NULL) system = ai_cli_client_get_system_prompt(client);
     if (system != NULL && *system &&
-        (!ai_cli_client_get_session_persistence(client) ||
+        (self->mcp_overrides != NULL || !ai_cli_client_get_session_persistence(client) ||
          ((session == NULL || !*session) && !self->continue_session)))
         g_string_append_printf(prompt, "<system>\n%s\n</system>\n\n", system);
     messages = ai_cli_client_messages_for_prompt(client, messages);
@@ -447,8 +455,133 @@ finalize(GObject *object)
     g_free(self->additional_directories);
     g_free(self->profile);
     g_free(self->turn_system_prompt);
+    g_strfreev(self->mcp_overrides);
     G_OBJECT_CLASS(ai_codex_cli_client_parent_class)->finalize(object);
 }
+
+/*
+ * endpoint_applied:
+ * @client: the receiving CLI client
+ * @endpoint: (nullable): the granted configuration file
+ * @error: return location for a configuration error
+ *
+ * Accept only the small JSON/TOML intersection needed for stdio MCP
+ * servers. This prevents a host fragment from changing sandbox or model
+ * configuration, and rejects malformed values before launching Codex.
+ * Keep an owned snapshot so deletion or replacement of the host's file
+ * cannot change a grant after it has been applied.
+ *
+ * Returns: whether the grant was accepted
+ */
+static gboolean
+endpoint_applied(
+	AiCliClient           *client,
+	const AiAgentEndpoint *endpoint,
+	GError               **error
+){
+	AiCodexCliClient *self = AI_CODEX_CLI_CLIENT(client);
+	g_autofree gchar *contents = NULL;
+	g_auto(GStrv) lines = NULL;
+	g_autoptr(GPtrArray) overrides = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(GHashTable) keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	g_autoptr(GFile) file = NULL;
+	g_autoptr(GFileInputStream) input = NULL;
+	GHashTableIter iter;
+	gpointer stored_key;
+	gsize length;
+	guint i;
+
+	/* Failed replacement must not leave a revoked grant active. */
+	g_clear_pointer(&self->mcp_overrides, g_strfreev);
+	if (endpoint == NULL || g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG_CODEX) != 0)
+		return TRUE;
+	if (endpoint->value == NULL || *endpoint->value == '\0')
+		goto invalid;
+	file = g_file_new_for_path(endpoint->value);
+	input = g_file_read(file, NULL, error);
+	if (input == NULL) return FALSE;
+	contents = g_malloc0(65538);
+	if (!g_input_stream_read_all(G_INPUT_STREAM(input), contents, 65537, &length, NULL, error))
+		return FALSE;
+	if (length > 65536 || strlen(contents) != length || !g_utf8_validate(contents, length, NULL))
+		goto invalid;
+	lines = g_strsplit(contents, "\n", -1);
+	for (i = 0; lines[i] != NULL; i++)
+	{
+		g_autoptr(JsonParser) parser = json_parser_new();
+		g_auto(GStrv) path = NULL;
+		gchar *line = g_strstrip(lines[i]);
+		gchar *equals;
+		gchar *key;
+		gchar *value;
+		JsonNode *node;
+		guint j;
+
+		if (*line == '\0' || *line == '#') continue;
+		equals = strchr(line, '=');
+		if (equals == NULL) goto invalid;
+		*equals = '\0';
+		key = g_strstrip(line);
+		value = g_strstrip(equals + 1);
+		path = g_strsplit(key, ".", -1);
+		if (g_strv_length(path) != 3 || !g_str_equal(path[0], "mcp_servers") || !*path[1])
+			goto invalid;
+		for (j = 0; path[1][j] != '\0'; j++)
+			if (!g_ascii_isalnum(path[1][j]) && path[1][j] != '_' && path[1][j] != '-')
+				goto invalid;
+		if (!g_hash_table_add(keys, g_strdup(key))) goto invalid;
+		if (!json_parser_load_from_data(parser, value, -1, NULL)) goto invalid;
+		node = json_parser_get_root(parser);
+		if (g_str_equal(path[2], "command"))
+		{
+			if (!JSON_NODE_HOLDS_VALUE(node) || json_node_get_value_type(node) != G_TYPE_STRING ||
+			    !*json_node_get_string(node)) goto invalid;
+		}
+		else if (g_str_equal(path[2], "args"))
+		{
+			JsonArray *array;
+			if (!JSON_NODE_HOLDS_ARRAY(node)) goto invalid;
+			array = json_node_get_array(node);
+			for (j = 0; j < json_array_get_length(array); j++)
+			{
+				JsonNode *element = json_array_get_element(array, j);
+				if (!JSON_NODE_HOLDS_VALUE(element) || json_node_get_value_type(element) != G_TYPE_STRING)
+					goto invalid;
+			}
+		}
+		else goto invalid;
+		/* JSON permits \\/, while TOML does not; reject that ambiguous escape. */
+		if (strstr(value, "\\/") != NULL) goto invalid;
+		g_ptr_array_add(overrides, g_strdup_printf("%s=%s", key, value));
+	}
+	if (overrides->len == 0) goto invalid;
+	/* An args-only table would inherit an unrelated user command. */
+	g_hash_table_iter_init(&iter, keys);
+	while (g_hash_table_iter_next(&iter, &stored_key, NULL))
+	{
+		const gchar *key = (const gchar *)stored_key;
+		if (g_str_has_suffix(key, ".args"))
+		{
+			g_autofree gchar *prefix = g_strndup(key, strlen(key) - 5);
+			g_autofree gchar *command_key = g_strconcat(prefix, ".command", NULL);
+			if (!g_hash_table_contains(keys, command_key)) goto invalid;
+		}
+	}
+	g_ptr_array_add(overrides, NULL);
+	self->mcp_overrides = (gchar **)g_ptr_array_free(g_steal_pointer(&overrides), FALSE);
+	return TRUE;
+
+invalid:
+	g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+		"Invalid Codex MCP configuration: expected unique mcp_servers.NAME.command/args JSON assignments (maximum 64 KiB)");
+	return FALSE;
+}
+
+static const gchar * const endpoint_kinds[] = {
+	AI_ENDPOINT_KIND_ENV,
+	AI_ENDPOINT_KIND_MCP_CONFIG_CODEX,
+	NULL
+};
 
 static void
 ai_codex_cli_client_class_init(AiCodexCliClientClass *klass)
@@ -459,6 +592,8 @@ ai_codex_cli_client_class_init(AiCodexCliClientClass *klass)
     object_class->set_property = set_property;
     object_class->finalize = finalize;
     cli->check_exit_status = TRUE;
+    cli->endpoint_applied = endpoint_applied;
+    cli->endpoint_kinds = endpoint_kinds;
     cli->get_executable_path = get_executable;
     cli->build_argv = build_argv;
     cli->build_stdin = build_stdin;

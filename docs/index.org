@@ -37,6 +37,7 @@ see their provider pages.
 - [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
 - [[file:native-session.org][Native session import]] - Read a wrapped CLI's own transcript so a switch does not lose it
 - [[file:tui.org][ai-tui]] - The terminal agent harness
+- [[file:mcp.org][MCP hosting]] - Opt-in conversation, TODO, and agent control with CLI provider injection
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 - [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON
 

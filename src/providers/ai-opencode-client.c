@@ -49,6 +49,8 @@ struct _AiOpenCodeClient
      * the re-prompt fallback when the AI produces no text. */
     gchar *last_tool_summary;
     gchar *turn_system_prompt;
+    gchar *saved_opencode_config;
+    gboolean endpoint_config_active;
 };
 
 /*
@@ -1043,6 +1045,7 @@ ai_opencode_client_finalize(GObject *object)
     g_free(self->log_level);
     g_free(self->turn_system_prompt);
 
+    g_free(self->saved_opencode_config);
     G_OBJECT_CLASS(ai_opencode_client_parent_class)->finalize(object);
 }
 
@@ -1075,18 +1078,28 @@ ai_opencode_client_endpoint_applied(
     const AiAgentEndpoint  *endpoint,
     GError                **error
 ){
+    AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
+
     (void)error;
+
+    /* Restore the caller's setting before replacing or revoking a grant. */
+    if (self->endpoint_config_active)
+    {
+        if (self->saved_opencode_config != NULL)
+            ai_cli_client_set_env(client, "OPENCODE_CONFIG", self->saved_opencode_config);
+        else
+            ai_cli_client_unset_env(client, "OPENCODE_CONFIG");
+        g_clear_pointer(&self->saved_opencode_config, g_free);
+        self->endpoint_config_active = FALSE;
+    }
 
     if (endpoint != NULL
         && g_strcmp0(endpoint->kind,
                      AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE) == 0)
     {
+        self->saved_opencode_config = g_strdup(ai_cli_client_get_env(client, "OPENCODE_CONFIG"));
+        self->endpoint_config_active = TRUE;
         ai_cli_client_set_env(client, "OPENCODE_CONFIG", endpoint->value);
-    }
-    else
-    {
-        /* Revoke must undo exactly what apply did. */
-        ai_cli_client_unset_env(client, "OPENCODE_CONFIG");
     }
 
     return TRUE;
@@ -1415,6 +1428,8 @@ on_retry_communicate_complete(
                                                &stdout_data, &stderr_data,
                                                &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         goto fallback;
     }
 
@@ -1544,6 +1559,8 @@ on_chat_communicate_complete(
     if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
                                                &stdout_data, &stderr_data, &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         g_task_return_error(data->task, g_steal_pointer(&error));
         chat_async_data_free(data);
         return;

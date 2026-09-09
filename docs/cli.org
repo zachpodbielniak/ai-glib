@@ -447,3 +447,7 @@ See [[file:providers/codex-cli.org][Codex CLI]] for models, session behavior and
 Use =openai-compatible= (alias =http=) with your own API root, token and
 model ID. See [[file:providers/openai-compatible.org][the OpenAI-compatible provider guide]] for
 configuration, supported APIs, examples and compatibility limits.
+
+** MCP server
+
+=ai --mcp-server --mcp-tools conversation_status,conversation_send,conversation_transcript= exposes a headless conversation to MCP clients. Tools are disabled by default; =--mcp-all-tools= grants the complete host catalog. =--mcp-socket= selects a private Unix socket, and =--mcp-connect= bridges a client to an existing server. All MCP flags begin with =--mcp-=. See [[file:mcp.org][MCP hosting and provider integration]] for schemas, transport modes, provider delivery, and complete examples.

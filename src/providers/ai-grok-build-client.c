@@ -66,6 +66,7 @@ struct _AiGrokBuildClient
     /* Temporary GROK_HOME standing in for the user's, so an endpoint can
      * add MCP servers without writing to their home or repository. */
     gchar   *home_overlay;
+    gchar   *saved_grok_home;
 };
 
 /*
@@ -1389,6 +1390,7 @@ ai_grok_build_client_finalize(GObject *object)
         g_clear_pointer(&self->home_overlay, g_free);
     }
 
+    g_free(self->saved_grok_home);
     G_OBJECT_CLASS(ai_grok_build_client_parent_class)->finalize(object);
 }
 
@@ -1423,7 +1425,11 @@ ai_grok_build_client_endpoint_applied(
     {
         ai_grok_home_overlay_destroy(self->home_overlay);
         g_clear_pointer(&self->home_overlay, g_free);
-        ai_cli_client_unset_env(client, "GROK_HOME");
+        if (self->saved_grok_home != NULL)
+            ai_cli_client_set_env(client, "GROK_HOME", self->saved_grok_home);
+        else
+            ai_cli_client_unset_env(client, "GROK_HOME");
+        g_clear_pointer(&self->saved_grok_home, g_free);
     }
 
     if (endpoint == NULL
@@ -1432,10 +1438,12 @@ ai_grok_build_client_endpoint_applied(
         return TRUE;
     }
 
-    self->home_overlay = ai_grok_home_overlay_create(NULL, endpoint->value,
+    self->saved_grok_home = g_strdup(ai_cli_client_get_env(client, "GROK_HOME"));
+    self->home_overlay = ai_grok_home_overlay_create(self->saved_grok_home, endpoint->value,
                                                      error);
     if (self->home_overlay == NULL)
     {
+        g_clear_pointer(&self->saved_grok_home, g_free);
         return FALSE;
     }
 
@@ -1792,6 +1800,8 @@ on_retry_communicate_complete(
                                                &stdout_data, &stderr_data,
                                                &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         goto fallback;
     }
 
@@ -1928,6 +1938,8 @@ on_chat_communicate_complete(
                                                &stdout_data, &stderr_data,
                                                &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         g_task_return_error(data->task, g_steal_pointer(&error));
         chat_async_data_free(data);
         return;

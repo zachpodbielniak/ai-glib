@@ -50,4 +50,16 @@ G_DECLARE_FINAL_TYPE (AiLocalWorker, ai_local_worker, AI, LOCAL_WORKER, GObject)
  */
 AiLocalWorker *ai_local_worker_new (void);
 
+/**
+ * ai_local_worker_get_pending_count:
+ * @self: a local worker
+ *
+ * Counts runs whose asynchronous cleanup has not finished, including cancelled
+ * agents already in a terminal state. Call on the worker's owning main context.
+ * Shutdown code can use this to drain cancellation callbacks before exiting.
+ *
+ * Returns: the number of pending runs
+ */
+guint ai_local_worker_get_pending_count (AiLocalWorker *self);
+
 G_END_DECLS

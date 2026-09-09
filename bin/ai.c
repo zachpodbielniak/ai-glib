@@ -32,6 +32,7 @@
 #include "ai-glib.h"
 #include "ai-setup.h"
 #include "ai-launch.h"
+#include "ai-mcp-options.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -1368,6 +1369,7 @@ main(int argc, char *argv[])
 
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);
+	g_option_context_add_main_entries(ctx, mcp_option_entries, NULL);
 	g_option_context_set_summary(
 		ctx,
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
@@ -1400,6 +1402,8 @@ main(int argc, char *argv[])
 		"  ai --launch -p claude -m opus     # open Claude Code directly\n"
 		"  ai --launch-cmd -p default -m default\n"
 		"  ai --launch-cmd-print -p grok-build \"explain this project\"\n"
+		"  ai --mcp-server --mcp-tools conversation_status,conversation_send\n"
+		"  ai --mcp-server --mcp-all-tools --mcp-no-inject\n"
 		"  ai --setup                       # choose defaults for one scope\n"
 		"  ai -p default -m default \"hi\"    # same defaults as ai \"hi\"\n"
 		"  ai \"why is the sky blue?\"\n"
@@ -1415,6 +1419,12 @@ main(int argc, char *argv[])
 	{
 		g_printerr("ai: %s\n", error->message);
 		return 2;
+	}
+
+	{
+		gint mcp_status = mcp_early(argc, argv[0], opt_launch || opt_launch_cmd || opt_launch_cmd_print || opt_setup || opt_image_gen || opt_image_list_models || opt_interactive || opt_dry_run || opt_usage || opt_history, &error);
+		if (mcp_status >= 0) { if (error != NULL) g_printerr("ai: %s\n", error->message); return mcp_status; }
+		if (mcp_requested() && !opt_mcp_server && opt_mcp_socket == NULL) { g_printerr("ai: MCP tool options require --mcp-server or --mcp-socket\n"); return 2; }
 	}
 
 	if (opt_version)
@@ -1521,6 +1531,12 @@ main(int argc, char *argv[])
 	{
 		g_object_unref(provider);
 		return 2;
+	}
+	if (mcp_requested())
+	{
+		gint mcp_status = mcp_headless(provider, "ai", opt_system, opt_max_tokens, opt_stream, FALSE);
+		g_object_unref(provider);
+		return mcp_status;
 	}
 	if (opt_usage || opt_history)
 	{

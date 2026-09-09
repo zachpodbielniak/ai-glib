@@ -128,6 +128,7 @@ PUBLIC_HEADERS = \
 
 # Library source files
 LIB_SOURCES = \
+	$(SRCDIR)/mcp/ai-mcp-host.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
@@ -255,6 +256,9 @@ include rules.mk
 # (build/release/, build/debug/) and consolidated lib-static + lib-shared
 # into a single `lib` target. We only consume the static archive but pay
 # for the shared lib too — acceptable since yaml-glib is small.
+$(MCP_GLIB_STATIC): $(wildcard $(MCP_GLIB_DIR)/src/*.c $(MCP_GLIB_DIR)/src/*.h)
+	$(MAKE) -C $(MCP_GLIB_DIR) build/libmcp-glib-1.0.a
+
 $(YAML_GLIB_STATIC):
 	@echo "Building yaml-glib..."
 	$(MAKE) -C $(YAML_GLIB_DIR) lib DEBUG=0 ASAN=0 UBSAN=0
@@ -305,7 +309,7 @@ $(LIB_STATIC): $(LIB_OBJECTS) | $(OUTDIR)
 	$(AR) rcs $@ $(LIB_OBJECTS)
 
 # Ensure config.h, ai-version.h, and yaml-glib exist before compiling
-$(LIB_OBJECTS): $(OUTDIR)/config.h $(OUTDIR)/ai-version.h $(YAML_GLIB_STATIC)
+$(LIB_OBJECTS): $(OUTDIR)/config.h $(OUTDIR)/ai-version.h $(YAML_GLIB_STATIC) $(MCP_GLIB_STATIC)
 
 # pkg-config file (stays at project root — moving it under $(OUTDIR) would
 # silently break consumers that run `pkg-config --variable pcfiledir`).
@@ -368,6 +372,7 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

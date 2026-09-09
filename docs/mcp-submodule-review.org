@@ -1,0 +1,87 @@
+#+title: Bundled mcp-glib integration review
+#+description: Source audit of MCP transport, server lifecycle, validation, and local control integration
+#+authors: ai-glib contributors
+#+categories: development mcp security
+#+created: 2026-09-09T00:00:00-04:00
+#+updated: 2026-09-09T00:00:00-04:00
+#+version: 1
+
+* Scope and evidence
+
+This review examines bundled revision =a6bd81177e9fe55df8941462be5442791bccd6f5= for stdio and Unix socket servers controlling a shared =AiConversation=. Findings below describe that revision, before any integration hardening. This is a source audit, not a claim that the bundled test suite was executed. Host implementation and test evidence belong to the integration documentation and build logs.
+
+Four passes covered the public transport/server contract, GLib lifecycle and integration suitability, concrete defects and resource limits, then source-reference and recommendation accuracy. HTTP, WebSocket, client sampling, and remote deployment are outside this integration's scope.
+
+* Integration contract
+
+Use one =McpServer= per connection and register exactly the selected tools. Protocol state, request identifiers, and peer capabilities belong to the connection; conversation, TODO, and agent state belong to the host. Each handler must retain a safe reference to the shared host state for its lifetime. The =McpUnixSocketServer::session-created= signal is the registration point, before handshake.
+
+Run conversation operations on the owning GLib main context. The library dispatches ordinary tool handlers synchronously; an asynchronous conversation send should schedule work and return an operation identifier. Awaiting a provider inside the handler blocks other clients, cancellation, and the TUI. A nested main loop permits reentrant mutations and should also be avoided. Reject concurrent sends while the conversation is busy and expose explicit cancellation/status operations.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::on_incoming][Unix session creation]], [[file:../deps/mcp-glib/src/mcp-server.c::handle_tools_call][tool dispatch]].
+
+* Findings requiring protection
+
+** Socket pathname removal is unconditional
+
+=mcp_unix_socket_server_start()= unlinks the supplied pathname before binding. A preexisting regular file, symlink, or another live listener's socket can be removed; the stale-socket comment is not an existence/type/liveness check. Stop unlinks the path again without checking that it still denotes this listener. Listener failures after a successful bind can leave a pathname because =running= remains false and stop returns immediately.
+
+Create a fresh, owned mode-0700 directory and place a previously absent socket inside it. For an explicitly supplied socket path, reject an existing entry using =lstat()=, validate the parent directory's ownership and permissions, and reject unsafe/shared parents. Do not attempt to recover arbitrary stale paths automatically. A private directory is also the access boundary: the library does not authenticate peer credentials or apply socket permissions explicitly. Treat all same-user clients as able to exercise every enabled tool. Same-user hostile processes are outside this filesystem isolation boundary.
+
+Source: [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::mcp_unix_socket_server_start][listener start]], [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::mcp_unix_socket_server_stop][listener stop]].
+
+** Tool schemas are advertised, not enforced
+
+=handle_tools_call()= validates the tool name, looks it up in the registered tool table, and extracts an object-shaped =arguments= member. It does not validate the advertised JSON Schema. Missing, null, array, and scalar arguments all become a null pointer at the callback boundary. Nested malformed members reach host callbacks unchanged. Typed json-glib getters can log criticals or return null on mismatched input.
+
+Validate all required members, exact JSON types, enum values, numeric bounds, array lengths, string lengths, and nested objects before mutation. Validate the entire replacement TODO list before changing existing state. Require stable IDs and reject duplicate IDs. Bound transcript pagination and agent concurrency. Return an MCP tool error for invalid application arguments. Never register an unrestricted dispatcher that bypasses the allowlist.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-server.c::handle_tools_call][wire invocation]], [[file:../deps/mcp-glib/src/mcp-server.c::mcp_server_invoke_tool][in-process invocation]], [[file:../deps/mcp-glib/src/mcp-json-util.h][internal typed accessors]].
+
+** Handshake ordering is not enforced
+
+=handle_request()= dispatches tools before initialization; =notifications/initialized= sets READY regardless of the previous state. Repeated initialize requests replace =client_capabilities= without releasing the prior object. The initialize handler does not require the advertised protocol version and full client metadata. A handler-level READY check prevents direct pre-initialize execution but does not stop a forged initialized notification.
+
+Enforce initialization sequencing at protocol dispatch: allow initialize only in CONNECTING, initialized only in INITIALIZING, and tools only in READY. Reject repeated initialize requests before allocating new capabilities. Validate required handshake types without emitting warnings for peer mistakes. Do not rely on a tool callback alone to enforce the handshake.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-server.c::handle_request][request dispatcher]], [[file:../deps/mcp-glib/src/mcp-server.c::handle_initialize][initialize]], [[file:../deps/mcp-glib/src/mcp-server.c::handle_notification][notifications]].
+
+** Output queue and connection counts are unbounded
+
+The stdio transport caps inbound frames at 16 MiB by default and exposes =max-line-bytes=. This protects incomplete newline-free input as it accumulates. It does not cap outbound frame size or the output queue. A client can keep sending valid requests without reading replies, growing memory indefinitely. Queue entries contain GTasks referencing their source transport, so retaining pending entries across disconnection also risks a reference cycle. The Unix listener has no session count limit or initialize deadline, allowing idle clients to retain sessions.
+
+Keep a finite frame cap; add byte and message-count bounds including the active write, terminate saturated connections, and complete every queued task on disconnect. Cancel outstanding writes and ensure late callbacks cannot pop a different queue entry after teardown. Add a session limit before allocating a session and a handshake deadline canceled during teardown. Limit tool payloads and responses independently: a bounded request can request a very large transcript.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-stdio-transport.h::MCP_STDIO_TRANSPORT_DEFAULT_MAX_LINE_BYTES][default inbound cap]], [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::drain_inbound][incremental framing]], [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::stdio_transport_send_message_async][output queue]], [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::stdio_transport_disconnect_async][disconnect]], [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::on_incoming][unbounded acceptance]].
+
+** Session signals require non-reentrant cleanup
+
+The existing session reference counter protects the connect/disconnect-before-start-completion race, and transport read/write operations retain their buffers independently of the transport object. These protections should be preserved. However, =session-created= is emitted before the session enters the owner's list, so stopping the owner from that callback does not reject the just-created session. =session-closed= is emitted before teardown even though its documentation says the server is already stopped. In stop, it is emitted before removal from the list; reentering stop from the callback can revisit the same session.
+
+Host signal handlers should only register tools or release host references, and should not recursively stop the listener. An upstream fix should remove a session from the list before emitting its close signal, guard the stopping state, and document whether the session is still usable during that signal. Cancel timers before dropping session storage.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::session_teardown][session lifetime]], [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::remove_session][normal removal]], [[file:../deps/mcp-glib/src/mcp-unix-socket-server.c::mcp_unix_socket_server_stop][stop ordering]], [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::read_op_new][read ownership]], [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::process_write_queue][write ownership]].
+
+* Framing and error behavior
+
+The transport uses newline-delimited JSON, accepts CRLF, ignores empty lines, and dispatches multiple complete frames from a single read. It does not implement Content-Length framing. An EOF ends the connection, so callers must terminate their final request with a newline. Keep all banners, diagnostics, provider output, and TUI rendering off protocol stdout. A stdio-to-socket bridge must copy bytes unchanged and handle EOF and partial writes in both directions.
+
+Malformed JSON emits a transport error; malformed JSON-RPC envelopes produce a protocol error and a warning. Expected invalid client input should not terminate a process running with fatal warnings. Tests should exercise the actual process with invalid frames and verify the intended recovery or clean disconnection behavior. The message implementation preserves integer-versus-string request ID forms for response serialization; retain wire assertions for both.
+
+Sources: [[file:../deps/mcp-glib/src/mcp-stdio-transport.c::dispatch_line][JSON framing]], [[file:../deps/mcp-glib/src/mcp-server.c::on_message_received][envelope handling]], [[file:../deps/mcp-glib/src/mcp-server.c::on_transport_error][transport errors]], [[file:../deps/mcp-glib/src/mcp-message.c::mcp_message_new_from_json][message validation]].
+
+* Existing test coverage and required integration regressions
+
+The bundled wire tests exercise malformed tool/resource/prompt names, serialization of empty results, malformed client metadata, and cancellation request-ID direction isolation. The Unix tests cover multiple sessions, disposal, and immediate disconnect races. The stdio tests cover in-flight read/write teardown. These are useful regression foundations; they do not establish application argument validation, finite output queues, safe custom socket paths, or host-state behavior.
+
+Integration tests should cover an empty default tool list; selected and all-tools lists; unknown tool rejection; incorrect argument types without state mutation; TODO replacement atomicity; real agent lifecycle; conversation busy/status/cancel/transcript pagination; two clients sharing host state with isolated protocol IDs; independent host instances; slow readers; fragmented and oversized frames; handshake ordering; listener path conflicts; dropped clients during handshake and active operations; provider configuration isolation; and injected prompt guidance matching only the available host tools.
+
+Sources: [[file:../deps/mcp-glib/tests/test-server-wire.c][wire regression tests]], [[file:../deps/mcp-glib/tests/test-unix-socket-server.c][Unix regression tests]], [[file:../deps/mcp-glib/tests/test-stdio-transport.c][stdio lifetime tests]].
+
+* Integrated resolution
+
+The integration pins =5c6809ffd689ad22d02659b19585a7a4949491db=, which includes hardening commit =bdee88b6dfa31e601c8dcc0376c8f07c1a2088fd=. The findings above are the historical audit of the newly added revision, not unresolved defects in the pinned implementation.
+
+The updated dependency enforces initialize/initialized ordering and typed metadata, rejects existing socket paths, checks inode identity before removing its own socket, bounds output to 16 MiB and 256 queued frames, drains canceled writes, makes Unix output nonblocking, limits Unix clients to 32 with a 10-second handshake deadline, and protects session removal against reentrant callbacks. Malformed JSON receives =-32700= with a null request ID and leaves the connection usable. The dependency suite passes 418 tests after these changes.
+
+The host supplies the remaining application protections: exact opt-in grants, nested argument validation before mutation, private owned directories, 1 MiB input frames, asynchronous foreground turns, bounded transcript pages/results, at most 128 tracked agents, graceful cancellation, endpoint rollback, and bounded stdio bridging. Application tests verify those behaviors separately from the dependency's protocol tests. The host uses the hardened =session-created= hook solely to register tools and set the frame bound.

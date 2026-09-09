@@ -136,3 +136,7 @@ See the [[file:docs/]] directory for full documentation:
 
 ** License
 AGPLv3 - See [[file:LICENSE]] for details.
+
+** MCP hosting
+
+Both =ai= and =ai-tui= offer opt-in MCP servers. Use =--mcp-server --mcp-tools conversation_status,conversation_send,conversation_transcript= for external conversation control, or run =ai-tui --mcp-tools todo_write,agent_spawn,agent_status,agent_result= to let supported CLI providers update the host's TODOS and AGENTS panels. =--mcp-all-tools= grants every host tool; no MCP tools are enabled by default. See [[file:docs/mcp.org][MCP documentation]] for transport modes, tool schemas, and provider support.

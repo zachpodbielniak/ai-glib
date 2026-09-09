@@ -39,6 +39,8 @@ struct _AiClaudeCodeClient
     gdouble  total_cost;
     gboolean skip_permissions;
     gchar   *mcp_config_path;    /* nullable: --mcp-config <path> */
+    gchar   *saved_mcp_config_path;
+    gboolean endpoint_config_active;
     gint     last_input_tokens;  /* tracks input tokens for compaction detection */
 
     /*
@@ -1818,6 +1820,7 @@ ai_claude_code_client_finalize(GObject *object)
      */
     clear_prompt_spills(self);
 
+    g_free(self->saved_mcp_config_path);
     G_OBJECT_CLASS(ai_claude_code_client_parent_class)->finalize(object);
 }
 
@@ -1842,16 +1845,20 @@ ai_claude_code_client_endpoint_applied(
 
     (void)error;
 
+    /* Preserve the caller's property across replacement and revocation. */
+    if (self->endpoint_config_active)
+    {
+        ai_claude_code_client_set_mcp_config_path(self, self->saved_mcp_config_path);
+        g_clear_pointer(&self->saved_mcp_config_path, g_free);
+        self->endpoint_config_active = FALSE;
+    }
+
     if (endpoint != NULL
         && g_strcmp0(endpoint->kind, AI_ENDPOINT_KIND_MCP_CONFIG) == 0)
     {
+        self->saved_mcp_config_path = g_strdup(self->mcp_config_path);
+        self->endpoint_config_active = TRUE;
         ai_claude_code_client_set_mcp_config_path(self, endpoint->value);
-    }
-    else
-    {
-        /* Revoked, or environment-only: drop the path so a later run
-         * does not point at a file that has been deleted. */
-        ai_claude_code_client_set_mcp_config_path(self, NULL);
     }
 
     return TRUE;
@@ -2471,6 +2478,8 @@ on_retry_communicate_complete(
                                                &stdout_data, &stderr_data,
                                                &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         goto fallback;
     }
 
@@ -2620,6 +2629,8 @@ on_chat_communicate_complete(
     if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
                                                &stdout_data, &stderr_data, &error))
     {
+		/* Cancelling communication closes pipes but does not terminate the child. */
+		g_subprocess_force_exit(G_SUBPROCESS(source));
         g_task_return_error(data->task, g_steal_pointer(&error));
         chat_async_data_free(data);
         return;

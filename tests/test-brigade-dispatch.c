@@ -522,6 +522,102 @@ test_cancelling_a_queued_agent_does_not_start_it(void)
 	g_assert_null(ai_agent_get_result(two));
 }
 
+/* Count even transient starts: cancelled state alone would hide accidental dispatch. */
+static void
+count_queued_starts(AiAgent *agent, gint old_state, gint new_state, gpointer user_data)
+{
+	guint *starts = user_data;
+	(void)agent;
+	(void)old_state;
+	if (new_state == AI_AGENT_STATE_STARTING) (*starts)++;
+}
+
+static void
+test_cancel_all_never_starts_queued_work(void)
+{
+	Watch watch = { 0 };
+	g_autoptr(AiBrigade) brigade = brigade_with_worker(&watch);
+	g_autoptr(AiAgent) one = agent_saying("running", "one", 50);
+	g_autoptr(AiAgent) two = agent_saying("queued-1", "two", 50);
+	g_autoptr(AiAgent) three = agent_saying("queued-2", "three", 50);
+	guint starts = 0;
+	gint64 deadline;
+
+	ai_brigade_set_max_concurrent(brigade, 1);
+	g_signal_connect(two, "state-changed", G_CALLBACK(count_queued_starts), &starts);
+	g_signal_connect(three, "state-changed", G_CALLBACK(count_queued_starts), &starts);
+	g_assert_true(ai_brigade_start(brigade, one, "go", NULL));
+	g_assert_true(ai_brigade_start(brigade, two, "go", NULL));
+	g_assert_true(ai_brigade_start(brigade, three, "go", NULL));
+	g_assert_cmpint(ai_agent_get_state(two), ==, AI_AGENT_STATE_QUEUED);
+	g_assert_cmpint(ai_agent_get_state(three), ==, AI_AGENT_STATE_QUEUED);
+	g_assert_cmpuint(ai_brigade_cancel_all(brigade), ==, 3);
+	g_assert_cmpuint(starts, ==, 0);
+	g_assert_cmpint(ai_agent_get_state(one), ==, AI_AGENT_STATE_CANCELLED);
+	g_assert_cmpint(ai_agent_get_state(two), ==, AI_AGENT_STATE_CANCELLED);
+	g_assert_cmpint(ai_agent_get_state(three), ==, AI_AGENT_STATE_CANCELLED);
+	g_assert_cmpuint(ai_brigade_count_live(brigade), ==, 0);
+	/* Observe the delayed completion too: it must not restart queued work. */
+	deadline = g_get_monotonic_time() + 150 * 1000;
+	while (g_get_monotonic_time() < deadline)
+		if (!g_main_context_iteration(NULL, FALSE)) g_usleep(1000);
+	g_assert_cmpuint(starts, ==, 0);
+	g_assert_cmpuint(ai_brigade_cancel_all(brigade), ==, 0);
+}
+
+/* A terminal callback may remove every brigade reference in one operation. */
+static void
+count_agent_finalized(gpointer user_data, GObject *object)
+{
+	guint *finalized = user_data;
+	(void)object;
+	(*finalized)++;
+}
+
+static void
+remove_all_on_finish(AiBrigade *brigade, const gchar *id, gint state, gpointer user_data)
+{
+	guint *finalized = user_data;
+	g_autoptr(GList) agents = ai_brigade_list(brigade);
+	g_autoptr(GPtrArray) ids = g_ptr_array_new_with_free_func(g_free);
+	GList *iter;
+	guint i;
+	(void)id;
+	(void)state;
+
+	/* Copy identifiers before removing anything; the cancelling snapshot
+	 * must independently keep the agent objects alive until it finishes. */
+	for (iter = agents; iter != NULL; iter = iter->next)
+		g_ptr_array_add(ids, g_strdup(ai_agent_get_id(AI_AGENT(iter->data))));
+	for (i = 0; i < ids->len; i++)
+		g_assert_true(ai_brigade_remove(brigade, g_ptr_array_index(ids, i)));
+	g_assert_cmpuint(*finalized, ==, 0);
+}
+
+static void
+test_cancel_all_holds_removed_agents(void)
+{
+	g_autoptr(AiBrigade) brigade = ai_brigade_new();
+	g_autoptr(GList) remaining = NULL;
+	guint finalized = 0;
+	guint i;
+
+	for (i = 0; i < 3; i++)
+	{
+		g_autofree gchar *id = g_strdup_printf("cancel-%u", i);
+		g_autoptr(AiAgent) agent = agent_saying(id, "unused", 0);
+		/* Manual live state avoids a worker holding additional references. */
+		ai_agent_set_state(agent, AI_AGENT_STATE_RUNNING);
+		g_object_weak_ref(G_OBJECT(agent), count_agent_finalized, &finalized);
+		g_assert_true(ai_brigade_add(brigade, agent));
+	}
+	g_signal_connect(brigade, "agent-finished", G_CALLBACK(remove_all_on_finish), &finalized);
+	g_assert_cmpuint(ai_brigade_cancel_all(brigade), ==, 3);
+	g_assert_cmpuint(finalized, ==, 3);
+	remaining = ai_brigade_list(brigade);
+	g_assert_null(remaining);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -572,6 +668,10 @@ main(int argc, char *argv[])
 	                test_cancel_all_stops_the_live_ones);
 	g_test_add_func("/ai-glib/brigade-dispatch/cancel-queued",
 	                test_cancelling_a_queued_agent_does_not_start_it);
+	g_test_add_func("/ai-glib/brigade-dispatch/cancel-all-queued-not-started",
+	                test_cancel_all_never_starts_queued_work);
+	g_test_add_func("/ai-glib/brigade-dispatch/cancel-all-removal-reentrancy",
+	                test_cancel_all_holds_removed_agents);
 
 	return g_test_run();
 }

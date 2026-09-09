@@ -113,6 +113,18 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (AiAgentEndpoint, ai_agent_endpoint_free)
 #define AI_ENDPOINT_KIND_MCP_CONFIG_GROK "mcp-config-grok"
 
 /**
+ * AI_ENDPOINT_KIND_MCP_CONFIG_CODEX:
+ *
+ * @value is a file containing one dotted MCP configuration assignment
+ * per line, delivered through Codex's per-invocation `-c` overrides.
+ * Keys are `mcp_servers.NAME.command` or `mcp_servers.NAME.args`;
+ * values are JSON strings or arrays of strings (also valid TOML).
+ * Blank lines and whole-line comments are allowed. No other settings,
+ * table headers, multiline strings or inline comments are accepted.
+ */
+#define AI_ENDPOINT_KIND_MCP_CONFIG_CODEX "mcp-config-codex"
+
+/**
  * AI_ENDPOINT_KIND_HTTP_URL:
  *
  * @value is a URL the worker connects to.
