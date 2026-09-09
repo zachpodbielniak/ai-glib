@@ -365,6 +365,7 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

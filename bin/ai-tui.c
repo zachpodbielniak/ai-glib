@@ -29,6 +29,7 @@
 #include "ai-launch.h"
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
+#include "ai-tui-herdr.h"
 
 /* ================================================================
  * Options
@@ -50,6 +51,7 @@ static gboolean  opt_yes = FALSE;
 static gboolean  opt_dry_run = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
+static gboolean  opt_no_herdr = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 static gboolean  opt_launch = FALSE;
@@ -61,6 +63,8 @@ static gboolean opt_no_animation = FALSE;
 static gboolean theme_explicit = FALSE;
 
 static const GOptionEntry option_entries[] = {
+	{ "no-herdr", 0, 0, G_OPTION_ARG_NONE, &opt_no_herdr,
+	  "Disable automatic herdr pane lifecycle reporting", NULL },
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme, "Terminal theme (overrides AI_TUI_THEME and NO_COLOR)", "NAME" },
 	{ "list-themes", 0, 0, G_OPTION_ARG_NONE, &opt_list_themes, "List terminal themes without loading a provider", NULL },
 	{ "no-animation", 0, 0, G_OPTION_ARG_NONE, &opt_no_animation, "Disable decorative motion (elapsed time still updates)", NULL },
@@ -356,6 +360,7 @@ static const gchar *SPINNER_FRAMES[] = {
 typedef struct
 {
     AiConversation *conversation;
+	AiTuiHerdr *herdr;
     GMainLoop      *loop;
     GCancellable   *cancellable;
 
@@ -438,6 +443,30 @@ typedef struct
      * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
 } App;
+
+/* Publish expansion, provider I/O and approvals through one state mapping.
+ * This callback also runs in dump mode, where there are no curses windows. */
+static void
+app_sync_herdr(App *app)
+{
+	ai_tui_herdr_update(app->herdr,
+		app->sending || ai_conversation_get_busy(app->conversation),
+		app->approval_prompt != NULL);
+}
+
+/* Dispatch termination on the main loop so normal cleanup can release the
+ * herdr identity and restore the terminal, including during an approval. */
+static gboolean
+on_herdr_shutdown(gpointer data)
+{
+	App *app = data;
+
+	app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
+	app->running = FALSE;
+	ai_conversation_cancel(app->conversation);
+	if (app->loop != NULL) g_main_loop_quit(app->loop);
+	return G_SOURCE_CONTINUE;
+}
 
 /* One rendered row: which block it came from, and its text. */
 typedef struct
@@ -3035,6 +3064,7 @@ on_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 
     ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
 	app->sending = FALSE;
+	app_sync_herdr(app);
 
     /* The full error is in the transcript; chrome carries only the outcome. */
 	ui_turn_finished(app, error);
@@ -3063,6 +3093,7 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
     ai_conversation_send_input_finish(AI_CONVERSATION(source), result,
                                       &command, &error);
 	app->sending = FALSE;
+	app_sync_herdr(app);
 
     if (error != NULL)
     {
@@ -3524,6 +3555,7 @@ app_send(App *app)
 
     app->follow = TRUE;
 	app->sending = TRUE;
+	app_sync_herdr(app);
     g_clear_object(&app->cancellable);
     app->cancellable = g_cancellable_new();
 
@@ -3597,6 +3629,7 @@ on_approval_requested(
 	if (app->approval_prompt != NULL) return AI_TOOL_APPROVAL_DENY;
 	app->approval_prompt = prompt;
 	app->approval_answer = AI_TOOL_APPROVAL_DEFAULT;
+	app_sync_herdr(app);
 	app_redraw(app);
 	while (app->running && app->approval_answer == AI_TOOL_APPROVAL_DEFAULT &&
 		(app->cancellable == NULL || !g_cancellable_is_cancelled(app->cancellable)))
@@ -3607,6 +3640,7 @@ on_approval_requested(
 	}
 	answer = app->approval_answer == AI_TOOL_APPROVAL_DEFAULT ? AI_TOOL_APPROVAL_DENY : app->approval_answer;
 	app->approval_prompt = NULL;
+	app_sync_herdr(app);
 
     app_schedule_redraw(app);
 
@@ -3834,6 +3868,18 @@ build_provider_named(
         return NULL;
     }
 
+    /* Wrapped CLI hooks must not replace ai-tui's pane authority or persist
+     * a native CLI session that would restore into a different application.
+     * Preserve all other child environment and leave native launch modes alone. */
+	if (AI_IS_CLI_CLIENT(provider) && !opt_no_herdr && !opt_dry_run &&
+		!opt_launch && !opt_launch_cmd && !opt_launch_cmd_print &&
+		ai_tui_herdr_detect(g_getenv("HERDR_ENV"),
+			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID")))
+	{
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HERDR_ENV", "0");
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HERDR_PANE_ID", "");
+	}
+
     return provider;
 }
 
@@ -3935,6 +3981,7 @@ main(int argc, char *argv[])
     g_autoptr(GOptionContext) context = NULL;
     g_autoptr(GError) error = NULL;
     g_autofree gchar *prompt = NULL;
+    g_autoptr(AiTuiHerdr) herdr = NULL;
     GObject *provider;
     App app;
 
@@ -4174,6 +4221,17 @@ main(int argc, char *argv[])
     }
 
 	ai_tui_history_restore(app.conversation, app.history);
+	if (!opt_no_herdr)
+		herdr = ai_tui_herdr_new(g_getenv("HERDR_ENV"),
+			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID"));
+	app.herdr = herdr;
+	if (herdr != NULL)
+	{
+		g_unix_signal_add(SIGTERM, on_herdr_shutdown, &app);
+		g_unix_signal_add(SIGHUP, on_herdr_shutdown, &app);
+	}
+	g_signal_connect_swapped(app.conversation, "notify::busy",
+		G_CALLBACK(app_sync_herdr), &app);
 
     /*
      * One-shot: --dump, or a prompt given without a terminal.
@@ -4197,6 +4255,8 @@ main(int argc, char *argv[])
 
             app.loop = loop;
             app.dump_loop = loop;
+			app.sending = TRUE;
+			app_sync_herdr(&app);
 
             if (opt_no_expand)
             {

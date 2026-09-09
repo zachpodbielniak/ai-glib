@@ -24,6 +24,10 @@ echo "review the diff" | ai-tui
 
 The prompt comes from leftover arguments if present, otherwise from stdin when stdin is not a terminal --- the same rule as [[file:cli.org][the =ai= CLI]]. On a terminal, that text is the first turn: it is placed in the composer and sent. A piped prompt is read, then stdin is reopened on =/dev/tty= so ncurses can take the keyboard. Without a terminal --- stdout is not a tty, or =/dev/tty= cannot be opened --- the same prompt runs one turn and prints the transcript, as =--dump= does. Use =--= before a prompt that begins with a dash.
 
+** Herdr integration
+
+Inside a herdr pane, =ai-tui= automatically reports itself as =ai-tui= with =idle=, =working= and =blocked= states, including local tool approval waits. It uses the injected local socket directly and needs no installed hook or wrapper. =--no-herdr= disables reporting. Native launch and informational modes remain unregistered. See [[file:herdr.org][Native herdr integration]] for detection, child hook ownership, failure handling, tests and the limits of recovery after a server restart.
+
 ** Independent Defaults
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted options behave exactly like =ai-tui -p default -m default=: use saved ai-tui defaults and ignore =AI_PROVIDER=. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
 
@@ -131,6 +135,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--list-themes=       | List built-in themes without starting a provider        |
 | =--no-animation=      | Disable decorative motion; elapsed time still updates  |
 | =--no-agents=         | Do not let the model start background agents             |
+| =--no-herdr=          | Disable automatic herdr pane lifecycle reporting         |
 | =--dump PROMPT=       | Force one turn and print the transcript, even on a terminal |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
 | =--dry-run=           | Print the command a CLI provider would run, then exit    |
