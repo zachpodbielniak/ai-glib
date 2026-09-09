@@ -21,6 +21,7 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <unistd.h>
+#include "ai-glib.h"
 
 /* ----------------------------------------------------------------
  * Harness
@@ -2275,17 +2276,156 @@ test_composer_editing(void)
  * @command: a complete built-in command, including its arguments
  * @notice: the completion message to observe
  *
- * Dismiss command completion before Enter so it submits the literal line.
+ * Submit with the same single Enter a user presses, without a completion
+ * workaround that could hide a broken command dispatch path.
  */
 static void
 tmux_command(const gchar *command, const gchar *notice)
 {
 	tmux_send(TUI_SESSION, command);
-	tmux_send(TUI_SESSION, "Escape");
-	/* Let the Escape/Alt-Enter discriminator finish before submitting. */
-	g_usleep(150000);
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, notice));
+}
+
+typedef struct
+{
+	const gchar *name;
+	const gchar *notice;
+} CommandCase;
+
+static const CommandCase COMMAND_CASES[] = {
+	{ "help", "clear the line" },
+	{ "clear", NULL },
+	{ "reset", NULL },
+	{ "quit", NULL },
+	{ "model", "Model:" },
+	{ "provider", "Provider: Grok Build" },
+	{ "tools", "local tools are off" },
+	{ "commands", "Commands from disk" },
+	{ "skills", "Skills" },
+	{ "agents", "Agents" },
+	{ "reload", "Rescanned." },
+	{ "cwd", NULL },
+	{ "context", "No context carried" },
+	{ "todos", "No todos." },
+	{ "running", "No background agents." },
+	{ "kill", "/kill needs an agent id" },
+	{ "expand", "/expand needs something to expand." },
+	{ "save", "/save needs a path." },
+	{ "export", "/export needs a format" }
+};
+
+/**
+ * test_builtin_enter:
+ * @data: a built-in command and its expected local result
+ *
+ * Exercise every built-in through the real composer with one Enter. Read
+ * the saved transcript as well as the screen so menu labels and header
+ * text cannot masquerade as executed commands. No provider is invoked.
+ */
+static void
+test_builtin_enter(gconstpointer data)
+{
+	const CommandCase *test_case = data;
+	Stub *stub;
+	g_autofree gchar *command = NULL;
+	g_autofree gchar *saved_path = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *saved = NULL;
+	gboolean clears;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	command = g_strconcat("/", test_case->name, NULL);
+	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_command("/expand command-audit-sentinel", "Would send:");
+	tmux_send(TUI_SESSION, command);
+	tmux_send(TUI_SESSION, "Enter");
+	if (g_str_equal(test_case->name, "quit"))
+		g_assert_true(tmux_wait_for_exit(TUI_SESSION));
+	else
+	{
+		/* Long listings scroll their title off screen. Synchronize with
+		 * the empty composer, then verify the complete saved transcript. */
+		g_assert_true(tmux_wait_for(TUI_SESSION, "Ask, build, investigate..."));
+		tmux_command("/save command-audit.txt", "Wrote");
+		g_assert_true(g_file_get_contents(saved_path, &saved, NULL, NULL));
+		if (clears)
+			g_assert_cmpstr(saved, ==, "");
+		else
+		{
+			g_assert_nonnull(strstr(saved, "command-audit-sentinel"));
+			g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
+				stub->dir : test_case->notice));
+		}
+	}
+	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/**
+ * test_builtin_catalog:
+ *
+ * Require terminal coverage for every registered built-in, including any
+ * added later. Compare names rather than a count that could hide omissions.
+ */
+static void
+test_builtin_catalog(void)
+{
+	g_autoptr(AiCommandSet) commands = ai_command_set_new(NULL);
+	GList *items = ai_command_set_list(commands);
+	GList *iter;
+	guint i;
+
+	g_assert_cmpuint(g_list_length(items), ==, G_N_ELEMENTS(COMMAND_CASES));
+	for (iter = items; iter != NULL; iter = iter->next)
+	{
+		for (i = 0; i < G_N_ELEMENTS(COMMAND_CASES); i++)
+			if (g_str_equal(ai_command_get_name(iter->data), COMMAND_CASES[i].name))
+				break;
+		g_assert_cmpuint(i, <, G_N_ELEMENTS(COMMAND_CASES));
+	}
+	g_list_free_full(items, g_object_unref);
+}
+
+/**
+ * test_command_cursor_completion:
+ * @data: the Home/End key pair to exercise
+ *
+ * Moving back to the end must discard the completion range from inside
+ * the name; accepting that stale range turns /reload into /reloadd.
+ */
+static void
+test_command_cursor_completion(gconstpointer data)
+{
+	const gchar * const *keys = data;
+	Stub *stub;
+	g_autofree gchar *stdin_path = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_send(TUI_SESSION, "/reload");
+	tmux_send(TUI_SESSION, "Left");
+	tmux_send(TUI_SESSION, keys[1]);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Rescanned."));
+
+	/* Home is before the slash, where Tab must not insert a command. */
+	tmux_send(TUI_SESSION, "/expand cursor-home-sentinel");
+	tmux_send(TUI_SESSION, keys[0]);
+	tmux_send(TUI_SESSION, "Tab");
+	tmux_send(TUI_SESSION, keys[1]);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Would send:"));
+	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
 }
 
 /**
@@ -2690,7 +2830,10 @@ test_inline_tool_previews(void)
 int
 main(int argc, char *argv[])
 {
+	static const gchar * const cursor_keys[] = { "Home", "End" };
+	static const gchar * const control_keys[] = { "C-a", "C-e" };
 	gint status;
+	guint i;
 
 	/* Spawned fixtures must never register in the developer's real herdr pane. */
 	g_unsetenv("HERDR_ENV");
@@ -2728,6 +2871,14 @@ main(int argc, char *argv[])
 	}
 
 	g_test_add_func("/ai-glib/ai-tui/version", test_version);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/command-home-end", cursor_keys, test_command_cursor_completion);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/command-control-a-e", control_keys, test_command_cursor_completion);
+	g_test_add_func("/ai-glib/ai-tui/builtins/catalog", test_builtin_catalog);
+	for (i = 0; i < G_N_ELEMENTS(COMMAND_CASES); i++)
+	{
+		g_autofree gchar *path = g_strconcat("/ai-glib/ai-tui/builtins/", COMMAND_CASES[i].name, NULL);
+		g_test_add_data_func(path, &COMMAND_CASES[i], test_builtin_enter);
+	}
 	g_test_add_func("/ai-glib/ai-tui/license", test_license);
 	g_test_add_func("/ai-glib/ai-tui/help", test_help);
 	g_test_add_func("/ai-glib/ai-tui/themes", test_theme_options);

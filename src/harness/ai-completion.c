@@ -814,6 +814,13 @@ ai_completion_context_query(
     result->start = cursor;
     result->end = cursor;
 
+    /* Before the first character there is no token to complete. In
+     * particular, subtracting the slash below would underflow at zero. */
+    if (cursor == 0)
+    {
+        return (AiCompletionResult *)g_steal_pointer(&result);
+    }
+
     /* A slash command: only at offset 0, and only while the cursor is
      * still inside the name. */
     if (buffer[0] == '/')

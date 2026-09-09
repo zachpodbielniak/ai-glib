@@ -150,6 +150,24 @@ test_cursor_past_the_end_is_clamped(void)
 	g_assert_true(has_item(r, "deploy"));
 }
 
+/**
+ * test_cursor_before_slash:
+ *
+ * Home puts the cursor before the slash, not inside its name. Return an
+ * empty zero-width result instead of underflowing the command-name length.
+ */
+static void
+test_cursor_before_slash(void)
+{
+	g_autoptr(AiCompletionContext) ctx = context_with_commands();
+	g_autoptr(AiCompletionResult) r = ai_completion_context_query(ctx, "/help", 0);
+
+	g_assert_cmpint(ai_completion_result_get_kind(r), ==, AI_COMPLETION_NONE);
+	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 0);
+	g_assert_cmpuint(ai_completion_result_get_start(r), ==, 0);
+	g_assert_cmpuint(ai_completion_result_get_end(r), ==, 0);
+}
+
 /* ----------------------------------------------------------------
  * Commands
  * ---------------------------------------------------------------- */
@@ -656,6 +674,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/completion/plain-text", test_plain_text);
 	g_test_add_func("/ai-glib/completion/cursor-clamped",
 	                test_cursor_past_the_end_is_clamped);
+	g_test_add_func("/ai-glib/completion/cursor-before-slash", test_cursor_before_slash);
 
 	g_test_add_func("/ai-glib/completion/slash-at-start", test_slash_at_start);
 	g_test_add_func("/ai-glib/completion/bare-slash",

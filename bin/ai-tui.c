@@ -3079,11 +3079,13 @@ drain_keys(App *app)
             case KEY_HOME:
             case 1:   /* ^A */
                 app->cursor = 0;
+                completion_refresh(app);
                 break;
 
             case KEY_END:
             case 5:   /* ^E */
                 app->cursor = (guint)app->input->len;
+                completion_refresh(app);
                 break;
 
             case 21:  /* ^U */
@@ -4770,6 +4772,12 @@ main(int argc, char *argv[])
      */
     define_key("\033[13;2u", KEY_SHIFT_ENTER);
     define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
+	/* tmux and terminals also emit the numeric Home/End forms, which
+	 * xterm terminfo may omit in favor of application-cursor sequences. */
+	define_key("\033[1~", KEY_HOME);
+	define_key("\033[4~", KEY_END);
+	define_key("\033[7~", KEY_HOME);
+	define_key("\033[8~", KEY_END);
 	define_key("\033[200~", KEY_PASTE_START);
 	define_key("\033[201~", KEY_PASTE_END);
 	/* This terminal input mode has no curses wrapper; colors and drawing

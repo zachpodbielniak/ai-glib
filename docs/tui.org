@@ -307,6 +307,10 @@ history back with a half-typed command still on the line.
 
 A fully typed command such as =/model= or =/provider= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider=, leaving it in the composer so you can add an argument. =Tab= always completes without submitting. Path completions also remain in the composer.
 
+=Home= / =C-a= and =End= / =C-e= refresh completion at the new cursor position, just like the arrow keys. Before the initial slash there is no token to complete, so =Tab= leaves the draft unchanged. Terminal tests exercise every registered built-in with one =Enter=, including missing-argument feedback, and check that these local commands never invoke the provider.
+
+Numeric Home/End escape sequences used by tmux and other terminals are recognized alongside the terminfo defaults, preventing their bytes from being inserted into the command text.
+
 Each row is the name in bold, its description in readable secondary text, and the harness it
 came from right-aligned --- the origin has its own column because the
 description is what gets truncated, and the origin is the half that tells
