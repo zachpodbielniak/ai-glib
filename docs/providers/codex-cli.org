@@ -62,6 +62,11 @@ not inserted into the assistant's prose. Input token counts include cached
 input tokens, as reported by Codex; the library's usage type has no separate
 cache counter or reasoning-token counter. No monetary cost is invented.
 
+Unknown =item.*= kinds are dropped. They are not turned into
+=AI_EVENT_STATUS= of the raw JSON: conversation appends every STATUS as
+its own transcript block, so a new heartbeat kind would have painted the
+TUI the way Claude Code's =thinking_tokens= lines did.
+
 Malformed output, failed turns, truncated output and unsuccessful process
 exits return errors. The subprocess pipeline drains stderr, writes stdin
 asynchronously and enforces cancellation and timeouts. The provider inherits

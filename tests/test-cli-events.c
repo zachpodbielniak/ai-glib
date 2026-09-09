@@ -25,6 +25,8 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-cursor-client.h"
+#include "providers/ai-antigravity-client.h"
+#include "providers/ai-codex-cli-client.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -923,6 +925,35 @@ test_gb_content_block_stop_without_start(void)
 	parsed_free(p);
 }
 
+static void
+test_gb_system_chatter_is_not_status(void)
+{
+	/*
+	 * grok-build's streaming-messages-json is Anthropic-shaped and
+	 * can carry the same system lines claude-code does. They must
+	 * not become STATUS: the parser never had a "print every
+	 * subtype" branch, and this is what keeps it that way.
+	 */
+	static const gchar * const lines[] = {
+		"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"g1\"}",
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\","
+		"\"estimated_tokens\":9}",
+		"{\"type\":\"system\",\"subtype\":\"task_started\","
+		"\"task_id\":\"t\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_notification\","
+		"\"task_id\":\"t\",\"status\":\"completed\"}",
+		NULL
+	};
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(p->events->len, ==, 0);
+
+	parsed_free(p);
+}
+
 /* ----------------------------------------------------------------
  * opencode
  * ---------------------------------------------------------------- */
@@ -1087,6 +1118,27 @@ test_oc_session_id_camel(void)
 	parsed_free(p);
 }
 
+static void
+test_oc_unknown_types_are_not_status(void)
+{
+	/* Status / progress types opencode has grown, plus a future one. */
+	static const gchar * const lines[] = {
+		"{\"type\":\"status\",\"part\":{\"status\":\"thinking\"}}",
+		"{\"type\":\"step_start\",\"part\":{}}",
+		"{\"type\":\"session.status\",\"part\":{\"message\":\"wait\"}}",
+		"{\"type\":\"thinking_tokens\",\"part\":{\"tokens\":4}}",
+		NULL
+	};
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(p->events->len, ==, 0);
+
+	parsed_free(p);
+}
+
 /* ----------------------------------------------------------------
  * Cursor Agent
  * ---------------------------------------------------------------- */
@@ -1140,6 +1192,93 @@ test_cu_tool_and_error(void)
 	g_assert_error(p->error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
 	g_assert_nonnull(e);
 	g_assert_cmpstr(ai_tool_use_get_name(ai_event_get_tool_use(e)), ==, "shell");
+
+	parsed_free(p);
+}
+
+static void
+test_cu_system_chatter_is_not_status(void)
+{
+	/*
+	 * Cursor captures session id from system lines and otherwise
+	 * ignores them. A subtype dump here is the same bug claude-code
+	 * had.
+	 */
+	static const gchar * const lines[] = {
+		"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"c1\"}",
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_started\"}",
+		"{\"type\":\"system\",\"subtype\":\"task_notification\"}",
+		NULL
+	};
+	g_autoptr(AiCursorClient) client = ai_cursor_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(p->events->len, ==, 0);
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)),
+	                ==, "c1");
+
+	parsed_free(p);
+}
+
+/* ----------------------------------------------------------------
+ * Antigravity
+ * ---------------------------------------------------------------- */
+
+static void
+test_agy_init_and_unknown_are_not_status(void)
+{
+	static const gchar * const lines[] = {
+		"{\"event\":\"init\",\"session_id\":\"a1\"}",
+		"{\"event\":\"thinking_tokens\",\"estimated_tokens\":3}",
+		"{\"event\":\"task_started\"}",
+		"{\"type\":\"system\",\"subtype\":\"thinking_tokens\"}",
+		NULL
+	};
+	g_autoptr(AiAntigravityClient) client = ai_antigravity_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(p->events->len, ==, 0);
+
+	parsed_free(p);
+}
+
+/* ----------------------------------------------------------------
+ * Codex CLI
+ * ---------------------------------------------------------------- */
+
+static void
+test_cx_unknown_items_are_not_status(void)
+{
+	/*
+	 * Unknown item kinds used to be dumped as STATUS of the raw
+	 * JSON, which is how a new heartbeat kind would paint the
+	 * transcript. They must be dropped, like unrecognised top-level
+	 * types already are.
+	 */
+	static const gchar * const lines[] = {
+		"{\"type\":\"thread.started\",\"thread_id\":\"th1\"}",
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"x\","
+		"\"type\":\"token_count\",\"tokens\":12}}",
+		"{\"type\":\"item.updated\",\"item\":{\"id\":\"y\","
+		"\"type\":\"thinking_tokens\"}}",
+		"{\"type\":\"item.started\",\"item\":{\"id\":\"z\","
+		"\"type\":\"task_notification\"}}",
+		"{\"type\":\"future.event\"}",
+		NULL
+	};
+	g_autoptr(AiCodexCliClient) client = ai_codex_cli_client_new();
+	Parsed *p = parse_lines(AI_CLI_CLIENT(client), lines);
+
+	g_assert_true(p->ok);
+	g_assert_cmpuint(count_kind(p, AI_EVENT_STATUS), ==, 0);
+	g_assert_cmpuint(p->events->len, ==, 0);
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)),
+	                ==, "th1");
 
 	parsed_free(p);
 }
@@ -1278,6 +1417,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/cli-events/gb/usage", test_gb_usage_event);
 	g_test_add_func("/ai-glib/cli-events/gb/stop-without-start",
 	                test_gb_content_block_stop_without_start);
+	g_test_add_func("/ai-glib/cli-events/gb/system-chatter",
+	                test_gb_system_chatter_is_not_status);
 
 	g_test_add_func("/ai-glib/cli-events/oc/text", test_oc_text);
 	g_test_add_func("/ai-glib/cli-events/oc/tool-completed", test_oc_tool_completed);
@@ -1290,12 +1431,22 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/cli-events/oc/call-id-spelling", test_oc_call_id_spelling);
 	g_test_add_func("/ai-glib/cli-events/oc/step-finish", test_oc_step_finish_usage);
 	g_test_add_func("/ai-glib/cli-events/oc/session-id", test_oc_session_id_camel);
+	g_test_add_func("/ai-glib/cli-events/oc/unknown-not-status",
+	                test_oc_unknown_types_are_not_status);
 
 	g_test_add_func("/ai-glib/cli-events/cu/text", test_cu_text_delta);
 	g_test_add_func("/ai-glib/cli-events/cu/duplicate-flush",
 	                test_cu_duplicate_flush_ignored);
 	g_test_add_func("/ai-glib/cli-events/cu/tool-and-error",
 	                test_cu_tool_and_error);
+	g_test_add_func("/ai-glib/cli-events/cu/system-chatter",
+	                test_cu_system_chatter_is_not_status);
+
+	g_test_add_func("/ai-glib/cli-events/agy/init-not-status",
+	                test_agy_init_and_unknown_are_not_status);
+
+	g_test_add_func("/ai-glib/cli-events/cx/unknown-items",
+	                test_cx_unknown_items_are_not_status);
 
 	g_test_add_func("/ai-glib/cli-events/all/vfunc-present",
 	                test_every_provider_implements_the_vfunc);
