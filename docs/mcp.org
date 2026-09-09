@@ -117,6 +117,12 @@ Agent tools use the existing executor and brigade, so AGENTS displays real proce
 | Antigravity | Automatic injection unsupported; inspected native CLI offers persistent MCP management rather than a per-invocation override |
 | HTTP providers | No subprocess injection; external MCP control remains available |
 
+Claude Code and Claude tmux add =--allowedTools mcp__ai_host__*= only when the configured =ai_host= is the parent's absolute-command, absolute-socket =--mcp-connect= bridge. This authorizes the host's published allowlist while preserving caller allow/deny rules and avoiding a blanket permission bypass. Clearing the endpoint removes the generated grant. An ordinary server named =ai_host= does not automatically receive this permission.
+
+Grok applies the equivalent =--allow 'MCPTool(ai_host__*)'= rule for a recognized parent bridge in its scoped TOML fragment, including resume and synthesis retry arguments. The rule is revoked with the overlay. This makes callbacks work in normal permission mode, rather than relying on a saved =always-approve= setting; explicit deny rules retain their precedence.
+
+OpenCode local runs deliver the configuration through the shared subprocess launcher, including resumed turns. =--attach= targets an existing server that cannot read the new process's temporary MCP configuration, so injection is rejected both at binding and at spawn; use a local run or =--mcp-no-inject=. Streamed OpenCode error events now fail the turn even when the CLI exits zero, making startup, model, and MCP failures visible.
+
 Generated configurations use the server key =ai_host= and an absolute executable path with arguments =--mcp-connect= and the socket path. JSON/TOML escaping preserves spaces and special characters without a shell command string. Files live in a private temporary directory and are removed after the endpoint is revoked. Provider consumers restore caller configuration when an endpoint is revoked or replaced. =/new= rebinds existing socket sessions to the replacement conversation; supported =/provider= changes regenerate the correct dialect and preserve the host grant. A switch to a provider without a reliable injection path is rejected when injection is requested.
 
 The bridge is intentionally local. There is no HTTP listener, public TCP port, bearer-token scheme, or remote multi-user authorization. Possession of access to the private socket grants the enabled tools. No network listener starts by default. The MCP grant does not sandbox the underlying provider, agent, or host OS. Abrupt process termination can leave a private temporary directory; the next process creates a new directory rather than deleting or reusing an unknown socket.
@@ -128,6 +134,14 @@ The private application adapter is =src/mcp/ai-mcp-host.c=; =bin/ai-mcp-options.
 =tests/test-mcp-host.c= checks grants, schema validation, atomic TODO replacement, shared panels, bounds, socket-path handling, rebinding, and provider switching. =tests/test-mcp-cli.c= launches the real binaries with a C provider fixture, validates both server transports and the real stdio bridge, and proves injected TODO calls reach the TUI transcript. =tests/test-mcp-provider-delivery.c= checks provider dialects, scoped configuration restoration, invalid configuration rejection, and Codex resumed guidance. The full =make test= target also runs existing provider, CLI, TUI, and introspection regressions.
 
 The bundled dependency review and hardening rationale are recorded in [[file:mcp-submodule-review.org][MCP submodule review]]. Protocol and transport regression tests live in =deps/mcp-glib/tests/=.
+
+** CLI audit, 2026-09-09
+
+The process fixtures exercise the actual parent socket and stdio bridge through Claude Code JSON, Codex overrides, OpenCode's child environment, and Grok's temporary home. Each writes and reads a TODO and checks the rendered parent panel. Separate tests cover fresh/resumed Claude and tmux launch grants, caller permission preservation, endpoint revocation, unsupported Cursor/Antigravity startup, and OpenCode attach refusal and streamed errors.
+
+Live model checks passed TODO writes/readbacks and parent-panel updates on fresh and resumed turns for Claude Code, Codex, Grok Build, and OpenCode (with the available =openai/gpt-6-astra= model). Grok's saved =always-approve= setting initially masked its authorization gap; a separate live check in explicit =permission-mode=default= reproduced the failure and passed after adding the scoped grant. OpenCode's configured default =anthropic/claude-sonnet-5= was unavailable in the installed CLI; that is separate from MCP delivery. Claude tmux's live check stopped before its SessionStart hook became ready after 15 seconds. Its fresh/resumed MCP argv and permission grant are regression-tested, but that live readiness failure prevents claiming an end-to-end tmux model callback on this machine. Cursor and Antigravity continue to reject automatic injection explicitly.
+
+Permission syntax references: [[https://code.claude.com/docs/en/permissions][Claude permissions]], [[https://opencode.ai/docs/permissions/][OpenCode permissions]], and [[https://docs.x.ai/build/features/permissions][Grok permissions]]. These local host grants do not override administrator restrictions or explicit caller deny rules in Claude.
 
 ** Resource limits and shutdown
 

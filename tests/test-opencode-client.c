@@ -1214,6 +1214,17 @@ test_parse_error_nested_data_message(void)
 	g_assert_nonnull(strstr(error->message, "UnknownError"));
 	/* And the raw object must not be what the caller reads. */
 	g_assert_null(strstr(error->message, "\"timestamp\""));
+	{
+		g_autoptr(AiResponse) streamed = ai_response_new("test", "test");
+		g_autoptr(GPtrArray) events = g_ptr_array_new();
+		g_clear_error(&error);
+		/* The same exit-zero error must terminate streamed turns too. */
+		g_assert_false(AI_CLI_CLIENT_GET_CLASS(client)->parse_stream_events(AI_CLI_CLIENT(client),
+			"{\"type\":\"error\",\"error\":{\"name\":\"UnknownError\",\"data\":{\"message\":\"MCP startup failed\"}}}",
+			streamed, events, &error));
+		g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+		g_assert_nonnull(strstr(error->message, "MCP startup failed"));
+	}
 }
 
 /* The flatter shapes must keep working. */

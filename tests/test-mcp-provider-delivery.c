@@ -5,6 +5,9 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include "ai-glib.h"
+#include "core/ai-cli-client-private.h"
+#include "providers/ai-claude-tmux-client-internal.h"
+
 
 /* Write only a test-owned temporary file and return its absolute name. */
 static gchar *
@@ -261,10 +264,122 @@ test_unsupported_providers(void)
 	}
 }
 
+/* Both Claude transports grant only the parent bridge, on fresh and resumed
+ * turns. Clearing the endpoint removes the grant and preserves caller rules. */
+static void
+test_claude_host_permissions(void)
+{
+	g_autofree gchar *path = write_fragment("{\"mcpServers\":{\"ai_host\":{\"command\":\"/tmp/ai-tui\",\"args\":[\"--mcp-connect\",\"/tmp/host.sock\"]}}}");
+	g_autoptr(AiClaudeCodeClient) claude = ai_claude_code_client_new();
+	g_autoptr(AiAgentEndpoint) endpoint = ai_agent_endpoint_new(AI_ENDPOINT_KIND_MCP_CONFIG, path);
+	g_autoptr(GError) error = NULL;
+	AiCliClient *client = AI_CLI_CLIENT(claude);
+	guint i;
+
+	g_assert_true(ai_cli_client_mcp_config_has_host(path, FALSE));
+	g_object_set(claude, "allowed-tools", "Read", "disallowed-tools", "Bash", NULL);
+	g_assert_true(ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(claude), endpoint, &error));
+	g_assert_no_error(error);
+	for (i = 0; i < 2; i++)
+	{
+		g_auto(GStrv) argv = NULL;
+		g_autoptr(GPtrArray) tmux = NULL;
+		ai_cli_client_set_session_id(client, i == 0 ? NULL : "resumed-session");
+		argv = AI_CLI_CLIENT_GET_CLASS(client)->build_argv(client, NULL, NULL, 0, TRUE);
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "mcp__ai_host__*"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "Read"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "Bash"));
+		g_assert_false(g_strv_contains((const gchar * const *)argv, "--dangerously-skip-permissions"));
+		tmux = ai_claude_tmux_client_build_session_argv("tmux", "test", "test", "/tmp", "/usr/bin/claude",
+			i != 0, "session", "/tmp/settings", "sonnet", NULL, FALSE, path);
+		g_assert_true(g_strv_contains((const gchar * const *)tmux->pdata, "mcp__ai_host__*"));
+		g_assert_false(g_strv_contains((const gchar * const *)tmux->pdata, "--dangerously-skip-permissions"));
+	}
+	g_assert_true(ai_tool_endpoint_consumer_clear(AI_TOOL_ENDPOINT_CONSUMER(claude), &error));
+	{
+		g_auto(GStrv) argv = AI_CLI_CLIENT_GET_CLASS(client)->build_argv(client, NULL, NULL, 0, TRUE);
+		g_assert_false(g_strv_contains((const gchar * const *)argv, "mcp__ai_host__*"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "Read"));
+	}
+	/* A similarly named ordinary server must not receive automatic grants. */
+	g_assert_true(g_file_set_contents(path, "{\"mcpServers\":{\"ai_host\":{\"command\":\"/tmp/other\",\"args\":[]}}}", -1, NULL));
+	g_assert_false(ai_cli_client_mcp_config_has_host(path, FALSE));
+	g_assert_true(g_file_set_contents(path, "null", -1, NULL));
+	g_assert_false(ai_cli_client_mcp_config_has_host(path, FALSE));
+	g_assert_cmpint(g_unlink(path), ==, 0);
+	g_assert_false(ai_cli_client_mcp_config_has_host(path, FALSE));
+}
+
+/* Grok must not depend on the user's global always-approve setting. */
+static void
+test_grok_host_permissions(void)
+{
+	g_autofree gchar *path = write_fragment("[mcp_servers.ai_host]\ncommand=\"/tmp/ai-tui\"\nargs=[\"--mcp-connect\",\"/tmp/host.sock\"]\n");
+	g_autoptr(AiGrokBuildClient) grok = ai_grok_build_client_new();
+	g_autoptr(AiAgentEndpoint) endpoint = ai_agent_endpoint_new(AI_ENDPOINT_KIND_MCP_CONFIG_GROK, path);
+	g_autoptr(GError) error = NULL;
+	AiCliClient *client = AI_CLI_CLIENT(grok);
+	g_autofree gchar *home = g_dir_make_tmp("ai-grok-grant-XXXXXX", &error);
+	guint i;
+	g_assert_no_error(error);
+	ai_cli_client_set_env(client, "GROK_HOME", home);
+	g_object_set(grok, "permission-mode", "default", "allowed-tools", "Read", "disallowed-tools", "Bash", NULL);
+	g_assert_true(ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(grok), endpoint, &error));
+	g_assert_no_error(error);
+	for (i = 0; i < 2; i++)
+	{
+		g_auto(GStrv) argv = NULL;
+		ai_cli_client_set_session_id(client, i == 0 ? NULL : "resumed-session");
+		argv = AI_CLI_CLIENT_GET_CLASS(client)->build_argv(client, NULL, NULL, 0, TRUE);
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "MCPTool(ai_host__*)"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "Read"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "Bash"));
+		g_assert_true(g_strv_contains((const gchar * const *)argv, "default"));
+	}
+	g_assert_true(ai_tool_endpoint_consumer_clear(AI_TOOL_ENDPOINT_CONSUMER(grok), &error));
+	{
+		g_auto(GStrv) argv = AI_CLI_CLIENT_GET_CLASS(client)->build_argv(client, NULL, NULL, 0, TRUE);
+		g_assert_false(g_strv_contains((const gchar * const *)argv, "MCPTool(ai_host__*)"));
+	}
+	g_assert_cmpint(g_rmdir(home), ==, 0);
+	g_assert_cmpint(g_unlink(path), ==, 0);
+}
+
+/* Attaching does not restart the remote server with this process's config. */
+static void
+test_opencode_attach_refused(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autoptr(AiAgentEndpoint) endpoint = ai_agent_endpoint_new(AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE, "/tmp/host.json");
+	g_autoptr(GError) error = NULL;
+	g_object_set(client, "attach", "http://localhost:4096", NULL);
+	g_assert_false(ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(client), endpoint, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_assert_nonnull(strstr(error->message, "--attach"));
+	g_assert_null(ai_cli_client_get_env(AI_CLI_CLIENT(client), "OPENCODE_CONFIG"));
+	g_clear_error(&error);
+	g_object_set(client, "attach", NULL, NULL);
+	g_assert_true(ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(client), endpoint, &error));
+	g_object_set(client, "attach", "http://localhost:4096", NULL);
+	{
+		const gchar *argv[] = { "/usr/bin/true", NULL };
+		g_autoptr(GSubprocess) process = AI_CLI_CLIENT_GET_CLASS(client)->spawn(
+			AI_CLI_CLIENT(client), argv, G_SUBPROCESS_FLAGS_NONE, &error);
+		g_assert_null(process);
+		g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	}
+	g_clear_error(&error);
+	g_assert_true(ai_tool_endpoint_consumer_clear(AI_TOOL_ENDPOINT_CONSUMER(client), &error));
+	g_assert_null(ai_cli_client_get_env(AI_CLI_CLIENT(client), "OPENCODE_CONFIG"));
+}
+
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/mcp/provider/claude-host-permissions", test_claude_host_permissions);
+	g_test_add_func("/mcp/provider/grok-host-permissions", test_grok_host_permissions);
+	g_test_add_func("/mcp/provider/opencode-attach-refused", test_opencode_attach_refused);
 	g_test_add_func("/mcp/provider/codex-scoped-delivery", test_codex_scoped_delivery);
 	g_test_add_func("/mcp/provider/codex-invalid", test_codex_rejects_invalid);
 	g_test_add_func("/mcp/provider/codex-file-errors", test_codex_file_errors);

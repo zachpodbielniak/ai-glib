@@ -89,6 +89,8 @@ spawn_process(const gchar * const *argv, const gchar *mode)
 
 	g_subprocess_launcher_setenv(launcher, "CLAUDE_CODE_PATH", test_executable, TRUE);
 	g_subprocess_launcher_setenv(launcher, "CODEX_PATH", test_executable, TRUE);
+	g_subprocess_launcher_setenv(launcher, "OPENCODE_PATH", test_executable, TRUE);
+	g_subprocess_launcher_setenv(launcher, "GROK_PATH", test_executable, TRUE);
 	g_subprocess_launcher_setenv(launcher, "AI_MCP_TEST_STUB", mode != NULL ? mode : "normal", TRUE);
 	if (stub_pid_path != NULL)
 		g_subprocess_launcher_setenv(launcher, "AI_MCP_TEST_PID_FILE", stub_pid_path, TRUE);
@@ -106,6 +108,7 @@ spawn_process(const gchar * const *argv, const gchar *mode)
 		g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", fixture_directory, TRUE);
 		g_subprocess_launcher_setenv(launcher, "XDG_STATE_HOME", fixture_directory, TRUE);
 		g_subprocess_launcher_setenv(launcher, "XDG_DATA_HOME", fixture_directory, TRUE);
+		g_subprocess_launcher_setenv(launcher, "GROK_HOME", fixture_directory, TRUE);
 		g_subprocess_launcher_set_cwd(launcher, fixture_directory);
 	}
 	process = g_subprocess_launcher_spawnv(launcher, argv, &error);
@@ -271,6 +274,8 @@ stub_main(gint argc, gchar **argv)
 {
 	const gchar *mode = g_getenv("AI_MCP_TEST_STUB");
 	const gchar *config = NULL;
+	gboolean opencode = g_str_equal(mode, "opencode");
+	gboolean grok = g_str_equal(mode, "grok-build");
 	gboolean stream = FALSE;
 	gboolean instructions = FALSE;
 	gint i;
@@ -309,17 +314,56 @@ stub_main(gint argc, gchar **argv)
 		g_autoptr(JsonParser) parser = json_parser_new();
 		g_autoptr(GError) error = NULL;
 		JsonObject *server;
+		g_autoptr(JsonObject) converted = NULL;
 		JsonArray *args;
 		const gchar *bridge_argv[5];
 		g_autoptr(Peer) bridge = NULL;
 		g_autofree gchar *result = NULL;
 
-		g_assert_nonnull(config);
-		g_assert_true(instructions);
-		g_assert_true(json_parser_load_from_file(parser, config, &error));
-		g_assert_no_error(error);
-		server = json_object_get_object_member(json_object_get_object_member(
-			json_node_get_object(json_parser_get_root(parser)), "mcpServers"), "ai_host");
+		if (grok)
+		{
+			/* The generated TOML subset is also key-file syntax. Decode
+			 * its JSON string/array values without depending on Grok itself. */
+			g_autoptr(GKeyFile) keyfile = g_key_file_new();
+			g_autofree gchar *path = g_build_filename(g_getenv("GROK_HOME"), "config.toml", NULL);
+			g_autofree gchar *command = NULL;
+			g_autofree gchar *arguments = NULL;
+			g_autoptr(JsonNode) command_node = NULL;
+			g_assert_true(g_strv_contains((const gchar * const *)argv, "MCPTool(ai_host__*)"));
+			g_assert_true(g_key_file_load_from_file(keyfile, path, G_KEY_FILE_NONE, &error));
+			g_assert_no_error(error);
+			command = g_key_file_get_value(keyfile, "mcp_servers.ai_host", "command", NULL);
+			arguments = g_key_file_get_value(keyfile, "mcp_servers.ai_host", "args", NULL);
+			command_node = parse_text(command);
+			converted = json_object_new();
+			json_object_set_member(converted, "command", g_steal_pointer(&command_node));
+			json_object_set_member(converted, "args", parse_text(arguments));
+			server = converted;
+		}
+		else
+		{
+			if (opencode) config = g_getenv("OPENCODE_CONFIG");
+			g_assert_nonnull(config);
+			if (!opencode) g_assert_true(instructions);
+			g_assert_true(json_parser_load_from_file(parser, config, &error));
+			g_assert_no_error(error);
+			server = json_object_get_object_member(json_object_get_object_member(
+				json_node_get_object(json_parser_get_root(parser)), opencode ? "mcp" : "mcpServers"), "ai_host");
+			if (opencode)
+			{
+				JsonArray *tokens = json_object_get_array_member(server, "command");
+				JsonArray *arguments = json_array_new();
+				g_assert_cmpuint(json_array_get_length(tokens), ==, 3);
+				converted = json_object_new();
+				json_object_set_string_member(converted, "command", json_array_get_string_element(tokens, 0));
+				json_array_add_string_element(arguments, json_array_get_string_element(tokens, 1));
+				json_array_add_string_element(arguments, json_array_get_string_element(tokens, 2));
+				json_object_set_array_member(converted, "args", arguments);
+				server = converted;
+			}
+			else
+				g_assert_true(g_strv_contains((const gchar * const *)argv, "mcp__ai_host__*"));
+		}
 		args = json_object_get_array_member(server, "args");
 		g_assert_cmpuint(json_array_get_length(args), ==, 2);
 		bridge_argv[0] = json_object_get_string_member(server, "command");
@@ -331,12 +375,22 @@ stub_main(gint argc, gchar **argv)
 		peer_initialize(bridge);
 		result = peer_tool(bridge, "todo_write",
 			"{\"todos\":[{\"content\":\"MCP integration task\",\"active_form\":\"Updating MCP integration\",\"status\":\"in_progress\"}]}", TRUE);
+		g_clear_pointer(&result, g_free);
+		result = peer_tool(bridge, "todo_read", "{}", TRUE);
+		g_assert_nonnull(strstr(result, "MCP integration task"));
 		/* Closing bridge stdin exercises EOF cancellation without killing the host. */
 		finish_process(bridge->process, TRUE);
 		g_clear_object(&bridge->process);
 		g_string_free(bridge->buffer, TRUE);
 		g_free(g_steal_pointer(&bridge));
 	}
+	if (opencode)
+	{
+		g_print("{\"type\":\"text\",\"sessionID\":\"fixture-session\",\"part\":{\"text\":\"MCP bridge exercised\"}}\n");
+		return 0;
+	}
+	if (grok)
+		g_print("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"MCP bridge exercised\"}}}\n");
 	if (stream)
 		g_print("{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"MCP bridge exercised\"}]}}\n");
 	g_print("{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"MCP bridge exercised\",\"session_id\":\"mcp-fixture-session\"}\n");
@@ -632,7 +686,7 @@ test_tui_dump(gconstpointer data)
 {
 	const gchar *argv[] = { tui_executable, "--provider", data, "--mcp-tools", "todo_write,todo_read",
 		"--dump", "Update our TODO panel", NULL };
-	g_autoptr(GSubprocess) process = spawn_process(argv, NULL);
+	g_autoptr(GSubprocess) process = spawn_process(argv, data);
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *output = NULL;
 	g_autofree gchar *diagnostic = NULL;
@@ -640,7 +694,8 @@ test_tui_dump(gconstpointer data)
 	g_assert_true(ai_subprocess_communicate_utf8_bounded(process, NULL, DEADLINE_MS, NULL, &output, &diagnostic, &error));
 	g_assert_no_error(error);
 	if (!g_subprocess_get_successful(process)) g_error("TUI MCP dump failed: %s", diagnostic);
-	g_assert_nonnull(strstr(output, "MCP bridge exercised"));
+	if (strstr(output, "MCP bridge exercised") == NULL)
+		g_error("Missing MCP callback result: stdout=%s stderr=%s", output, diagnostic);
 	/* Active tasks display active_form rather than the pending content label. */
 	g_assert_nonnull(strstr(output, "Updating MCP integration"));
 }
@@ -744,6 +799,27 @@ codex_stub_main(gint argc, gchar **argv)
 		"{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"MCP bridge exercised\"}}\n"
 		"{\"type\":\"turn.completed\",\"usage\":{}}\n");
 	return 0;
+}
+
+/* Unsupported frontends must fail before publishing misleading instructions. */
+static void
+test_unsupported_injection(gconstpointer data)
+{
+	const gchar *providers[] = { "cursor", "antigravity" };
+	guint i;
+	for (i = 0; i < G_N_ELEMENTS(providers); i++)
+	{
+		const gchar *argv[] = { data, "--provider", providers[i], "--mcp-server", "--mcp-tools", "todo_read", NULL };
+		g_autoptr(GSubprocess) process = spawn_process(argv, NULL);
+		g_autoptr(GError) error = NULL;
+		g_autofree gchar *output = NULL;
+		g_autofree gchar *diagnostic = NULL;
+		g_assert_true(ai_subprocess_communicate_utf8_bounded(process, NULL, DEADLINE_MS,
+			NULL, &output, &diagnostic, &error));
+		g_assert_no_error(error);
+		g_assert_false(g_subprocess_get_successful(process));
+		g_assert_nonnull(strstr(diagnostic, "no reliable session-scoped MCP injection"));
+	}
 }
 
 /* No-inject keeps external tools available without passing them to the CLI. */
@@ -1125,6 +1201,7 @@ main(int argc, char **argv)
 		ADD_CASE("/socket-existing", test_socket_existing);
 		ADD_CASE("/turn-control", test_turn_control);
 		ADD_CASE("/injected-turn", test_injected_turn);
+		ADD_CASE("/unsupported-injection", test_unsupported_injection);
 		ADD_CASE("/no-inject", test_no_inject);
 		ADD_CASE("/background-agents", test_background_agents);
 		ADD_CASE("/oversized-frame", test_oversized_frame);
@@ -1135,6 +1212,8 @@ main(int argc, char **argv)
 	}
 	g_test_add_data_func("/mcp/cli/tui/dump", "claude-code", test_tui_dump);
 	g_test_add_data_func("/mcp/cli/tui/codex-dump", "codex", test_tui_dump);
+	g_test_add_data_func("/mcp/cli/tui/opencode-dump", "opencode", test_tui_dump);
+	g_test_add_data_func("/mcp/cli/tui/grok-dump", "grok-build", test_tui_dump);
 	g_test_add_func("/mcp/cli/tui/terminal-shutdown", test_terminal_shutdown);
 	result = g_test_run();
 	remove_fixture(fixture_directory);

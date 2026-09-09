@@ -540,7 +540,17 @@ emit_permission_args(AiClaudeCodeClient *self, GPtrArray *args)
         }
     }
 
-    emit_list_flag(args, "--allowedTools", self->allowed_tools);
+    /* The injected parent grants only its published allowlist. Preserve
+     * caller rules and let explicit deny rules keep their precedence. */
+    if (ai_cli_client_mcp_config_has_host(self->mcp_config_path, FALSE))
+    {
+        g_autofree gchar *allowed = g_strconcat(
+            self->allowed_tools != NULL ? self->allowed_tools : "",
+            ",mcp__ai_host__*", NULL);
+        emit_list_flag(args, "--allowedTools", allowed);
+    }
+    else
+        emit_list_flag(args, "--allowedTools", self->allowed_tools);
     emit_list_flag(args, "--disallowedTools", self->disallowed_tools);
     emit_list_flag(args, "--add-dir", self->additional_directories);
     emit_list_flag(args, "--tools", self->tools);

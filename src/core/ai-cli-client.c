@@ -18,6 +18,84 @@
 #include "model/ai-text-content.h"
 #include "model/ai-tool-result.h"
 #include "model/ai-tool-use.h"
+#include "core/ai-json-util.h"
+
+/**
+ * ai_cli_client_mcp_config_has_host:
+ * @path: (nullable): scoped MCP configuration path
+ * @toml: whether the fragment uses Grok's generated TOML subset
+ *
+ * Recognize the explicit parent callback before granting Claude's host-only
+ * permission rule. Ordinary caller MCP files must not authorize an unrelated
+ * server merely because it happens to use the reserved ai_host name.
+ *
+ * Returns: whether ai_host is configured as the local socket bridge
+ */
+gboolean
+ai_cli_client_mcp_config_has_host(const gchar *path, gboolean toml)
+{
+	g_autoptr(GFile) file = NULL;
+	g_autoptr(GFileInfo) info = NULL;
+	g_autoptr(GFileInputStream) input = NULL;
+	g_autoptr(JsonParser) parser = json_parser_new();
+	g_autoptr(JsonObject) toml_host = NULL;
+	g_autofree gchar *buffer = NULL;
+	JsonObject *root;
+	JsonObject *servers;
+	JsonObject *host;
+	JsonArray *args;
+	gsize size;
+	const gchar *command;
+
+	if (path == NULL || *path == '\0') return FALSE;
+	file = g_file_new_for_path(path);
+	/* Configuration must be a regular file, not a device or blocking FIFO. */
+	info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_TYPE,
+		G_FILE_QUERY_INFO_NONE, NULL, NULL);
+	if (info == NULL || g_file_info_get_file_type(info) != G_FILE_TYPE_REGULAR)
+		return FALSE;
+	input = g_file_read(file, NULL, NULL);
+	if (input == NULL) return FALSE;
+	buffer = g_malloc(1048577);
+	if (!g_input_stream_read_all(G_INPUT_STREAM(input), buffer, 1048577, &size, NULL, NULL) ||
+	    size > 1048576)
+		return FALSE;
+	if (toml)
+	{
+		/* Generated command/args TOML values deliberately use JSON syntax. */
+		g_autoptr(GKeyFile) keyfile = g_key_file_new();
+		g_autofree gchar *value = NULL;
+		if (!g_key_file_load_from_data(keyfile, buffer, size, G_KEY_FILE_NONE, NULL)) return FALSE;
+		toml_host = json_object_new();
+		value = g_key_file_get_value(keyfile, "mcp_servers.ai_host", "command", NULL);
+		if (value == NULL || !json_parser_load_from_data(parser, value, -1, NULL)) return FALSE;
+		json_object_set_member(toml_host, "command", json_node_copy(json_parser_get_root(parser)));
+		g_clear_pointer(&value, g_free);
+		value = g_key_file_get_value(keyfile, "mcp_servers.ai_host", "args", NULL);
+		if (value == NULL || !json_parser_load_from_data(parser, value, -1, NULL)) return FALSE;
+		json_object_set_member(toml_host, "args", json_node_copy(json_parser_get_root(parser)));
+		host = toml_host;
+	}
+	else
+	{
+		if (!json_parser_load_from_data(parser, buffer, (gssize)size, NULL) ||
+		    !JSON_NODE_HOLDS_OBJECT(json_parser_get_root(parser))) return FALSE;
+		root = json_node_get_object(json_parser_get_root(parser));
+		servers = ai_json_get_object(root, "mcpServers");
+		host = servers != NULL ? ai_json_get_object(servers, "ai_host") : NULL;
+	}
+	if (host == NULL) return FALSE;
+	command = ai_json_get_string(host, "command", NULL);
+	args = ai_json_get_array(host, "args");
+	if (command == NULL || !g_path_is_absolute(command) || args == NULL ||
+	    json_array_get_length(args) != 2) return FALSE;
+	/* Type-check elements before using JSON-GLib's typed accessors. */
+	if (json_node_get_value_type(json_array_get_element(args, 0)) != G_TYPE_STRING ||
+	    json_node_get_value_type(json_array_get_element(args, 1)) != G_TYPE_STRING)
+		return FALSE;
+	return g_str_equal(json_array_get_string_element(args, 0), "--mcp-connect") &&
+	       g_path_is_absolute(json_array_get_string_element(args, 1));
+}
 
 static void
 append_projected_part(GString *out, const gchar *part)

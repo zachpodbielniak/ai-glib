@@ -43,6 +43,7 @@ struct _AiGrokBuildClient
 
     gdouble  total_cost;
     gboolean skip_permissions;
+    gboolean host_mcp_granted;
 
     /*
      * Everything below is emitted only when set, so an unconfigured client
@@ -344,6 +345,10 @@ emit_permission_args(AiGrokBuildClient *self, GPtrArray *args)
     }
 
     emit_rule_flag(args, "--allow", self->allowed_tools);
+    /* Authorize the published parent allowlist even in normal mode. This
+     * shared builder also covers resumed and text-synthesis retry turns. */
+    if (self->host_mcp_granted)
+        emit_rule_flag(args, "--allow", "MCPTool(ai_host__*)");
     emit_rule_flag(args, "--deny", self->disallowed_tools);
 }
 
@@ -1421,6 +1426,7 @@ ai_grok_build_client_endpoint_applied(
 
     /* Revoke first, and unconditionally: an apply that replaces an
      * earlier endpoint must not leak the previous overlay. */
+    self->host_mcp_granted = FALSE;
     if (self->home_overlay != NULL)
     {
         ai_grok_home_overlay_destroy(self->home_overlay);
@@ -1448,6 +1454,7 @@ ai_grok_build_client_endpoint_applied(
     }
 
     ai_cli_client_set_env(client, "GROK_HOME", self->home_overlay);
+    self->host_mcp_granted = ai_cli_client_mcp_config_has_host(endpoint->value, TRUE);
 
     return TRUE;
 }

@@ -15,6 +15,9 @@
 
 G_BEGIN_DECLS
 
+gboolean
+ai_cli_client_mcp_config_has_host(const gchar *path, gboolean toml);
+
 gchar *
 ai_cli_client_project_message(AiMessage *message);
 

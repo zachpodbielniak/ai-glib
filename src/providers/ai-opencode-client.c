@@ -237,6 +237,15 @@ ai_opencode_client_spawn(
     AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
     g_autoptr(GSubprocessLauncher) launcher = NULL;
 
+    /* Properties may change after endpoint application; never silently
+     * redirect a granted local callback into an already running server. */
+    if (self->endpoint_config_active && self->attach != NULL && *self->attach != '\0')
+    {
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+            "OpenCode --attach cannot inject a local host MCP config; use a local run or --mcp-no-inject");
+        return NULL;
+    }
+
     /*
      * Through the factory, never a hand-rolled launcher.  This override
      * used to build its own and reproduce the base's cwd logic, and the
@@ -960,6 +969,14 @@ ai_opencode_client_parse_stream_events(
     type = ai_json_get_string(obj, "type", NULL);
     part = ai_json_get_object(obj, "part");
 
+    /* Startup and MCP failures can arrive as an error event with exit 0.
+     * Reuse the nonstreaming decoder so neither delivery mode hides them. */
+    if (json_object_has_member(obj, "error"))
+    {
+        g_autoptr(AiResponse) failed = ai_opencode_client_parse_json_output(client, line, error);
+        return failed != NULL;
+    }
+
     /* opencode spells this camelCase, unlike the rest of its payload. */
     session_id = ai_json_get_string(obj, "sessionID", NULL);
     if (session_id == NULL && part != NULL)
@@ -1080,8 +1097,6 @@ ai_opencode_client_endpoint_applied(
 ){
     AiOpenCodeClient *self = AI_OPENCODE_CLIENT(client);
 
-    (void)error;
-
     /* Restore the caller's setting before replacing or revoking a grant. */
     if (self->endpoint_config_active)
     {
@@ -1097,6 +1112,14 @@ ai_opencode_client_endpoint_applied(
         && g_strcmp0(endpoint->kind,
                      AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE) == 0)
     {
+        /* --attach uses an already running server, which never reads this
+         * child's temporary config. Refuse instead of advertising lost tools. */
+        if (self->attach != NULL && *self->attach != '\0')
+        {
+            g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                "OpenCode --attach cannot inject a local host MCP config; use a local run or --mcp-no-inject");
+            return FALSE;
+        }
         self->saved_opencode_config = g_strdup(ai_cli_client_get_env(client, "OPENCODE_CONFIG"));
         self->endpoint_config_active = TRUE;
         ai_cli_client_set_env(client, "OPENCODE_CONFIG", endpoint->value);

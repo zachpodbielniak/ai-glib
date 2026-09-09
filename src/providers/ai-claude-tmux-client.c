@@ -2047,6 +2047,12 @@ ai_claude_tmux_client_build_session_argv(
     {
         g_ptr_array_add(argv, g_strdup("--mcp-config"));
         g_ptr_array_add(argv, g_strdup(mcp_config_path));
+        /* Interactive Claude runs inside an unattended tmux child too. */
+        if (ai_cli_client_mcp_config_has_host(mcp_config_path, FALSE))
+        {
+            g_ptr_array_add(argv, g_strdup("--allowedTools"));
+            g_ptr_array_add(argv, g_strdup("mcp__ai_host__*"));
+        }
     }
     g_ptr_array_add(argv, NULL);
 
