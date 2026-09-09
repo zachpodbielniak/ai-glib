@@ -156,7 +156,7 @@ one that refuses to start.
 ** Keys
 | Key                        | Does                                              |
 |----------------------------+---------------------------------------------------|
-| =Enter=                    | Send --- or take the completion, if one is open   |
+| =Enter=                    | Send a complete command/prompt, or accept completion |
 | =Alt-Enter= / =Shift-Enter= | New line                                          |
 | =C-g=                      | Edit the prompt in =$EDITOR=                      |
 | =C-c=                      | Stop the turn, then clear the line, then quit     |
@@ -297,13 +297,15 @@ an =@= anywhere lists paths.
 | =PgUp= / =PgDn=    | Move it a page at a time                        |
 | =Tab=              | Take what is on offer, or step to the next      |
 | =Shift-Tab=        | Step back                                       |
-| =Enter=            | Accept the highlighted candidate                |
+| =Enter=            | Submit an exact command, otherwise accept the candidate |
 | =Escape=           | Dismiss, until the line changes again           |
 
 The arrows, =PgUp= and =PgDn= belong to the menu while it is showing and
 to the input history and the transcript when it is not --- one key, two
 jobs, decided by what is on screen. Press =Escape= first if you want the
 history back with a half-typed command still on the line.
+
+A fully typed command such as =/model= or =/provider= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider=, leaving it in the composer so you can add an argument. =Tab= always completes without submitting. Path completions also remain in the composer.
 
 Each row is the name in bold, its description in readable secondary text, and the harness it
 came from right-aligned --- the origin has its own column because the
@@ -432,6 +434,8 @@ Carried 12.4 KiB of that session's own history, including its tool calls.
 The line appears only when something was actually carried. Nothing on disk
 yet, or a provider whose history lives in SQLite (=opencode=, =cursor=,
 =antigravity=), switches quietly on the portable history alone.
+
+This migration is handled by =AiConversation=, including when ai-tui has an MCP host enabled. Terminal regression tests inspect the receiving CLI's actual system prompt and message input to verify that the original system instructions, portable conversation, and harvested native tool history survive a provider switch; they also check that a subsequent =/model NAME= reaches the child's model argument.
 
 The carried text goes into the system prompt, which the transcript never
 shows, so =/context= is how to see it:

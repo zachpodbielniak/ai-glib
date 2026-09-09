@@ -489,6 +489,7 @@ static void completion_advance(App *app);
 static void completion_refresh(App *app);
 static gboolean completion_select(App *app, gint delta);
 static void completion_accept(App *app);
+static gboolean completion_is_exact_command(App *app);
 static void completion_close(App *app);
 static void on_input_sent(GObject *source, GAsyncResult *result,
                           gpointer user_data);
@@ -3010,13 +3011,15 @@ drain_keys(App *app)
             case '\n':
             case '\r':
             case KEY_ENTER:
-                /* A visible menu means Enter is a choice, not an edit. */
-                if (app->candidates != NULL)
+                /* Submit an already complete command on the first Enter.
+                 * Partial names and path candidates still need acceptance. */
+                if (app->candidates != NULL && !completion_is_exact_command(app))
                 {
                     completion_accept(app);
                     break;
                 }
 
+                completion_close(app);
                 app_send(app);
                 break;
 
@@ -3512,6 +3515,35 @@ completion_advance(App *app)
     }
 
     app->candidate_index = (app->candidate_index + 1) % n;
+}
+
+/**
+ * completion_is_exact_command:
+ * @app: the active composer
+ *
+ * Whether accepting the selected command would leave the complete input
+ * unchanged. Only a command at the end of the draft qualifies: Enter must
+ * still accept partial names, a different selected command, and paths.
+ *
+ * Returns: %TRUE if Enter should submit instead of accepting completion
+ */
+static gboolean
+completion_is_exact_command(App *app)
+{
+	const gchar *text = NULL;
+	guint start;
+	guint end;
+
+	if (app->candidates == NULL ||
+		ai_completion_result_get_kind(app->candidates) != AI_COMPLETION_COMMAND ||
+		!ai_completion_result_get_item_fields(app->candidates, app->candidate_index,
+			&text, NULL, NULL, NULL, NULL))
+		return FALSE;
+
+	start = ai_completion_result_get_start(app->candidates);
+	end = ai_completion_result_get_end(app->candidates);
+	return start == 1 && end == app->input->len && app->cursor == end &&
+		app->input->str[0] == '/' && g_str_equal(app->input->str + start, text);
 }
 
 /* Replace the queried range with the highlighted candidate. */

@@ -1425,6 +1425,135 @@ test_no_expand_leaves_a_command_alone(void)
 	"\"delta\":{\"type\":\"text_delta\",\"text\":\"the reply\"}}}\n" \
 	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
 
+/**
+ * test_switch_command_enter:
+ * @data: the complete command to submit
+ *
+ * A fully typed command must run on the first Enter even while its exact
+ * completion is visible. Dump mode and Escape-before-Enter miss this path.
+ */
+static void
+test_switch_command_enter(gconstpointer data)
+{
+	const gchar *command = data;
+	const gchar *notice = g_str_equal(command, "/model") ? "Model:" : "Provider:";
+	Stub *stub;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *partial = g_strndup(command, 4);
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	/* Partial input still completes without executing the command. */
+	tmux_send(TUI_SESSION, partial);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, command));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, notice));
+	tmux_send(TUI_SESSION, "C-u");
+	/* Tab likewise leaves an exact command ready for editing. */
+	tmux_send(TUI_SESSION, command);
+	tmux_send(TUI_SESSION, "Tab");
+	g_assert_true(tmux_wait_for(TUI_SESSION, command));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, notice));
+	tmux_send(TUI_SESSION, "C-u");
+	tmux_send(TUI_SESSION, command);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, notice));
+	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/**
+ * test_switch_context_delivery:
+ * @data: whether to enable the MCP host during migration
+ *
+ * Drive a real CLI-to-CLI switch, then inspect the receiving child's argv
+ * and stdin. A success notice alone does not prove either context delivery
+ * or that /model changes the model used for the next request.
+ */
+static void
+test_switch_context_delivery(gconstpointer data)
+{
+	Stub *stub;
+	g_autofree gchar *encoded = NULL;
+	g_autofree gchar *native_path = NULL;
+	g_autofree gchar *options = NULL;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *args_path = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *arguments = NULL;
+	g_autofree gchar *sent = NULL;
+	gsize i;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	args_path = g_build_filename(stub->dir, "args.log", NULL);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	script = g_strdup_printf("#!/bin/bash\nprintf '%%s\\n' \"$@\" > '%s'\n"
+		"cat > '%s'\ncat '%s/stdout'\n", args_path, stdin_path, stub->dir);
+	g_assert_true(g_file_set_contents(stub->stub, script, -1, NULL));
+
+	/* Only this sandbox's native Claude transcript can be harvested. */
+	encoded = g_strdup(stub->dir);
+	for (i = 0; encoded[i] != '\0'; i++)
+		if (encoded[i] == '/' || encoded[i] == '.' || encoded[i] == '_')
+			encoded[i] = '-';
+	native_path = g_build_filename(".claude", "projects", encoded, "s1.jsonl", NULL);
+	sandbox_write(stub->dir, native_path,
+		"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":["
+		"{\"type\":\"tool_use\",\"id\":\"private-tool\",\"name\":\"read_file\","
+		"\"input\":{\"path\":\"private-amber.c\"}}]}}\n"
+		"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"private-tool\","
+		"\"content\":\"native-tool-result-amber\"}]}}\n");
+	options = g_strdup_printf("-p claude-code --set executable-path='%s' "
+		"--system keep-system-amber --no-animation %s", stub->stub,
+		GPOINTER_TO_INT(data) ? "--mcp-tools todo_read,todo_write" : "");
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, options);
+	tmux_send(TUI_SESSION, "remember-portable-amber");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
+
+	tmux_send(TUI_SESSION, "/provider grok-build");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Provider switched to Grok Build"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Carried"));
+	tmux_send(TUI_SESSION, "/model test-switch-model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Model switched from"));
+
+	/* A distinct reply synchronizes with the receiving child's completed turn. */
+	sandbox_write(stub->dir, "stdout",
+		"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"migration-complete-amber\"}}}\n"
+		"{\"type\":\"result\",\"result\":\"migration-complete-amber\",\"session_id\":\"s2\"}\n");
+	tmux_send(TUI_SESSION, "recall-amber-now");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "migration-complete-amber"));
+	g_assert_true(g_file_get_contents(args_path, &arguments, NULL, NULL));
+	g_assert_nonnull(strstr(arguments, "--model\ntest-switch-model\n"));
+	g_assert_nonnull(strstr(arguments, "--system-prompt-override\n"));
+	g_assert_nonnull(strstr(arguments, "keep-system-amber"));
+	g_assert_nonnull(strstr(arguments, "private-amber.c"));
+	g_assert_nonnull(strstr(arguments, "native-tool-result-amber"));
+	g_assert_null(strstr(arguments, "--resume\n"));
+	g_assert_null(strstr(arguments, "--continue\n"));
+	g_assert_true(g_file_get_contents(stdin_path, &sent, NULL, NULL));
+	g_assert_nonnull(strstr(sent, "remember-portable-amber"));
+	g_assert_nonnull(strstr(sent, "the reply"));
+	g_assert_nonnull(strstr(sent, "recall-amber-now"));
+	g_assert_null(strstr(sent, "/provider"));
+	g_assert_null(strstr(sent, "/model"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 /* Reset must discard both native resume flags and all local prompt history. */
 static void
 test_reset_session(void)
@@ -2680,6 +2809,14 @@ main(int argc, char *argv[])
 
 	g_test_add_func("/ai-glib/ai-tui/keys/enter-sends",
 	                test_enter_sends_the_prompt);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
+	                     test_switch_command_enter);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",
+	                     test_switch_command_enter);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/switch-context", GINT_TO_POINTER(FALSE),
+	                     test_switch_context_delivery);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/switch-context-mcp", GINT_TO_POINTER(TRUE),
+	                     test_switch_context_delivery);
 	g_test_add_func("/ai-glib/ai-tui/keys/positional-prompt-sends",
 	                test_positional_prompt_sends_in_the_tui);
 	g_test_add_func("/ai-glib/ai-tui/keys/piped-prompt-sends",
