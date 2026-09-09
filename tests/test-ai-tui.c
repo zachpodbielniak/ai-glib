@@ -437,9 +437,16 @@ tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
 	args[14] = command;
 	out = tmux_run(args);
 
-	/* The prompt marker is the first thing drawn, so its arrival is the
-	 * signal that ncurses is up and reading keys. */
-	g_assert_true(tmux_wait_for(session, "COMPOSE"));
+	/*
+	 * The composer frame is the first thing drawn, so its arrival is the
+	 * signal that ncurses is up and reading keys.
+	 *
+	 * The frame and not its title: the title says whose move it is, and
+	 * a positional prompt can send, finish and hand the turn back before
+	 * this ever looks --- which made waiting for "COMPOSE" a race that
+	 * the fast stub won.
+	 */
+	g_assert_true(tmux_wait_for(session, "╭"));
 }
 
 static void
@@ -480,7 +487,8 @@ tmux_start_tui_piped(const gchar *session, const gchar *stub_dir,
 	args[14] = command;
 	out = tmux_run(args);
 
-	g_assert_true(tmux_wait_for(session, "COMPOSE"));
+	/* The frame, not its title --- see tmux_start_tui_with_options(). */
+	g_assert_true(tmux_wait_for(session, "╭"));
 }
 
 /* Write an executable stand-in for $EDITOR into @dir. */
@@ -1947,6 +1955,29 @@ composer_border(void)
 	return g_strndup(start, (gsize)(end - start));
 }
 
+/*
+ * The composer's top border with its SGR attributes intact.
+ *
+ * Bold is an attribute and not a glyph, so the plain capture behind
+ * composer_border() reports a breathing frame and a still one as the
+ * same string. The line is taken from its start rather than from the
+ * corner because the escape that sets an attribute is emitted before the
+ * glyph it applies to.
+ */
+static gchar *
+composer_border_styled(void)
+{
+	const gchar *capture[] = { "capture-pane", "-t", TUI_SESSION, "-p", "-e", NULL };
+	g_autofree gchar *pane = tmux_run(capture);
+	const gchar *at = strstr(pane, "╭"), *start, *end;
+
+	g_assert_nonnull(at);
+	for (start = at; start > pane && start[-1] != '\n'; start--) { }
+	end = strchr(at, '\n');
+	g_assert_nonnull(end);
+	return g_strndup(start, (gsize)(end - start));
+}
+
 static void
 test_activity_motion(gconstpointer data)
 {
@@ -1984,15 +2015,56 @@ test_activity_motion(gconstpointer data)
 	g_assert_cmpint(changed, ==, !reduced);
 	sandbox_write(stub->dir, "release", "ready\n");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
-	g_assert_true(tmux_wait_for(TUI_SESSION, "ready"));
+	/*
+	 * The hand-off.
+	 *
+	 * On a quiet screen a finished turn and a slow one look identical ---
+	 * the sweep is gone either way --- so the composer has to say which
+	 * one this is, in the frame and in the status line, and go on saying
+	 * it after the accent has stopped.
+	 */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "YOUR TURN"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "your turn"));
 	g_clear_pointer(&first, g_free);
 	first = composer_border();
 	g_assert_null(strstr(first, "━"));
-	idle = tmux_capture(TUI_SESSION);
-	g_usleep(250000);
-	g_clear_pointer(&next, g_free);
-	next = tmux_capture(TUI_SESSION);
-	g_assert_cmpstr(idle, ==, next);
+	{
+		g_autofree gchar *styled = composer_border_styled();
+		g_autofree gchar *settled = NULL;
+		gboolean breathed = FALSE;
+
+		/* It breathes --- unless motion is off, where the colour and the
+		 * title carry the whole state and nothing moves at all. */
+		deadline = g_get_monotonic_time() + (3 * G_TIME_SPAN_SECOND) / 2;
+		do
+		{
+			g_autofree gchar *sample = NULL;
+			g_usleep(150000);
+			sample = composer_border_styled();
+			breathed = g_strcmp0(styled, sample) != 0;
+		} while (!breathed && g_get_monotonic_time() < deadline);
+		g_assert_cmpint(breathed, ==, !reduced);
+
+		/* And then it stops. A session somebody left open overnight is
+		 * sitting in exactly this state, so the accent is bounded and
+		 * what remains is static --- the frame, the whole screen, and
+		 * the words that say whose move it is. */
+		g_usleep(3 * G_USEC_PER_SEC / 2);
+		settled = composer_border_styled();
+		idle = tmux_capture(TUI_SESSION);
+		g_usleep(600000);
+		g_clear_pointer(&next, g_free);
+		next = tmux_capture(TUI_SESSION);
+		g_assert_cmpstr(idle, ==, next);
+		g_assert_nonnull(strstr(idle, "YOUR TURN"));
+		{
+			g_autofree gchar *again = composer_border_styled();
+			g_assert_cmpstr(settled, ==, again);
+		}
+	}
+	/* Typing is an answer: the prompt to answer stands down. */
+	tmux_send(TUI_SESSION, "typing");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "COMPOSE"));
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }

@@ -292,6 +292,23 @@ attr_for_tag(AiStyleTag tag)
 #define FEEDBACK_DURATION_US (1600 * G_TIME_SPAN_MILLISECOND)
 
 /*
+ * Handing the turn back to the user.
+ *
+ * A model finishing looks, on a quiet screen, exactly like a model still
+ * thinking: the sweep stops, the spinner stops, and nothing says whose
+ * move it is. So the input frame breathes for a moment and then *stays*
+ * in a different colour with a different title until something is typed.
+ *
+ * The breathing is bounded and the resting state is static, deliberately.
+ * An indefinite pulse would repaint a terminal that somebody left open
+ * overnight, which is the rule INTRO_DURATION_US above exists to keep;
+ * the colour and the title carry the state for free once it stops.
+ */
+#define AWAIT_PULSE_STEP_US (420 * G_TIME_SPAN_MILLISECOND)
+#define AWAIT_PULSE_CYCLES (3)
+#define AWAIT_PULSE_DURATION_US (2 * AWAIT_PULSE_CYCLES * AWAIT_PULSE_STEP_US)
+
+/*
  * How many background agents may run at once.
  *
  * A ceiling rather than a queue depth --- anything beyond it waits its
@@ -407,6 +424,12 @@ typedef struct
     guint                spinner_frame;
 	gint64               intro_started;
 	gint64               feedback_until;
+
+	/* When the last turn handed control back, or 0 while a turn owns it.
+	 * Not cleared by the first keystroke --- app_awaiting_user() reads the
+	 * input buffer for that, so emptying the line again says "your turn"
+	 * again, which is what is actually true. */
+	gint64               awaiting_since;
 	gchar               *feedback;
 	AiStyleTag           feedback_style;
 
@@ -628,6 +651,47 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
     wattrset(win, A_NORMAL);
 }
 
+/*
+ * Is the harness idle with the ball in the user's court?
+ *
+ * Derived rather than stored, so there is no third state to keep in sync:
+ * a turn starting clears awaiting_since, and anything in the input buffer
+ * means the user has already started answering and no longer needs to be
+ * told it is their move. A modal prompt --- an approval, a search --- is
+ * its own, louder, request for input and owns the frame while it is up.
+ */
+static gboolean
+app_awaiting_user(App *app)
+{
+	return app->awaiting_since != 0 && app->input->len == 0 &&
+		app->approval_prompt == NULL && !app->searching &&
+		!ai_conversation_get_busy(app->conversation);
+}
+
+/* The bounded half of the hand-off: a few breaths, then the static frame. */
+static gboolean
+awaiting_pulse_active(App *app, gint64 now)
+{
+	return !opt_no_animation && app_awaiting_user(app) &&
+		now < app->awaiting_since + AWAIT_PULSE_DURATION_US;
+}
+
+/*
+ * The colour of a frame that is waiting on a person.
+ *
+ * Green rather than the accent, because the accent is what the frame
+ * wears the rest of the time and a state nobody can see is not a state.
+ * Without colour the tag contributes no attributes at all, so bold is
+ * what carries it --- a monochrome terminal must not silently lose this.
+ */
+static attr_t
+awaiting_border_attr(void)
+{
+	attr_t attr = attr_for_tag(AI_STYLE_TOOL_OK);
+
+	return theme_colour ? attr : (attr | A_BOLD);
+}
+
 /* Activity and short UI accents share a clock. The transcript row cache
  * stays intact, and the final tick restores the static frame before stopping. */
 static gboolean
@@ -641,6 +705,7 @@ on_spinner_tick(gpointer user_data)
 
     app_schedule_redraw(app);
 	if (!ai_conversation_get_busy(app->conversation) && now >= app->feedback_until &&
+		!awaiting_pulse_active(app, now) &&
 		(opt_no_animation || now >= app->intro_started + INTRO_DURATION_US))
 	{
 		app->spinner_id = 0;
@@ -664,6 +729,7 @@ sync_spinner(App *app)
     gboolean busy = ai_conversation_get_busy(app->conversation);
 	gint64 now = g_get_monotonic_time();
 	gboolean active = busy || now < app->feedback_until ||
+		awaiting_pulse_active(app, now) ||
 		(!opt_no_animation && now < app->intro_started + INTRO_DURATION_US);
 
     if (active && app->spinner_id == 0 && app->running)
@@ -697,6 +763,10 @@ ui_feedback(App *app, const gchar *text, AiStyleTag style)
 static void
 ui_turn_finished(App *app, const GError *error)
 {
+	/* However a turn ended --- answered, stopped, or failed --- nothing
+	 * further happens until the user says so, so all three hand over. */
+	app->awaiting_since = g_get_monotonic_time();
+
 	if (error == NULL)
 		ui_feedback(app, "Turn complete", AI_STYLE_TOOL_OK);
 	else if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
@@ -716,6 +786,10 @@ on_busy_changed(
 
     (void)object;
     (void)pspec;
+
+	/* A turn owns the frame again; ui_turn_finished() hands it back. */
+	if (ai_conversation_get_busy(app->conversation))
+		app->awaiting_since = 0;
 
     sync_spinner(app);
     app_schedule_redraw(app);
@@ -790,7 +864,9 @@ draw_status(App *app)
                                model != NULL ? model : "",
                                app->interrupt_id != 0
                                    ? "^C again to quit"
-                                   : "ready",
+                                   : app_awaiting_user(app)
+                                       ? "your turn · type to reply"
+                                       : "ready",
                                 app->follow ? "" : "   [scrolled]");
     }
 	if (app->feedback != NULL && app->interrupt_id == 0 &&
@@ -1046,17 +1122,35 @@ draw_input(App *app)
     gint     rows = getmaxy(app->input_win) - 2;
     InputPen pen = { 0 };
 	gboolean busy = ai_conversation_get_busy(app->conversation);
+	gint64   now = g_get_monotonic_time();
+	gboolean awaiting = app_awaiting_user(app);
 	attr_t border = theme_attr(PAIR_ACCENT);
 
-	if (!busy && app->feedback != NULL && g_get_monotonic_time() < app->feedback_until)
+	if (!busy && app->feedback != NULL && now < app->feedback_until)
 		border = attr_for_tag(app->feedback_style);
+	else if (awaiting)
+		border = awaiting_border_attr();
+
+	/*
+	 * The breath: the whole frame alternates weight on a slow beat.
+	 *
+	 * Weight and not geometry or colour --- the frame stays exactly where
+	 * it was and stays the colour it settles on, so the motion reads as
+	 * one thing asking for attention rather than as the layout moving
+	 * under a cursor somebody is about to type at.
+	 */
+	if (awaiting_pulse_active(app, now) &&
+		((now - app->awaiting_since) / AWAIT_PULSE_STEP_US) % 2 == 0)
+		border |= A_BOLD;
 
 	wbkgd(app->input_win, ' ' | attr_for_tag(AI_STYLE_DEFAULT));
     werase(app->input_win);
 	wattrset(app->input_win, border);
 	draw_frame(app->input_win);
 	{
-		g_autofree gchar *title = fit_to_width(ai_conversation_get_busy(app->conversation) ? " DRAFT / waiting for turn " : " COMPOSE ", width - 4);
+		const gchar *label = busy ? " DRAFT / waiting for turn "
+			: awaiting ? " YOUR TURN " : " COMPOSE ";
+		g_autofree gchar *title = fit_to_width(label, width - 4);
 		mvwaddstr(app->input_win, 0, 2, title);
 	}
 	draw_sweep(app, app->input_win, 0, busy ? 30 : 13, width - (busy ? 32 : 15));
@@ -1081,7 +1175,9 @@ draw_input(App *app)
 	input_walk(app, &pen);
 	if (app->input->len == 0)
 	{
-		g_autofree gchar *hint = fit_to_width("Ask, build, investigate...  / commands  @ files", width - 5);
+		g_autofree gchar *hint = fit_to_width(awaiting
+			? "Your turn · type a reply, or / commands  @ files"
+			: "Ask, build, investigate...  / commands  @ files", width - 5);
 		wattrset(app->input_win, attr_for_tag(AI_STYLE_DIM));
 		mvwaddstr(app->input_win, 1, 2, hint);
 	}

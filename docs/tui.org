@@ -65,9 +65,9 @@ The interface uses Catppuccin Mocha by default: a high-contrast identity badge, 
 
    Created 2 files  +5-0
 
- Grok Build / grok-4.6   ready
- ╭─ COMPOSE ───────────────────────────────────────────────────────╮
- │ Ask, build, investigate...  / commands  @ files                  │
+ Grok Build / grok-4.6   your turn · type to reply
+ ╭─ YOUR TURN ─────────────────────────────────────────────────────╮
+ │ Your turn · type a reply, or / commands  @ files                │
  ╰───────────────────────────────────────────────────────── 1/1 ───╯
  Enter send | ^F find | ^O help | ^T theme | ^P panel
 
@@ -79,10 +79,17 @@ explanation lost inside it.
 
 The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits; =/todos=, =/running= and =/tools= provide full listings. =C-p= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders and the wordmark fall back to ASCII.
 
+*** Whose turn it is
+A finished turn and a slow one look alike on a quiet screen: the sweep stops either way and nothing on the screen says the harness is now waiting on a person. So the composer states it. When a turn hands control back --- answered, stopped by =C-c=, or failed --- the composer frame turns from the accent color to the confirmation color, its title changes from =COMPOSE= to =YOUR TURN=, the placeholder line reads =Your turn · type a reply=, and the status strip reads =your turn · type to reply= in place of =ready=.
+
+The frame also breathes for about 2.5 seconds as the turn is handed over: the border alternates weight on a slow beat, three times, and then stops. Weight and not geometry or color, so the layout never moves under a cursor you are about to type at, and bounded rather than perpetual, for the same reason startup and feedback accents are bounded --- a session left open overnight must not be repainting a terminal. What remains after the breath is static, and it is the color and the two labels that carry the state from then on. =--no-animation= drops the breath and keeps all of it.
+
+The state is derived rather than remembered, so it always describes what is actually true: it ends the moment there is anything in the composer, and it returns if you clear the line again without sending. A search or approval overlay is its own, louder request for input and owns the frame while it is up. Terminals without color show the waiting frame in bold, since a state nobody can see is not a state.
+
 *** Motion and feedback
 A brief startup sweep introduces the composer. While a turn runs, a small two-tone highlight travels along the composer's top border alongside the existing activity spinner. It never covers the prompt, shifts the layout, or delays text and keyboard input. Search and approval overlays suppress the border sweep. Once the turn finishes, the border briefly indicates success, failure, or cancellation, and the status strip names the outcome. Theme and panel changes also give short status feedback without adding messages to the transcript or model context.
 
-Motion is deliberately bounded: startup lasts 900 ms, feedback lasts about 1.6 seconds, and an idle session has no ongoing animation timer. The activity and effect clock is shared, and cached transcript rows are reused rather than rebuilt for animation ticks. =--no-animation= disables the startup/border sweeps and spinner rotation; elapsed time still updates once per second and static feedback remains available. There are no blinking text effects, palette changes, or moving transcript contents.
+Motion is deliberately bounded: startup lasts 900 ms, feedback lasts about 1.6 seconds, the turn hand-off breathes for about 2.5 seconds, and an idle session has no ongoing animation timer. The activity and effect clock is shared, and cached transcript rows are reused rather than rebuilt for animation ticks. =--no-animation= disables the startup/border sweeps and spinner rotation; elapsed time still updates once per second and static feedback remains available. There are no blinking text effects, palette changes, or moving transcript contents.
 
 *** Themes
 Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =C-t= cycles themes in the running interface without interrupting the conversation or discarding a draft.
