@@ -379,6 +379,7 @@ typedef struct
 	gint search_row;
 	guint search_matches;
 	gchar *history_draft;
+	gchar *kill_buffer;
 	const gchar *approval_prompt;
 	gint approval_answer;
 	gboolean sending;
@@ -1561,6 +1562,77 @@ input_backspace(App *app)
     app->cursor = (guint)(previous - start);
 }
 
+/**
+ * input_delete:
+ * @app: the active composer
+ *
+ * Delete one complete Unicode character after the cursor. At the end of
+ * the draft this is a no-op, including when the draft is empty.
+ */
+static void
+input_delete(App *app)
+{
+	const gchar *start;
+	const gchar *next;
+
+	if (app->cursor >= app->input->len)
+		return;
+	start = app->input->str + app->cursor;
+	next = g_utf8_next_char(start);
+	g_string_erase(app->input, (gssize)app->cursor, (gssize)(next - start));
+}
+
+/**
+ * input_kill:
+ * @app: the active composer
+ * @word: whether to kill the preceding word instead of the line suffix
+ *
+ * Keep a single session-local kill buffer. Word deletion consumes trailing
+ * Unicode whitespace then non-whitespace characters. Line deletion stops
+ * before a newline, or consumes that newline when already at line end.
+ * Empty kills preserve the previous buffer so a boundary key cannot lose it.
+ */
+static void
+input_kill(App *app, gboolean word)
+{
+	const gchar *text = app->input->str;
+	gsize start = app->cursor;
+	gsize end = app->cursor;
+	const gchar *previous;
+
+	if (word)
+	{
+		while (start > 0)
+		{
+			previous = g_utf8_prev_char(text + start);
+			if (!g_unichar_isspace(g_utf8_get_char(previous)))
+				break;
+			start = (gsize)(previous - text);
+		}
+		while (start > 0)
+		{
+			previous = g_utf8_prev_char(text + start);
+			if (g_unichar_isspace(g_utf8_get_char(previous)))
+				break;
+			start = (gsize)(previous - text);
+		}
+	}
+	else if (text[end] == '\n')
+		end++;
+	else
+	{
+		while (text[end] != '\0' && text[end] != '\n')
+			end++;
+	}
+
+	if (start == end)
+		return;
+	g_free(app->kill_buffer);
+	app->kill_buffer = g_strndup(text + start, end - start);
+	g_string_erase(app->input, (gssize)start, (gssize)(end - start));
+	app->cursor = (guint)start;
+}
+
 /* Move the cursor a whole character, never into the middle of one. */
 static void
 input_move(App *app, gint direction)
@@ -1837,6 +1909,9 @@ show_help(App *app)
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
                     "  ^G           edit the prompt in $EDITOR\n"
+					"  Delete       delete the next Unicode character\n"
+					"  ^W / ^K      kill previous word / to line end\n"
+					"  ^Y           yank the last killed text\n"
                     "  ^C           stop the turn, then clear the line,\n"
                     "               then quit on a second press\n"
                     "  ^D           quit, on an empty line\n"
@@ -2031,10 +2106,35 @@ on_agent_finished(
     app_schedule_redraw(app);
 }
 
+/**
+ * resolve_command_path:
+ * @app: the active conversation
+ * @path: a literal command path
+ *
+ * Resolve paths without changing the process directory, which may be in
+ * use by background work. Only a leading ~/ is expanded; no shell syntax
+ * is evaluated and spaces remain part of the filename.
+ *
+ * Returns: (transfer full): the canonical absolute path
+ */
+static gchar *
+resolve_command_path(App *app, const gchar *path)
+{
+	g_autofree gchar *expanded = NULL;
+
+	if (g_str_equal(path, "~"))
+		expanded = g_strdup(g_get_home_dir());
+	else if (g_str_has_prefix(path, "~/"))
+		expanded = g_build_filename(g_get_home_dir(), path + 2, NULL);
+	return g_canonicalize_filename(expanded != NULL ? expanded : path,
+		ai_conversation_get_working_directory(app->conversation));
+}
+
 static void
 save_transcript(App *app, const gchar *path)
 {
     g_autofree gchar *text = NULL;
+    g_autofree gchar *resolved = NULL;
     g_autoptr(GError) error = NULL;
 
     if (path == NULL || path[0] == '\0')
@@ -2046,13 +2146,14 @@ save_transcript(App *app, const gchar *path)
     text = ai_transcript_to_text(
         ai_conversation_get_transcript(app->conversation), 0);
 
-    if (!g_file_set_contents(path, text, -1, &error))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_set_contents(resolved, text, -1, &error))
     {
         say(app, "Could not write %s: %s", path, error->message);
         return;
     }
 
-    say(app, "Wrote %s", path);
+    say(app, "Wrote %s", resolved);
 }
 
 /*
@@ -2069,6 +2170,7 @@ export_transcript(App *app, const gchar *arguments)
     g_auto(GStrv) parts = NULL;
     g_autofree gchar *text = NULL;
     g_autofree gchar *chosen = NULL;
+    g_autofree gchar *resolved = NULL;
     g_autoptr(GError) error = NULL;
     AiExportFormat format;
     const gchar *path;
@@ -2079,7 +2181,7 @@ export_transcript(App *app, const gchar *arguments)
         return;
     }
 
-    parts = g_strsplit(arguments, " ", 2);
+    parts = g_strsplit_set(arguments, " \t\r\n", 2);
 
     if (!ai_export_format_from_string(parts[0], &format))
     {
@@ -2088,7 +2190,9 @@ export_transcript(App *app, const gchar *arguments)
         return;
     }
 
-    path = (parts[1] != NULL && parts[1][0] != '\0') ? parts[1] : NULL;
+    path = parts[1] != NULL ? g_strchug(parts[1]) : NULL;
+    if (path != NULL && path[0] == '\0')
+        path = NULL;
 
     if (path == NULL)
     {
@@ -2105,38 +2209,42 @@ export_transcript(App *app, const gchar *arguments)
     text = ai_transcript_export(
         ai_conversation_get_transcript(app->conversation), format);
 
-    if (!g_file_set_contents(path, text, -1, &error))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_set_contents(resolved, text, -1, &error))
     {
         say(app, "Could not write %s: %s", path, error->message);
         return;
     }
 
-    say(app, "Wrote %s", path);
+    say(app, "Wrote %s", resolved);
 }
 
 static void
 change_directory(App *app, const gchar *path)
 {
+    g_autofree gchar *resolved = NULL;
+
     if (path == NULL || path[0] == '\0')
     {
         say(app, "%s", ai_conversation_get_working_directory(app->conversation));
         return;
     }
 
-    if (!g_file_test(path, G_FILE_TEST_IS_DIR))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_test(resolved, G_FILE_TEST_IS_DIR))
     {
         say(app, "No such directory: %s", path);
         return;
     }
 
-    ai_conversation_set_working_directory(app->conversation, path);
+    ai_conversation_set_working_directory(app->conversation, resolved);
 
     if (app->completion != NULL)
     {
-        ai_completion_context_set_working_directory(app->completion, path);
+        ai_completion_context_set_working_directory(app->completion, resolved);
     }
 
-    say(app, "Working directory: %s", path);
+    say(app, "Working directory: %s", resolved);
 }
 
 static void
@@ -2819,6 +2927,26 @@ drain_keys(App *app)
                 app->completion_dismissed = FALSE;
                 completion_refresh(app);
                 break;
+
+			case KEY_DC:
+				input_delete(app);
+				app->completion_dismissed = FALSE;
+				completion_refresh(app);
+				break;
+
+			case 23:  /* ^W: kill the preceding word */
+			case 11:  /* ^K: kill to the end of the logical line */
+				input_kill(app, ch == 23);
+				app->completion_dismissed = FALSE;
+				completion_refresh(app);
+				break;
+
+			case 25:  /* ^Y: insert the last killed text literally */
+				if (app->kill_buffer != NULL)
+					input_insert(app, app->kill_buffer);
+				app->completion_dismissed = TRUE;
+				completion_close(app);
+				break;
 
             case KEY_LEFT:
                 input_move(app, -1);
@@ -4429,6 +4557,7 @@ main(int argc, char *argv[])
     g_ptr_array_unref(app.history);
     g_main_loop_unref(app.loop);
 	g_string_free(app.search, TRUE);
+	g_free(app.kill_buffer);
 	g_free(app.history_draft);
 	g_free(app.feedback);
 	g_clear_pointer(&app.row_cache, g_ptr_array_unref);
