@@ -851,6 +851,95 @@ fails by whose machine ran it.
 
 See `docs/harness.org` and `docs/commands.org`.
 
+## Native session import (`src/core/ai-native-session.{h,c}`)
+
+A CLI wrapper does most of its work in its own process. The portable
+`AiMessage` history holds the prompt sent and the final text returned and
+nothing in between, and a session resumed with `--continue` brings a backlog
+ai-glib never saw. `AiNativeSession` reads the record those programs already
+write to disk, so a provider switch does not drop the difference.
+
+**The reader table is the registration** — same pattern as `AiToolStyle`,
+`AiImageModelInfo` and `AiResourceRegistry`'s search paths. It is keyed on
+the canonical provider name and the client's **C type name**, never on
+`ai_provider_get_name()`: that returns a display name ("Claude Code"), and a
+table keyed on those stops matching the day somebody improves the
+capitalisation — with the symptom being a switch that quietly carries no
+context.
+
+**The read starts at the last compaction boundary.** Every marker was
+confirmed against real transcripts, not inferred:
+
+| provider | boundary |
+|---|---|
+| `claude-code` / `claude-tmux` | `isCompactSummary`, or `system`/`compact_boundary` |
+| `codex-cli` | `type:"compacted"`; its `payload.replacement_history` **is** the post-compaction history and seeds the result |
+| `grok-build` | `compaction_checkpoint`, `auto_compact_completed` |
+
+No boundary is not an error and not empty — nothing has been compacted, so
+the whole file is the history since the last compaction.
+
+`opencode`, `cursor` and `antigravity` keep history in SQLite and are
+**deliberately absent** from the table. Reading them means a new hard
+dependency and a schema we do not control; a partial import is worse than
+none, because the gap is invisible to the model that receives it.
+
+Four things that are not style:
+
+- **Reasoning is dropped**, on every provider. It is the bulk of a modern
+  transcript, the least useful to a different model, and several providers
+  reject another model's thinking outright. Sidechains are dropped because a
+  subagent's transcript is not this conversation; codex `developer` items
+  because they describe how codex is configured, and carrying them tells the
+  next provider it has tools it does not have.
+- **A tool result is correlated back to its call's name.** Every one of these
+  formats names the tool only on the call and identifies the result by id
+  alone, and an id means nothing to a model that never saw the call frame.
+- **A JsonNode from `for_each_record()` does not outlive the scan pass.** The
+  per-line `JsonParser` is `g_autoptr` inside the loop. codex's
+  `replacement_history` has to be `json_node_copy()`d; borrowing it was a
+  use-after-free that surfaced as a Json critical on a *valid* document.
+- **Same untrusted-input rules as subprocess stdout.** Every member through
+  `ai-json-util.h`; a malformed record costs itself and nothing else. The
+  hard failures are the ones where continuing would lie: unreadable file,
+  past the 64 MiB bound, invalid UTF-8, and an embedded NUL — which would
+  truncate every `strchr()` walk without saying so, producing a short import
+  that reads exactly like a short session.
+
+### In `AiConversation`
+
+`ai_conversation_set_provider()` harvests from the **outgoing** provider,
+after every check that can still refuse the switch and before the provider
+pointer changes. The digest is prepended to the system prompt at send time
+(`effective_system_prompt()`), never folded into `messages` — it is a text
+projection, not content blocks, and a turn that mixed the two would send the
+same exchange in two shapes. It is not written into `:system-prompt` either;
+a host reading that property back must see what it set.
+
+- **The digest is filtered against the portable history.** Sending an
+  exchange as an `AiMessage` and again inside the digest reads to the model
+  as the user having asked the same thing twice.
+- **The limit bounds the accumulated total**, not each hop. Four switches at
+  64 KiB apiece is a system prompt larger than most context windows, and the
+  failure arrives as the provider rejecting a turn rather than as anything
+  pointing here. The trim never splits a UTF-8 character.
+- **Re-harvesting an unchanged transcript is idempotent.** Toggling
+  `A→B→A→B` would otherwise append the same history every hop.
+- **A failed harvest never fails the switch.** No readable store, a first
+  turn that has not run, a garbage transcript: all `g_debug`, all proceed on
+  the portable history.
+
+Tests: `tests/test-native-session.c` (the three formats, the malformed
+table, the locators) and `tests/test-native-context.c` (the conversation
+half). Both **must** sandbox `HOME` and the working directory — a suite that
+reads the developer's real `~/.claude` passes or fails by whose machine ran
+it. `AiMockProvider` records the system prompt so a test can prove the digest
+is actually *sent*; asserting only on `:carried-context` would pass against
+an implementation that harvested perfectly and never used it.
+
+`ai-tui` reports what a switch carried, and `/context` shows or drops it.
+See `docs/native-session.org`.
+
 ## Reading JSON
 
 `json_object_has_member()` answers **"is the key present"**, which is a

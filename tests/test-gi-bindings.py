@@ -458,6 +458,36 @@ def main():
     installed = conversation.enable_background_agents(4)
     assert conversation.get_brigade() is installed
 
+    # Native session import. The reader table and the digest have to be
+    # reachable from bindings for the same reason the view layer does:
+    # an Emacs frontend drives the provider switch and has to be able to
+    # say what it carried.
+    assert (AiGlib.NativeSession.kind_for_provider("claude-code")
+            == AiGlib.NativeSessionKind.JSONL)
+    assert (AiGlib.NativeSession.kind_for_provider("opencode")
+            == AiGlib.NativeSessionKind.UNSUPPORTED)
+
+    with tempfile.TemporaryDirectory() as box:
+        path = os.path.join(box, "s.jsonl")
+        with open(path, "w") as handle:
+            handle.write(
+                '{"type":"user","message":{"role":"user","content":'
+                '[{"type":"text","text":"remember amber"}]}}\n')
+
+        session = AiGlib.NativeSession.read_file("claude-code", path, "sid")
+        assert session.get_session_id() == "sid"
+        assert session.get_compacted() is False
+        assert len(session.get_messages()) == 1
+        assert "amber" in session.to_context_text(0)
+
+    # And the conversation half, as properties -- native GObject syntax
+    # is what makes a new knob reachable without new plumbing.
+    assert conversation.props.import_native_context is True
+    assert conversation.props.carried_context is None
+    conversation.props.native_context_limit = 4096
+    assert conversation.get_native_context_limit() == 4096
+    conversation.clear_carried_context()
+
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"
           f" {AiGlib.__path__ if hasattr(AiGlib, '__path__') else '(typelib)'}")

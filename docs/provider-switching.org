@@ -40,28 +40,64 @@ The CLI wrappers also keep session state in the wrapped program:
 =agy --conversation= and =cursor-agent --resume=. Claude Code (tmux) reads
 Claude's JSONL transcript by session id.
 
-Those stores are provider-private. ai-glib does not parse one provider's
-JSONL or session database and translate it into another provider. Importing,
-merging or mapping native session ids is explicitly outside the switching
-contract.
-
-On a switch *to any CLI provider*, =ai_conversation_set_provider()= clears the
-target object's =session-id= and, where it exists, =continue-session=. This
-applies even if the caller preconfigured either value. The target therefore
-starts a fresh native session seeded from the portable =AiMessage= history,
-rather than combining that history with an unrelated or overlapping native
-conversation.
+Those stores are provider-private, and a native session id is never mapped,
+merged or handed to another provider. On a switch *to any CLI provider*,
+=ai_conversation_set_provider()= clears the target object's =session-id= and,
+where it exists, =continue-session=. This applies even if the caller
+preconfigured either value. The target therefore starts a fresh native
+session rather than combining this conversation with an unrelated or
+overlapping native one.
 
 After the switched turn, the CLI may capture a new session id and use its
 ordinary persistence rules for later turns. That new id belongs only to that
 CLI client.
+
+**** Reading the outgoing provider's transcript
+What *is* carried is the outgoing CLI provider's own *history*, read from
+the record that program already writes to disk. This matters because the
+portable =AiMessage= list is a strict subset of what a CLI wrapper knows:
+that provider runs its tools in its own process, so the list holds the
+prompt sent and the final text returned with nothing in between, and a
+session resumed with =--continue= brings a backlog the conversation never
+saw at all. Switching on the subset alone hands the next provider a
+conversation with a hole in it, and a model answering confidently from that
+reads as a bad model rather than as missing context.
+
+On a switch *away from* a CLI provider, ai-glib reads that provider's
+transcript through [[file:native-session.org][=AiNativeSession=]], projects it
+to text, and keeps it as =AiConversation:carried-context=. That digest is
+prepended to the system prompt on every later turn.
+
+Four properties of the import are worth knowing:
+
+- *It starts at the last compaction boundary.* Everything before it was
+  superseded by the harness's own decision, and it is also the bulk of the
+  bytes. A transcript that has never been compacted yields the whole file.
+- *It is filtered against the portable history.* Sending an exchange as an
+  =AiMessage= and again inside the digest reads to the model as the user
+  having asked the same thing twice. What survives is exactly the part this
+  conversation never saw.
+- *A failed read never fails the switch.* A provider with no readable store,
+  a first turn that has not run, a transcript past the size bound: all
+  ordinary, all logged at =g_debug=, and all leave the switch to proceed on
+  the portable history exactly as it did before this existed.
+- *Only four providers have a readable store.* =claude-code=,
+  =claude-tmux=, =codex-cli= and =grok-build= write JSONL. =opencode=,
+  =cursor= and =antigravity= keep history in SQLite and are deliberately
+  not read at all rather than half-read --- a partial import is worse than
+  none, because the gap is invisible to the model that receives it.
+
+Turn the whole thing off with =AiConversation:import-native-context=, bound
+it with =AiConversation:native-context-limit= (64 KiB by default, applied to
+the accumulated total rather than to each hop), and drop what has
+accumulated with =ai_conversation_clear_carried_context()=.
 
 ** What moves, and what does not
 | State | After a successful switch |
 |-------+---------------------------|
 | Completed =AiMessage= history | Preserved and sent on the next turn |
 | =AiTranscript= blocks | Preserved |
-| System prompt | Preserved |
+| System prompt | Preserved; the carried digest is prepended at send time |
 | Maximum tokens and streaming choice | Preserved |
 | Working directory | Preserved; pushed onto a CLI target |
 | Command set, tool endpoint and background-agent wiring | Preserved |
@@ -71,7 +107,8 @@ CLI client.
 | Explicit =passthrough-commands= override | Preserved |
 | Target model, effort, credentials and permission properties | Taken from the target object; not copied |
 | Target CLI =session-id= / =continue-session= | Cleared |
-| Old provider's native history | Not imported or merged |
+| Old CLI provider's native history | Read, projected to text, carried in the system prompt |
+| Old provider's native session id | Never mapped or handed to the target |
 
 Configure provider-specific properties before switching:
 
@@ -229,9 +266,11 @@ switch when the target's default model is not the one you want.
 ** Limits
 - Only completed in-process =AiMessage= history is portable. A turn in flight
   cannot be switched.
-- History that exists only in a provider's native session is not imported.
-  Starting =ai-tui -c= can resume that provider, but a later =/provider= does
-  not extract the resumed backlog for migration.
+- History that exists only in a provider's native session is imported for
+  the four CLI wrappers that write JSONL, and not for the three that use
+  SQLite. Starting =ai-tui -c= resumes a provider, and a later =/provider=
+  does carry that resumed backlog --- as text in the system prompt, not as
+  native session state.
 - CLI projection is text. Tool structure is labelled; image bytes and other
   provider-only details are not transferable through that prompt.
 - Provider-specific state is not inferred or translated. Configure the target
@@ -240,6 +279,7 @@ switch when the target's default model is not the one you want.
   the canonical history on its own; the target may reject an oversized turn.
 
 ** See also
+- [[file:native-session.org][Native session import]]
 - [[file:api-reference/ai-conversation.org][AiConversation API]]
 - [[file:transcript.org][The transcript]]
 - [[file:harness.org][The harness layer]]

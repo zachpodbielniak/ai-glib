@@ -52,6 +52,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "agents",   "List agents",                                NULL },
     { "reload",   "Rescan the command, skill and agent paths",  NULL },
     { "cwd",      "Show or change the working directory",       "[path]" },
+    { "context",  "Show or drop history carried from a previous provider",
+      "[clear]" },
     { "todos",    "Show the current todo list",                 NULL },
     { "running",  "Show background agents and what they are doing", NULL },
     { "kill",     "Stop a background agent",                    "<id|all>" },

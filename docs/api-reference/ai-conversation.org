@@ -183,3 +183,33 @@ times to say the same thing.
 
 The animation belongs to the frontend; this is the state behind it. See
 [[file:../transcript.org::*Showing progress][Showing progress]].
+
+* Carried native context
+
+Leaving a CLI provider reads that program's own transcript and carries it
+into the system prompt of every later turn. See
+[[file:../native-session.org][Native session import]].
+
+#+begin_src C
+gboolean ai_conversation_get_import_native_context(AiConversation *self);
+void     ai_conversation_set_import_native_context(AiConversation *self,
+                                                   gboolean enabled);
+
+guint    ai_conversation_get_native_context_limit(AiConversation *self);
+void     ai_conversation_set_native_context_limit(AiConversation *self,
+                                                  guint limit);
+
+const gchar *ai_conversation_get_carried_context(AiConversation *self);
+void         ai_conversation_clear_carried_context(AiConversation *self);
+#+end_src
+
+| Property | Type | Default | Meaning |
+|----------+------+---------+---------|
+| =import-native-context= | =gboolean= | =TRUE= | Whether leaving a CLI provider reads its transcript |
+| =native-context-limit= | =guint= | 65536 | Byte ceiling on the accumulated digest; 0 for none |
+| =carried-context= | =utf8= | =NULL= | Read-only; what has been carried so far |
+
+=carried-context= is prepended to =system-prompt= at send time rather than
+written into it, so a host reading =system-prompt= back sees what it set.
+The host's own instructions come *last*, so they keep their force over a
+digest that may be tens of kilobytes.

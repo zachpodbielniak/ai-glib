@@ -1,0 +1,229 @@
+#+title: Native session import
+#+description: Reading a wrapped CLI's own transcript so a provider switch does not lose it
+#+authors: ai-glib
+#+categories: subsystem
+#+created: 2026-09-08
+#+updated: 2026-09-08
+#+version: 0.3.0
+
+* Native session import
+
+A CLI wrapper does most of its work in its own process. ai-glib sees the
+prompt it sent and the final text that came back; it does not see the
+fourteen tool calls in between, and when a session was resumed with
+=--continue= it did not see the backlog either.
+
+The portable =AiMessage= history is therefore a strict subset of what the
+wrapped program actually knows. Anything built on that subset --- a
+provider switch, an export, a report --- drops the difference silently, and
+a model answering confidently from a conversation it only half received
+reads as a bad model rather than as missing context.
+
+Every one of these programs already writes the full record to disk.
+=AiNativeSession= (=src/core/ai-native-session.{h,c}=) reads it back.
+
+** The compaction boundary
+
+A long session gets compacted: the harness replaces the transcript prefix
+with a summary and continues. Everything before that boundary is, by the
+harness's own decision, superseded --- and it is also the bulk of the
+bytes. So the read starts at the *last* compaction boundary and takes
+everything after it.
+
+Each harness marks the boundary differently. Every marker below was
+confirmed against real transcripts rather than inferred from
+documentation:
+
+| Provider | Boundary marker |
+|----------+-----------------|
+| =claude-code=, =claude-tmux= | =isCompactSummary: true= on a record, or =type:"system"= with =subtype:"compact_boundary"= |
+| =codex-cli= | =type:"compacted"=, whose =payload.replacement_history= carries the post-compaction history in full |
+| =grok-build= | =sessionUpdate: "compaction_checkpoint"=, and =auto_compact_completed= |
+
+A transcript with *no* boundary is not an error and not empty: it means
+nothing has been compacted, so the whole file is the history since the
+last compaction. That fallback is the common case.
+
+=ai_native_session_get_compacted()= says whether a boundary was found, and
+=ai_native_session_get_dropped()= how many records it skipped.
+
+** What is supported, and what is not
+
+| Provider | Store | Read |
+|----------+-------+------|
+| =claude-code= | =~/.claude/projects/<encoded-cwd>/<id>.jsonl= | yes |
+| =claude-tmux= | the same file | yes |
+| =codex-cli= | =~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl= | yes |
+| =grok-build= | =~/.grok/sessions/<encoded-cwd>/<id>/updates.jsonl= | yes |
+| =opencode= | =~/.local/share/opencode/opencode.db= | no --- SQLite |
+| =cursor= | =~/.cursor/chats/<hash>/<id>/store.db= | no --- SQLite |
+| =antigravity= | =~/.gemini/antigravity-cli/conversations/<id>.db= | no --- SQLite |
+
+The three SQLite harnesses are deliberately =AI_NATIVE_SESSION_UNSUPPORTED=
+rather than half-read. Reading them would mean a new hard dependency and a
+schema this library does not control, and a partial import is worse than
+none: the gap is invisible to the model that receives it.
+
+=ai_native_session_kind_for_provider()= answers the question without paying
+for a directory scan that will find nothing.
+
+** What is imported, and what is dropped
+
+Dropped on purpose:
+
+- *Reasoning and thinking blocks.* The bulk of a modern transcript and the
+  least useful to a different model, which did not produce it and cannot
+  continue it. Several providers reject another model's thinking outright.
+- *Sidechains.* A subagent's transcript is interleaved into claude's parent
+  file and is not part of this conversation. Folding it in makes the main
+  thread read as though it argued with itself.
+- *Harness scaffolding.* codex's =developer= items describe how codex is
+  configured --- skills instructions, sandbox policy, multi-agent role
+  text. Carrying them would tell another provider it has tools and rules
+  it does not have.
+- *codex's =reasoning= items and grok's =tool_call_update= frames.* The
+  second is the progress stream for a call already recorded, at two frames
+  per call, repeating the whole payload each time.
+
+Kept, and labelled in the vocabulary
+[[file:provider-switching.org][provider switching]] already uses:
+
+#+begin_example
+[Tool call: read_file; id=call-7; arguments={"path":"src/parser.c"}]
+
+[Tool result: read_file; id=call-7; error=false]
+...file contents...
+[End tool result]
+#+end_example
+
+A result is correlated back to its call's name, because every one of these
+formats names the tool only on the *call* and identifies the result by id
+alone --- an id means nothing to a model that never saw the call frame.
+
+Tool arguments and results are truncated at 2 KiB apiece. A 300 KiB file
+read pasted into a system prompt spends the whole context window on
+something the new provider can simply read again.
+
+** Bounds and failure
+
+Three hard failures, and they are the ones where continuing would lie:
+
+- A file that cannot be read.
+- A file past the 64 MiB bound. Silently importing the first 32 MiB of a
+  90 MiB transcript hands the model a conversation that stops
+  mid-sentence with no indication it was cut.
+- Invalid UTF-8, or an embedded NUL. The NUL would truncate every internal
+  =strchr()= walk without saying so, producing a short import that reads
+  exactly like a short session.
+
+Everything else degrades. These files are not ours --- same category as
+subprocess stdout and the harness layer's markdown --- so a line that does
+not parse, a record of an unknown shape and a member of the wrong type are
+all skipped with a =g_debug=. One bad line must not hide four hundred good
+ones, nor abort a =G_DEBUG=fatal-warnings= run. Every member is read
+through =core/ai-json-util.h= for that reason.
+
+** Using it directly
+
+#+begin_src C
+g_autoptr(AiNativeSession) session = NULL;
+g_autoptr(GError) error = NULL;
+
+session = ai_cli_client_read_native_session(AI_CLI_CLIENT(client), &error);
+
+if (session != NULL)
+{
+    g_autofree gchar *digest =
+        ai_native_session_to_context_text(session, 64 * 1024);
+
+    g_print("%u messages from %s%s\n",
+            g_list_length(ai_native_session_get_messages(session)),
+            ai_native_session_get_path(session),
+            ai_native_session_get_compacted(session) ? " (compacted)" : "");
+}
+#+end_src
+
+The transcript is located from the client's working directory,
+=session-id= and environment --- the same three things the wrapped program
+used to choose the file. With no =session-id= set, the most recently
+modified transcript for that directory wins, which is the one =--continue=
+would have resumed. Modification time rather than name order, because none
+of these harnesses names a transcript so that it sorts chronologically.
+
+=ai_native_session_read_file()= takes a path directly, which is what tests
+use: reproducing a harness's directory layout to exercise a parser is a
+cost with no coverage in it.
+
+*** The digest
+
+=ai_native_session_to_context_text()= renders labelled text for a system
+prompt. Over a limit, the *oldest* messages are dropped and a marker says
+so. Recency is what a continuing conversation needs; a digest trimmed from
+the other end would preserve the opening pleasantries and lose the thing
+being worked on. The cut is always at a message boundary.
+
+=ai_native_session_to_context_text_full()= additionally takes history the
+caller already holds, and leaves out anything matching it by role and
+text. That is what stops =AiConversation= sending an exchange twice --- once
+as an =AiMessage= and once inside the digest --- which reads to the model
+as the user having asked the same thing twice.
+
+** In =AiConversation=
+
+Leaving a CLI provider harvests automatically. See
+[[file:provider-switching.org][Provider switching]] for the switch contract
+and [[file:tui.org][ai-tui]] for =/provider= and =/context=.
+
+| Property | Default | Meaning |
+|----------+---------+---------|
+| =import-native-context= | =TRUE= | Whether leaving a CLI provider reads its transcript |
+| =native-context-limit= | 65536 | Byte ceiling on the carried digest; 0 for none |
+| =carried-context= | =NULL= | Read-only: what has been carried so far |
+
+The limit applies to the *accumulated* total, not just each hop. Four
+switches at 64 KiB apiece is a system prompt larger than most context
+windows, and the failure would arrive as the provider rejecting a turn
+rather than as anything pointing here. The trim never splits a UTF-8
+character, since the result goes straight into a prompt.
+
+Re-harvesting an unchanged transcript is idempotent. Toggling
+=A -> B -> A -> B= would otherwise append the same history on every hop
+until the prompt was mostly repetition.
+
+A failed harvest never fails the switch. Refusing to change provider
+because a file could not be read would be a worse answer to every reason
+the read can fail.
+
+** Adding a harness
+
+One struct literal in the reader table in =ai-native-session.c= plus its
+two callbacks --- *that table is the registration*, the same pattern as
+=AiToolStyle=, =AiImageModelInfo= and =AiResourceRegistry='s search paths:
+
+#+begin_src C
+{ "newharness", "AiNewHarnessClient",
+  AI_NATIVE_SESSION_JSONL, newharness_scan, newharness_collect }
+#+end_src
+
+- =scan= runs first and records the index of the last compaction boundary.
+- =collect= runs second and folds every record after it into the session
+  with =append_message()=, =append_tool_call()= and =append_tool_result()=.
+- Add a locator beside =locate_claude()= if the layout is not one of the
+  three already handled.
+
+The table is keyed on the canonical provider name and the client's C type
+name, *never* on =ai_provider_get_name()=. That returns a display name
+("Claude Code", "Grok Build"), and a table keyed on those would silently
+stop matching the day somebody improved the capitalisation --- with the
+symptom being a provider switch that quietly carried no context.
+
+Cover the format in =tests/test-native-session.c=, including a case in the
+malformed table. Every test that touches this must sandbox =HOME= and the
+working directory: a suite that reads the developer's real =~/.claude=
+passes or fails by whose machine ran it.
+
+** See also
+
+- [[file:provider-switching.org][Provider switching]]
+- [[file:tui.org][ai-tui]]
+- [[file:api-reference/ai-conversation.org][AiConversation API]]

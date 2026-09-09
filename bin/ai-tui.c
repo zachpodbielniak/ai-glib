@@ -2246,21 +2246,103 @@ handle_builtin(App *app, AiCommandResult *result)
     }
     else if (g_strcmp0(name, "model") == 0)
     {
-        GObject *provider = ai_conversation_get_provider(app->conversation);
+        GObject          *provider =
+            ai_conversation_get_provider(app->conversation);
+        const gchar      *current = AI_IS_CLIENT(provider)
+            ? ai_client_get_model(AI_CLIENT(provider))
+            : ai_cli_client_get_model(AI_CLI_CLIENT(provider));
+        g_autofree gchar *requested = NULL;
+        g_autofree gchar *previous = g_strdup(current);
 
-        if (arguments == NULL || arguments[0] == '\0')
+        if (arguments != NULL)
         {
-            say(app, "%s", AI_IS_CLIENT(provider)
-                    ? ai_client_get_model(AI_CLIENT(provider))
-                    : ai_cli_client_get_model(AI_CLI_CLIENT(provider)));
+            requested = g_strdup(arguments);
+            g_strstrip(requested);
         }
-        else if (AI_IS_CLIENT(provider))
+
+        if (requested == NULL || requested[0] == '\0')
         {
-            ai_client_set_model(AI_CLIENT(provider), arguments);
+            say(app, "Model: %s", current != NULL ? current : "(default)");
         }
-        else if (AI_IS_CLI_CLIENT(provider))
+        else if (ai_conversation_get_busy(app->conversation))
         {
-            ai_cli_client_set_model(AI_CLI_CLIENT(provider), arguments);
+            /*
+             * Same rule as /provider, and for the same reason: half a
+             * turn answered by one model and half by another is not a
+             * transcript anybody can reason about afterwards.
+             */
+            say(app, "Model unchanged: a turn is in flight.");
+        }
+        else if (g_strcmp0(previous, requested) == 0)
+        {
+            say(app, "Model: %s", requested);
+        }
+        else
+        {
+            if (AI_IS_CLIENT(provider))
+            {
+                ai_client_set_model(AI_CLIENT(provider), requested);
+            }
+            else
+            {
+                ai_cli_client_set_model(AI_CLI_CLIENT(provider), requested);
+            }
+
+            /*
+             * Say it out loud.  A model id that the provider will reject
+             * is not detectable here --- no wrapped CLI offers a
+             * validating lookup --- so the error arrives on the next
+             * turn, and by then the only thing that makes it explicable
+             * is having seen the change reported.
+             */
+            say(app, "Model switched from %s to %s. Context preserved.",
+                previous != NULL ? previous : "the default", requested);
+        }
+    }
+    else if (g_strcmp0(name, "context") == 0)
+    {
+        const gchar      *carried =
+            ai_conversation_get_carried_context(app->conversation);
+        g_autofree gchar *what = NULL;
+
+        if (arguments != NULL)
+        {
+            what = g_strdup(arguments);
+            g_strstrip(what);
+        }
+
+        if (what != NULL && g_strcmp0(what, "clear") == 0)
+        {
+            if (carried == NULL)
+            {
+                say(app, "No carried context to drop.");
+            }
+            else
+            {
+                ai_conversation_clear_carried_context(app->conversation);
+                say(app, "Carried context dropped. Later turns send only "
+                    "this session's own history.");
+            }
+        }
+        else if (what != NULL && what[0] != '\0')
+        {
+            say(app, "/context takes no argument, or `clear`.");
+        }
+        else if (carried == NULL)
+        {
+            say(app, "No context carried from another provider.");
+        }
+        else
+        {
+            /*
+             * The size, not the text.  Printing tens of kilobytes of
+             * carried transcript into the transcript that carried it is
+             * how a reader loses the thread entirely; the count is what
+             * answers "why is my prompt so large".
+             */
+            say(app, "Carrying %.1f KiB of history from a previous "
+                "provider, sent with every turn. /context clear drops it.",
+                strlen(carried) / 1024.0);
         }
     }
     else if (g_strcmp0(name, "provider") == 0)
@@ -2279,6 +2361,10 @@ handle_builtin(App *app, AiCommandResult *result)
             g_autoptr(GError) error = NULL;
             gboolean had_local_tools =
                 ai_conversation_get_local_tools(app->conversation);
+            /* Snapshotted before the switch: the harvest appends to it,
+             * so the difference is what this switch actually carried. */
+            g_autofree gchar *had_context = g_strdup(
+                ai_conversation_get_carried_context(app->conversation));
 
             g_strstrip(requested);
             replacement = build_provider_named(requested, FALSE, &error);
@@ -2292,8 +2378,27 @@ handle_builtin(App *app, AiCommandResult *result)
             }
             else
             {
+                const gchar *carried = ai_conversation_get_carried_context(
+                    app->conversation);
+
                 say(app, "Provider switched to %s. Context preserved.",
                     ai_provider_get_name(AI_PROVIDER(replacement)));
+
+                /*
+                 * Say when the wrapped program's own history came along.
+                 * That import is the difference between the new provider
+                 * knowing what the last one did and guessing, and it is
+                 * invisible otherwise --- it lands in the system prompt,
+                 * which the transcript never shows.
+                 */
+                if (carried != NULL && g_strcmp0(carried, had_context) != 0)
+                {
+                    gsize grew = strlen(carried)
+                        - (had_context != NULL ? strlen(had_context) : 0);
+
+                    say(app, "Carried %.1f KiB of that session's own "
+                        "history, including its tool calls.", grew / 1024.0);
+                }
 
                 if (had_local_tools
                     && !ai_conversation_get_local_tools(app->conversation))
