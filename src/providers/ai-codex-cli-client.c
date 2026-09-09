@@ -396,11 +396,12 @@ parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
                         ai_json_get_string(item, "message", "Codex item failed"));
             return FALSE;
         }
-        else
-        {
-            g_autofree gchar *text = json_to_string(ai_json_get_node(obj, "item"), FALSE);
-            g_ptr_array_add(events, ai_event_new_status(text));
-        }
+        /*
+         * Unknown item kinds are dropped. Relaying the raw JSON as
+         * STATUS would paint process chatter into the transcript the
+         * way claude-code's thinking_tokens heartbeats did; a kind we
+         * do not recognise is not something worth telling a human.
+         */
     }
     return TRUE;
 malformed:

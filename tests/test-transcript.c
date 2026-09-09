@@ -737,6 +737,40 @@ test_usage_and_error_become_status(void)
 }
 
 static void
+test_status_events_each_become_a_block(void)
+{
+	/*
+	 * STATUS is "something worth telling a human", and conversation
+	 * appends each one as its own block -- it does not coalesce
+	 * repeats. A provider that relays thinking_tokens heartbeats as
+	 * STATUS will therefore paint the same "○ claude: thinking_tokens"
+	 * line fifty times; the claude-code parser is what must not do
+	 * that. This is the consumer half of that contract.
+	 */
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	AiTranscript *t = ai_conversation_get_transcript(c);
+	g_autofree gchar *first = NULL;
+	guint i;
+
+	for (i = 0; i < 5; i++)
+	{
+		g_autoptr(AiEvent) event =
+			ai_event_new_status("claude: thinking_tokens");
+
+		emit(mock, event);
+	}
+
+	g_assert_cmpuint(ai_transcript_get_n_blocks(t), ==, 5);
+	g_assert_cmpint(kind_at(c, 0), ==, AI_VIEW_BLOCK_STATUS);
+	g_assert_cmpint(kind_at(c, 4), ==, AI_VIEW_BLOCK_STATUS);
+
+	first = ai_view_block_render_text(ai_transcript_get_block(t, 0), 0);
+	g_assert_true(g_str_has_prefix(first, "\xe2\x97\x8b "));
+	g_assert_true(strstr(first, "claude: thinking_tokens") != NULL);
+}
+
+static void
 test_unpriced_usage_omits_cost(void)
 {
 	/* Claiming a turn was free is worse than saying nothing about it. */
@@ -1297,6 +1331,8 @@ main(int argc, char *argv[])
 	                test_unmatched_tool_result_is_still_shown);
 	g_test_add_func("/ai-glib/fold/thinking", test_thinking_gets_its_own_block);
 	g_test_add_func("/ai-glib/fold/usage-and-error", test_usage_and_error_become_status);
+	g_test_add_func("/ai-glib/fold/status-not-coalesced",
+	                test_status_events_each_become_a_block);
 	g_test_add_func("/ai-glib/fold/unpriced", test_unpriced_usage_omits_cost);
 	g_test_add_func("/ai-glib/fold/stream-end", test_stream_end_completes_blocks);
 	g_test_add_func("/ai-glib/fold/input-delta", test_input_delta_is_not_folded);

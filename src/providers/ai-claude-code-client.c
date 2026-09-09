@@ -1449,11 +1449,81 @@ cc_note_session_limit(AiClaudeCodeClient *self, JsonObject *msg_obj)
 }
 
 /*
+ * Translate a system line into at most one STATUS event.
+ *
+ * AI_EVENT_STATUS is "something worth telling a human". Claude Code
+ * now emits a lot of type=system lines that are not that:
+ * thinking_tokens while the model is reasoning, task_started /
+ * task_notification for background work, hook progress, and more.
+ * Relaying every subtype as "claude: <subtype>" painted the same
+ * spinner line into the transcript on every heartbeat -- the TUI
+ * shows each STATUS as its own "○ …" block, and conversation does
+ * not coalesce them.
+ *
+ * Session id is captured by the caller before this runs, so dropping
+ * a line here does not lose resume. Unknown subtypes are dropped
+ * on purpose: a denylist would lag every new heartbeat Claude adds.
+ */
+static void
+cc_emit_system_status(
+    JsonObject  *obj,
+    const gchar *subtype,
+    GPtrArray   *out_events
+){
+    const gchar *text = NULL;
+    g_autofree gchar *owned = NULL;
+
+    if (subtype == NULL || subtype[0] == '\0')
+        return;
+
+    if (g_strcmp0(subtype, "init") == 0)
+    {
+        owned = g_strdup("claude: init");
+        text = owned;
+    }
+    else if (g_strcmp0(subtype, "informational") == 0)
+    {
+        /* The banner itself, not "claude: informational". */
+        text = ai_json_get_string(obj, "content", NULL);
+    }
+    else if (g_strcmp0(subtype, "compact_boundary") == 0)
+    {
+        owned = g_strdup("Context compacted");
+        text = owned;
+    }
+    else if (g_strcmp0(subtype, "worker_shutting_down") == 0)
+    {
+        const gchar *reason = ai_json_get_string(obj, "reason", NULL);
+
+        if (reason != NULL && reason[0] != '\0')
+            owned = g_strdup_printf("claude: shutting down (%s)", reason);
+        else
+            owned = g_strdup("claude: shutting down");
+        text = owned;
+    }
+    else if (g_strcmp0(subtype, "status") == 0)
+    {
+        const gchar *status = ai_json_get_string(obj, "status", NULL);
+
+        if (g_strcmp0(status, "compacting") == 0)
+        {
+            owned = g_strdup("Compacting context");
+            text = owned;
+        }
+    }
+
+    if (text != NULL && text[0] != '\0')
+        g_ptr_array_add(out_events, ai_event_new_status(text));
+}
+
+/*
  * Parse a single NDJSON line from `claude --print --output-format stream-json`
  * into events.
  *
  * The lines that matter:
- *   {"type":"system","subtype":"init",...}  -> STATUS
+ *   {"type":"system","subtype":"init",...}  -> STATUS (session chatter
+ *     such as thinking_tokens / task_started is dropped; see
+ *     cc_emit_system_status())
  *   {"type":"assistant","message":{...}}    -> text / thinking / tool_use
  *   {"type":"user","message":{...}}         -> tool_result
  *   {"type":"stream_event","event":{...}}   -> token-level deltas, only with
@@ -1528,11 +1598,7 @@ ai_claude_code_client_parse_stream_events(
             ai_cli_client_set_session_id(client, session_id);
         }
 
-        if (subtype != NULL && subtype[0] != '\0')
-        {
-            g_autofree gchar *text = g_strdup_printf("claude: %s", subtype);
-            g_ptr_array_add(out_events, ai_event_new_status(text));
-        }
+        cc_emit_system_status(obj, subtype, out_events);
     }
     else if (g_strcmp0(type, "assistant") == 0)
     {
