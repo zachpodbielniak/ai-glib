@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later
- * Read native Grok history for display only. Never replay old prompts/tools
- * into the provider: its resumed session already owns that context.
+ * Read native Grok and Codex history for display only. Never replay old
+ * prompts/tools into the provider: its resumed session already owns that
+ * context.
  */
 #pragma once
 
@@ -296,6 +297,325 @@ ai_tui_history_read(const gchar *path, const gchar *session_id, GError **error)
 	return g_steal_pointer(&transcript);
 }
 
+/* First-line only: rollout files carry huge base_instructions in session_meta. */
+static gchar *
+ai_tui_history_first_line(const gchar *path)
+{
+	g_autoptr(GIOChannel) channel = g_io_channel_new_file(path, "r", NULL);
+	gchar *line = NULL;
+	gsize n = 0;
+
+	if (channel == NULL) return NULL;
+	g_io_channel_set_encoding(channel, NULL, NULL);
+	if (g_io_channel_read_line(channel, &line, &n, NULL, NULL) != G_IO_STATUS_NORMAL)
+		return NULL;
+	if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+	return line;
+}
+
+/* Join text / Text parts, plus Codex reasoning summaries when those exist. */
+static gchar *
+ai_tui_history_item_text(JsonObject *item)
+{
+	JsonArray *content = ai_json_get_array(item, "content");
+	JsonArray *summary = ai_json_get_array(item, "summary_text");
+	const gchar *text = ai_json_get_string(item, "text", NULL);
+	g_autoptr(GString) out = g_string_new(NULL);
+	guint i;
+
+	if (text != NULL && text[0] != '\0') g_string_append(out, text);
+	for (i = 0; content != NULL && i < json_array_get_length(content); i++)
+	{
+		JsonObject *part = ai_json_array_get_object(content, i);
+		const gchar *chunk = ai_json_get_string(part, "text", NULL);
+		if (chunk != NULL) g_string_append(out, chunk);
+	}
+	for (i = 0; summary != NULL && i < json_array_get_length(summary); i++)
+	{
+		JsonNode *node = json_array_get_element(summary, i);
+		if (node != NULL && JSON_NODE_HOLDS_VALUE(node) &&
+		    json_node_get_value_type(node) == G_TYPE_STRING)
+			g_string_append(out, json_node_get_string(node));
+		else if (node != NULL && JSON_NODE_HOLDS_OBJECT(node))
+			g_string_append(out, ai_json_get_string(json_node_get_object(node), "text", ""));
+	}
+	return out->len > 0 ? g_string_free(g_steal_pointer(&out), FALSE) : NULL;
+}
+
+/* `command` is a string on the exec JSONL path and an argv array in rollouts. */
+static gchar *
+ai_tui_codex_command(JsonObject *item)
+{
+	const gchar *command = ai_json_get_string(item, "command", NULL);
+	JsonArray *argv = ai_json_get_array(item, "command");
+	guint i;
+
+	if (command != NULL && command[0] != '\0') return g_strdup(command);
+	if (argv == NULL) return NULL;
+	for (i = json_array_get_length(argv); i > 0; i--)
+	{
+		JsonNode *node = json_array_get_element(argv, i - 1);
+		const gchar *word;
+
+		if (node == NULL || !JSON_NODE_HOLDS_VALUE(node) ||
+		    json_node_get_value_type(node) != G_TYPE_STRING) continue;
+		word = json_node_get_string(node);
+		if (word != NULL && word[0] != '\0') return g_strdup(word);
+	}
+	return NULL;
+}
+
+/* Project a rollout FileChange onto the live file_change input the summariser knows. */
+static JsonNode *
+ai_tui_codex_file_input(JsonObject *item)
+{
+	JsonObject *input = json_object_new();
+	JsonNode *changes = ai_json_get_node(item, "changes");
+	JsonNode *node = json_node_new(JSON_NODE_OBJECT);
+	JsonArray *out = json_array_new();
+	const gchar *first_path = NULL;
+
+	if (changes != NULL && JSON_NODE_HOLDS_ARRAY(changes))
+	{
+		json_array_unref(out);
+		json_object_set_array_member(input, "changes", json_array_ref(json_node_get_array(changes)));
+		if (json_array_get_length(json_node_get_array(changes)) == 1)
+			json_object_set_string_member(input, "path",
+				ai_json_get_string(ai_json_array_get_object(json_node_get_array(changes), 0), "path", NULL));
+		out = NULL;
+	}
+	else if (changes != NULL && JSON_NODE_HOLDS_OBJECT(changes))
+	{
+		GList *members = json_object_get_members(json_node_get_object(changes));
+		GList *iter;
+
+		for (iter = members; iter != NULL; iter = iter->next)
+		{
+			const gchar *path = iter->data;
+			JsonObject *entry = json_object_new();
+			JsonObject *value = ai_json_get_object(json_node_get_object(changes), path);
+
+			json_object_set_string_member(entry, "path", path);
+			json_object_set_string_member(entry, "kind", ai_json_get_string(value, "type", "update"));
+			json_array_add_object_element(out, entry);
+			if (first_path == NULL) first_path = path;
+		}
+		g_list_free(members);
+		if (first_path != NULL && json_array_get_length(out) == 1)
+			json_object_set_string_member(input, "path", first_path);
+		json_object_set_array_member(input, "changes", out);
+		out = NULL;
+	}
+	if (out != NULL) json_array_unref(out);
+	json_node_take_object(node, input);
+	return node;
+}
+
+static JsonNode *
+ai_tui_codex_command_input(const gchar *command)
+{
+	JsonObject *input = json_object_new();
+	JsonNode *node = json_node_new(JSON_NODE_OBJECT);
+
+	json_object_set_string_member(input, "command", command);
+	json_node_take_object(node, input);
+	return node;
+}
+
+static void
+ai_tui_codex_history_scan(const gchar *directory, const gchar *cwd, const gchar *wanted,
+                          gchar **selected, gchar **session_id, gint64 *best_mtime)
+{
+	g_autoptr(GDir) dir = g_dir_open(directory, 0, NULL);
+	const gchar *name;
+
+	if (dir == NULL) return;
+	while ((name = g_dir_read_name(dir)) != NULL)
+	{
+		g_autofree gchar *path = g_build_filename(directory, name, NULL);
+		g_autofree gchar *line = NULL;
+		g_autoptr(JsonParser) parser = NULL;
+		GStatBuf stat_buf;
+		JsonNode *root;
+		JsonObject *payload;
+		const gchar *id;
+		gint64 mtime;
+
+		if (g_file_test(path, G_FILE_TEST_IS_SYMLINK)) continue;
+		if (g_file_test(path, G_FILE_TEST_IS_DIR))
+		{
+			ai_tui_codex_history_scan(path, cwd, wanted, selected, session_id, best_mtime);
+			continue;
+		}
+		if (!g_str_has_prefix(name, "rollout-") || !g_str_has_suffix(name, ".jsonl")) continue;
+		if (g_stat(path, &stat_buf) != 0 || stat_buf.st_size > 64 * 1024 * 1024) continue;
+		line = ai_tui_history_first_line(path);
+		if (line == NULL || *line == '\0') continue;
+		parser = json_parser_new();
+		if (!json_parser_load_from_data(parser, line, -1, NULL)) continue;
+		root = json_parser_get_root(parser);
+		if (root == NULL || !JSON_NODE_HOLDS_OBJECT(root)) continue;
+		if (g_strcmp0(ai_json_get_string(json_node_get_object(root), "type", ""), "session_meta") != 0) continue;
+		payload = ai_json_get_object(json_node_get_object(root), "payload");
+		id = ai_json_get_string(payload, "session_id", ai_json_get_string(payload, "id", NULL));
+		if (id == NULL || *id == '\0') continue;
+		if (wanted != NULL && *wanted != '\0' && !g_str_equal(wanted, id)) continue;
+		if (!ai_tui_history_same_directory(ai_json_get_string(payload, "cwd", NULL), cwd)) continue;
+		mtime = (gint64)stat_buf.st_mtime;
+		if (*selected != NULL && mtime < *best_mtime) continue;
+		if (*selected != NULL && mtime == *best_mtime && g_strcmp0(id, *session_id) <= 0) continue;
+		*best_mtime = mtime;
+		g_free(*selected);
+		*selected = g_strdup(path);
+		g_free(*session_id);
+		*session_id = g_strdup(id);
+	}
+}
+
+/* Select only this project's Codex rollouts. A supplied session ID wins. */
+static gchar *
+ai_tui_codex_history_find(AiCliClient *client, gchar **session_id)
+{
+	const gchar *base = ai_tui_history_env(client, "CODEX_HOME");
+	const gchar *home = ai_tui_history_env(client, "HOME");
+	const gchar *wanted = ai_cli_client_get_session_id(client);
+	g_autofree gchar *fallback = NULL;
+	g_autofree gchar *cwd = g_get_current_dir();
+	g_autofree gchar *root = NULL;
+	gchar *selected = NULL;
+	gint64 best_mtime = G_MININT64;
+
+	if (base == NULL || *base == '\0')
+		base = fallback = g_build_filename(home != NULL ? home : g_get_home_dir(), ".codex", NULL);
+	if (ai_cli_client_get_working_directory(client) != NULL)
+	{
+		g_free(cwd);
+		cwd = g_canonicalize_filename(ai_cli_client_get_working_directory(client), NULL);
+	}
+	root = g_build_filename(base, "sessions", NULL);
+	ai_tui_codex_history_scan(root, cwd, wanted, &selected, session_id, &best_mtime);
+	return selected;
+}
+
+/* Fold completed rollout items. Unknown item types are metadata, not errors. */
+static AiTranscript *
+ai_tui_codex_history_read(const gchar *path, GError **error)
+{
+	g_autofree gchar *contents = NULL;
+	g_autofree gchar *previous = NULL;
+	g_autoptr(GString) user_text = g_string_new(NULL);
+	g_autoptr(AiTranscript) transcript = ai_transcript_new();
+	g_autoptr(GHashTable) calls = g_hash_table_new(g_str_hash, g_str_equal);
+	AiViewBlock *open = NULL;
+	AiViewToolBlock *tool_block = NULL;
+	GStatBuf stat_buf;
+	gchar *line;
+
+	if (g_stat(path, &stat_buf) == 0 && stat_buf.st_size > 64 * 1024 * 1024)
+	{
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Native history exceeds the 64 MiB display limit");
+		return NULL;
+	}
+	if (!g_file_get_contents(path, &contents, NULL, error)) return NULL;
+	line = contents;
+	while (*line != '\0')
+	{
+		gchar *end = strchr(line, '\n');
+		g_autoptr(JsonParser) parser = json_parser_new();
+		JsonNode *root;
+		JsonObject *object;
+		JsonObject *payload;
+		JsonObject *item;
+		const gchar *kind;
+
+		if (end != NULL) *end = '\0';
+		if (*line != '\0')
+		{
+			if (!json_parser_load_from_data(parser, line, -1, error)) return NULL;
+			root = json_parser_get_root(parser);
+			object = root != NULL && JSON_NODE_HOLDS_OBJECT(root) ? json_node_get_object(root) : NULL;
+			payload = ai_json_get_object(object, "payload");
+			if (g_strcmp0(ai_json_get_string(object, "type", ""), "event_msg") == 0 &&
+			    g_str_equal(ai_json_get_string(payload, "type", ""), "item_completed"))
+			{
+				item = ai_json_get_object(payload, "item");
+				kind = ai_json_get_string(item, "type", "");
+				if (g_str_equal(kind, "UserMessage") || g_str_equal(kind, "AgentMessage") ||
+				    g_str_equal(kind, "Reasoning"))
+				{
+					g_autofree gchar *text = ai_tui_history_item_text(item);
+					const gchar *chunk = g_str_equal(kind, "UserMessage") ? "user_message_chunk" :
+						g_str_equal(kind, "Reasoning") ? "agent_thought_chunk" : "agent_message_chunk";
+					if (text != NULL)
+					{
+						ai_tui_history_text(transcript, chunk, text, &previous, user_text, &open);
+						tool_block = NULL;
+					}
+				}
+				else if (g_str_equal(kind, "CommandExecution") || g_str_equal(kind, "FileChange"))
+				{
+					const gchar *id = ai_json_get_string(item, "id", NULL);
+					AiToolCall *call = id != NULL ? g_hash_table_lookup(calls, id) : NULL;
+					const gchar *status = ai_json_get_string(item, "status", "");
+					gboolean failed = g_str_equal(status, "failed") ||
+						ai_json_get_int(item, "exit_code", 0) != 0;
+
+					ai_tui_history_text(transcript, "tool", "", &previous, user_text, &open);
+					if (call == NULL && id != NULL)
+					{
+						g_autoptr(JsonNode) input = NULL;
+						g_autoptr(AiToolUse) use = NULL;
+						g_autofree gchar *command = NULL;
+
+						if (g_str_equal(kind, "FileChange"))
+							input = ai_tui_codex_file_input(item);
+						else
+						{
+							command = ai_tui_codex_command(item);
+							input = ai_tui_codex_command_input(command != NULL ? command : "");
+						}
+						use = ai_tool_use_new(id, g_str_equal(kind, "FileChange") ? "file_change" : "command_execution", input);
+						if (tool_block == NULL)
+						{
+							g_autoptr(AiViewBlock) block = ai_view_tool_block_new();
+							tool_block = AI_VIEW_TOOL_BLOCK(block);
+							ai_view_block_set_complete(block, TRUE);
+							ai_transcript_append(transcript, block);
+						}
+						call = ai_view_tool_block_add_call(tool_block, use);
+						g_hash_table_insert(calls, (gpointer)ai_tool_call_get_id(call), call);
+					}
+					if (call != NULL)
+					{
+						const gchar *output = ai_json_get_string(item, "aggregated_output",
+							ai_json_get_string(item, "stdout", ""));
+						g_autoptr(AiToolResult) result = ai_tool_result_new(id, output, failed);
+						ai_tool_call_finish(call, result);
+					}
+				}
+			}
+		}
+		if (end == NULL) break;
+		line = end + 1;
+	}
+	ai_tui_history_text(transcript, "end", "", &previous, user_text, &open);
+	return g_steal_pointer(&transcript);
+}
+
+static void
+ai_tui_history_publish(AiTranscript *target, AiTranscript *history, GPtrArray *input_history)
+{
+	guint i;
+
+	for (i = 0; i < ai_transcript_get_n_blocks(history); i++)
+	{
+		AiViewBlock *block = ai_transcript_get_block(history, i);
+		ai_transcript_append(target, block);
+		if (AI_IS_VIEW_TURN_BLOCK(block))
+			g_ptr_array_add(input_history, g_strdup(ai_view_turn_block_get_text(AI_VIEW_TURN_BLOCK(block))));
+	}
+}
+
 /* Startup-only display restoration. Pin the exact session before any new turn,
  * and keep historical messages out of AiConversation's outgoing prompt list. */
 static void
@@ -309,16 +629,17 @@ ai_tui_history_restore(AiConversation *conversation, GPtrArray *input_history)
 	g_autoptr(GError) error = NULL;
 	g_autoptr(AiTranscript) history = NULL;
 	AiTranscript *target = ai_conversation_get_transcript(conversation);
-	guint i;
 
-	if (!AI_IS_GROK_BUILD_CLIENT(provider)) return;
+	if (!AI_IS_GROK_BUILD_CLIENT(provider) && !AI_IS_CODEX_CLI_CLIENT(provider)) return;
 	client = AI_CLI_CLIENT(provider);
 	g_object_get(provider, "continue-session", &continuing, NULL);
 	if (!ai_cli_client_get_session_persistence(client) ||
 	    (!continuing && ai_cli_client_get_session_id(client) == NULL)) return;
-	path = ai_tui_history_find(client, &id);
+	path = AI_IS_GROK_BUILD_CLIENT(provider) ? ai_tui_history_find(client, &id) :
+		ai_tui_codex_history_find(client, &id);
 	if (path == NULL) return;
-	history = ai_tui_history_read(path, id, &error);
+	history = AI_IS_GROK_BUILD_CLIENT(provider) ? ai_tui_history_read(path, id, &error) :
+		ai_tui_codex_history_read(path, &error);
 	if (history == NULL)
 	{
 		g_autofree gchar *message = g_strdup_printf("Could not load native session history: %s", error->message);
@@ -327,11 +648,5 @@ ai_tui_history_restore(AiConversation *conversation, GPtrArray *input_history)
 		return;
 	}
 	ai_cli_client_set_session_id(client, id);
-	for (i = 0; i < ai_transcript_get_n_blocks(history); i++)
-	{
-		AiViewBlock *block = ai_transcript_get_block(history, i);
-		ai_transcript_append(target, block);
-		if (AI_IS_VIEW_TURN_BLOCK(block))
-			g_ptr_array_add(input_history, g_strdup(ai_view_turn_block_get_text(AI_VIEW_TURN_BLOCK(block))));
-	}
+	ai_tui_history_publish(target, history, input_history);
 }

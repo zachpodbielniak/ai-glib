@@ -6,6 +6,7 @@
 #include <glib/gstdio.h>
 #include <yaml.h>
 #include <string.h>
+#include <utime.h>
 #include "../bin/ai-tui-history.h"
 
 #define CONFIG_FILE "config/ai-glib/config.yaml"
@@ -88,6 +89,21 @@ box_setup(Box *box, gconstpointer data)
 	(void)data;
 	box->dir = g_dir_make_tmp("ai-defaults-XXXXXX", &error);
 	g_assert_no_error(error);
+	box_write(box, "codex",
+		"#!/bin/bash\nset -eu\n"
+		"printf '%s\\n' \"$@\" > \"$HOME/codex.argv\"\n"
+		"pwd > \"$HOME/codex.cwd\"\n"
+		"/usr/bin/cat > \"$HOME/codex.stdin\"\n"
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"new-thread\"}'\n"
+		"printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
+		"printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"m\","
+		"\"type\":\"agent_message\",\"text\":\"codex reply\"}}'\n"
+		"printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":"
+		"{\"input_tokens\":1,\"output_tokens\":1}}'\n");
+	{
+		g_autofree gchar *codex = g_build_filename(box->dir, "codex", NULL);
+		g_assert_cmpint(g_chmod(codex, 0700), ==, 0);
+	}
 	for (i = 0; i < G_N_ELEMENTS(names); i++)
 	{
 		g_autofree gchar *path = g_build_filename(box->dir, names[i], NULL);
@@ -141,6 +157,7 @@ run_box(Box *box, gboolean tui, const gchar * const *args,
 	g_autofree gchar *config = g_build_filename(box->dir, "config", NULL);
 	g_autofree gchar *grok = g_build_filename(box->dir, "grok", NULL);
 	g_autofree gchar *cursor = g_build_filename(box->dir, "cursor", NULL);
+	g_autofree gchar *codex = g_build_filename(box->dir, "codex", NULL);
 	gchar *empty[] = { NULL };
 	guint i;
 	gint status;
@@ -157,6 +174,7 @@ run_box(Box *box, gboolean tui, const gchar * const *args,
 	g_subprocess_launcher_setenv(launcher, "LD_LIBRARY_PATH", library_dir, TRUE);
 	g_subprocess_launcher_setenv(launcher, "GROK_PATH", grok, TRUE);
 	g_subprocess_launcher_setenv(launcher, "CURSOR_AGENT_PATH", cursor, TRUE);
+	g_subprocess_launcher_setenv(launcher, "CODEX_PATH", codex, TRUE);
 	g_subprocess_launcher_setenv(launcher, "G_DEBUG", "fatal-warnings", TRUE);
 	for (i = 0; overrides != NULL && overrides[i] != NULL; i += 2)
 		g_subprocess_launcher_setenv(launcher, overrides[i], overrides[i + 1], TRUE);
@@ -762,6 +780,132 @@ test_native_history(Box *box, gconstpointer data)
 	}
 }
 
+#define CODEX_ITEM(item) "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":" item "}}\n"
+#define CODEX_USER(text) CODEX_ITEM("{\"type\":\"UserMessage\",\"id\":\"u\",\"content\":[{\"type\":\"text\",\"text\":\"" text "\"}]}")
+#define CODEX_AGENT(text) CODEX_ITEM("{\"type\":\"AgentMessage\",\"id\":\"a\",\"content\":[{\"type\":\"Text\",\"text\":\"" text "\"}]}")
+#define CODEX_THINK(text) CODEX_ITEM("{\"type\":\"Reasoning\",\"id\":\"r\",\"summary_text\":[\"" text "\"]}")
+
+/* Native Codex rollouts live under $CODEX_HOME/sessions/YYYY/MM/DD/. */
+static void
+write_codex_history(Box *box, const gchar *id, const gchar *stamp, const gchar *cwd, const gchar *log)
+{
+	g_autofree gchar *rel = g_strdup_printf(".codex/sessions/2026/09/08/rollout-%s-%s.jsonl", stamp, id);
+	g_autofree gchar *path = g_build_filename(box->dir, rel, NULL);
+	g_autofree gchar *meta = g_strdup_printf(
+		"{\"timestamp\":\"%s\",\"type\":\"session_meta\",\"payload\":"
+		"{\"session_id\":\"%s\",\"id\":\"%s\",\"cwd\":\"%s\"}}\n", stamp, id, id, cwd);
+	g_autofree gchar *contents = g_strconcat(meta, log, NULL);
+	g_autoptr(GDateTime) at = g_date_time_new_from_iso8601(stamp, NULL);
+	struct utimbuf times;
+
+	box_write(box, rel, contents);
+	g_assert_nonnull(at);
+	times.actime = times.modtime = (time_t)g_date_time_to_unix(at);
+	g_assert_cmpint(g_utime(path, &times), ==, 0);
+}
+
+static void
+test_codex_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "codex", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "codex", "--dump", "fresh prompt", NULL };
+	const gchar *explicit_id[] = { "-p", "codex", "-c", "--set", "session-id=older", "--dump", "new prompt", NULL };
+	const gchar *disabled[] = { "-p", "codex", "-c", "--set", "session-persistence=false", "--dump", "new prompt", NULL };
+	g_autoptr(AiCodexCliClient) provider = ai_codex_cli_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *sent = NULL;
+	g_autofree gchar *argv = NULL;
+	AiTranscript *transcript = ai_conversation_get_transcript(conversation);
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_codex_history(box, "older", "2026-09-06T12:00:00Z", box->dir,
+		CODEX_USER("older question"));
+	write_codex_history(box, "latest", "2026-09-07T12:00:00Z", box->dir,
+		CODEX_USER("previous question")
+		CODEX_THINK("previous reasoning")
+		CODEX_AGENT("previous answer")
+		CODEX_ITEM("{\"type\":\"CommandExecution\",\"id\":\"cmd-1\",\"command\":[\"/bin/bash\",\"-lc\",\"make\"],\"status\":\"completed\",\"aggregated_output\":\"ok\",\"exit_code\":0}")
+		CODEX_ITEM("{\"type\":\"FileChange\",\"id\":\"file-1\",\"status\":\"completed\",\"changes\":{\"file.c\":{\"type\":\"update\"}}}"));
+	write_codex_history(box, "other", "2026-09-08T12:00:00Z", "/tmp/not-this-project",
+		CODEX_USER("must not appear"));
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "must not appear"));
+	sent = box_read(box, "codex.stdin");
+	argv = box_read(box, "codex.argv");
+	g_assert_null(strstr(sent, "previous question"));
+	g_assert_nonnull(strstr(sent, "new prompt"));
+	g_assert_nonnull(strstr(argv, "resume\nlatest\n"));
+	g_assert_null(strstr(argv, "--last"));
+	g_assert_cmpint(run_box(box, TRUE, explicit_id, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, disabled, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "CODEX_HOME", "");
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 4);
+	g_assert_cmpuint(history->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_null(ai_conversation_get_messages(conversation));
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "command_execution");
+	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 1)), ==, "file_change");
+	g_assert_cmpstr(ai_view_tool_block_get_summary(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Ran make, changed file.c");
+	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "ok");
+
+	{
+		g_autofree gchar *other = g_build_filename(box->dir, "other-project", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_mkdir(other, 0700), ==, 0);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), other);
+		selected_path = ai_tui_codex_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_null(selected_path);
+		g_assert_null(selected_id);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	}
+
+	write_codex_history(box, "latest", "2026-09-07T12:00:00Z", box->dir,
+		CODEX_USER("partial history must not appear") "{broken\n");
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Could not load native session history"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_null(strstr(box->out, "partial history must not appear"));
+
+	{
+		g_autofree gchar *old_home = g_build_filename(box->dir, ".codex", NULL);
+		g_autofree gchar *new_home = g_build_filename(box->dir, "native-home", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_rename(old_home, new_home), ==, 0);
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "CODEX_HOME", new_home);
+		selected_path = ai_tui_codex_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_nonnull(selected_path);
+		g_assert_cmpstr(selected_id, ==, "latest");
+	}
+}
+
 /* Resolve siblings before subprocesses change cwd; release/debug both work. */
 int
 main(int argc, char *argv[])
@@ -793,6 +937,7 @@ main(int argc, char *argv[])
 	ADD("process-timeout/default", test_process_timeout_default);
 	ADD("process-timeout/stream", test_process_timeout_stream);
 	ADD("native-history", test_native_history);
+	ADD("codex-native-history", test_codex_native_history);
 #undef ADD
 	status = g_test_run();
 	g_free(ai_binary);

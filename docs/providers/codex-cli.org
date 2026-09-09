@@ -140,6 +140,9 @@ the previous turn's successful completion.
 - An explicit =session-id= wins over =continue-session=. With persistence
   disabled, the stored ID is ignored and newly reported IDs are not captured;
   the previously stored ID is retained for possible later reuse.
+- =ai-tui -c= restores the matching native rollout into the transcript
+  before the first draw, then pins that session ID so the next turn uses
+  =resume ID= rather than =resume --last=. See [[../tui.org][ai-tui]].
 - After an =AiConversation= provider switch, portable history seeds the new
   session. Once its native session ID is captured, only the latest message
   is replayed. Direct callers supply the messages they want sent; a native
