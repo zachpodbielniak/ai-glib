@@ -4823,6 +4823,9 @@ main(int argc, char *argv[])
 	define_key("\033[7~", KEY_HOME);
 	define_key("\033[8~", KEY_END);
 	define_key("\033[Z", KEY_BTAB);
+	/* gst's legacy ISO_Left_Tab path includes the explicit Shift
+	 * modifier. Normalize it to the same key as the terminfo backtab. */
+	define_key("\033[1;2Z", KEY_BTAB);
 	define_key("\033[9;2u", KEY_BTAB);
 	define_key("\033[27;2;9~", KEY_BTAB);
 	define_key("\033[200~", KEY_PASTE_START);

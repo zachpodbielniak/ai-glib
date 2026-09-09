@@ -102,6 +102,8 @@ The state is derived rather than remembered, so it always describes what is actu
 *** Permission modes
 The composer's lower border shows =read-only= in the theme's green or =skip-permissions= in its yellow, with =S-TAB= as the switching hint. =Shift-Tab= toggles the mode without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
 
+The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four switch in both directions, including sessions started with =--skip-permissions=.
+
 Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. For wrapped CLIs, a change affects subsequent invocations, including resumed turns; already-running tools and background agents retain their existing permissions. Search, approval dialogs and bracketed paste retain their own input handling.
 
 =read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. CLIs without a =skip-permissions= property report that switching is unsupported.

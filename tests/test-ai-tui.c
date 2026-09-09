@@ -1722,7 +1722,7 @@ test_enter_sends_the_prompt(void)
 
 /**
  * test_permission_modes:
- * @data: nonzero to start with permission bypass enabled
+ * @data: bit zero selects startup bypass; higher bits select the key encoding
  *
  * Exercise real terminal keys and inspect the child's effective argv through
  * its reply. Toggling must preserve drafts and survive a session reset.
@@ -1731,7 +1731,11 @@ static void
 test_permission_modes(gconstpointer data)
 {
 	Stub *stub;
-	gboolean initial_skip = GPOINTER_TO_INT(data) != 0;
+	static const gchar * const keys[] = {
+		"BTab", "\033[1;2Z", "\033[9;2u", "\033[27;2;9~"
+	};
+	guint variant = GPOINTER_TO_UINT(data);
+	gboolean initial_skip = (variant & 1) != 0;
 	guint i;
 	const gchar *script =
 		"#!/bin/bash\n"
@@ -1766,7 +1770,9 @@ test_permission_modes(gconstpointer data)
 
 		/* A completion menu must not consume the new global composer key. */
 		tmux_send(TUI_SESSION, "/pro");
-		tmux_send(TUI_SESSION, "BTab");
+		/* Raw bytes exercise terminal-specific encodings without letting
+		 * tmux translate them back into its canonical BTab sequence. */
+		tmux_send(TUI_SESSION, keys[variant >> 1]);
 		g_assert_true(tmux_wait_for(TUI_SESSION, skip
 			? "skip-permissions | S-TAB" : "read-only | S-TAB"));
 		g_assert_true(tmux_wait_for(TUI_SESSION, "/pro"));
@@ -3062,6 +3068,18 @@ main(int argc, char *argv[])
 		GINT_TO_POINTER(0), test_permission_modes);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-skip",
 		GINT_TO_POINTER(1), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-gst-default",
+		GUINT_TO_POINTER(2), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-gst-skip",
+		GUINT_TO_POINTER(3), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-csi-u-default",
+		GUINT_TO_POINTER(4), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-csi-u-skip",
+		GUINT_TO_POINTER(5), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-modify-other-keys-default",
+		GUINT_TO_POINTER(6), test_permission_modes);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-modify-other-keys-skip",
+		GUINT_TO_POINTER(7), test_permission_modes);
 	status = g_test_run();
 	if (tmux_available())
 	{
