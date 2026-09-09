@@ -61,6 +61,12 @@ The model receives the selected tool names and instructions to use host =todo_wr
 
 =--mcp-no-inject= suppresses provider injection and its system-prompt addition while retaining external control. Native CLI permission settings still govern whether a CLI may connect to or call MCP tools. MCP registration does not implicitly enable =--skip-permissions= or approve unrelated provider tools.
 
+Codex injection places every MCP =-c= override after =exec= and before =resume=, at the same argument scope as =model_reasoning_effort=. Codex 0.153.4 discards parent-level =-c= values when =exec= has its own overrides; placing MCP configuration before =exec= therefore advertised host tools in the prompt without actually registering the server. The host also sets =mcp_servers.ai_host.required=true= so Codex waits for bridge initialization and reports startup failures. These overrides apply to new and resumed turns, do not modify the user's Codex configuration, and are removed when the endpoint is cleared. The callback path is =ai-tui → codex exec → ai-tui --mcp-connect → parent Unix socket=, so TODO writes update the parent conversation's visible panel.
+
+The injected server sets =default_tools_approval_mode="approve"= for the explicitly enabled host allowlist. Without this scoped setting, Codex 0.153.4 exposes the tools but rejects their calls with =MCP tool call requires approval, but approval policy is never=. Other servers and native tool permissions retain their existing policies. Selecting host tools authorizes their use during the session; use =--mcp-no-inject= to reserve the socket for external controllers.
+
+The Codex settings are documented in [[https://learn.chatgpt.com/docs/extend/mcp?surface=cli][OpenAI's MCP configuration reference]]. A real =ai-tui -p codex --mcp-tools todo_read,todo_write --dump= smoke test should write a uniquely named TODO, read it back, and show it in the rendered panel; merely checking generated arguments does not establish tool availability.
+
 ** Control a running TUI from another application
 
 #+begin_src bash

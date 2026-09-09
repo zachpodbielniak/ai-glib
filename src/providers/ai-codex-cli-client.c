@@ -116,14 +116,15 @@ build_argv(AiCliClient *client, GList *messages, const gchar *system_prompt,
     if (self->search) arg(args, "--search");
     if (self->profile != NULL && *self->profile)
     { arg(args, "--profile"); arg(args, self->profile); }
+    arg(args, "exec");
     if (self->mcp_overrides != NULL)
     {
         guint i;
-        /* Global overrides also apply when exec resumes a saved session. */
+        /* Keep all -c overrides at exec scope. Codex's subcommand parser
+         * replaces parent -c values when exec has its own effort override. */
         for (i = 0; self->mcp_overrides[i] != NULL; i++)
         { arg(args, "-c"); arg(args, self->mcp_overrides[i]); }
     }
-    arg(args, "exec");
     arg(args, "--json");
     arg(args, "--skip-git-repo-check");
     if (self->skip_permissions)
@@ -549,20 +550,33 @@ endpoint_applied(
 					goto invalid;
 			}
 		}
+		else if (g_str_equal(path[2], "required"))
+		{
+			if (!JSON_NODE_HOLDS_VALUE(node) || json_node_get_value_type(node) != G_TYPE_BOOLEAN)
+				goto invalid;
+		}
+		else if (g_str_equal(path[2], "default_tools_approval_mode"))
+		{
+			/* Host fragments may authorize their own tools, never global policy. */
+			if (!JSON_NODE_HOLDS_VALUE(node) || json_node_get_value_type(node) != G_TYPE_STRING ||
+			    g_strcmp0(json_node_get_string(node), "approve") != 0)
+				goto invalid;
+		}
 		else goto invalid;
 		/* JSON permits \\/, while TOML does not; reject that ambiguous escape. */
 		if (strstr(value, "\\/") != NULL) goto invalid;
 		g_ptr_array_add(overrides, g_strdup_printf("%s=%s", key, value));
 	}
 	if (overrides->len == 0) goto invalid;
-	/* An args-only table would inherit an unrelated user command. */
+	/* Every server needs its own command; args or required alone must not
+	 * inherit an unrelated user command. */
 	g_hash_table_iter_init(&iter, keys);
 	while (g_hash_table_iter_next(&iter, &stored_key, NULL))
 	{
 		const gchar *key = (const gchar *)stored_key;
-		if (g_str_has_suffix(key, ".args"))
+		if (!g_str_has_suffix(key, ".command"))
 		{
-			g_autofree gchar *prefix = g_strndup(key, strlen(key) - 5);
+			g_autofree gchar *prefix = g_strndup(key, strrchr(key, '.') - key);
 			g_autofree gchar *command_key = g_strconcat(prefix, ".command", NULL);
 			if (!g_hash_table_contains(keys, command_key)) goto invalid;
 		}
@@ -573,7 +587,7 @@ endpoint_applied(
 
 invalid:
 	g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-		"Invalid Codex MCP configuration: expected unique mcp_servers.NAME.command/args JSON assignments (maximum 64 KiB)");
+		"Invalid Codex MCP configuration: expected unique mcp_servers.NAME.command/args/required/default_tools_approval_mode JSON assignments (maximum 64 KiB)");
 	return FALSE;
 }
 

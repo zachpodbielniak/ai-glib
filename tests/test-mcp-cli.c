@@ -88,6 +88,7 @@ spawn_process(const gchar * const *argv, const gchar *mode)
 	GSubprocess *process;
 
 	g_subprocess_launcher_setenv(launcher, "CLAUDE_CODE_PATH", test_executable, TRUE);
+	g_subprocess_launcher_setenv(launcher, "CODEX_PATH", test_executable, TRUE);
 	g_subprocess_launcher_setenv(launcher, "AI_MCP_TEST_STUB", mode != NULL ? mode : "normal", TRUE);
 	if (stub_pid_path != NULL)
 		g_subprocess_launcher_setenv(launcher, "AI_MCP_TEST_PID_FILE", stub_pid_path, TRUE);
@@ -627,9 +628,9 @@ test_injected_turn(gconstpointer data)
 
 /* The actual headless TUI renderer must show the MCP-updated TODOS panel. */
 static void
-test_tui_dump(void)
+test_tui_dump(gconstpointer data)
 {
-	const gchar *argv[] = { tui_executable, "--provider", "claude-code", "--mcp-tools", "todo_write,todo_read",
+	const gchar *argv[] = { tui_executable, "--provider", data, "--mcp-tools", "todo_write,todo_read",
 		"--dump", "Update our TODO panel", NULL };
 	g_autoptr(GSubprocess) process = spawn_process(argv, NULL);
 	g_autoptr(GError) error = NULL;
@@ -642,6 +643,107 @@ test_tui_dump(void)
 	g_assert_nonnull(strstr(output, "MCP bridge exercised"));
 	/* Active tasks display active_form rather than the pending content label. */
 	g_assert_nonnull(strstr(output, "Updating MCP integration"));
+}
+
+/**
+ * codex_stub_main:
+ * @argc: number of child-process arguments
+ * @argv: (array length=argc): child-process argument vector
+ *
+ * Exercise Codex's actual child-process callback path, not just its argv.
+ * Read the scoped transport and policy, discover the exact allowlist, and
+ * verify a write through a second request before emitting Codex JSONL.
+ *
+ * Returns: zero after the callback and readback succeed
+ */
+static gint
+codex_stub_main(gint argc, gchar **argv)
+{
+	g_autofree gchar *command = NULL;
+	g_autoptr(JsonNode) args_node = NULL;
+	g_autoptr(GString) prompt = g_string_new(NULL);
+	g_autoptr(Peer) bridge = NULL;
+	g_autoptr(JsonNode) listed = NULL;
+	g_autofree gchar *result = NULL;
+	const gchar *bridge_argv[4];
+	JsonArray *args;
+	JsonArray *tools;
+	gboolean required = FALSE;
+	gboolean approved = FALSE;
+	gboolean exec_scope = FALSE;
+	gboolean read_seen = FALSE;
+	gboolean write_seen = FALSE;
+	gchar buffer[4096];
+	gssize count;
+	gint i;
+	guint j;
+
+	for (i = 1; i + 1 < argc; i++)
+	{
+		const gchar *assignment;
+		const gchar *value;
+		g_autoptr(JsonNode) node = NULL;
+		if (g_str_equal(argv[i], "exec")) exec_scope = TRUE;
+		if (!g_str_equal(argv[i], "-c")) continue;
+		/* Model Codex's subcommand boundary: parent config cannot coexist
+		 * with the effort override supplied at exec scope. */
+		g_assert_true(exec_scope);
+		assignment = argv[++i];
+		value = strchr(assignment, '=');
+		g_assert_nonnull(value);
+		node = parse_text(value + 1);
+		if (g_str_has_prefix(assignment, "mcp_servers.ai_host.command="))
+			command = g_strdup(json_node_get_string(node));
+		else if (g_str_has_prefix(assignment, "mcp_servers.ai_host.args="))
+			args_node = g_steal_pointer(&node);
+		else if (g_str_has_prefix(assignment, "mcp_servers.ai_host.required="))
+			required = json_node_get_boolean(node);
+		else if (g_str_has_prefix(assignment, "mcp_servers.ai_host.default_tools_approval_mode="))
+			approved = g_strcmp0(json_node_get_string(node), "approve") == 0;
+	}
+	g_assert_nonnull(command);
+	g_assert_nonnull(args_node);
+	g_assert_true(required);
+	g_assert_true(approved);
+	/* Consume the prompt so the parent can finish writing before callbacks. */
+	while ((count = read(STDIN_FILENO, buffer, sizeof buffer)) != 0)
+	{
+		if (count < 0 && errno == EINTR) continue;
+		g_assert_cmpint(count, >, 0);
+		g_string_append_len(prompt, buffer, count);
+	}
+	g_assert_nonnull(strstr(prompt->str, "host todo_write"));
+	args = json_node_get_array(args_node);
+	g_assert_cmpuint(json_array_get_length(args), ==, 2);
+	bridge_argv[0] = command;
+	bridge_argv[1] = json_array_get_string_element(args, 0);
+	bridge_argv[2] = json_array_get_string_element(args, 1);
+	bridge_argv[3] = NULL;
+	g_assert_cmpstr(bridge_argv[1], ==, "--mcp-connect");
+	bridge = peer_new(bridge_argv, NULL);
+	peer_initialize(bridge);
+	listed = peer_request(bridge, "tools/list", "{}");
+	tools = json_object_get_array_member(json_object_get_object_member(
+		json_node_get_object(listed), "result"), "tools");
+	g_assert_cmpuint(json_array_get_length(tools), ==, 2);
+	for (j = 0; j < json_array_get_length(tools); j++)
+	{
+		const gchar *name = json_object_get_string_member(json_array_get_object_element(tools, j), "name");
+		if (g_str_equal(name, "todo_read")) read_seen = TRUE;
+		if (g_str_equal(name, "todo_write")) write_seen = TRUE;
+	}
+	g_assert_true(read_seen);
+	g_assert_true(write_seen);
+	result = peer_tool(bridge, "todo_write",
+		"{\"todos\":[{\"content\":\"MCP integration task\",\"active_form\":\"Updating MCP integration\",\"status\":\"in_progress\"}]}", TRUE);
+	g_clear_pointer(&result, g_free);
+	result = peer_tool(bridge, "todo_read", "{}", TRUE);
+	g_assert_nonnull(strstr(result, "MCP integration task"));
+	g_print("{\"type\":\"thread.started\",\"thread_id\":\"mcp-codex-fixture\"}\n"
+		"{\"type\":\"turn.started\"}\n"
+		"{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"MCP bridge exercised\"}}\n"
+		"{\"type\":\"turn.completed\",\"usage\":{}}\n");
+	return 0;
 }
 
 /* No-inject keeps external tools available without passing them to the CLI. */
@@ -993,7 +1095,12 @@ main(int argc, char **argv)
 
 	test_executable = g_file_read_link("/proc/self/exe", &error);
 	g_assert_no_error(error);
-	if (g_getenv("AI_MCP_TEST_STUB") != NULL) return stub_main(argc, argv);
+	if (g_getenv("AI_MCP_TEST_STUB") != NULL)
+	{
+		if (g_strv_contains((const gchar * const *)argv, "--json"))
+			return codex_stub_main(argc, argv);
+		return stub_main(argc, argv);
+	}
 	fixture_directory = g_dir_make_tmp("ai-mcp-cli-fixture-XXXXXX", &error);
 	g_assert_no_error(error);
 	directory = g_path_get_dirname(test_executable);
@@ -1026,7 +1133,8 @@ main(int argc, char **argv)
 		ADD_CASE("/agent-shutdown-cancelled", test_agent_shutdown_cancelled);
 #undef ADD_CASE
 	}
-	g_test_add_func("/mcp/cli/tui/dump", test_tui_dump);
+	g_test_add_data_func("/mcp/cli/tui/dump", "claude-code", test_tui_dump);
+	g_test_add_data_func("/mcp/cli/tui/codex-dump", "codex", test_tui_dump);
 	g_test_add_func("/mcp/cli/tui/terminal-shutdown", test_terminal_shutdown);
 	result = g_test_run();
 	remove_fixture(fixture_directory);

@@ -681,7 +681,11 @@ endpoint_config(const gchar *kind, const gchar *executable, const gchar *path)
 	if (g_str_equal(kind, AI_ENDPOINT_KIND_MCP_CONFIG_GROK))
 		return g_strdup_printf("[mcp_servers.ai_host]\ncommand = %s\nargs = [\"--mcp-connect\", %s]\n", command, socket);
 	if (g_str_equal(kind, "mcp-config-codex"))
-		return g_strdup_printf("mcp_servers.ai_host.command=%s\nmcp_servers.ai_host.args=[\"--mcp-connect\",%s]\n", command, socket);
+		/* The foreground turn depends on these tools. Wait for initialization
+		 * instead of allowing Codex's optional-server startup grace to omit them.
+		 * The user explicitly granted this host's allowlist. Codex exec runs
+		 * without approval prompts, so approve only this server's tools. */
+		return g_strdup_printf("mcp_servers.ai_host.command=%s\nmcp_servers.ai_host.args=[\"--mcp-connect\",%s]\nmcp_servers.ai_host.required=true\nmcp_servers.ai_host.default_tools_approval_mode=\"approve\"\n", command, socket);
 	if (g_str_equal(kind, AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE))
 		return g_strdup_printf("{\"mcp\":{\"ai_host\":{\"type\":\"local\",\"command\":[%s,\"--mcp-connect\",%s],\"enabled\":true}}}", command, socket);
 	return g_strdup_printf("{\"mcpServers\":{\"ai_host\":{\"command\":%s,\"args\":[\"--mcp-connect\",%s]}}}", command, socket);

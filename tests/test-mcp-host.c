@@ -288,6 +288,14 @@ test_rebind(Fixture *fixture, gconstpointer data)
 	g_assert_no_error(error);
 	g_assert_true(ai_conversation_get_provider(replacement) == G_OBJECT(codex));
 	g_assert_cmpstr(ai_conversation_get_tool_endpoint(replacement)->kind, ==, AI_ENDPOINT_KIND_MCP_CONFIG_CODEX);
+	/* A model turn must wait for its host tools, including after switching
+	 * providers. A missing bridge must fail startup instead of hiding tools. */
+	g_clear_pointer(&config, g_free);
+	g_assert_true(g_file_get_contents(ai_conversation_get_tool_endpoint(replacement)->value,
+		&config, NULL, &error));
+	g_assert_no_error(error);
+	g_assert_nonnull(strstr(config, "mcp_servers.ai_host.required=true\n"));
+	g_assert_nonnull(strstr(config, "mcp_servers.ai_host.default_tools_approval_mode=\"approve\"\n"));
 	g_assert_true(ai_mcp_host_set_provider(fixture->host, G_OBJECT(ollama), "/tmp/ai", TRUE, &error));
 	g_assert_no_error(error);
 	g_assert_true(ai_conversation_get_provider(replacement) == G_OBJECT(ollama));

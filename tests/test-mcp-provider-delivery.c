@@ -23,12 +23,14 @@ write_fragment(const gchar *contents)
 	return path;
 }
 
-/* Assert that every override is a separate argv entry before exec/resume. */
+/* All overrides share exec scope: a later exec -c replaces parent values. */
 static void
 assert_codex_overrides(AiCliClient *client, gboolean expected)
 {
 	g_auto(GStrv) argv = AI_CLI_CLIENT_GET_CLASS(client)->build_argv(client, NULL, NULL, 0, TRUE);
 	gboolean saw_exec = FALSE;
+	gboolean saw_resume = FALSE;
+	gboolean saw_effort = FALSE;
 	guint overrides = 0;
 	guint i;
 
@@ -36,19 +38,27 @@ assert_codex_overrides(AiCliClient *client, gboolean expected)
 	for (i = 0; argv[i] != NULL; i++)
 	{
 		if (g_str_equal(argv[i], "exec")) saw_exec = TRUE;
+		if (g_str_equal(argv[i], "resume")) saw_resume = TRUE;
 		if (g_str_equal(argv[i], "-c"))
 		{
 			g_assert_nonnull(argv[i + 1]);
+			g_assert_true(saw_exec);
+			g_assert_false(saw_resume);
+			if (g_str_has_prefix(argv[i + 1], "model_reasoning_effort=")) saw_effort = TRUE;
 			if (!g_str_has_prefix(argv[i + 1], "mcp_servers.")) continue;
-			g_assert_false(saw_exec);
 			if (overrides == 0)
 				g_assert_cmpstr(argv[i + 1], ==, "mcp_servers.ai_host.command=\"/path with spaces/ai-tui\"");
-			else
+			else if (overrides == 1)
 				g_assert_cmpstr(argv[i + 1], ==, "mcp_servers.ai_host.args=[\"--mcp-connect\",\"/tmp/quote\\\"socket\"]");
+			else if (overrides == 2)
+				g_assert_cmpstr(argv[i + 1], ==, "mcp_servers.ai_host.required=true");
+			else
+				g_assert_cmpstr(argv[i + 1], ==, "mcp_servers.ai_host.default_tools_approval_mode=\"approve\"");
 			overrides++;
 		}
 	}
-	g_assert_cmpuint(overrides, ==, expected ? 2 : 0);
+	g_assert_cmpuint(overrides, ==, expected ? 4 : 0);
+	g_assert_cmpint(saw_effort, ==, *ai_cli_client_get_effort_level(client) != '\0');
 }
 
 /* Snapshotting the file and replacing/clearing the grant must be deterministic. */
@@ -60,7 +70,9 @@ test_codex_scoped_delivery(void)
 	AiToolEndpointConsumer *consumer = AI_TOOL_ENDPOINT_CONSUMER(codex);
 	g_autofree gchar *path = write_fragment(
 		"# host tools\n\nmcp_servers.ai_host.command = \"/path with spaces/ai-tui\"\n"
-		"mcp_servers.ai_host.args=[\"--mcp-connect\",\"/tmp/quote\\\"socket\"]\n");
+		"mcp_servers.ai_host.args=[\"--mcp-connect\",\"/tmp/quote\\\"socket\"]\n"
+		"mcp_servers.ai_host.required=true\n"
+		"mcp_servers.ai_host.default_tools_approval_mode=\"approve\"\n");
 	g_autoptr(AiAgentEndpoint) endpoint = ai_agent_endpoint_new(AI_ENDPOINT_KIND_MCP_CONFIG_CODEX, path);
 	g_autoptr(GError) error = NULL;
 
@@ -97,7 +109,16 @@ test_codex_rejects_invalid(void)
 		"mcp_servers.ai_host.args={}", "mcp_servers.ai_host.args=[]", "mcp_servers.ai_host.env=\"secret\"",
 		"mcp_servers..command=\"ai\"", "mcp_servers.a b.command=\"ai\"",
 		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.command=\"other\"",
-		"mcp_servers.ai_host.command=\"ai\" # comment", NULL
+		"mcp_servers.ai_host.command=\"ai\" # comment",
+		"mcp_servers.ai_host.required=true",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.required=1",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.required=\"true\"",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.required=[]",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.required=null",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.required=true\nmcp_servers.ai_host.required=false",
+		"mcp_servers.ai_host.default_tools_approval_mode=\"approve\"",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.default_tools_approval_mode=true",
+		"mcp_servers.ai_host.command=\"ai\"\nmcp_servers.ai_host.default_tools_approval_mode=\"unknown\"", NULL
 	};
 	g_autoptr(AiCodexCliClient) codex = ai_codex_cli_client_new();
 	AiToolEndpointConsumer *consumer = AI_TOOL_ENDPOINT_CONSUMER(codex);
