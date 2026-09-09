@@ -29,6 +29,7 @@
 #include "ai-launch.h"
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
+#include "ai-tui-herdr.h"
 
 /* ================================================================
  * Options
@@ -50,6 +51,7 @@ static gboolean  opt_yes = FALSE;
 static gboolean  opt_dry_run = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
+static gboolean  opt_no_herdr = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 static gboolean  opt_launch = FALSE;
@@ -61,6 +63,8 @@ static gboolean opt_no_animation = FALSE;
 static gboolean theme_explicit = FALSE;
 
 static const GOptionEntry option_entries[] = {
+	{ "no-herdr", 0, 0, G_OPTION_ARG_NONE, &opt_no_herdr,
+	  "Disable automatic herdr pane lifecycle reporting", NULL },
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme, "Terminal theme (overrides AI_TUI_THEME and NO_COLOR)", "NAME" },
 	{ "list-themes", 0, 0, G_OPTION_ARG_NONE, &opt_list_themes, "List terminal themes without loading a provider", NULL },
 	{ "no-animation", 0, 0, G_OPTION_ARG_NONE, &opt_no_animation, "Disable decorative motion (elapsed time still updates)", NULL },
@@ -356,6 +360,7 @@ static const gchar *SPINNER_FRAMES[] = {
 typedef struct
 {
     AiConversation *conversation;
+	AiTuiHerdr *herdr;
     GMainLoop      *loop;
     GCancellable   *cancellable;
 
@@ -374,6 +379,7 @@ typedef struct
 	gint search_row;
 	guint search_matches;
 	gchar *history_draft;
+	gchar *kill_buffer;
 	const gchar *approval_prompt;
 	gint approval_answer;
 	gboolean sending;
@@ -438,6 +444,30 @@ typedef struct
      * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
 } App;
+
+/* Publish expansion, provider I/O and approvals through one state mapping.
+ * This callback also runs in dump mode, where there are no curses windows. */
+static void
+app_sync_herdr(App *app)
+{
+	ai_tui_herdr_update(app->herdr,
+		app->sending || ai_conversation_get_busy(app->conversation),
+		app->approval_prompt != NULL);
+}
+
+/* Dispatch termination on the main loop so normal cleanup can release the
+ * herdr identity and restore the terminal, including during an approval. */
+static gboolean
+on_herdr_shutdown(gpointer data)
+{
+	App *app = data;
+
+	app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
+	app->running = FALSE;
+	ai_conversation_cancel(app->conversation);
+	if (app->loop != NULL) g_main_loop_quit(app->loop);
+	return G_SOURCE_CONTINUE;
+}
 
 /* One rendered row: which block it came from, and its text. */
 typedef struct
@@ -1532,6 +1562,77 @@ input_backspace(App *app)
     app->cursor = (guint)(previous - start);
 }
 
+/**
+ * input_delete:
+ * @app: the active composer
+ *
+ * Delete one complete Unicode character after the cursor. At the end of
+ * the draft this is a no-op, including when the draft is empty.
+ */
+static void
+input_delete(App *app)
+{
+	const gchar *start;
+	const gchar *next;
+
+	if (app->cursor >= app->input->len)
+		return;
+	start = app->input->str + app->cursor;
+	next = g_utf8_next_char(start);
+	g_string_erase(app->input, (gssize)app->cursor, (gssize)(next - start));
+}
+
+/**
+ * input_kill:
+ * @app: the active composer
+ * @word: whether to kill the preceding word instead of the line suffix
+ *
+ * Keep a single session-local kill buffer. Word deletion consumes trailing
+ * Unicode whitespace then non-whitespace characters. Line deletion stops
+ * before a newline, or consumes that newline when already at line end.
+ * Empty kills preserve the previous buffer so a boundary key cannot lose it.
+ */
+static void
+input_kill(App *app, gboolean word)
+{
+	const gchar *text = app->input->str;
+	gsize start = app->cursor;
+	gsize end = app->cursor;
+	const gchar *previous;
+
+	if (word)
+	{
+		while (start > 0)
+		{
+			previous = g_utf8_prev_char(text + start);
+			if (!g_unichar_isspace(g_utf8_get_char(previous)))
+				break;
+			start = (gsize)(previous - text);
+		}
+		while (start > 0)
+		{
+			previous = g_utf8_prev_char(text + start);
+			if (g_unichar_isspace(g_utf8_get_char(previous)))
+				break;
+			start = (gsize)(previous - text);
+		}
+	}
+	else if (text[end] == '\n')
+		end++;
+	else
+	{
+		while (text[end] != '\0' && text[end] != '\n')
+			end++;
+	}
+
+	if (start == end)
+		return;
+	g_free(app->kill_buffer);
+	app->kill_buffer = g_strndup(text + start, end - start);
+	g_string_erase(app->input, (gssize)start, (gssize)(end - start));
+	app->cursor = (guint)start;
+}
+
 /* Move the cursor a whole character, never into the middle of one. */
 static void
 input_move(App *app, gint direction)
@@ -1808,6 +1909,9 @@ show_help(App *app)
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
                     "  ^G           edit the prompt in $EDITOR\n"
+					"  Delete       delete the next Unicode character\n"
+					"  ^W / ^K      kill previous word / to line end\n"
+					"  ^Y           yank the last killed text\n"
                     "  ^C           stop the turn, then clear the line,\n"
                     "               then quit on a second press\n"
                     "  ^D           quit, on an empty line\n"
@@ -2002,10 +2106,35 @@ on_agent_finished(
     app_schedule_redraw(app);
 }
 
+/**
+ * resolve_command_path:
+ * @app: the active conversation
+ * @path: a literal command path
+ *
+ * Resolve paths without changing the process directory, which may be in
+ * use by background work. Only a leading ~/ is expanded; no shell syntax
+ * is evaluated and spaces remain part of the filename.
+ *
+ * Returns: (transfer full): the canonical absolute path
+ */
+static gchar *
+resolve_command_path(App *app, const gchar *path)
+{
+	g_autofree gchar *expanded = NULL;
+
+	if (g_str_equal(path, "~"))
+		expanded = g_strdup(g_get_home_dir());
+	else if (g_str_has_prefix(path, "~/"))
+		expanded = g_build_filename(g_get_home_dir(), path + 2, NULL);
+	return g_canonicalize_filename(expanded != NULL ? expanded : path,
+		ai_conversation_get_working_directory(app->conversation));
+}
+
 static void
 save_transcript(App *app, const gchar *path)
 {
     g_autofree gchar *text = NULL;
+    g_autofree gchar *resolved = NULL;
     g_autoptr(GError) error = NULL;
 
     if (path == NULL || path[0] == '\0')
@@ -2017,13 +2146,14 @@ save_transcript(App *app, const gchar *path)
     text = ai_transcript_to_text(
         ai_conversation_get_transcript(app->conversation), 0);
 
-    if (!g_file_set_contents(path, text, -1, &error))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_set_contents(resolved, text, -1, &error))
     {
         say(app, "Could not write %s: %s", path, error->message);
         return;
     }
 
-    say(app, "Wrote %s", path);
+    say(app, "Wrote %s", resolved);
 }
 
 /*
@@ -2040,6 +2170,7 @@ export_transcript(App *app, const gchar *arguments)
     g_auto(GStrv) parts = NULL;
     g_autofree gchar *text = NULL;
     g_autofree gchar *chosen = NULL;
+    g_autofree gchar *resolved = NULL;
     g_autoptr(GError) error = NULL;
     AiExportFormat format;
     const gchar *path;
@@ -2050,7 +2181,7 @@ export_transcript(App *app, const gchar *arguments)
         return;
     }
 
-    parts = g_strsplit(arguments, " ", 2);
+    parts = g_strsplit_set(arguments, " \t\r\n", 2);
 
     if (!ai_export_format_from_string(parts[0], &format))
     {
@@ -2059,7 +2190,9 @@ export_transcript(App *app, const gchar *arguments)
         return;
     }
 
-    path = (parts[1] != NULL && parts[1][0] != '\0') ? parts[1] : NULL;
+    path = parts[1] != NULL ? g_strchug(parts[1]) : NULL;
+    if (path != NULL && path[0] == '\0')
+        path = NULL;
 
     if (path == NULL)
     {
@@ -2076,38 +2209,42 @@ export_transcript(App *app, const gchar *arguments)
     text = ai_transcript_export(
         ai_conversation_get_transcript(app->conversation), format);
 
-    if (!g_file_set_contents(path, text, -1, &error))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_set_contents(resolved, text, -1, &error))
     {
         say(app, "Could not write %s: %s", path, error->message);
         return;
     }
 
-    say(app, "Wrote %s", path);
+    say(app, "Wrote %s", resolved);
 }
 
 static void
 change_directory(App *app, const gchar *path)
 {
+    g_autofree gchar *resolved = NULL;
+
     if (path == NULL || path[0] == '\0')
     {
         say(app, "%s", ai_conversation_get_working_directory(app->conversation));
         return;
     }
 
-    if (!g_file_test(path, G_FILE_TEST_IS_DIR))
+    resolved = resolve_command_path(app, path);
+    if (!g_file_test(resolved, G_FILE_TEST_IS_DIR))
     {
         say(app, "No such directory: %s", path);
         return;
     }
 
-    ai_conversation_set_working_directory(app->conversation, path);
+    ai_conversation_set_working_directory(app->conversation, resolved);
 
     if (app->completion != NULL)
     {
-        ai_completion_context_set_working_directory(app->completion, path);
+        ai_completion_context_set_working_directory(app->completion, resolved);
     }
 
-    say(app, "Working directory: %s", path);
+    say(app, "Working directory: %s", resolved);
 }
 
 static void
@@ -2896,6 +3033,26 @@ drain_keys(App *app)
                 completion_refresh(app);
                 break;
 
+			case KEY_DC:
+				input_delete(app);
+				app->completion_dismissed = FALSE;
+				completion_refresh(app);
+				break;
+
+			case 23:  /* ^W: kill the preceding word */
+			case 11:  /* ^K: kill to the end of the logical line */
+				input_kill(app, ch == 23);
+				app->completion_dismissed = FALSE;
+				completion_refresh(app);
+				break;
+
+			case 25:  /* ^Y: insert the last killed text literally */
+				if (app->kill_buffer != NULL)
+					input_insert(app, app->kill_buffer);
+				app->completion_dismissed = TRUE;
+				completion_close(app);
+				break;
+
             case KEY_LEFT:
                 input_move(app, -1);
                 completion_refresh(app);
@@ -3140,6 +3297,7 @@ on_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 
     ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
 	app->sending = FALSE;
+	app_sync_herdr(app);
 
     /* The full error is in the transcript; chrome carries only the outcome. */
 	ui_turn_finished(app, error);
@@ -3168,6 +3326,7 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
     ai_conversation_send_input_finish(AI_CONVERSATION(source), result,
                                       &command, &error);
 	app->sending = FALSE;
+	app_sync_herdr(app);
 
     if (error != NULL)
     {
@@ -3629,6 +3788,7 @@ app_send(App *app)
 
     app->follow = TRUE;
 	app->sending = TRUE;
+	app_sync_herdr(app);
     g_clear_object(&app->cancellable);
     app->cancellable = g_cancellable_new();
 
@@ -3702,6 +3862,7 @@ on_approval_requested(
 	if (app->approval_prompt != NULL) return AI_TOOL_APPROVAL_DENY;
 	app->approval_prompt = prompt;
 	app->approval_answer = AI_TOOL_APPROVAL_DEFAULT;
+	app_sync_herdr(app);
 	app_redraw(app);
 	while (app->running && app->approval_answer == AI_TOOL_APPROVAL_DEFAULT &&
 		(app->cancellable == NULL || !g_cancellable_is_cancelled(app->cancellable)))
@@ -3712,6 +3873,7 @@ on_approval_requested(
 	}
 	answer = app->approval_answer == AI_TOOL_APPROVAL_DEFAULT ? AI_TOOL_APPROVAL_DENY : app->approval_answer;
 	app->approval_prompt = NULL;
+	app_sync_herdr(app);
 
     app_schedule_redraw(app);
 
@@ -3939,6 +4101,18 @@ build_provider_named(
         return NULL;
     }
 
+    /* Wrapped CLI hooks must not replace ai-tui's pane authority or persist
+     * a native CLI session that would restore into a different application.
+     * Preserve all other child environment and leave native launch modes alone. */
+	if (AI_IS_CLI_CLIENT(provider) && !opt_no_herdr && !opt_dry_run &&
+		!opt_launch && !opt_launch_cmd && !opt_launch_cmd_print &&
+		ai_tui_herdr_detect(g_getenv("HERDR_ENV"),
+			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID")))
+	{
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HERDR_ENV", "0");
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HERDR_PANE_ID", "");
+	}
+
     return provider;
 }
 
@@ -4040,6 +4214,7 @@ main(int argc, char *argv[])
     g_autoptr(GOptionContext) context = NULL;
     g_autoptr(GError) error = NULL;
     g_autofree gchar *prompt = NULL;
+    g_autoptr(AiTuiHerdr) herdr = NULL;
     GObject *provider;
     App app;
 
@@ -4279,6 +4454,17 @@ main(int argc, char *argv[])
     }
 
 	ai_tui_history_restore(app.conversation, app.history);
+	if (!opt_no_herdr)
+		herdr = ai_tui_herdr_new(g_getenv("HERDR_ENV"),
+			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID"));
+	app.herdr = herdr;
+	if (herdr != NULL)
+	{
+		g_unix_signal_add(SIGTERM, on_herdr_shutdown, &app);
+		g_unix_signal_add(SIGHUP, on_herdr_shutdown, &app);
+	}
+	g_signal_connect_swapped(app.conversation, "notify::busy",
+		G_CALLBACK(app_sync_herdr), &app);
 
     /*
      * One-shot: --dump, or a prompt given without a terminal.
@@ -4302,6 +4488,8 @@ main(int argc, char *argv[])
 
             app.loop = loop;
             app.dump_loop = loop;
+			app.sending = TRUE;
+			app_sync_herdr(&app);
 
             if (opt_no_expand)
             {
@@ -4474,6 +4662,7 @@ main(int argc, char *argv[])
     g_ptr_array_unref(app.history);
     g_main_loop_unref(app.loop);
 	g_string_free(app.search, TRUE);
+	g_free(app.kill_buffer);
 	g_free(app.history_draft);
 	g_free(app.feedback);
 	g_clear_pointer(&app.row_cache, g_ptr_array_unref);

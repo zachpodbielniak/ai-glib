@@ -1,0 +1,120 @@
+#+title: Native herdr integration in ai-tui
+#+description: Automatic pane lifecycle reporting, transport behavior, testing and compatibility
+#+authors: ai-glib contributors
+#+categories: ai-glib tui integrations
+#+created: 2026-09-08T20:14:26-04:00
+#+updated: 2026-09-08T20:14:26-04:00
+#+version: 1
+
+* Start using it
+
+Launch =ai-tui= normally inside a herdr pane. It detects the pane environment and reports itself as =ai-tui= automatically. No herdr integration installation, hook configuration, wrapper script or additional dependency is required. This works with HTTP providers and wrapped CLI providers, including provider changes during a conversation.
+
+#+begin_src bash
+# Inside a herdr pane:
+ai-tui -p grok-build
+ai-tui -p ollama
+ai-tui --continue -p grok-build
+
+# Opt out for this process:
+ai-tui --no-herdr -p grok-build
+#+end_src
+
+The integration was researched and exercised against herdr =0.8.2=, upstream tag =v0.8.2=, commit =9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c=. Other releases are supported only to the extent that they retain the same custom lifecycle socket methods; an incompatible or unavailable server does not prevent ai-tui from working.
+
+* Detection and scope
+
+All three conditions must hold: =HERDR_ENV= is exactly =1=, =HERDR_SOCKET_PATH= is an absolute filesystem socket path that fits the platform's Unix-domain address, and =HERDR_PANE_ID= is a nonempty valid UTF-8 identifier of at most 256 bytes. Pane identifiers are treated as opaque strings. The socket need not already exist: the reporter can recover when it becomes available. Relative and oversized paths are rejected rather than silently truncated. The program does not guess a default socket, discover a focused pane, invoke the herdr CLI, or contact a remote host.
+
+The context is captured once for the lifetime of ai-tui. A dedicated worker uses the socket named by that environment, including when a herdr client detaches and later reattaches. Workspaces, tabs, terminal dimensions and titles remain managed by herdr.
+
+Interactive and one-shot execution (=--dump= or a prompt without a terminal) report lifecycle. Informational exits (=--help=, =--version=, =--license=, =--list-themes=), =--dry-run= and native launch modes (=--launch=, =--launch-cmd=, =--launch-cmd-print=) do not register ai-tui. =--no-herdr= disables registration and child hook suppression. Outside herdr, no reporter thread or socket traffic is created.
+
+* State model
+
+| Application condition | Reported state | Meaning |
+|-----------------------+----------------+---------|
+| Waiting for the first or next prompt | =idle= | Ready for input |
+| Expanding/sending input or processing a provider turn | =working= | A turn is in progress |
+| Waiting in ai-tui's local tool approval prompt | =blocked= | A deliberate user decision is needed |
+| Approval accepted or denied while the turn continues | =working= | The approval modal has closed |
+| Turn completes, errors, or is cancelled | =idle= | The user can submit another turn |
+| Normal exit, handled termination, or terminal input closure | release | Remove this reporter's pane ownership |
+
+Approval takes precedence over busy state. Duplicate state changes are suppressed. Built-in commands that do not call a provider still complete the working/idle transition. =--yes= does not open an approval modal and therefore does not report a blocked state. A provider switch keeps the =ai-tui= identity. The integration reports the foreground conversation, not aggregate progress of background brigade workers.
+
+These are semantic states: herdr uses them for agent listings, waits, tab/workspace summaries and its configured notifications. There is no separate =done= report: completion returns a running conversational application to =idle=. The reporter does not send an additional notification and does not rename panes or workspaces.
+
+Only approvals handled by ai-tui can be reported as =blocked=. A CLI's private approval mechanism is not an ai-tui event. The integration does not invent permission decisions or bypass approvals.
+
+* Wrapped CLI hook ownership
+
+While the automatic integration applies, each wrapped CLI provider receives =HERDR_ENV=0= and an empty =HERDR_PANE_ID= in its child environment. This prevents installed native herdr hooks and plugins from claiming ai-tui's pane or attaching an incompatible native session identity. Other environment entries remain intact, including =HERDR_SOCKET_PATH=. The parent process environment and user hook files are not changed. Runtime provider switches apply the same rule.
+
+Commands running inside a wrapped provider cannot rely on an inherited current-pane ID; if they intentionally control herdr, they need an explicit target. New terminals created by herdr receive their own pane context normally. Native launch modes preserve the native CLI environment and let that CLI's herdr integration run as usual.
+
+* Protocol and failure handling
+
+The private implementation is in =bin/ai-tui-herdr.h=. It uses existing GIO and JSON-GLib dependencies to send one newline-delimited JSON request per Unix socket connection. It sends =pane.report_agent= with =pane_id=, =agent=ai-tui=, =state=, and a process-specific =source=custom:ai-tui:<UUID>=. Shutdown uses =pane.release_agent= with the same pane, source and agent. JSON-GLib escapes all strings. Prompt text, tool arguments, credentials, transcripts and provider session IDs are never included in reports.
+
+A fresh request ID is required to match the reply. An acknowledgement must contain =result.type=ok= and no =error= field. The code rejects malformed JSON, wrong member types, mismatched IDs, server errors, premature EOF, missing newlines and replies larger than 16 KiB. The entire connect/write/read exchange shares a 250 ms monotonic deadline, including partial I/O. Socket writes cannot terminate ai-tui with SIGPIPE.
+
+Only the worker touches transport. It serializes state transitions in a queue of at most 32 entries. On overflow, obsolete pending entries are discarded and the newest state is retained. Under overload a short-lived intermediate state may therefore never reach herdr. During ordinary operation, transitions retain their order. No =seq= is necessary because requests are serialized, avoiding herdr's per-source sequence accounting. Process-specific sources guard against a delayed old release clearing a newer reporter's authority.
+
+Every five seconds without a pending transition, the worker refreshes current state. Each attempt reconnects, so missing sockets, refused connections and server replacement can recover without another keystroke or provider event. Errors are best-effort: they do not abort a conversation, add transcript messages or write normal stderr output over curses. Debug diagnostics are available through GLib logging; a failed acknowledgement is not treated as proof that herdr rejected a request it may already have processed.
+
+Cleanup allows 500 ms to drain queued transitions, then sends a final release. One in-flight request may run past that drain deadline by up to 250 ms, and the release has its own 250 ms budget: nominal socket waiting during shutdown is bounded by one second, excluding OS scheduling delays. SIGTERM and SIGHUP are dispatched through GLib's main loop when the integration is active so ordinary cleanup and terminal restoration run. SIGINT keeps ai-tui's existing cancel/exit behavior.
+
+* Persistence boundaries
+
+Detaching a herdr client leaves ai-tui running in its server-owned terminal, so the same conversation and reporting worker continue. A herdr server or machine restart is different: herdr 0.8.2 only constructs native resume commands for its allowlisted official agent integrations. A custom =ai-tui= report cannot register a new native resume command.
+
+This implementation therefore does not promise automatic ai-tui conversation recovery after server or machine restart. It does not impersonate =herdr:codex=, =herdr:grok= or another native agent to obtain a resume command, because that would reopen the native CLI instead of ai-tui. Use the existing =ai-tui --continue -p PROVIDER= workflow where that provider supports continuation; persistence semantics and display history remain provider-specific.
+
+An uncatchable kill, process crash, or failed release request can leave stale status in herdr. Herdr's custom lifecycle authority has no TTL field in this protocol, so the client cannot guarantee cleanup after process death. Normal shutdown and handled signals attempt release; a new ai-tui process in the pane establishes a new identity. The five-second refresh repairs a live process's missing status, not a dead process's stale status.
+
+* Troubleshooting
+
+Inside the relevant herdr environment:
+
+#+begin_src bash
+printf 'herdr=%s pane=%s socket=%s\n' "${HERDR_ENV:-}" "${HERDR_PANE_ID:-}" "${HERDR_SOCKET_PATH:-}"
+herdr pane get "$HERDR_PANE_ID"
+herdr agent list
+
+# Reproduce with transport diagnostics, keeping logging away from curses:
+G_MESSAGES_DEBUG=all ai-tui -p grok-build --dump 'hello' > herdr-debug.log 2>&1
+
+# Compare behavior with reporting disabled:
+ai-tui --no-herdr -p grok-build
+#+end_src
+
+If the pane remains unknown, check the three detection values, whether =--no-herdr= was supplied, socket accessibility and herdr version. The implementation uses the injected socket path; replacing it with another session's socket does not retarget the inherited pane ID safely. A refused or malformed server reply appears only in debug logging. Do not install additional native hooks to fix ai-tui reporting: those hooks belong to the native applications, while ai-tui already reports its own lifecycle.
+
+A debug log can include provider diagnostics in addition to integration messages. Inspect it before sharing. The integration's own messages contain transport/protocol errors, not prompts or credentials.
+
+* Build and verification
+
+Fedora build packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libyaml-devel= and =ncurses-devel=. The existing bundled =yaml-glib= submodule is also required. Optional GIR generation needs =gobject-introspection-devel=; the broader existing terminal tests use =tmux=. Native reporting adds no package and does not require herdr to be installed at build time.
+
+On builds without ncurses, ai-glib omits the ai-tui binary. Socket unit tests still run and the application group explicitly reports a skip; it does not claim that interactive behavior was verified.
+
+#+begin_src bash
+make clean all
+make clean tests
+make test
+build/release/tests/test-ai-tui-herdr
+#+end_src
+
+The GTest suite =tests/test-ai-tui-herdr.c= starts isolated AF_UNIX peers to verify complete/incomplete environment detection, JSON escaping and framing, fragmented success replies, malformed and oversized responses, missing/refused endpoints, queue overload, nonblocking updates, shutdown deadlines, reporter ownership, lifecycle ordering and heartbeat recovery after server socket replacement. It drives the actual binary in dump mode and on PTYs, covering child hook suppression, provider errors, cancellation, approval allow/deny/deny-all/Escape, termination during approval, normal turn completion, informational exits, opt-out and native-launch printing. HTTP approval tests use a loopback fixture with a dummy key; CLI tests use a local stub. Existing ai-tui/defaults test processes clear the herdr marker before spawning fixtures, while the integration tests inject their own isolated context. They never call a model service or a user's live herdr server.
+
+An additional manual interoperability check starts herdr 0.8.2 with isolated configuration and socket paths, creates a test workspace, launches the built ai-tui with a stub provider, observes =ai-tui / idle=, =working=, then =idle= through =pane.get=, and verifies release on exit. This complements mock-server tests by checking the installed server's acceptance and actual state model.
+
+* Research sources
+
+- [[https://herdr.dev/docs/socket-api/][Herdr socket API]]: custom state reporting and semantic state behavior.
+- [[https://herdr.dev/docs/integrations/][Herdr integrations]]: lifecycle ownership and native provider integrations.
+- [[https://github.com/herdrdev/herdr/blob/v0.8.2/src/api/schema/panes.rs][v0.8.2 pane protocol schema]]: exact report/release request fields.
+- [[https://github.com/herdrdev/herdr/blob/v0.8.2/src/api/schema/response.rs][v0.8.2 response schema]]: request correlation and =result.type=ok=.
+- [[https://github.com/herdrdev/herdr/blob/v0.8.2/src/terminal/state.rs][v0.8.2 terminal state]]: source-guarded release and custom authority behavior.
+- [[https://github.com/herdrdev/herdr/blob/v0.8.2/src/agent_resume.rs][v0.8.2 native resume implementation]]: official-source allowlist and provider-specific resume commands.

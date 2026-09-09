@@ -6,6 +6,7 @@
 #include <glib/gstdio.h>
 #include <yaml.h>
 #include <string.h>
+#include <utime.h>
 #include "../bin/ai-tui-history.h"
 
 #define CONFIG_FILE "config/ai-glib/config.yaml"
@@ -88,6 +89,51 @@ box_setup(Box *box, gconstpointer data)
 	(void)data;
 	box->dir = g_dir_make_tmp("ai-defaults-XXXXXX", &error);
 	g_assert_no_error(error);
+	box_write(box, "codex",
+		"#!/bin/bash\nset -eu\n"
+		"printf '%s\\n' \"$@\" > \"$HOME/codex.argv\"\n"
+		"pwd > \"$HOME/codex.cwd\"\n"
+		"/usr/bin/cat > \"$HOME/codex.stdin\"\n"
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"new-thread\"}'\n"
+		"printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
+		"printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"m\","
+		"\"type\":\"agent_message\",\"text\":\"codex reply\"}}'\n"
+		"printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":"
+		"{\"input_tokens\":1,\"output_tokens\":1}}'\n");
+	{
+		g_autofree gchar *codex = g_build_filename(box->dir, "codex", NULL);
+		g_assert_cmpint(g_chmod(codex, 0700), ==, 0);
+	}
+	box_write(box, "claude",
+		"#!/bin/bash\nset -eu\n"
+		"printf '%s\\n' \"$@\" > \"$HOME/claude.argv\"\n"
+		"pwd > \"$HOME/claude.cwd\"\n"
+		"/usr/bin/cat > \"$HOME/claude.stdin\"\n"
+		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"claude reply\","
+		"\"session_id\":\"new\",\"is_error\":false}'\n");
+	box_write(box, "opencode-bin",
+		"#!/bin/bash\nset -eu\n"
+		"printf '%s\\n' \"$@\" > \"$HOME/opencode.argv\"\n"
+		"pwd > \"$HOME/opencode.cwd\"\n"
+		"/usr/bin/cat > \"$HOME/opencode.stdin\"\n"
+		"printf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"new\"}'\n"
+		"printf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"opencode reply\"}}'\n"
+		"printf '%s\\n' '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1,\"output\":1}}}'\n");
+	box_write(box, "agy",
+		"#!/bin/bash\nset -eu\n"
+		"printf '%s\\n' \"$@\" > \"$HOME/agy.argv\"\n"
+		"pwd > \"$HOME/agy.cwd\"\n"
+		"/usr/bin/cat > \"$HOME/agy.stdin\"\n"
+		"printf '%s\\n' '{\"conversation_id\":\"new\",\"status\":\"SUCCESS\","
+		"\"response\":\"agy reply\"}'\n");
+	{
+		g_autofree gchar *claude = g_build_filename(box->dir, "claude", NULL);
+		g_autofree gchar *opencode = g_build_filename(box->dir, "opencode-bin", NULL);
+		g_autofree gchar *agy = g_build_filename(box->dir, "agy", NULL);
+		g_assert_cmpint(g_chmod(claude, 0700), ==, 0);
+		g_assert_cmpint(g_chmod(opencode, 0700), ==, 0);
+		g_assert_cmpint(g_chmod(agy, 0700), ==, 0);
+	}
 	for (i = 0; i < G_N_ELEMENTS(names); i++)
 	{
 		g_autofree gchar *path = g_build_filename(box->dir, names[i], NULL);
@@ -141,6 +187,10 @@ run_box(Box *box, gboolean tui, const gchar * const *args,
 	g_autofree gchar *config = g_build_filename(box->dir, "config", NULL);
 	g_autofree gchar *grok = g_build_filename(box->dir, "grok", NULL);
 	g_autofree gchar *cursor = g_build_filename(box->dir, "cursor", NULL);
+	g_autofree gchar *codex = g_build_filename(box->dir, "codex", NULL);
+	g_autofree gchar *claude = g_build_filename(box->dir, "claude", NULL);
+	g_autofree gchar *opencode = g_build_filename(box->dir, "opencode-bin", NULL);
+	g_autofree gchar *agy = g_build_filename(box->dir, "agy", NULL);
 	gchar *empty[] = { NULL };
 	guint i;
 	gint status;
@@ -157,6 +207,10 @@ run_box(Box *box, gboolean tui, const gchar * const *args,
 	g_subprocess_launcher_setenv(launcher, "LD_LIBRARY_PATH", library_dir, TRUE);
 	g_subprocess_launcher_setenv(launcher, "GROK_PATH", grok, TRUE);
 	g_subprocess_launcher_setenv(launcher, "CURSOR_AGENT_PATH", cursor, TRUE);
+	g_subprocess_launcher_setenv(launcher, "CODEX_PATH", codex, TRUE);
+	g_subprocess_launcher_setenv(launcher, "CLAUDE_CODE_PATH", claude, TRUE);
+	g_subprocess_launcher_setenv(launcher, "OPENCODE_PATH", opencode, TRUE);
+	g_subprocess_launcher_setenv(launcher, "AGY_PATH", agy, TRUE);
 	g_subprocess_launcher_setenv(launcher, "G_DEBUG", "fatal-warnings", TRUE);
 	for (i = 0; overrides != NULL && overrides[i] != NULL; i += 2)
 		g_subprocess_launcher_setenv(launcher, overrides[i], overrides[i + 1], TRUE);
@@ -768,6 +822,391 @@ test_native_history(Box *box, gconstpointer data)
 	}
 }
 
+#define CODEX_ITEM(item) "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":" item "}}\n"
+#define CODEX_USER(text) CODEX_ITEM("{\"type\":\"UserMessage\",\"id\":\"u\",\"content\":[{\"type\":\"text\",\"text\":\"" text "\"}]}")
+#define CODEX_AGENT(text) CODEX_ITEM("{\"type\":\"AgentMessage\",\"id\":\"a\",\"content\":[{\"type\":\"Text\",\"text\":\"" text "\"}]}")
+#define CODEX_THINK(text) CODEX_ITEM("{\"type\":\"Reasoning\",\"id\":\"r\",\"summary_text\":[\"" text "\"]}")
+
+/* Native Codex rollouts live under $CODEX_HOME/sessions/YYYY/MM/DD/. */
+static void
+write_codex_history(Box *box, const gchar *id, const gchar *stamp, const gchar *cwd, const gchar *log)
+{
+	g_autofree gchar *rel = g_strdup_printf(".codex/sessions/2026/09/08/rollout-%s-%s.jsonl", stamp, id);
+	g_autofree gchar *path = g_build_filename(box->dir, rel, NULL);
+	g_autofree gchar *meta = g_strdup_printf(
+		"{\"timestamp\":\"%s\",\"type\":\"session_meta\",\"payload\":"
+		"{\"session_id\":\"%s\",\"id\":\"%s\",\"cwd\":\"%s\"}}\n", stamp, id, id, cwd);
+	g_autofree gchar *contents = g_strconcat(meta, log, NULL);
+	g_autoptr(GDateTime) at = g_date_time_new_from_iso8601(stamp, NULL);
+	struct utimbuf times;
+
+	box_write(box, rel, contents);
+	g_assert_nonnull(at);
+	times.actime = times.modtime = (time_t)g_date_time_to_unix(at);
+	g_assert_cmpint(g_utime(path, &times), ==, 0);
+}
+
+static void
+test_codex_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "codex", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "codex", "--dump", "fresh prompt", NULL };
+	const gchar *explicit_id[] = { "-p", "codex", "-c", "--set", "session-id=older", "--dump", "new prompt", NULL };
+	const gchar *disabled[] = { "-p", "codex", "-c", "--set", "session-persistence=false", "--dump", "new prompt", NULL };
+	g_autoptr(AiCodexCliClient) provider = ai_codex_cli_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *sent = NULL;
+	g_autofree gchar *argv = NULL;
+	AiTranscript *transcript = ai_conversation_get_transcript(conversation);
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_codex_history(box, "older", "2026-09-06T12:00:00Z", box->dir,
+		CODEX_USER("older question"));
+	write_codex_history(box, "latest", "2026-09-07T12:00:00Z", box->dir,
+		CODEX_USER("previous question")
+		CODEX_THINK("previous reasoning")
+		CODEX_AGENT("previous answer")
+		CODEX_ITEM("{\"type\":\"CommandExecution\",\"id\":\"cmd-1\",\"command\":[\"/bin/bash\",\"-lc\",\"make\"],\"status\":\"completed\",\"aggregated_output\":\"ok\",\"exit_code\":0}")
+		CODEX_ITEM("{\"type\":\"FileChange\",\"id\":\"file-1\",\"status\":\"completed\",\"changes\":{\"file.c\":{\"type\":\"update\"}}}"));
+	write_codex_history(box, "other", "2026-09-08T12:00:00Z", "/tmp/not-this-project",
+		CODEX_USER("must not appear"));
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "must not appear"));
+	sent = box_read(box, "codex.stdin");
+	argv = box_read(box, "codex.argv");
+	g_assert_null(strstr(sent, "previous question"));
+	g_assert_nonnull(strstr(sent, "new prompt"));
+	g_assert_nonnull(strstr(argv, "resume\nlatest\n"));
+	g_assert_null(strstr(argv, "--last"));
+	g_assert_cmpint(run_box(box, TRUE, explicit_id, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "older question"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_cmpint(run_box(box, TRUE, disabled, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "CODEX_HOME", "");
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 4);
+	g_assert_cmpuint(history->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_null(ai_conversation_get_messages(conversation));
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "command_execution");
+	g_assert_cmpstr(ai_tool_call_get_name(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 1)), ==, "file_change");
+	g_assert_cmpstr(ai_view_tool_block_get_summary(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3))), ==, "Ran make, changed file.c");
+	g_assert_cmpstr(ai_tool_call_get_result(ai_view_tool_block_get_call(
+		AI_VIEW_TOOL_BLOCK(ai_transcript_get_block(transcript, 3)), 0)), ==, "ok");
+
+	{
+		g_autofree gchar *other = g_build_filename(box->dir, "other-project", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_mkdir(other, 0700), ==, 0);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), other);
+		selected_path = ai_tui_codex_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_null(selected_path);
+		g_assert_null(selected_id);
+		ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	}
+
+	write_codex_history(box, "latest", "2026-09-07T12:00:00Z", box->dir,
+		CODEX_USER("partial history must not appear") "{broken\n");
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Could not load native session history"));
+	g_assert_null(strstr(box->out, "previous question"));
+	g_assert_null(strstr(box->out, "partial history must not appear"));
+
+	{
+		g_autofree gchar *old_home = g_build_filename(box->dir, ".codex", NULL);
+		g_autofree gchar *new_home = g_build_filename(box->dir, "native-home", NULL);
+		g_autofree gchar *selected_id = NULL;
+		g_autofree gchar *selected_path = NULL;
+
+		g_assert_cmpint(g_rename(old_home, new_home), ==, 0);
+		ai_cli_client_set_env(AI_CLI_CLIENT(provider), "CODEX_HOME", new_home);
+		selected_path = ai_tui_codex_history_find(AI_CLI_CLIENT(provider), &selected_id);
+		g_assert_nonnull(selected_path);
+		g_assert_cmpstr(selected_id, ==, "latest");
+	}
+}
+
+static void
+touch_stamp(const gchar *path, const gchar *stamp)
+{
+	g_autoptr(GDateTime) at = g_date_time_new_from_iso8601(stamp, NULL);
+	struct utimbuf times;
+
+	g_assert_nonnull(at);
+	times.actime = times.modtime = (time_t)g_date_time_to_unix(at);
+	g_assert_cmpint(g_utime(path, &times), ==, 0);
+}
+
+static void
+write_claude_history(Box *box, const gchar *id, const gchar *stamp, const gchar *log)
+{
+	g_autofree gchar *encoded = ai_tui_history_dash_path(box->dir, TRUE);
+	g_autofree gchar *rel = g_strdup_printf(".claude/projects/%s/%s.jsonl", encoded, id);
+	g_autofree gchar *path = g_build_filename(box->dir, rel, NULL);
+
+	box_write(box, rel, log);
+	touch_stamp(path, stamp);
+}
+
+static void
+write_cursor_history(Box *box, const gchar *id, const gchar *stamp, const gchar *log)
+{
+	g_autofree gchar *encoded = ai_tui_history_dash_path(box->dir, FALSE);
+	g_autofree gchar *rel = g_strdup_printf(".cursor/projects/%s/agent-transcripts/%s/%s.jsonl", encoded, id, id);
+	g_autofree gchar *path = g_build_filename(box->dir, rel, NULL);
+
+	box_write(box, rel, log);
+	touch_stamp(path, stamp);
+}
+
+static void
+write_agy_history(Box *box, const gchar *id, const gchar *cwd, const gchar *stamp, const gchar *log)
+{
+	g_autofree gchar *rel = g_strdup_printf(".gemini/antigravity-cli/brain/%s/.system_generated/logs/transcript.jsonl", id);
+	g_autofree gchar *path = g_build_filename(box->dir, rel, NULL);
+	g_autofree gchar *index = g_strdup_printf("{\"%s\":\"%s\"}", cwd, id);
+	g_autofree gchar *existing = NULL;
+	g_autofree gchar *index_path = g_build_filename(box->dir, ".gemini/antigravity-cli/cache/last_conversations.json", NULL);
+
+	if (g_file_get_contents(index_path, &existing, NULL, NULL) && existing != NULL && *existing == '{')
+	{
+		g_autofree gchar *merged = NULL;
+		existing[strlen(existing) - 1] = '\0';
+		merged = g_strdup_printf("%s,\"%s\":\"%s\"}", existing, cwd, id);
+		box_write(box, ".gemini/antigravity-cli/cache/last_conversations.json", merged);
+	}
+	else
+		box_write(box, ".gemini/antigravity-cli/cache/last_conversations.json", index);
+	box_write(box, rel, log);
+	touch_stamp(path, stamp);
+}
+
+static void
+write_opencode_history(Box *box, const gchar *id, const gchar *cwd, gint64 updated,
+                       const gchar *user, const gchar *reply)
+{
+	g_autofree gchar *path = g_build_filename(box->dir, "opencode", "opencode.db", NULL);
+	g_autofree gchar *parent = g_path_get_dirname(path);
+	g_autofree gchar *sql = NULL;
+	sqlite3 *db = NULL;
+	char *errmsg = NULL;
+
+	g_assert_cmpint(g_mkdir_with_parents(parent, 0700), ==, 0);
+	g_assert_cmpint(sqlite3_open(path, &db), ==, SQLITE_OK);
+	sql = g_strdup_printf(
+		"CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_updated INTEGER, parent_id TEXT);"
+		"CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);"
+		"CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);"
+		"INSERT OR REPLACE INTO session(id, directory, title, time_updated, parent_id) VALUES ('%s', '%s', 't', %lld, NULL);"
+		"INSERT OR REPLACE INTO message VALUES ('mu-%s', '%s', 1, '{\"role\":\"user\"}');"
+		"INSERT OR REPLACE INTO message VALUES ('ma-%s', '%s', 2, '{\"role\":\"assistant\"}');"
+		"INSERT OR REPLACE INTO part VALUES ('pu-%s', 'mu-%s', '%s', 1, '{\"type\":\"text\",\"text\":\"%s\"}');"
+		"INSERT OR REPLACE INTO part VALUES ('pr-%s', 'ma-%s', '%s', 2, '{\"type\":\"reasoning\",\"text\":\"previous reasoning\"}');"
+		"INSERT OR REPLACE INTO part VALUES ('pa-%s', 'ma-%s', '%s', 3, '{\"type\":\"text\",\"text\":\"%s\"}');"
+		"INSERT OR REPLACE INTO part VALUES ('pt-%s', 'ma-%s', '%s', 4, '{\"type\":\"tool\",\"tool\":\"bash\",\"callID\":\"c1\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"make\"},\"output\":\"ok\"}}');",
+		id, cwd, (long long)updated, id, id, id, id, id, id, id, user, id, id, id, id, id, id, reply, id, id, id);
+	g_assert_cmpint(sqlite3_exec(db, sql, NULL, NULL, &errmsg), ==, SQLITE_OK);
+	sqlite3_close(db);
+}
+
+#define CLAUDE_USER(text) "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" text "\"}}\n"
+#define CLAUDE_ASSISTANT "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[" \
+	"{\"type\":\"thinking\",\"thinking\":\"previous reasoning\"}," \
+	"{\"type\":\"text\",\"text\":\"previous answer\"}," \
+	"{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\",\"input\":{\"file_path\":\"file.c\"}}]}}\n" \
+	"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"saved output\"}]}}\n"
+#define CURSOR_USER(text) "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>" text "</user_query>\"}]}}\n"
+#define CURSOR_ASSISTANT "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"previous answer\"}]}}\n"
+#define AGY_USER(text) "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n" text "\\n</USER_REQUEST>\"}\n"
+#define AGY_ASSISTANT "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"previous answer\",\"tool_calls\":[{\"name\":\"view_file\",\"args\":{\"AbsolutePath\":\"file.c\"}}]}\n"
+
+static void
+test_claude_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "claude-code", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "claude-code", "--dump", "fresh prompt", NULL };
+	g_autoptr(AiClaudeCodeClient) code = ai_claude_code_client_new();
+	g_autoptr(AiClaudeTmuxClient) tmux = ai_claude_tmux_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(code));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *argv = NULL;
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_claude_history(box, "older", "2026-09-06T12:00:00Z", CLAUDE_USER("older question"));
+	write_claude_history(box, "latest", "2026-09-07T12:00:00Z",
+		CLAUDE_USER("previous question") CLAUDE_ASSISTANT);
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	argv = box_read(box, "claude.argv");
+	g_assert_nonnull(strstr(argv, "--resume\nlatest\n"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(code), "HOME", box->dir);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(code), box->dir);
+	g_object_set(code, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(ai_transcript_get_n_blocks(ai_conversation_get_transcript(conversation)), ==, 4);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(code)), ==, "latest");
+	g_assert_cmpstr(ai_view_tool_block_get_summary(AI_VIEW_TOOL_BLOCK(
+		ai_transcript_get_block(ai_conversation_get_transcript(conversation), 3))), ==, "Read file.c");
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(tmux), "HOME", box->dir);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(tmux), box->dir);
+	g_object_set(tmux, "continue-session", TRUE, NULL);
+	{
+		g_autoptr(AiConversation) tmux_conversation = ai_conversation_new(G_OBJECT(tmux));
+		g_autoptr(GPtrArray) tmux_history = g_ptr_array_new_with_free_func(g_free);
+		ai_tui_history_restore(tmux_conversation, tmux_history);
+		g_assert_cmpuint(ai_transcript_get_n_blocks(ai_conversation_get_transcript(tmux_conversation)), >, 0);
+		g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(tmux)), ==, "latest");
+	}
+}
+
+static void
+test_cursor_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "cursor", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "cursor", "--dump", "fresh prompt", NULL };
+	g_autoptr(AiCursorClient) provider = ai_cursor_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *argv = NULL;
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_cursor_history(box, "older", "2026-09-06T12:00:00Z", CURSOR_USER("older question"));
+	write_cursor_history(box, "latest", "2026-09-07T12:00:00Z",
+		CURSOR_USER("previous question") CURSOR_ASSISTANT);
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	argv = box_read(box, "cursor.argv");
+	g_assert_nonnull(strstr(argv, "--resume\nlatest\n"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(history->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+}
+
+static void
+test_opencode_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "opencode", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "opencode", "--dump", "fresh prompt", NULL };
+	g_autoptr(AiOpenCodeClient) provider = ai_opencode_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *argv = NULL;
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_opencode_history(box, "older", box->dir, 100, "older question", "older answer");
+	write_opencode_history(box, "latest", box->dir, 200, "previous question", "previous answer");
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	argv = box_read(box, "opencode.argv");
+	g_assert_nonnull(strstr(argv, "--session\nlatest\n"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "XDG_DATA_HOME", box->dir);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(ai_transcript_get_n_blocks(ai_conversation_get_transcript(conversation)), ==, 4);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+	g_assert_cmpstr(ai_view_tool_block_get_summary(AI_VIEW_TOOL_BLOCK(
+		ai_transcript_get_block(ai_conversation_get_transcript(conversation), 3))), ==, "Ran make");
+}
+
+static void
+test_agy_native_history(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "-p", "agy", "-c", "--dump", "new prompt", NULL };
+	const gchar *fresh[] = { "-p", "agy", "--dump", "fresh prompt", NULL };
+	g_autoptr(AiAntigravityClient) provider = ai_antigravity_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *argv = NULL;
+
+	(void)data;
+	if (!g_file_test(tui_binary, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("ai-tui unavailable");
+		return;
+	}
+	write_agy_history(box, "older", "/tmp/not-this-project", "2026-09-06T12:00:00Z",
+		AGY_USER("older question") AGY_ASSISTANT);
+	write_agy_history(box, "latest", box->dir, "2026-09-07T12:00:00Z",
+		AGY_USER("previous question") AGY_ASSISTANT);
+	g_assert_cmpint(run_box(box, TRUE, args, NULL, NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "previous question"));
+	g_assert_nonnull(strstr(box->out, "previous answer"));
+	g_assert_null(strstr(box->out, "older question"));
+	argv = box_read(box, "agy.argv");
+	g_assert_nonnull(strstr(argv, "--conversation\nlatest\n"));
+	g_assert_cmpint(run_box(box, TRUE, fresh, NULL, NULL), ==, 0);
+	g_assert_null(strstr(box->out, "previous question"));
+
+	ai_cli_client_set_env(AI_CLI_CLIENT(provider), "HOME", box->dir);
+	ai_cli_client_set_working_directory(AI_CLI_CLIENT(provider), box->dir);
+	g_object_set(provider, "continue-session", TRUE, NULL);
+	ai_tui_history_restore(conversation, history);
+	g_assert_cmpuint(history->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(history, 0), ==, "previous question");
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(provider)), ==, "latest");
+}
+
 /* Resolve siblings before subprocesses change cwd; release/debug both work. */
 int
 main(int argc, char *argv[])
@@ -777,6 +1216,8 @@ main(int argc, char *argv[])
 	g_autofree gchar *dir = NULL;
 	gint status;
 
+	/* Spawned fixtures must never register in the developer's real herdr pane. */
+	g_unsetenv("HERDR_ENV");
 	g_test_init(&argc, &argv, NULL);
 	self = g_file_read_link("/proc/self/exe", NULL);
 	absolute = g_canonicalize_filename(self != NULL ? self : argv[0], NULL);
@@ -799,6 +1240,11 @@ main(int argc, char *argv[])
 	ADD("process-timeout/default", test_process_timeout_default);
 	ADD("process-timeout/stream", test_process_timeout_stream);
 	ADD("native-history", test_native_history);
+	ADD("codex-native-history", test_codex_native_history);
+	ADD("claude-native-history", test_claude_native_history);
+	ADD("cursor-native-history", test_cursor_native_history);
+	ADD("opencode-native-history", test_opencode_native_history);
+	ADD("agy-native-history", test_agy_native_history);
 #undef ADD
 	status = g_test_run();
 	g_free(ai_binary);

@@ -24,18 +24,29 @@ echo "review the diff" | ai-tui
 
 The prompt comes from leftover arguments if present, otherwise from stdin when stdin is not a terminal --- the same rule as [[file:cli.org][the =ai= CLI]]. On a terminal, that text is the first turn: it is placed in the composer and sent. A piped prompt is read, then stdin is reopened on =/dev/tty= so ncurses can take the keyboard. Without a terminal --- stdout is not a tty, or =/dev/tty= cannot be opened --- the same prompt runs one turn and prints the transcript, as =--dump= does. Use =--= before a prompt that begins with a dash.
 
+** Herdr integration
+
+Inside a herdr pane, =ai-tui= automatically reports itself as =ai-tui= with =idle=, =working= and =blocked= states, including local tool approval waits. It uses the injected local socket directly and needs no installed hook or wrapper. =--no-herdr= disables reporting. Native launch and informational modes remain unregistered. See [[file:herdr.org][Native herdr integration]] for detection, child hook ownership, failure handling, tests and the limits of recovery after a server restart.
+
 ** Independent Defaults
 Run =ai --setup= and select scope =2= to configure =ai-tui=. Startup resolves =apps.ai-tui.default_provider= and =apps.ai-tui.default_model= independently of =ai= and the library's top-level defaults. =AI_GLIB_DEFAULT_PROVIDER= and =AI_GLIB_DEFAULT_MODEL= do not affect this scope. Omitted options behave exactly like =ai-tui -p default -m default=: use saved ai-tui defaults and ignore =AI_PROVIDER=. A saved model is used only when its provider matches the startup selection. Runtime provider switches do not inherit the startup model or reapply these defaults. See [[file:cli.org][the setup protocol]] and [[file:configuration.org][the exact schema]].
 
 ** CLI Process Deadline
 CLI providers default to =process-timeout-ms=0= in =ai-tui=, including after runtime provider switches, so the wrapper does not terminate a long-running turn after thirty minutes. At startup, =--set process-timeout-ms=600000= opts into a ten-minute deadline; =--set process-timeout-ms=0= explicitly disables it. As with other startup =--set= properties, an explicit override is not reapplied after a provider switch. Cancellation remains available. The library default remains 1800000 ms; HTTP, native CLI and tmux-specific timeouts are separate controls.
 
-** Restoring Grok Session History
-With =-p grok-build -c=, the transcript is populated before the first screen is drawn, without submitting a prompt or starting Grok. This also applies when grok-build is your saved provider default. User turns, assistant replies, reasoning and tool calls are read from Grok's native =updates.jsonl= log; previous user turns are available through input history. Tool calls use grok's wire names (=read_file=, =search_replace=, =run_terminal_command=), including ACP history variants such as =ReadFile=, so restored groups read as =Read file.c, edited parser.c, ran make= rather than =Used N tools=. =--dump= includes the restored transcript before the new turn.
+** Restoring Native Session History
+With =-c= / =--continue=, the transcript is populated before the first screen is drawn, without submitting a prompt or starting the wrapped CLI. This also applies when the saved provider default is one of the supported wrappers. Previous user turns are available through input history. =--dump= includes the restored transcript before the new turn.
 
-Session selection is restricted to the provider's working directory and uses the most recent native activity timestamp. =--set session-id=ID= selects that session explicitly. The selected ID is passed to Grok with =--resume= so the next turn continues the history shown on screen. Historical prompts and tools are only rendered, never submitted or executed again. A fresh startup without a resume option does not load history, and =--set session-persistence=false= disables restoration.
+- =grok-build= reads Grok's native =updates.jsonl=. Tool calls use grok's wire names (=read_file=, =search_replace=, =run_terminal_command=), including ACP history variants such as =ReadFile=, so restored groups read as =Read file.c, edited parser.c, ran make= rather than =Used N tools=.
+- =codex-cli= / =codex= reads Codex rollout JSONL under =$CODEX_HOME/sessions= (defaulting to =~/.codex/sessions=). Completed user, reasoning, assistant, command and file-change items are folded; restored groups use the live names (=command_execution=, =file_change=) so they read as =Ran make, changed file.c=.
+- =claude-code= and =claude-tmux= read =~/.claude/projects/<cwd-with-slashes-as-dashes>/<id>.jsonl= (or =CLAUDE_CONFIG_DIR= / tmux's =claude-project-dir=). User turns, thinking, assistant text and =tool_use= / =tool_result= pairs are folded.
+- =cursor= reads =~/.cursor/projects/<cwd-without-leading-slash>/<id>/<id>.jsonl= under =agent-transcripts=. =<user_query>= wrappers are stripped so the composer history is the prompt, not Cursor's timestamp envelope.
+- =opencode= reads =$XDG_DATA_HOME/opencode/opencode.db= (defaulting to =~/.local/share/opencode/opencode.db=). Top-level sessions for this working directory are selected; subagent rows with a parent id are skipped.
+- =antigravity= / =agy= reads =~/.gemini/antigravity-cli/cache/last_conversations.json= to map the cwd onto =brain/<id>/.system_generated/logs/transcript.jsonl=, then folds =USER_INPUT= / =PLANNER_RESPONSE= / =tool_calls=.
 
-The reader honors the provider's =GROK_HOME= and =HOME= environment overrides, including Grok's hashed directory buckets. Missing sessions leave a fresh transcript. Unreadable or malformed selected logs produce a visible error without adding partial history; logs over 64 MiB are rejected with a visible display-limit error. Native launch and dry-run modes do not load history. This native history reader currently supports grok-build; other providers retain their existing continuation behavior.
+Session selection is restricted to the provider's working directory and uses the most recent native activity timestamp. =--set session-id=ID= selects that session explicitly. The selected ID is passed back to the CLI (=--resume= for Grok, Claude and Cursor, =resume ID= for Codex never =--last=, =--session= for OpenCode, =--conversation= for Antigravity) so the next turn continues the history shown on screen. Historical prompts and tools are only rendered, never submitted or executed again. A fresh startup without a resume option does not load history, and =--set session-persistence=false= disables restoration.
+
+The reader honors =GROK_HOME= / =CODEX_HOME= / =CLAUDE_CONFIG_DIR= / =XDG_DATA_HOME= and =HOME= environment overrides, including Grok's hashed directory buckets. Missing sessions leave a fresh transcript. Unreadable or malformed selected logs produce a visible error without adding partial history; logs over 64 MiB are rejected with a visible display-limit error. Native launch and dry-run modes do not load history.
 
 ** What it looks like
 *** Native CLI Alternative
@@ -124,6 +135,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--list-themes=       | List built-in themes without starting a provider        |
 | =--no-animation=      | Disable decorative motion; elapsed time still updates  |
 | =--no-agents=         | Do not let the model start background agents             |
+| =--no-herdr=          | Disable automatic herdr pane lifecycle reporting         |
 | =--dump PROMPT=       | Force one turn and print the transcript, even on a terminal |
 | =--width N=           | Wrap width for =--dump= (0 for none)                     |
 | =--dry-run=           | Print the command a CLI provider would run, then exit    |
@@ -180,6 +192,17 @@ terminal produces (the kitty keyboard protocol's =CSI 13;2u= and xterm's
 sends either and costs nothing if it does not.
 
 The framed composer grows as you type, up to ten content rows or the available terminal height. Longer drafts scroll to keep the cursor visible; =C-a= and =C-e= reveal the beginning and end. The frame reports the current row and total rows when space permits. Unicode input is accepted, including wide characters; byte offsets remain compatible with the library's completion APIs. Complex emoji/grapheme display still depends on the terminal's width rules.
+
+*** Composer editing
+
+| Key | Action |
+|-----+--------|
+| =Delete= | Delete the next Unicode character without moving the cursor |
+| =C-w= | Kill preceding whitespace and then the preceding word |
+| =C-k= | Kill from the cursor to the next newline or draft end; at a newline, kill that newline |
+| =C-y= | Insert the most recently killed text at the cursor |
+
+Words are separated by Unicode whitespace, so filenames and punctuation stay together. Delete and word kill move across whole Unicode code points, not grapheme clusters. The single kill buffer lasts for this process only; each nonempty =C-w= or =C-k= replaces it, while an empty kill preserves it. =Backspace=, =Delete= and =C-u= do not replace the kill buffer. Yank inserts text literally, including newlines, and closes completion without submitting a prompt. These bindings edit the draft during a running turn too; approval and search prompts retain their own key handling.
 
 Bracketed paste is enabled while ai-tui owns the terminal. A multiline paste is inserted into the composer without submitting any of its lines; press =Enter= explicitly when ready. Terminals without bracketed paste support cannot distinguish a pasted newline from a typed =Enter=, so use =C-g= for multiline text there. Pasted approval answers are ignored: approvals require a deliberate key. Control characters other than newlines and tabs are discarded in bracketed input; tabs are displayed as a single blank but retained in the prompt.
 
@@ -323,6 +346,21 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/expand LINE=      | What a line would send, without sending it        |
 | =/save PATH=        | Write the transcript to a file                    |
 | =/export FMT [PATH]= | Write it as =text=, =markdown= or =org=         |
+
+*** Command paths
+
+=/cwd=, =/save= and =/export= resolve relative paths against the conversation's current directory. Consecutive relative directory changes therefore build on one another, and subsequent saves land in the directory shown in the header. Absolute paths remain absolute; =~= and a leading =~/= expand to your home directory. Paths are literal: spaces need no quotes, and shell variables, wildcards and =~otheruser= are not expanded. =/export= accepts spaces or tabs between its format and path. An invalid directory leaves the current directory unchanged; failed writes report the error in the transcript. Saving to an existing file replaces its contents.
+
+#+begin_example
+/cwd ~/source/projects
+/cwd ai-glib
+/save review notes.txt
+/export org review notes.org
+#+end_example
+
+The process directory is unchanged so background work is not redirected. The conversation directory is propagated through the existing provider, tool and completion APIs. Terminal regression tests exercise nested relative changes, home expansion, paths containing spaces, failed directory changes and write errors; editing tests submit the resulting drafts to a local stub provider without network access.
+
+*** Other command behavior
 
 =/agents= and =/running= are different things: the first lists agent
 *definitions* found on disk, the second lists agents actually running.

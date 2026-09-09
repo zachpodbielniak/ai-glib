@@ -1999,6 +1999,148 @@ test_long_bracketed_paste(void)
 	stub_free(stub);
 }
 
+/**
+ * test_composer_editing:
+ *
+ * Exercise real terminal decoding and assert the exact prompt received by
+ * the provider. Each case starts with an empty kill buffer and fresh draft.
+ */
+static void
+test_composer_editing(void)
+{
+	static const struct {
+		const gchar *name;
+		const gchar *keys[20];
+		const gchar *expected;
+	} cases[] = {
+		{ "forward Unicode delete", { "café中文", "C-a", "Right", "Right", "Right", "DC", "DC", "C-e", "DC", "Enter", NULL }, "caf文" },
+		{ "word kill and yank", { "keep café中文　", "C-w", "replacement", "C-y", "Enter", NULL }, "keep replacementcafé中文　" },
+		{ "empty kills retain buffer", { "café", "C-w", "C-w", "C-k", "DC", "C-y", "Enter", NULL }, "café" },
+		{ "line suffix", { "ab中文", "C-a", "Right", "Right", "C-k", "X", "C-y", "Enter", NULL }, "abX中文" },
+		{ "multiline kill and yank", { "first", "M-Enter", "second", "C-a", "C-k", "Right", "C-y", "Enter", NULL }, "firstsecond" },
+		{ "newline kill", { "first", "M-Enter", "second", "C-a", "Right", "Right", "Right", "Right", "Right", "C-k", "Enter", NULL }, "firstsecond" },
+		{ "latest kill wins", { "one two", "C-w", "C-w", "C-y", "Enter", NULL }, "one" },
+		{ "empty yank", { "C-y", "safe", "Enter", NULL }, "safe" }
+	};
+	guint i;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		Stub *stub = stub_new(STUB_REPLY);
+		g_autofree gchar *path = g_build_filename(stub->dir, "stdin.log", NULL);
+		g_autofree gchar *input = NULL;
+		gchar *suffix;
+		guint j;
+
+		g_test_message("Composer: %s", cases[i].name);
+		tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+		for (j = 0; cases[i].keys[j] != NULL; j++)
+			tmux_send(TUI_SESSION, cases[i].keys[j]);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+		g_assert_true(g_file_get_contents(path, &input, NULL, NULL));
+		/* Grok appends its text-response instruction after the user text. */
+		suffix = strstr(input, "\n\nIMPORTANT: Always include a plain text response.");
+		g_assert_nonnull(suffix);
+		*suffix = '\0';
+		/* Submission strips outer whitespace, independently of editing. */
+		g_assert_cmpstr(g_strstrip(input), ==, cases[i].expected);
+		tmux_kill(TUI_SESSION);
+		stub_free(stub);
+	}
+}
+
+/**
+ * tmux_command:
+ * @command: a complete built-in command, including its arguments
+ * @notice: the completion message to observe
+ *
+ * Dismiss command completion before Enter so it submits the literal line.
+ */
+static void
+tmux_command(const gchar *command, const gchar *notice)
+{
+	tmux_send(TUI_SESSION, command);
+	tmux_send(TUI_SESSION, "Escape");
+	/* Let the Escape/Alt-Enter discriminator finish before submitting. */
+	g_usleep(150000);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, notice));
+}
+
+/**
+ * test_command_paths:
+ *
+ * Follow two relative directory changes and inspect the files on disk.
+ * Failed directory changes and writes must leave the session usable.
+ */
+static void
+test_command_paths(void)
+{
+	Stub *stub;
+	g_autofree gchar *parent = NULL;
+	g_autofree gchar *child = NULL;
+	g_autofree gchar *saved = NULL;
+	g_autofree gchar *exported = NULL;
+	g_autofree gchar *home_saved = NULL;
+	g_autofree gchar *absolute_saved = NULL;
+	g_autofree gchar *tilde_saved = NULL;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *notice = NULL;
+	g_autofree gchar *command = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	parent = g_build_filename(stub->dir, "parent dir", NULL);
+	child = g_build_filename(parent, "child", NULL);
+	saved = g_build_filename(child, "review notes.txt", NULL);
+	exported = g_build_filename(child, "review notes.org", NULL);
+	home_saved = g_build_filename(stub->dir, "home notes.txt", NULL);
+	absolute_saved = g_build_filename(parent, "absolute.txt", NULL);
+	tilde_saved = g_build_filename(stub->dir, "tilde.txt", NULL);
+	g_assert_cmpint(g_mkdir_with_parents(child, 0700), ==, 0);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_send(TUI_SESSION, "hello");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+
+	notice = g_strdup_printf("Working directory: %s", parent);
+	tmux_command("/cwd parent dir", notice);
+	g_clear_pointer(&notice, g_free);
+	notice = g_strdup_printf("Working directory: %s", child);
+	tmux_command("/cwd child", notice);
+	tmux_command("/cwd nonexistent", "No such directory: nonexistent");
+	tmux_command("/save review notes.txt", "Wrote");
+	g_assert_true(g_file_get_contents(saved, &text, NULL, NULL));
+	g_assert_nonnull(strstr(text, "the reply"));
+	g_clear_pointer(&text, g_free);
+	/* A new filename is the synchronization token, not an old Wrote row. */
+	tmux_command("/export org    review notes.org", "review notes.org");
+	g_assert_true(g_file_get_contents(exported, &text, NULL, NULL));
+	g_assert_nonnull(strstr(text, "the reply"));
+	tmux_command("/save missing/output.txt", "Could not write");
+	tmux_command("/save ~/home notes.txt", "home notes.txt");
+	g_assert_true(g_file_test(home_saved, G_FILE_TEST_IS_REGULAR));
+
+	/* Absolute paths and ~ also work after leaving the launch directory. */
+	command = g_strdup_printf("/cwd %s", parent);
+	tmux_command(command, parent);
+	tmux_command("/save absolute.txt", "absolute.txt");
+	g_assert_true(g_file_test(absolute_saved, G_FILE_TEST_IS_REGULAR));
+	tmux_command("/cwd ~", stub->dir);
+	tmux_command("/save tilde.txt", "tilde.txt");
+	g_assert_true(g_file_test(tilde_saved, G_FILE_TEST_IS_REGULAR));
+	tmux_kill(TUI_SESSION);
+	g_assert_cmpint(g_remove(saved), ==, 0);
+	g_assert_cmpint(g_remove(exported), ==, 0);
+	g_assert_cmpint(g_remove(home_saved), ==, 0);
+	g_assert_cmpint(g_remove(absolute_saved), ==, 0);
+	g_assert_cmpint(g_remove(tilde_saved), ==, 0);
+	g_assert_cmpint(g_rmdir(child), ==, 0);
+	g_assert_cmpint(g_rmdir(parent), ==, 0);
+	stub_free(stub);
+}
+
 /* NO_COLOR and low-color terminfo are exercised against the styled
  * positive control above, not by simply trusting absence of escapes. */
 static void
@@ -2330,6 +2472,8 @@ main(int argc, char *argv[])
 {
 	gint status;
 
+	/* Spawned fixtures must never register in the developer's real herdr pane. */
+	g_unsetenv("HERDR_ENV");
 	g_test_init(&argc, &argv, NULL);
 	/* Never inherit the developer's tmux options or touch their sessions. */
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
@@ -2369,6 +2513,8 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/themes-resize", test_themes_and_resizing);
 	g_test_add_func("/ai-glib/ai-tui/keys/unicode-search", test_unicode_and_search);
 	g_test_add_func("/ai-glib/ai-tui/keys/long-paste", test_long_bracketed_paste);
+	g_test_add_func("/ai-glib/ai-tui/keys/composer-editing", test_composer_editing);
+	g_test_add_func("/ai-glib/ai-tui/keys/command-paths", test_command_paths);
 	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
 	g_test_add_func("/ai-glib/ai-tui/keys/busy-draft", test_busy_keeps_draft);
 	g_test_add_func("/ai-glib/ai-tui/keys/control-shortcuts", test_control_shortcuts);

@@ -244,7 +244,8 @@ BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
 # Target-specific, so only the one binary that needs a terminal library
 # links against one.
 $(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
-$(OUTDIR)/bin/ai-tui: LDFLAGS += $(NCURSES_LIBS)
+$(OUTDIR)/bin/ai-tui: LDFLAGS += $(NCURSES_LIBS) -lsqlite3
+$(OUTDIR)/tests/test-ai-defaults: LDFLAGS += -lsqlite3
 
 # Include common rules
 include rules.mk
@@ -366,6 +367,7 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

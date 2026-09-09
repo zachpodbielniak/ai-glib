@@ -33,6 +33,7 @@ A GLib/GObject-based C library for interacting with AI providers.
 - *GObject Introspection*: Use from Python, JavaScript, etc.
 - *CLI*: an =ai= command-line front-end for every provider (see [[file:docs/cli.org][docs/cli.org]])
 - *TUI*: =ai-tui=, a terminal agent harness over any provider (see [[file:docs/tui.org][docs/tui.org]])
+- *Herdr*: automatic native pane lifecycle reporting in =ai-tui=, including tool approval waits (see [[file:docs/herdr.org][integration guide]])
 - *Environment Variables*: Standard env var configuration
 - *AGPLv3 Licensed*: Free and open source
 
@@ -129,6 +130,7 @@ See the [[file:docs/]] directory for full documentation:
 - [[file:docs/harness.org][The harness layer]] --- commands, skills, agents, mentions, completion
 - [[file:docs/commands.org][Authoring commands, skills and agents]]
 - [[file:docs/tools.org][The built-in tools]]
+- [[file:docs/herdr.org][Native herdr integration]]
 - [[file:docs/api-reference/][API Reference]]
 - [[file:docs/examples/][Examples]]
 
