@@ -193,6 +193,17 @@ sends either and costs nothing if it does not.
 
 The framed composer grows as you type, up to ten content rows or the available terminal height. Longer drafts scroll to keep the cursor visible; =C-a= and =C-e= reveal the beginning and end. The frame reports the current row and total rows when space permits. Unicode input is accepted, including wide characters; byte offsets remain compatible with the library's completion APIs. Complex emoji/grapheme display still depends on the terminal's width rules.
 
+*** Composer editing
+
+| Key | Action |
+|-----+--------|
+| =Delete= | Delete the next Unicode character without moving the cursor |
+| =C-w= | Kill preceding whitespace and then the preceding word |
+| =C-k= | Kill from the cursor to the next newline or draft end; at a newline, kill that newline |
+| =C-y= | Insert the most recently killed text at the cursor |
+
+Words are separated by Unicode whitespace, so filenames and punctuation stay together. Delete and word kill move across whole Unicode code points, not grapheme clusters. The single kill buffer lasts for this process only; each nonempty =C-w= or =C-k= replaces it, while an empty kill preserves it. =Backspace=, =Delete= and =C-u= do not replace the kill buffer. Yank inserts text literally, including newlines, and closes completion without submitting a prompt. These bindings edit the draft during a running turn too; approval and search prompts retain their own key handling.
+
 Bracketed paste is enabled while ai-tui owns the terminal. A multiline paste is inserted into the composer without submitting any of its lines; press =Enter= explicitly when ready. Terminals without bracketed paste support cannot distinguish a pasted newline from a typed =Enter=, so use =C-g= for multiline text there. Pasted approval answers are ignored: approvals require a deliberate key. Control characters other than newlines and tabs are discarded in bracketed input; tabs are displayed as a single blank but retained in the prompt.
 
 Pressing =Enter= during a running turn preserves the entire draft instead of discarding it; the composer is labeled =DRAFT / waiting for turn=. This is not an automatic send queue. The draft remains for you to submit after the turn ends. Navigating back down past the newest history item also restores the draft you were editing.
@@ -335,6 +346,21 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/expand LINE=      | What a line would send, without sending it        |
 | =/save PATH=        | Write the transcript to a file                    |
 | =/export FMT [PATH]= | Write it as =text=, =markdown= or =org=         |
+
+*** Command paths
+
+=/cwd=, =/save= and =/export= resolve relative paths against the conversation's current directory. Consecutive relative directory changes therefore build on one another, and subsequent saves land in the directory shown in the header. Absolute paths remain absolute; =~= and a leading =~/= expand to your home directory. Paths are literal: spaces need no quotes, and shell variables, wildcards and =~otheruser= are not expanded. =/export= accepts spaces or tabs between its format and path. An invalid directory leaves the current directory unchanged; failed writes report the error in the transcript. Saving to an existing file replaces its contents.
+
+#+begin_example
+/cwd ~/source/projects
+/cwd ai-glib
+/save review notes.txt
+/export org review notes.org
+#+end_example
+
+The process directory is unchanged so background work is not redirected. The conversation directory is propagated through the existing provider, tool and completion APIs. Terminal regression tests exercise nested relative changes, home expansion, paths containing spaces, failed directory changes and write errors; editing tests submit the resulting drafts to a local stub provider without network access.
+
+*** Other command behavior
 
 =/agents= and =/running= are different things: the first lists agent
 *definitions* found on disk, the second lists agents actually running.
