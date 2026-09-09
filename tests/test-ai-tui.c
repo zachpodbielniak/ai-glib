@@ -1000,6 +1000,7 @@ test_help_lists_commands_from_disk(void)
 	/* And the built-ins, which exist before any file is read. */
 	g_assert_nonnull(strstr(run->stdout_data, "/quit"));
 	g_assert_nonnull(strstr(run->stdout_data, "/clear"));
+	g_assert_nonnull(strstr(run->stdout_data, "/reset"));
 
 	run_free(run);
 	sandbox_free(box);
@@ -1423,6 +1424,96 @@ test_no_expand_leaves_a_command_alone(void)
 	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\"," \
 	"\"delta\":{\"type\":\"text_delta\",\"text\":\"the reply\"}}}\n" \
 	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
+
+/* Reset must discard both native resume flags and all local prompt history. */
+static void
+test_reset_session(void)
+{
+	Stub *stub;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *args_path = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *arguments = NULL;
+	g_autofree gchar *sent = NULL;
+	g_autofree gchar *pane = NULL;
+	guint i;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	args_path = g_build_filename(stub->dir, "args.log", NULL);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	script = g_strdup_printf("#!/bin/bash\nprintf '%%s\\n' \"$@\" > '%s'\n"
+		"cat > '%s'\ncat '%s/stdout'\n", args_path, stdin_path, stub->dir);
+	g_assert_true(g_file_set_contents(stub->stub, script, -1, NULL));
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation --continue");
+	tmux_send(TUI_SESSION, "remember-old-secret");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
+
+	/* /clear retains the CLI session, demonstrating the intended distinction. */
+	tmux_send(TUI_SESSION, "/clear");
+	tmux_send(TUI_SESSION, "Escape");
+	/* Let the Escape/Alt-Enter discriminator settle before submission. */
+	g_usleep(150000);
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "MAKE SOMETHING WORTH SHIPPING."));
+	tmux_send(TUI_SESSION, "before-reset");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+	g_assert_true(g_file_get_contents(args_path, &arguments, NULL, NULL));
+	g_assert_nonnull(strstr(arguments, "--resume\ns1\n"));
+
+	/* Include a kill buffer and repeat the reset to catch stale ownership. */
+	tmux_send(TUI_SESSION, "discarded-draft");
+	tmux_send(TUI_SESSION, "C-u");
+	for (i = 0; i < 2; i++)
+	{
+		tmux_send(TUI_SESSION, "/reset");
+		tmux_send(TUI_SESSION, "Escape");
+		g_usleep(150000);
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "MAKE SOMETHING WORTH SHIPPING."));
+	}
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "C-y");
+	tmux_send(TUI_SESSION, "C-l");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Following latest output"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "remember-old-secret"));
+	g_assert_null(strstr(pane, "before-reset"));
+	g_assert_null(strstr(pane, "discarded-draft"));
+	g_assert_null(strstr(pane, "/reset"));
+	g_assert_null(strstr(pane, "YOUR TURN"));
+	tmux_send(TUI_SESSION, "after-reset");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+	g_clear_pointer(&arguments, g_free);
+	g_assert_true(g_file_get_contents(args_path, &arguments, NULL, NULL));
+	g_assert_null(strstr(arguments, "--resume"));
+	g_assert_null(strstr(arguments, "--continue"));
+	g_assert_true(g_file_get_contents(stdin_path, &sent, NULL, NULL));
+	g_assert_nonnull(strstr(sent, "after-reset"));
+	g_assert_null(strstr(sent, "remember-old-secret"));
+	g_assert_null(strstr(sent, "before-reset"));
+	tmux_kill(TUI_SESSION);
+	g_assert_cmpint(g_unlink(args_path), ==, 0);
+	stub_free(stub);
+}
+
+/* Noninteractive reset also resolves locally, without terminal state. */
+static void
+test_reset_dump(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/reset", "-p", "grok-build", NULL };
+	Run *run = run_tui_in(box, args);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_cmpstr(run->stdout_data, ==, "");
+	g_assert_cmpstr(run->stderr_data, ==, "");
+	run_free(run);
+	sandbox_free(box);
+}
 
 static void
 test_alt_enter_inserts_a_newline(void)
@@ -2477,6 +2568,8 @@ main(int argc, char *argv[])
 	g_test_init(&argc, &argv, NULL);
 	/* Never inherit the developer's tmux options or touch their sessions. */
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
+	g_test_add_func("/ai-glib/tui/reset-session", test_reset_session);
+	g_test_add_func("/ai-glib/tui/reset-dump", test_reset_dump);
 
 	tui_binary = find_tui_binary(argv[0]);
 
