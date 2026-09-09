@@ -24,6 +24,7 @@
 #include "core/ai-error.h"
 #include "core/ai-event.h"
 #include "model/ai-text-content.h"
+#include "model/ai-tool-result.h"
 #include "model/ai-tool-use.h"
 
 /*
@@ -856,13 +857,6 @@ ai_grok_build_client_parse_json_output(
     return (AiResponse *)g_steal_pointer(&response);
 }
 
-/*
- * Turn one Anthropic tool_use block into an AI_EVENT_TOOL_STARTED.
- *
- * Shared by the content_block_start path, where the input is still empty,
- * and the whole-message path, where it is complete. Both emit for the same
- * id on purpose; consumers key on the id and update.
- */
 static gboolean
 ai_grok_build_client_parse_stream_line(
     AiCliClient  *client,
@@ -872,6 +866,206 @@ ai_grok_build_client_parse_stream_line(
     GError      **error
 );
 
+/*
+ * grok serialises Vec<u8> fields as a JSON array of integers. A node is a
+ * byte only when it is a number in 0..255 --- anything else is a different
+ * shape, not a truncated one, and the caller must not treat it as text.
+ */
+static gboolean
+grok_json_node_byte(
+    JsonNode *node,
+    guint8   *out
+){
+    GType value_type;
+    gint64 value;
+
+    if (node == NULL || !JSON_NODE_HOLDS_VALUE(node))
+        return FALSE;
+
+    value_type = json_node_get_value_type(node);
+    if (value_type == G_TYPE_INT64 || value_type == G_TYPE_INT)
+        value = json_node_get_int(node);
+    else if (value_type == G_TYPE_DOUBLE)
+        value = (gint64)json_node_get_double(node);
+    else
+        return FALSE;
+
+    if (value < 0 || value > 255)
+        return FALSE;
+
+    *out = (guint8)value;
+    return TRUE;
+}
+
+/* Decode a serde bytes array into UTF-8, or NULL when the array is not bytes. */
+static gchar *
+grok_bytes_array_to_utf8(JsonArray *array)
+{
+    guint n;
+    guint i;
+    g_autoptr(GString) bytes = NULL;
+
+    if (array == NULL)
+        return NULL;
+
+    n = json_array_get_length(array);
+    bytes = g_string_sized_new(n);
+    for (i = 0; i < n; i++)
+    {
+        guint8 byte;
+
+        if (!grok_json_node_byte(json_array_get_element(array, i), &byte))
+            return NULL;
+        g_string_append_c(bytes, (gchar)byte);
+    }
+
+    return g_utf8_make_valid(bytes->str, bytes->len);
+}
+
+/*
+ * A grok ToolsToolOutput member is either a string or Vec<u8>. Prefer the
+ * string so output_for_prompt wins over the parallel byte array.
+ */
+static gchar *
+grok_flatten_output_member(
+    JsonObject  *obj,
+    const gchar *member
+){
+    const gchar *text = ai_json_get_string(obj, member, NULL);
+
+    if (text != NULL)
+        return g_strdup(text);
+
+    return grok_bytes_array_to_utf8(ai_json_get_array(obj, member));
+}
+
+/*
+ * Pull displayable text out of grok's tagged tool envelope:
+ *   {"type":"Bash","output":[104,105], "output_for_prompt":"hi"}
+ * Nested objects (ReadFile.FileContent.content, ListDir.Content.content)
+ * are the same idea for tools whose payload is not a byte array.
+ */
+static gchar *
+grok_flatten_tool_envelope(JsonObject *obj)
+{
+    gchar *text;
+    const gchar *nested_names[] = { "FileContent", "Content", "Result", NULL };
+    guint i;
+
+    if (obj == NULL)
+        return NULL;
+
+    text = g_strdup(ai_json_get_string(obj, "output_for_prompt", NULL));
+    if (text != NULL)
+        return text;
+
+    text = grok_flatten_output_member(obj, "output");
+    if (text != NULL)
+        return text;
+
+    text = grok_flatten_output_member(obj, "stdout");
+    if (text != NULL)
+        return text;
+
+    text = g_strdup(ai_json_get_string(obj, "text", NULL));
+    if (text != NULL)
+        return text;
+
+    for (i = 0; nested_names[i] != NULL; i++)
+    {
+        JsonObject *nested = ai_json_get_object(obj, nested_names[i]);
+
+        text = g_strdup(ai_json_get_string(nested, "content",
+            ai_json_get_string(nested, "text", NULL)));
+        if (text != NULL)
+            return text;
+    }
+
+    return NULL;
+}
+
+/*
+ * Flatten a tool_result `content` node into UTF-8.
+ *
+ * grok's streaming-messages-json often puts the serde ToolsToolOutput value
+ * here --- an object, or a JSON string of that object --- whose `output`
+ * field is a byte array. Copying that JSON verbatim is what made the TUI
+ * print `[104,101,114,100,114,...]` instead of the command's stdout.
+ *
+ * Anthropic's shapes still work: a plain string, or an array of `{text}`.
+ * A JSON string that is not a grok envelope is left alone, so a tool that
+ * genuinely returned `{"temp":72}` is not unwrapped.
+ */
+static gchar *
+grok_tool_result_text(JsonNode *content)
+{
+    if (content == NULL)
+        return g_strdup("");
+
+    if (JSON_NODE_HOLDS_VALUE(content) &&
+        json_node_get_value_type(content) == G_TYPE_STRING)
+    {
+        const gchar *str = json_node_get_string(content);
+        gchar *flat = NULL;
+
+        if (str != NULL && str[0] == '{')
+        {
+            g_autoptr(JsonParser) parser = json_parser_new();
+
+            if (json_parser_load_from_data(parser, str, -1, NULL))
+                flat = grok_flatten_tool_envelope(ai_json_root_object(parser));
+        }
+
+        if (flat != NULL)
+            return flat;
+
+        return g_strdup(str != NULL ? str : "");
+    }
+
+    if (JSON_NODE_HOLDS_OBJECT(content))
+    {
+        gchar *flat = grok_flatten_tool_envelope(json_node_get_object(content));
+
+        return flat != NULL ? flat : g_strdup("");
+    }
+
+    if (JSON_NODE_HOLDS_ARRAY(content))
+    {
+        JsonArray *parts = json_node_get_array(content);
+        g_autoptr(GString) text = g_string_new(NULL);
+        gchar *bytes;
+        guint i;
+        guint n = json_array_get_length(parts);
+
+        for (i = 0; i < n; i++)
+        {
+            const gchar *piece = ai_json_get_string(
+                ai_json_array_get_object(parts, i), "text", NULL);
+
+            if (piece != NULL)
+                g_string_append(text, piece);
+        }
+
+        if (text->len > 0)
+            return g_string_free((GString *)g_steal_pointer(&text), FALSE);
+
+        bytes = grok_bytes_array_to_utf8(parts);
+        if (bytes != NULL)
+            return bytes;
+
+        return g_string_free((GString *)g_steal_pointer(&text), FALSE);
+    }
+
+    return g_strdup("");
+}
+
+/*
+ * Turn one Anthropic tool_use block into an AI_EVENT_TOOL_STARTED.
+ *
+ * Shared by the content_block_start path, where the input is still empty,
+ * and the whole-message path, where it is complete. Both emit for the same
+ * id on purpose; consumers key on the id and update.
+ */
 static void
 grok_emit_tool_use_block(
     JsonObject *block,
@@ -1070,28 +1264,28 @@ ai_grok_build_client_parse_stream_events(
         }
     }
     else if (g_strcmp0(type, "user") == 0)
-	{
-		/* Anthropic-shaped tool replies carry the command output that the
-		 * transcript needs; ignoring these leaves every call running forever. */
-		JsonArray *blocks = ai_json_get_array(ai_json_get_object(obj, "message"), "content");
-		guint i;
-		for (i = 0; blocks != NULL && i < json_array_get_length(blocks); i++)
-		{
-			JsonObject *block = ai_json_array_get_object(blocks, i);
-			g_autoptr(GString) text = g_string_new(NULL);
-			g_autoptr(AiToolResult) result = NULL;
-			JsonArray *parts;
-			guint j;
-			if (g_strcmp0(ai_json_get_string(block, "type", NULL), "tool_result") != 0) continue;
-			g_string_append(text, ai_json_get_string(block, "content", ""));
-			parts = ai_json_get_array(block, "content");
-			for (j = 0; parts != NULL && j < json_array_get_length(parts); j++)
-				g_string_append(text, ai_json_get_string(ai_json_array_get_object(parts, j), "text", ""));
-			result = ai_tool_result_new(ai_json_get_string(block, "tool_use_id", ""), text->str,
-				ai_json_get_boolean(block, "is_error", FALSE));
-			g_ptr_array_add(out_events, ai_event_new_tool_finished(NULL, result));
-		}
-	}
+    {
+        /* Anthropic-shaped tool replies carry the command output that the
+         * transcript needs; ignoring these leaves every call running forever. */
+        JsonArray *blocks = ai_json_get_array(ai_json_get_object(obj, "message"), "content");
+        guint i;
+
+        for (i = 0; blocks != NULL && i < json_array_get_length(blocks); i++)
+        {
+            JsonObject *block = ai_json_array_get_object(blocks, i);
+            g_autofree gchar *text = NULL;
+            g_autoptr(AiToolResult) result = NULL;
+
+            if (g_strcmp0(ai_json_get_string(block, "type", NULL), "tool_result") != 0)
+                continue;
+
+            text = grok_tool_result_text(ai_json_get_node(block, "content"));
+            result = ai_tool_result_new(ai_json_get_string(block, "tool_use_id", ""),
+                                        text != NULL ? text : "",
+                                        ai_json_get_boolean(block, "is_error", FALSE));
+            g_ptr_array_add(out_events, ai_event_new_tool_finished(NULL, result));
+        }
+    }
     else if (g_strcmp0(type, "result") == 0)
     {
         /* Final result with session and usage info */

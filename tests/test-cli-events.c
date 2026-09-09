@@ -840,6 +840,62 @@ test_gb_native_tool_names(void)
 }
 
 static void
+test_gb_tool_result_bash_byte_array(void)
+{
+	/*
+	 * grok serialises Bash stdout as Vec<u8>. streaming-messages-json
+	 * puts that envelope in tool_result.content, either as an object or
+	 * as a JSON string of the object. The TUI prints the result text, so
+	 * leaving the array of integers in place is what showed
+	 * `[104,101,114,...]` instead of "herdr".
+	 */
+	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
+	Parsed *as_object = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c1\","
+		"\"content\":{\"type\":\"Bash\",\"output\":[104,101,114,100,114],"
+		"\"output_for_prompt\":\"herdr --help\"}}]}}");
+	Parsed *as_string = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c2\","
+		"\"content\":\"{\\\"type\\\":\\\"Bash\\\",\\\"output\\\":[104,105]}\"}]}}");
+	Parsed *utf8 = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c3\","
+		"\"content\":{\"type\":\"Bash\",\"output\":[226,128,148]}}]}}");
+	Parsed *plain_json = parse_line(AI_CLI_CLIENT(client),
+		"{\"type\":\"user\",\"message\":{\"content\":["
+		"{\"type\":\"tool_result\",\"tool_use_id\":\"c4\","
+		"\"content\":\"{\\\"temp\\\":72}\"}]}}");
+	AiEvent *e;
+
+	e = first_of(as_object, AI_EVENT_TOOL_FINISHED);
+	g_assert_nonnull(e);
+	g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(e)),
+	                ==, "herdr --help");
+
+	e = first_of(as_string, AI_EVENT_TOOL_FINISHED);
+	g_assert_nonnull(e);
+	g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(e)),
+	                ==, "hi");
+
+	e = first_of(utf8, AI_EVENT_TOOL_FINISHED);
+	g_assert_nonnull(e);
+	g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(e)),
+	                ==, "\xe2\x80\x94");
+
+	e = first_of(plain_json, AI_EVENT_TOOL_FINISHED);
+	g_assert_nonnull(e);
+	g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(e)),
+	                ==, "{\"temp\":72}");
+
+	parsed_free(as_object);
+	parsed_free(as_string);
+	parsed_free(utf8);
+	parsed_free(plain_json);
+}
+
+static void
 test_gb_error_line_fails(void)
 {
 	/*
@@ -1410,6 +1466,8 @@ main(int argc, char *argv[])
 	                test_gb_tool_start_then_complete_args);
 	g_test_add_func("/ai-glib/cli-events/gb/native-tool-names",
 	                test_gb_native_tool_names);
+	g_test_add_func("/ai-glib/cli-events/gb/tool-result-bash-bytes",
+	                test_gb_tool_result_bash_byte_array);
 	g_test_add_func("/ai-glib/cli-events/gb/error-line", test_gb_error_line_fails);
 	g_test_add_func("/ai-glib/cli-events/gb/result-is-error", test_gb_result_is_error);
 	g_test_add_func("/ai-glib/cli-events/gb/camel-and-snake",

@@ -343,6 +343,8 @@ grok --prompt-file /dev/stdin \
 
 The parser reads text from the =stream_event= deltas and ignores the whole-message =assistant= line, which would otherwise double every streamed reply. =thinking_delta= events are dropped: reasoning is not the answer. The =result= line still back-fills the text if no delta ever arrived.
 
+Tool results arrive on a =user= line, Anthropic-shaped. grok's own payload is a tagged =ToolsToolOutput= envelope --- ={"type":"Bash","output":[104,101,...]}= --- because the CLI stores stdout as =Vec<u8>= and serde writes that as a JSON array of integers. The parser decodes that array (and prefers =output_for_prompt= when present) so the transcript shows the command's text rather than the byte numbers. A plain string, or an array of ={text}= blocks, is still accepted as-is. A JSON string that is not that envelope is left alone.
+
 ** How output is parsed
 Subprocess stdout is untrusted input — a future CLI version, a plugin writing to stdout, or a truncated write can all produce a shape ai-glib did not expect — so the parser is deliberately total. Three things follow from that:
 
