@@ -447,6 +447,7 @@ typedef struct
      * and quit by whichever callback finishes it. Polling the busy flag
      * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
+	gboolean             dump_waiting_models;
 } App;
 
 /* Publish expansion, provider I/O and approvals through one state mapping.
@@ -1805,6 +1806,81 @@ say(App *app, const gchar *format, ...)
     }
 }
 
+/* Discovery owns only its output and optional one-shot loop, never App:
+ * the interactive frontend may exit while an HTTP request is pending. */
+typedef struct
+{
+	AiTranscript *transcript;
+	GMainLoop *dump_loop;
+	gchar *provider_name;
+} ModelListing;
+
+/* Publish discovery failures and empty catalogs without hiding manual entry. */
+static void
+models_listed(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	ModelListing *listing = (ModelListing *)user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GString) out = g_string_new(NULL);
+	g_autoptr(AiViewBlock) block = NULL;
+	GList *models;
+	GList *item;
+
+	models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
+	g_string_append_printf(out, "Available models for %s:\n", listing->provider_name);
+	if (error != NULL)
+		g_string_append_printf(out, "  Could not list models: %s\n", error->message);
+	else if (models == NULL)
+		g_string_append(out, "  No models reported by this provider.\n");
+	for (item = models; item != NULL; item = item->next)
+		g_string_append_printf(out, "  %s\n", (const gchar *)item->data);
+	g_string_append(out, "To switch, type /model MODEL_ID (manual IDs are accepted).");
+	block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, out->str);
+	ai_transcript_append(listing->transcript, block);
+	g_list_free_full(models, g_free);
+	if (listing->dump_loop != NULL)
+	{
+		g_main_loop_quit(listing->dump_loop);
+		g_main_loop_unref(listing->dump_loop);
+	}
+	g_object_unref(listing->transcript);
+	g_free(listing->provider_name);
+	g_free(listing);
+}
+
+/* Keep network discovery asynchronous so the terminal remains responsive. */
+static void
+show_models(App *app, GObject *provider)
+{
+	ModelListing *listing = g_new0(ModelListing, 1);
+
+	listing->transcript = g_object_ref(ai_conversation_get_transcript(app->conversation));
+	listing->provider_name = g_strdup(ai_provider_get_name(AI_PROVIDER(provider)));
+	if (app->dump_loop != NULL)
+	{
+		listing->dump_loop = g_main_loop_ref(app->dump_loop);
+		app->dump_waiting_models = TRUE;
+	}
+	ai_provider_list_models_async(AI_PROVIDER(provider), NULL, models_listed, listing);
+}
+
+/* Enumerate the same provider IDs accepted by the factory and setup UI. */
+static void
+show_providers(App *app, GObject *provider)
+{
+	g_autoptr(GEnumClass) providers = g_type_class_ref(AI_TYPE_PROVIDER_TYPE);
+	g_autoptr(GString) out = g_string_new(NULL);
+	guint i;
+
+	g_string_append_printf(out, "Provider: %s\nAvailable providers:\n",
+	                       ai_provider_get_name(AI_PROVIDER(provider)));
+	for (i = 0; i < providers->n_values; i++)
+		g_string_append_printf(out, "  %s\n", ai_provider_type_to_string(
+			(AiProviderType)providers->values[i].value));
+	g_string_append(out, "To switch, type /provider NAME (for example, /provider grok-build).");
+	say(app, "%s", out->str);
+}
+
 /* /help, /commands, /skills, /agents --- one listing, filtered. */
 static void
 list_resources(App *app, AiResourceKind kind, const gchar *heading)
@@ -2422,6 +2498,7 @@ handle_builtin(App *app, AiCommandResult *result)
         if (requested == NULL || requested[0] == '\0')
         {
             say(app, "Model: %s", current != NULL ? current : "(default)");
+			show_models(app, provider);
         }
         else if (ai_conversation_get_busy(app->conversation))
         {
@@ -2510,8 +2587,7 @@ handle_builtin(App *app, AiCommandResult *result)
 
         if (arguments == NULL || arguments[0] == '\0')
         {
-            say(app, "Provider: %s",
-                ai_provider_get_name(AI_PROVIDER(provider)));
+			show_providers(app, provider);
         }
         else
         {
@@ -3399,7 +3475,7 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 
     app_schedule_redraw(app);
 
-    if (app->dump_loop != NULL)
+    if (app->dump_loop != NULL && !app->dump_waiting_models)
     {
         g_main_loop_quit(app->dump_loop);
     }

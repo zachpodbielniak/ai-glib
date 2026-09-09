@@ -1085,6 +1085,9 @@ test_provider_command_shows_and_switches(void)
 	run = run_tui_in(box, show);
 	g_assert_cmpint(run->status, ==, 0);
 	g_assert_nonnull(strstr(run->stdout_data, "Provider: Grok Build"));
+	g_assert_nonnull(strstr(run->stdout_data, "Available providers:"));
+	g_assert_nonnull(strstr(run->stdout_data, "openai-compatible"));
+	g_assert_nonnull(strstr(run->stdout_data, "/provider NAME"));
 	run_free(run);
 
 	run = run_tui_in(box, change);
@@ -1254,6 +1257,10 @@ test_model_command_reports(void)
 	Run *run = run_tui_in(box, show);
 
 	g_assert_nonnull(strstr(run->stdout_data, "Model:"));
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Available models for Grok Build:"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4.6"));
+	g_assert_nonnull(strstr(run->stdout_data, "/model MODEL_ID"));
 	run_free(run);
 
 	run = run_tui_in(box, change);
@@ -2661,7 +2668,7 @@ test_control_shortcuts(void)
 	g_assert_nonnull(strstr(pane, "MAKE SOMETHING WORTH SHIPPING."));
 	g_assert_nonnull(strstr(pane, "SESSION"));
 	tmux_send(TUI_SESSION, "/pro");
-	g_assert_true(tmux_wait_for(TUI_SESSION, "Show or change the provider"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "List providers or switch"));
 	g_assert_true(tmux_wait_for(TUI_SESSION, "COMMANDS"));
 	tmux_send(TUI_SESSION, "C-o");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "cycle theme"));

@@ -513,6 +513,8 @@ attached across the switch. The working directory is also pushed to a CLI
 target, so its native command/skill discovery and ai-glib's completion keep
 describing the same project.
 
+With no argument, =/provider= shows the current provider, lists supported provider IDs, and explains how to switch using =/provider NAME= (for example, =/provider grok-build=). Listed providers may require credentials or an installed CLI before use. Similarly, =/model= shows the current model and asynchronously lists the active provider's models, followed by =/model MODEL_ID= switching instructions. CLI providers may return a built-in catalog; HTTP providers discover models from their endpoint. Discovery errors or empty catalogs are reported, and manual model IDs remain accepted.
+
 The built-in =/provider [NAME]= is resolved locally; it is never passed to a
 wrapped CLI. The frontend constructs the target and calls
 =ai_conversation_set_provider()=. See
