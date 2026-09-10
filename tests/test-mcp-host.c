@@ -164,6 +164,12 @@ test_opt_in(Fixture *fixture, gconstpointer data)
 	g_assert_null(result);
 	g_assert_nonnull(error);
 	g_assert_cmpuint(ai_tool_executor_get_n_todos(ai_conversation_get_executor(fixture->conversation)), ==, 0);
+	/* A filesystem tool must remain undiscoverable and uncallable without
+	 * its explicit grant, even if the caller guesses its name. */
+	g_clear_error(&error);
+	result = mcp_server_invoke_tool(fixture->server, "write", NULL, &error);
+	g_assert_null(result);
+	g_assert_nonnull(error);
 }
 
 static void
@@ -384,11 +390,69 @@ test_server_outlives_host(void)
 	g_assert_true(mcp_tool_result_get_is_error(result));
 }
 
+/* Exercise the actual executor through the MCP grant, including relative
+ * paths, optional numeric parameters and atomic rejection of invalid edits. */
+static void
+test_filesystem(Fixture *fixture, gconstpointer data)
+{
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *directory = g_dir_make_tmp("ai-mcp-files-XXXXXX", &error);
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *contents = NULL;
+	g_autoptr(McpToolResult) result = NULL;
+	const gchar *names[] = { "read", "write", "edit", "multi_edit", "glob", "grep", "ls", NULL };
+	GList *tools = mcp_server_list_tools(fixture->server);
+	guint i;
+	(void)data;
+
+	g_assert_no_error(error);
+	ai_conversation_set_working_directory(fixture->conversation, directory);
+	path = g_build_filename(directory, "sample.txt", NULL);
+	for (i = 0; names[i] != NULL; i++)
+	{
+		GList *iter;
+		for (iter = tools; iter != NULL; iter = iter->next)
+			if (g_str_equal(mcp_tool_get_name(iter->data), names[i])) break;
+		g_assert_nonnull(iter);
+	}
+	g_list_free_full(tools, g_object_unref);
+	result = call(fixture, "write", "{\"path\":\"sample.txt\",\"content\":\"hello world\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_true(g_file_get_contents(path, &contents, NULL, &error));
+	g_assert_no_error(error);
+	g_assert_cmpstr(contents, ==, "hello world");
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\",\"offset\":6,\"limit\":5}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_cmpstr(result_text(result), ==, "world");
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "edit", "{\"path\":\"sample.txt\",\"old_string\":\"world\",\"new_string\":\"MCP\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "multi_edit", "{\"path\":\"sample.txt\",\"edits\":[{\"old_string\":\"hello\",\"new_string\":\"goodbye\"},{\"old_string\":\"missing\",\"new_string\":\"oops\"}]}");
+	g_assert_true(mcp_tool_result_get_is_error(result));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\"}");
+	g_assert_cmpstr(result_text(result), ==, "hello MCP");
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\",\"offset\":\"invalid\"}");
+	g_assert_true(mcp_tool_result_get_is_error(result));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "write", "{\"path\":\"sample.txt\",\"content\":false}");
+	g_assert_true(mcp_tool_result_get_is_error(result));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\"}");
+	g_assert_cmpstr(result_text(result), ==, "hello MCP");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+
 int
 main(int argc, char **argv)
 {
 	static const gchar * const status_only[] = { "conversation_status", NULL };
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/mcp/host/filesystem", Fixture, NULL, setup, test_filesystem, teardown);
 	g_test_add_func("/mcp/host/server-outlives-host", test_server_outlives_host);
 	g_test_add("/mcp/host/shared-todos", Fixture, NULL, setup, test_shared_todos, teardown);
 	g_test_add("/mcp/host/invalid-atomic", Fixture, NULL, setup, test_invalid_atomic, teardown);

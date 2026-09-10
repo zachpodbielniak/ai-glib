@@ -4,11 +4,11 @@
 #+categories: ai-glib mcp cli tui
 #+created: 2026-09-09T00:00:00-04:00
 #+updated: 2026-09-09T00:00:00-04:00
-#+version: 1
+#+version: 2
 
 * Overview
 
-=ai= and =ai-tui= can expose their conversation, TODO list, and background agents as MCP tools. A standalone stdio server allows another application to drive either program. A Unix socket server controls a running TUI without taking its terminal input/output. CLI providers connect back to that live socket through a generated stdio bridge, so their tool calls update the actual TODOS and AGENTS panels.
+=ai= and =ai-tui= can expose their conversation, filesystem operations, TODO list, and background agents as MCP tools. A standalone stdio server allows another application to drive either program. A Unix socket server controls a running TUI without taking its terminal input/output. CLI providers connect back to that live socket through a generated stdio bridge, so their tool calls use the host executor and update the actual TODOS and AGENTS panels.
 
 MCP is opt-in. With no =--mcp-= arguments the existing application behavior is unchanged. Starting a server does not enable tools: select names with =--mcp-tools= or explicitly grant the complete host surface with =--mcp-all-tools=. Selection applies to discovery and invocation, including clients that guess an unadvertised name. All sessions connecting to one server share the same grant and conversation; the server is a local, same-user control interface, not a multi-tenant service.
 
@@ -32,7 +32,7 @@ Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =json-glib-
 | =--mcp-server= | Headless MCP server over stdin/stdout; no prompt or ncurses |
 | =--mcp-socket PATH= | Unix socket listener; combined with =--mcp-server= selects headless socket mode instead of stdio |
 | =--mcp-tools NAMES= | Enable comma-separated tool names; repeat to combine selections |
-| =--mcp-all-tools= | Enable all eleven host tools, including turn control and agent spawning |
+| =--mcp-all-tools= | Enable all eighteen host tools, including filesystem access, turn control and agent spawning |
 | =--mcp-list-tools= | List the complete tool catalog and exit before loading a provider |
 | =--mcp-no-inject= | Allow external MCP clients without configuring the selected CLI provider |
 | =--mcp-connect PATH= | Bridge stdio to an existing absolute Unix socket path; no provider is loaded |
@@ -67,6 +67,16 @@ The injected server sets =default_tools_approval_mode="approve"= for the explici
 
 The Codex settings are documented in [[https://learn.chatgpt.com/docs/extend/mcp?surface=cli][OpenAI's MCP configuration reference]]. A real =ai-tui -p codex --mcp-tools todo_read,todo_write --dump= smoke test should write a uniquely named TODO, read it back, and show it in the rendered panel; merely checking generated arguments does not establish tool availability.
 
+** Give a CLI model filesystem tools
+
+The built-in executor's filesystem tools are also available through the host MCP allowlist. CLI providers run their own tool loops and do not automatically inherit =AiToolExecutor= tools; a provider offering only shell execution and patching otherwise has no dedicated read/write tools. Enable the bridge explicitly:
+
+#+begin_src bash
+ai-tui -p codex-cli --mcp-tools read,write,edit,multi_edit,glob,grep,ls
+#+end_src
+
+These tools reuse the conversation's executor and working directory. Relative paths resolve there; absolute paths remain absolute. The grant permits the selected filesystem operations with the host process's OS permissions, including outside the project directory. Selecting tools authorizes their calls, just like the existing host TODO and agent grants. No tools are enabled by default. Each input string is limited to 65,536 bytes and results to 1 MiB; use =read= with =offset= and =limit= for larger files. The host instructions ask the model to prefer the enabled file tools for inspection and changes.
+
 ** Control a running TUI from another application
 
 #+begin_src bash
@@ -91,6 +101,13 @@ All tools take an object. Unknown fields, wrong JSON types, missing required fie
 | =conversation_transcript= | Optional =offset= integer, optional =limit= integer | Message page: =messages= with index/role/text, =next_offset=, =has_more= |
 | =todo_read= | None | Current complete =todos= array |
 | =todo_write= | Required =todos= array | Atomically replaces the actual host TODO list and updates the transcript/panel |
+| =read= | Required =path=; optional numeric =offset=, =limit= in bytes | Read a file |
+| =write= | Required =path=, =content= | Create or overwrite a file |
+| =edit= | Required =path=, =old_string=, =new_string= | Replace a unique occurrence |
+| =multi_edit= | Required =path=, =edits= array of =old_string=/=new_string= objects | Apply edits atomically |
+| =glob= | Required =pattern=; optional =path= | Find matching filenames recursively |
+| =grep= | Required =pattern=; optional =path=, =glob= | Search file contents with a regular expression |
+| =ls= | Optional =path= | List directory entries |
 | =agent_spawn= | Required =prompt=; optional =description=, =agent=, =provider=, =model= | Starts a real background agent through the conversation's brigade; returns its ID |
 | =agent_status= | Optional =agent_id= | Reads a named agent or all agents, including progress/state |
 | =agent_result= | Required =agent_id= | Collects a finished agent's result |
@@ -102,7 +119,7 @@ A TODO item requires =content= and =status= strings; =status= is exactly =pendin
 
 =operation_id= identifies the most recent turn accepted through MCP, not an enduring job database or every keyboard-initiated turn. =busy= always reflects the live conversation. Once the MCP operation finishes, =operation_state= becomes =completed= or =failed= and the latest error is available. A successful start acknowledgement is not a completed model response. Retrieve messages only after checking status. =conversation_send= is for external controllers; a model already answering in this conversation must not send itself a second turn.
 
-Agent tools use the existing executor and brigade, so AGENTS displays real processes/model calls rather than model-reported placeholders. When =provider= is omitted, the host supplies its current provider type and model and the factory constructs a separate provider instance. Provider environment/config defaults apply to that instance; arbitrary foreground =--set= overrides are not copied. Explicit =provider= and =model= choose another backend. Named =agent= definitions use the normal resource registry and its tool allowlist. Background concurrency is four; further work queues. =--mcp-all-tools= includes agent spawning and therefore authorizes additional model calls. Blocking =agent_wait= and general filesystem/shell tools are not exposed by this host; poll =agent_status=, and use the provider's ordinary execution tools for project work.
+Agent tools use the existing executor and brigade, so AGENTS displays real processes/model calls rather than model-reported placeholders. When =provider= is omitted, the host supplies its current provider type and model and the factory constructs a separate provider instance. Provider environment/config defaults apply to that instance; arbitrary foreground =--set= overrides are not copied. Explicit =provider= and =model= choose another backend. Named =agent= definitions use the normal resource registry and its tool allowlist. Background concurrency is four; further work queues. =--mcp-all-tools= includes agent spawning and therefore authorizes additional model calls. Blocking =agent_wait= and shell execution are not exposed by this host; poll =agent_status= and use the provider's ordinary shell tool for commands.
 
 * Provider delivery and lifetime
 

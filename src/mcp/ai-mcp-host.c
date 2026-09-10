@@ -46,6 +46,7 @@ G_DEFINE_TYPE(AiMcpHost, ai_mcp_host, G_TYPE_OBJECT)
 static const gchar * const catalog[] = {
 	"conversation_status", "conversation_send", "conversation_cancel",
 	"conversation_clear", "conversation_transcript", "todo_read", "todo_write",
+	"read", "write", "edit", "multi_edit", "glob", "grep", "ls",
 	"agent_spawn", "agent_status", "agent_result", "agent_cancel", NULL
 };
 
@@ -103,6 +104,10 @@ validate_node(JsonNode *node, JsonObject *schema, guint depth, GError **error)
 		        strlen(json_node_get_string(node)) <= MCP_HOST_MAX_STRING;
 	else if (g_str_equal(type, "integer"))
 		valid = JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_INT64;
+	else if (g_str_equal(type, "number"))
+		valid = JSON_NODE_HOLDS_VALUE(node) &&
+		        (json_node_get_value_type(node) == G_TYPE_INT64 ||
+		         json_node_get_value_type(node) == G_TYPE_DOUBLE);
 	else if (g_str_equal(type, "boolean"))
 		valid = JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_BOOLEAN;
 	else if (g_str_equal(type, "object") && JSON_NODE_HOLDS_OBJECT(node))
@@ -189,7 +194,9 @@ create_tool(AiMcpHost *self, const gchar *name)
 			"\"required\":[\"content\",\"status\"],\"additionalProperties\":false}", TRUE);
 		return tool;
 	}
-	if (g_str_has_prefix(name, "agent_"))
+	/* Reuse executor definitions for filesystem and agent tools so MCP
+	 * advertises the same arguments that the implementation consumes. */
+	if (!g_str_has_prefix(name, "conversation_") && !g_str_equal(name, "todo_read"))
 	{
 		for (iter = ai_tool_executor_get_tools(ai_conversation_get_executor(self->conversation));
 		     iter != NULL; iter = iter->next)
@@ -392,6 +399,11 @@ register_tools(AiMcpHost *self, McpServer *server)
 		g_string_append_printf(instructions, "%s ", catalog[i]);
 	}
 	g_string_append(instructions, ". Use host todo_write for TODOS and host agent_* for AGENTS when enabled; these update the visible application. Do not substitute the CLI harness plan/TODO or subagent tools. Do not call conversation_send to send yourself a message; it is for external controllers.");
+	if (g_hash_table_contains(self->allowed, "read") ||
+	    g_hash_table_contains(self->allowed, "write") ||
+	    g_hash_table_contains(self->allowed, "edit") ||
+	    g_hash_table_contains(self->allowed, "multi_edit"))
+		g_string_append(instructions, " Prefer enabled host read/write/edit/multi_edit tools for file inspection and changes; relative paths use the host conversation working directory.");
 	mcp_server_set_instructions(server, instructions->str);
 }
 

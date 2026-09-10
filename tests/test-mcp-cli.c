@@ -475,6 +475,40 @@ test_cli_errors(gconstpointer data)
 	}
 }
 
+/* Round-trip actual disk contents over JSON-RPC, including through the
+ * injected Codex bridge, rather than merely asserting advertised names. */
+static void
+check_filesystem_bridge(Peer *peer)
+{
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *arguments = NULL;
+	g_autofree gchar *result = NULL;
+	g_autofree gchar *contents = NULL;
+	g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+	g_autoptr(JsonObject) object = json_object_new();
+	gint fd = g_file_open_tmp("ai-mcp-roundtrip-XXXXXX", &path, &error);
+
+	g_assert_no_error(error);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	json_object_set_string_member(object, "path", path);
+	json_object_set_string_member(object, "content", "filesystem bridge works");
+	json_node_set_object(node, object);
+	arguments = json_to_string(node, FALSE);
+	result = peer_tool(peer, "write", arguments, TRUE);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, &error));
+	g_assert_no_error(error);
+	g_assert_cmpstr(contents, ==, "filesystem bridge works");
+	g_clear_pointer(&arguments, g_free);
+	g_clear_pointer(&result, g_free);
+	json_object_remove_member(object, "content");
+	arguments = json_to_string(node, FALSE);
+	result = peer_tool(peer, "read", arguments, TRUE);
+	g_assert_cmpstr(result, ==, contents);
+	g_unlink(path);
+}
+
 /* Listing is independent of provider authentication and matches the all-tools grant. */
 static void
 test_catalog(gconstpointer data)
@@ -495,7 +529,7 @@ test_catalog(gconstpointer data)
 	g_assert_no_error(error);
 	g_assert_true(g_subprocess_get_successful(process));
 	names = g_strsplit(g_strstrip(output), "\n", -1);
-	g_assert_cmpuint(g_strv_length(names), ==, 11);
+	g_assert_cmpuint(g_strv_length(names), ==, 18);
 	peer = peer_new(server_argv, NULL);
 	peer_initialize(peer);
 	reply = peer_request(peer, "tools/list", "{}");
@@ -504,6 +538,7 @@ test_catalog(gconstpointer data)
 	for (i = 0; i < json_array_get_length(tools); i++)
 		g_assert_true(g_strv_contains((const gchar * const *)names,
 			json_object_get_string_member(json_array_get_object_element(tools, i), "name")));
+	check_filesystem_bridge(peer);
 }
 
 /* Wait only for a short-lived socket bind; the containing directory is private. */
@@ -684,7 +719,7 @@ test_injected_turn(gconstpointer data)
 static void
 test_tui_dump(gconstpointer data)
 {
-	const gchar *argv[] = { tui_executable, "--provider", data, "--mcp-tools", "todo_write,todo_read",
+	const gchar *argv[] = { tui_executable, "--provider", data, "--mcp-tools", "todo_write,todo_read,read,write",
 		"--dump", "Update our TODO panel", NULL };
 	g_autoptr(GSubprocess) process = spawn_process(argv, data);
 	g_autoptr(GError) error = NULL;
@@ -780,7 +815,7 @@ codex_stub_main(gint argc, gchar **argv)
 	listed = peer_request(bridge, "tools/list", "{}");
 	tools = json_object_get_array_member(json_object_get_object_member(
 		json_node_get_object(listed), "result"), "tools");
-	g_assert_cmpuint(json_array_get_length(tools), ==, 2);
+	g_assert_cmpuint(json_array_get_length(tools), ==, 4);
 	for (j = 0; j < json_array_get_length(tools); j++)
 	{
 		const gchar *name = json_object_get_string_member(json_array_get_object_element(tools, j), "name");
@@ -789,6 +824,7 @@ codex_stub_main(gint argc, gchar **argv)
 	}
 	g_assert_true(read_seen);
 	g_assert_true(write_seen);
+	check_filesystem_bridge(bridge);
 	result = peer_tool(bridge, "todo_write",
 		"{\"todos\":[{\"content\":\"MCP integration task\",\"active_form\":\"Updating MCP integration\",\"status\":\"in_progress\"}]}", TRUE);
 	g_clear_pointer(&result, g_free);

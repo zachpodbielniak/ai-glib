@@ -15,7 +15,7 @@ static const GOptionEntry mcp_option_entries[] = {
 	{ "mcp-server", 0, 0, G_OPTION_ARG_NONE, &opt_mcp_server, "Serve MCP over stdio (headless; no tools enabled by default)", NULL },
 	{ "mcp-socket", 0, 0, G_OPTION_ARG_FILENAME, &opt_mcp_socket, "Serve MCP on a private Unix socket (with --mcp-server: socket instead of stdio)", "PATH" },
 	{ "mcp-tools", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_mcp_tools, "Enable named MCP tools; comma-separated, repeatable", "NAMES" },
-	{ "mcp-all-tools", 0, 0, G_OPTION_ARG_NONE, &opt_mcp_all_tools, "Enable every host MCP tool, including turn control and background agents", NULL },
+	{ "mcp-all-tools", 0, 0, G_OPTION_ARG_NONE, &opt_mcp_all_tools, "Enable every host MCP tool, including filesystem access, turn control and background agents", NULL },
 	{ "mcp-list-tools", 0, 0, G_OPTION_ARG_NONE, &opt_mcp_list_tools, "List available host MCP tool names and exit", NULL },
 	{ "mcp-no-inject", 0, 0, G_OPTION_ARG_NONE, &opt_mcp_no_inject, "Keep MCP for external controllers; do not inject into CLI providers", NULL },
 	{ "mcp-connect", 0, 0, G_OPTION_ARG_FILENAME, &opt_mcp_connect, "Bridge stdio to an existing host MCP Unix socket", "PATH" },
