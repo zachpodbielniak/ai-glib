@@ -37,6 +37,8 @@ typedef struct
 static gchar *tui_binary = NULL;
 static gchar *tmux_socket = NULL;
 
+#define NATIVE_TOOL_SESSION "native-tools"
+
 static void
 run_free(Run *run)
 {
@@ -793,6 +795,124 @@ test_dump_shows_grok_native_tool_summary(void)
 	g_assert_null(strstr(run->stdout_data, "Used 1 tool"));
 
 	run_free(run);
+	stub_free(stub);
+}
+
+/* Exercise native tools through the binary, without relying on MCP tool
+ * callbacks. The Codex fixture deliberately has no start event. */
+#define NATIVE_CLAUDE_REPLY \
+	"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"native-1\",\"name\":\"Write\",\"input\":{\"file_path\":\"native-file.c\",\"content\":\"hello\"}}]}}\n" \
+	"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"native-1\",\"content\":\"written\"}]}}\n" \
+	"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Native complete\"}}}\n" \
+	"{\"type\":\"result\",\"result\":\"Native complete\",\"session_id\":\"native-session\"}\n"
+
+typedef struct
+{
+	const gchar *provider;
+	const gchar *reply;
+	const gchar *summary;
+} NativeToolCase;
+
+static const NativeToolCase NATIVE_TOOL_CASES[] = {
+	{ "codex-cli",
+	  "{\"type\":\"turn.started\"}\n"
+	  "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"native-file.c\",\"kind\":\"update\",\"diff\":\"@@ -1 +1 @@\\n-old\\n+hello\"}]}}\n"
+	  "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"Native complete\"}}\n"
+	  "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n",
+	  "Changed 1 file" },
+	{ "claude-code", NATIVE_CLAUDE_REPLY, "Created native-file.c" },
+	{ "grok-build", NATIVE_CLAUDE_REPLY, "Created native-file.c" },
+	{ "antigravity",
+	  "{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"step_type\":\"tool\",\"state\":\"DONE\",\"tool_name\":\"write\",\"tool_info\":{\"parameters\":{\"path\":\"native-file.c\",\"content\":\"hello\"},\"output\":\"written\"}}}\n"
+	  "{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"text\",\"text_delta\":\"Native complete\"}}\n"
+	  "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Native complete\"}}\n",
+	  "Created native-file.c" },
+	{ "opencode",
+	  "{\"type\":\"tool_use\",\"part\":{\"id\":\"native-1\",\"tool\":\"write\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"native-file.c\",\"content\":\"hello\"},\"output\":\"written\"}}}\n"
+	  "{\"type\":\"text\",\"part\":{\"text\":\"Native complete\"}}\n",
+	  "Created native-file.c" },
+	{ "cursor",
+	  "{\"type\":\"tool_call\",\"subtype\":\"started\",\"call_id\":\"native-1\",\"tool_call\":{\"writeToolCall\":{\"args\":{\"path\":\"native-file.c\",\"content\":\"hello\"}}}}\n"
+	  "{\"type\":\"tool_call\",\"subtype\":\"completed\",\"call_id\":\"native-1\",\"tool_call\":{\"writeToolCall\":{\"result\":{\"success\":{\"content\":\"written\"}}}}}\n"
+	  "{\"type\":\"assistant\",\"timestamp_ms\":1,\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Native complete\"}]}}\n"
+	  "{\"type\":\"result\",\"result\":\"Native complete\"}\n",
+	  "Created native-file.c" }
+};
+
+/* Both MCP modes must preserve native activity across repeated CLI
+ * invocations and /reset. Run under a real terminal as well as --dump. */
+static void
+test_native_tool_activity(gconstpointer data)
+{
+	const NativeToolCase *test_case = data;
+	Stub *stub = stub_new(test_case->reply);
+	g_autofree gchar *property = g_strconcat("executable-path=", stub->stub, NULL);
+	gboolean external_only = g_str_equal(test_case->provider, "antigravity") ||
+		g_str_equal(test_case->provider, "cursor");
+	guint mode;
+
+	for (mode = 0; mode < 2; mode++)
+	{
+		const gchar *args[] = { "-p", test_case->provider, "--set", property,
+			"--dump", "native probe", NULL, NULL, NULL, NULL };
+		g_autofree gchar *options = NULL;
+		Run *run;
+		guint turn;
+
+		if (mode != 0)
+		{
+			args[6] = "--mcp-tools";
+			args[7] = "todo_read";
+			/* These providers support external host control, not injection. */
+			if (external_only) args[8] = "--mcp-no-inject";
+		}
+		run = run_tui_in(stub->dir, args);
+		g_test_message("%s MCP=%u: %s", test_case->provider, mode, run->stderr_data);
+		g_assert_cmpint(run->status, ==, 0);
+		g_assert_nonnull(strstr(run->stdout_data, test_case->summary));
+		g_assert_nonnull(strstr(run->stdout_data, "Native complete"));
+		run_free(run);
+
+		if (!tmux_available()) continue;
+		options = g_strdup_printf("--no-animation -p %s --set '%s' %s %s",
+			test_case->provider, property, mode != 0 ? "--mcp-tools todo_read" : "",
+			mode != 0 && external_only ? "--mcp-no-inject" : "");
+		tmux_start_tui_with_options(NATIVE_TOOL_SESSION, stub->dir, NULL, NULL, options);
+		tmux_resize("140", "55");
+		for (turn = 0; turn < 3; turn++)
+		{
+			g_autofree gchar *pane = NULL;
+			g_auto(GStrv) summaries = NULL;
+			g_auto(GStrv) answers = NULL;
+			guint expected = turn == 1 ? 2 : 1;
+			gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+			if (turn == 2)
+			{
+				tmux_send(NATIVE_TOOL_SESSION, "/reset");
+				tmux_send(NATIVE_TOOL_SESSION, "Escape");
+				g_usleep(150000);
+				tmux_send(NATIVE_TOOL_SESSION, "Enter");
+				g_assert_true(tmux_wait_for(NATIVE_TOOL_SESSION, "MAKE SOMETHING WORTH SHIPPING."));
+			}
+			tmux_send(NATIVE_TOOL_SESSION, "native probe");
+			tmux_send(NATIVE_TOOL_SESSION, "Enter");
+			/* Wait for this turn's final answer, not the preceding one. */
+			do
+			{
+				g_clear_pointer(&pane, g_free);
+				g_clear_pointer(&answers, g_strfreev);
+				pane = tmux_capture(NATIVE_TOOL_SESSION);
+				answers = g_strsplit(pane, "Native complete", -1);
+				if (g_strv_length(answers) > expected) break;
+				g_usleep(50 * 1000);
+			} while (g_get_monotonic_time() < deadline);
+			g_assert_cmpuint(g_strv_length(answers), ==, expected + 1);
+			summaries = g_strsplit(pane, test_case->summary, -1);
+			g_assert_cmpuint(g_strv_length(summaries), ==, expected + 1);
+		}
+		tmux_kill(NATIVE_TOOL_SESSION);
+	}
 	stub_free(stub);
 }
 
@@ -2953,6 +3073,11 @@ main(int argc, char *argv[])
 	}
 
 	g_test_add_func("/ai-glib/ai-tui/version", test_version);
+	for (i = 0; i < G_N_ELEMENTS(NATIVE_TOOL_CASES); i++)
+	{
+		g_autofree gchar *path = g_strconcat("/ai-glib/ai-tui/native-tools/", NATIVE_TOOL_CASES[i].provider, NULL);
+		g_test_add_data_func(path, &NATIVE_TOOL_CASES[i], test_native_tool_activity);
+	}
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-home-end", cursor_keys, test_command_cursor_completion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-control-a-e", control_keys, test_command_cursor_completion);
 	g_test_add_func("/ai-glib/ai-tui/builtins/catalog", test_builtin_catalog);

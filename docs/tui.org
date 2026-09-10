@@ -277,6 +277,8 @@ status bar says =[scrolled]= while that is so. Sending, or scrolling back
 down, resumes following.
 
 ** Tool previews
+Native CLI tool activity does not require =--mcp-tools=. MCP grants expose additional host tools; file edits, writes and commands reported by the CLI still appear through its event stream. Completion-only tool events create a group in the current turn even when a new CLI invocation reuses an earlier item ID. They never overwrite a previous turn's activity. =--no-stream= disables this live event path.
+
 Edits and commands now show compact inline previews beneath the grouped summary without requiring expansion. =C-n= selects a tool group and =C-b= expands it for more detail. Read/search calls remain summarized in compact mode. A compact group previews relevant calls among its last four calls and names how many earlier calls are hidden; expanded groups list every call.
 
 *** Edit regions

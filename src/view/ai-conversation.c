@@ -281,6 +281,11 @@ find_call_for_result(
     {
         AiViewBlock *block = ai_transcript_get_block(self->transcript, i - 1);
 
+        /* CLI processes may restart their item IDs on every turn. A
+         * completion-only event must never attach to an older turn. */
+        if (AI_IS_VIEW_TURN_BLOCK(block))
+            break;
+
         if (AI_IS_VIEW_TOOL_BLOCK(block))
         {
             AiToolCall *call = ai_view_tool_block_find_call(

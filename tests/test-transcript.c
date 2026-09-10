@@ -681,6 +681,43 @@ test_unmatched_tool_result_is_still_shown(void)
 	g_assert_cmpint(kind_at(c, 0), ==, AI_VIEW_BLOCK_TOOL);
 }
 
+/* CLI item IDs can restart on each invocation. A completion without a
+ * start must create activity in this turn, not rewrite an earlier turn. */
+static void
+test_tool_result_id_reused_in_new_turn(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) c = conversation_for(mock);
+	AiTranscript *transcript = ai_conversation_get_transcript(c);
+	g_autoptr(AiToolUse) old_use = ai_tool_use_new_from_json_string("item_0", "file_change",
+		"{\"changes\":[{\"path\":\"old.c\",\"kind\":\"update\"}]}");
+	g_autoptr(AiToolUse) new_use = ai_tool_use_new_from_json_string("item_0", "file_change",
+		"{\"changes\":[{\"path\":\"new.c\",\"kind\":\"add\"}]}");
+	g_autoptr(AiToolResult) old_result = ai_tool_result_new("item_0", "old result", FALSE);
+	g_autoptr(AiToolResult) new_result = ai_tool_result_new("item_0", "new result", FALSE);
+	g_autoptr(AiEvent) old_event = ai_event_new_tool_finished(old_use, old_result);
+	g_autoptr(AiEvent) new_event = ai_event_new_tool_finished(new_use, new_result);
+	g_autoptr(AiEvent) end = ai_event_new(AI_EVENT_STREAM_END);
+	g_autoptr(AiViewBlock) turn = ai_view_turn_block_new("next edit");
+	AiToolCall *old_call;
+	AiToolCall *new_call;
+
+	emit(mock, old_event);
+	emit(mock, end);
+	ai_transcript_append(transcript, turn);
+	emit(mock, new_event);
+
+	g_assert_cmpuint(ai_transcript_get_n_blocks(transcript), ==, 3);
+	old_call = ai_view_tool_block_find_call(AI_VIEW_TOOL_BLOCK(
+		ai_transcript_get_block(transcript, 0)), "item_0");
+	new_call = ai_view_tool_block_find_call(AI_VIEW_TOOL_BLOCK(
+		ai_transcript_get_block(transcript, 2)), "item_0");
+	g_assert_cmpstr(ai_tool_call_get_result(old_call), ==, "old result");
+	g_assert_cmpstr(ai_tool_call_get_result(new_call), ==, "new result");
+	g_assert_true(ai_tool_call_get_tool_use(old_call) == old_use);
+	g_assert_true(ai_tool_call_get_tool_use(new_call) == new_use);
+}
+
 static void
 test_thinking_gets_its_own_block(void)
 {
@@ -1323,6 +1360,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/fold/tool-interrupts-prose", test_tool_interrupts_prose);
 	g_test_add_func("/ai-glib/fold/tools-group", test_consecutive_tools_group);
 	g_test_add_func("/ai-glib/fold/tool-finished", test_tool_finished_updates_the_call);
+	g_test_add_func("/ai-glib/fold/tool-result-reused-id", test_tool_result_id_reused_in_new_turn);
 	g_test_add_func("/ai-glib/fold/file-change-finished-preview",
 	                test_file_change_finished_refreshes_preview);
 	g_test_add_func("/ai-glib/fold/tool-finished-late",
