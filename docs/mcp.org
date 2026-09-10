@@ -160,6 +160,24 @@ Live model checks passed TODO writes/readbacks and parent-panel updates on fresh
 
 Permission syntax references: [[https://code.claude.com/docs/en/permissions][Claude permissions]], [[https://opencode.ai/docs/permissions/][OpenCode permissions]], and [[https://docs.x.ai/build/features/permissions][Grok permissions]]. These local host grants do not override administrator restrictions or explicit caller deny rules in Claude.
 
+** Filesystem provider audit, 2026-09-09
+
+The filesystem grant is tested across every =AiProviderType=, using a server created before provider switching. Each provider runs all seven filesystem operations against a temporary directory, including relative paths, numeric read limits, successful and rejected atomic edits, and invalid input. The matrix checks the injected endpoint dialect, caller prompt preservation, and explicit rejection of unsupported injection. Real-process CLI fixtures now perform disk write/read round trips through Claude Code, Codex, Grok Build, and OpenCode bridges. Claude tmux's fresh/resumed configuration and scoped permission grant are covered by the provider-delivery tests.
+
+| Provider | Model tool path | Live filesystem verification |
+|----------+-----------------+------------------------------|
+| Claude Code | Injected MCP bridge | All seven operations passed |
+| Codex CLI | Injected MCP bridge | All seven operations passed; also exercised in the active debug TUI session |
+| Grok Build | Injected MCP bridge | All seven operations passed with =permission-mode=default= |
+| OpenCode | Injected MCP bridge, local run | All seven operations passed with =openai/gpt-6-astra= |
+| Claude tmux | Injected MCP bridge | Blocked before model startup by Claude's workspace trust prompt |
+| Cursor, Antigravity | External MCP only with =--mcp-no-inject= | Automatic injection remains unsupported and fails explicitly |
+| Claude, OpenAI, Gemini, Grok, Ollama, OpenAI-compatible HTTP | Built-in executor with =--local-tools= | Host grant/switching tested; no live HTTP model claim |
+
+=--mcp-all-tools= alone does not enable the HTTP model's local executor. Use =--local-tools= for HTTP model file operations; the MCP allowlist independently governs external clients. OpenCode =--attach= cannot receive this process's temporary MCP configuration and remains rejected.
+
+The Claude tmux timeout was reproduced with =debug-preserve-tmux=true= and diagnosed by capturing its dedicated pane: Claude was waiting at “Yes, I trust this folder” for the project directory, before the =SessionStart= hook. The audit did not accept or persist that trust decision. Complete the native trust flow before claiming a live tmux model callback; the generic 15-second readiness timeout does not identify that prompt by itself.
+
 ** Resource limits and shutdown
 
 Both host transports cap input frames at 1 MiB. The dependency caps each client's queued output at 16 MiB and 256 messages; saturation closes that connection rather than allowing unbounded accumulation. The socket server allows 32 simultaneous clients and requires initialization within 10 seconds. Plain tool results are truncated at a UTF-8 boundary after 1 MiB; JSON state results exceeding that bound return an error instead of invalid truncated JSON. Agent spawning allows at most 128 tracked agents; collect completed results to remove their records and free capacity. Normal host shutdown cancels the foreground turn and all tracked background work.

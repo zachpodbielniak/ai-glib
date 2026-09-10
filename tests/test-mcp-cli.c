@@ -268,6 +268,8 @@ parse_text(const gchar *text)
 	return json_node_copy(json_parser_get_root(parser));
 }
 
+static void check_filesystem_bridge(Peer *peer);
+
 /* A real CLI stub consumes the host-written config and invokes its bridge. */
 static gint
 stub_main(gint argc, gchar **argv)
@@ -378,6 +380,8 @@ stub_main(gint argc, gchar **argv)
 		g_clear_pointer(&result, g_free);
 		result = peer_tool(bridge, "todo_read", "{}", TRUE);
 		g_assert_nonnull(strstr(result, "MCP integration task"));
+		/* Every injected provider must perform filesystem calls too. */
+		check_filesystem_bridge(bridge);
 		/* Closing bridge stdin exercises EOF cancellation without killing the host. */
 		finish_process(bridge->process, TRUE);
 		g_clear_object(&bridge->process);

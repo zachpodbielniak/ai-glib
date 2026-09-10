@@ -443,8 +443,97 @@ test_filesystem(Fixture *fixture, gconstpointer data)
 	g_clear_pointer(&result, mcp_tool_result_unref);
 	result = call(fixture, "read", "{\"path\":\"sample.txt\"}");
 	g_assert_cmpstr(result_text(result), ==, "hello MCP");
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "multi_edit", "{\"path\":\"sample.txt\",\"edits\":[{\"old_string\":\"hello\",\"new_string\":\"goodbye\"},{\"old_string\":\"MCP\",\"new_string\":\"tools\"}]}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\"}");
+	g_assert_cmpstr(result_text(result), ==, "goodbye tools");
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "glob", "{\"pattern\":\"*.txt\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_nonnull(strstr(result_text(result), "sample.txt"));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "grep", "{\"pattern\":\"goodbye\",\"glob\":\"*.txt\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_nonnull(strstr(result_text(result), "goodbye tools"));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "ls", "{}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_nonnull(strstr(result_text(result), "sample.txt"));
 	g_unlink(path);
 	g_rmdir(directory);
+}
+
+/* Verify every enum provider through the same live host, preserving a server
+ * created before switching. Unsupported injection must fail explicitly; its
+ * external-only mode must still expose the exact filesystem grant. */
+static void
+test_filesystem_providers(void)
+{
+	g_autoptr(AiOllamaClient) initial = ai_ollama_client_new();
+	g_autoptr(AiConfig) config = ai_config_new();
+	GEnumClass *types = g_type_class_ref(AI_TYPE_PROVIDER_TYPE);
+	Fixture fixture = { NULL, NULL, NULL };
+	guint i;
+
+	fixture.conversation = ai_conversation_new(G_OBJECT(initial));
+	ai_conversation_enable_background_agents(fixture.conversation, 4);
+	ai_conversation_set_system_prompt(fixture.conversation, "Preserve caller instructions");
+	fixture.host = ai_mcp_host_new(fixture.conversation, "provider-matrix", NULL, TRUE, NULL);
+	fixture.server = ai_mcp_host_create_server(fixture.host);
+	for (i = 0; i < types->n_values; i++)
+	{
+		AiProviderType type = (AiProviderType)types->values[i].value;
+		g_autoptr(GError) error = NULL;
+		g_autoptr(GObject) provider = ai_provider_factory_new(type, config, &error);
+		const gchar *kind = NULL;
+		gboolean unsupported = type == AI_PROVIDER_CURSOR || type == AI_PROVIDER_ANTIGRAVITY;
+
+		g_test_message("Filesystem provider: %s", ai_provider_type_to_string(type));
+		g_assert_no_error(error);
+		g_assert_nonnull(provider);
+		switch (type)
+		{
+		case AI_PROVIDER_CLAUDE_CODE:
+		case AI_PROVIDER_CLAUDE_TMUX: kind = AI_ENDPOINT_KIND_MCP_CONFIG; break;
+		case AI_PROVIDER_CODEX_CLI: kind = AI_ENDPOINT_KIND_MCP_CONFIG_CODEX; break;
+		case AI_PROVIDER_GROK_BUILD: kind = AI_ENDPOINT_KIND_MCP_CONFIG_GROK; break;
+		case AI_PROVIDER_OPENCODE: kind = AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE; break;
+		default: break;
+		}
+		if (unsupported)
+		{
+			GObject *previous = ai_conversation_get_provider(fixture.conversation);
+			g_assert_false(ai_mcp_host_set_provider(fixture.host, provider, "/tmp/ai-tui", TRUE, &error));
+			g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+			g_assert_true(ai_conversation_get_provider(fixture.conversation) == previous);
+			g_clear_error(&error);
+		}
+		g_assert_true(ai_mcp_host_set_provider(fixture.host, provider, "/tmp/ai-tui", !unsupported, &error));
+		g_assert_no_error(error);
+		if (kind != NULL)
+		{
+			const AiAgentEndpoint *endpoint = ai_conversation_get_tool_endpoint(fixture.conversation);
+			g_assert_nonnull(endpoint);
+			g_assert_cmpstr(endpoint->kind, ==, kind);
+			g_assert_nonnull(strstr(ai_conversation_get_system_prompt(fixture.conversation), "host read/write/edit/multi_edit"));
+		}
+		else
+		{
+			g_assert_null(ai_conversation_get_tool_endpoint(fixture.conversation));
+			g_assert_cmpstr(ai_conversation_get_system_prompt(fixture.conversation), ==, "Preserve caller instructions");
+			/* HTTP tools are a separate, explicit --local-tools choice. */
+			if (AI_IS_CLIENT(provider))
+			{
+				ai_conversation_set_local_tools(fixture.conversation, TRUE);
+				g_assert_true(ai_conversation_get_local_tools(fixture.conversation));
+			}
+		}
+		test_filesystem(&fixture, NULL);
+	}
+	teardown(&fixture, NULL);
+	g_type_class_unref(types);
 }
 
 int
@@ -453,6 +542,7 @@ main(int argc, char **argv)
 	static const gchar * const status_only[] = { "conversation_status", NULL };
 	g_test_init(&argc, &argv, NULL);
 	g_test_add("/mcp/host/filesystem", Fixture, NULL, setup, test_filesystem, teardown);
+	g_test_add_func("/mcp/host/filesystem-providers", test_filesystem_providers);
 	g_test_add_func("/mcp/host/server-outlives-host", test_server_outlives_host);
 	g_test_add("/mcp/host/shared-todos", Fixture, NULL, setup, test_shared_todos, teardown);
 	g_test_add("/mcp/host/invalid-atomic", Fixture, NULL, setup, test_invalid_atomic, teardown);
