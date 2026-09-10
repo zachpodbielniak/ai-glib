@@ -201,6 +201,40 @@ usage_tokens(JsonObject *usage, const gchar *name)
     return (gint)count;
 }
 
+/*
+ * Codex exec reports token counts and no USD. That table is the
+ * registration: a model with no row stays unpriced (-1), never $0.
+ * Rates are dollars per million tokens; one token at $N/Mtok is
+ * exactly N micro-dollars, so the product is the cost with no float.
+ */
+typedef struct
+{
+    const gchar *model;
+    gint64       input_per_mtok;
+    gint64       output_per_mtok;
+} CodexPrice;
+
+static const CodexPrice CODEX_PRICES[] = {
+    { AI_CODEX_CLI_MODEL_GPT_6_ASTRA, 10, 50 },
+};
+
+static gint64
+codex_cost_micros(const gchar *model, gint input_tokens, gint output_tokens)
+{
+    guint i;
+
+    if (model == NULL || *model == '\0')
+        return -1;
+    for (i = 0; i < G_N_ELEMENTS(CODEX_PRICES); i++)
+    {
+        if (g_ascii_strcasecmp(CODEX_PRICES[i].model, model) != 0)
+            continue;
+        return (gint64)input_tokens * CODEX_PRICES[i].input_per_mtok
+             + (gint64)output_tokens * CODEX_PRICES[i].output_per_mtok;
+    }
+    return -1;
+}
+
 /* Capture a bounded diff once, at event receipt. Never run repository diff
  * drivers, textconv filters, or a shell, and never read an unbounded pipe. */
 static gboolean
@@ -349,11 +383,19 @@ parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
         JsonObject *u = ai_json_get_object(obj, "usage");
         if (u != NULL)
         {
-            g_autoptr(AiUsage) usage = ai_usage_new(
-                usage_tokens(u, "input_tokens"),
-                usage_tokens(u, "output_tokens"));
+            gint input_tokens = usage_tokens(u, "input_tokens");
+            gint output_tokens = usage_tokens(u, "output_tokens");
+            gint64 cost = codex_cost_micros(ai_cli_client_get_model(client),
+                                            input_tokens, output_tokens);
+            g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
+
             ai_response_set_usage(response, usage);
-            g_ptr_array_add(events, ai_event_new_usage(usage, 0));
+            /* -1, not 0, when the model has no published rate: zero would
+             * paint the turn as free. A priced model also lands on the
+             * response so a non-streaming caller sees the same figure. */
+            if (cost >= 0)
+                ai_response_set_cost_micros(response, cost);
+            g_ptr_array_add(events, ai_event_new_usage(usage, cost));
         }
         ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
     }

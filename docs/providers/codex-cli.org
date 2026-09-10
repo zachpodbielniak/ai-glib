@@ -60,7 +60,13 @@ are emitted as normalized =AiEvent= values. Codex emits completed message
 items, so text streaming is at message granularity. Tool execution output is
 not inserted into the assistant's prose. Input token counts include cached
 input tokens, as reported by Codex; the library's usage type has no separate
-cache counter or reasoning-token counter. No monetary cost is invented.
+cache counter or reasoning-token counter.
+
+Codex exec reports token counts and no =total_cost_usd=. Known models are
+priced from published rates; anything else stays unpriced (=-1=), never
+=$0=. =gpt-6-astra= is =$10= per million input tokens and =$50= per million
+output tokens. That figure is also stored on =AiResponse= so a buffered
+caller sees the same number as the usage event.
 
 Unknown =item.*= kinds are dropped. They are not turned into
 =AI_EVENT_STATUS= of the raw JSON: conversation appends every STATUS as
@@ -175,7 +181,7 @@ no saved credentials, model access or network calls.
 | Provider registration | Factory, canonical name, alias, type, seven ordered model IDs |
 | Arguments | All sandbox/bypass combinations, invalid/empty policies, effort options, profile/search, directory splitting |
 | Sessions | Explicit ID precedence, portable history, resumed context, stateless prompts, capture suppression |
-| Events | Event order, reasoning/text separation, cumulative updates, usage, command/file/MCP/search result translation |
+| Events | Event order, reasoning/text separation, cumulative updates, usage, =gpt-6-astra= cost, unpriced models, command/file/MCP/search result translation |
 | Parser | Invalid roots and field types, whitespace, unknown events, missing usage, oversized counters, truncated later turns |
 | Processes | Sync/async/stream success, stdin privacy, working directory, nonzero exit, structured error with zero exit, stderr-only failure |
 | Pipe handling | 512 KiB prompt with 256 KiB stderr, cancellation while stdin is blocked, timeout, pre-cancellation |

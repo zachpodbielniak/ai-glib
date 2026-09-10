@@ -41,6 +41,7 @@ That is the whole integration. Swap =ai_claude_code_client_new()= for
 | =grok-build=    | yes  | yes      | yes        | yes       | yes         | yes   | yes  |
 | =antigravity=   | yes  | yes      | yes        | ---       | yes         | yes   | ---  |
 | =cursor=        | yes  | ---      | yes        | ---       | yes         | yes   | ---  |
+| =codex-cli=     | yes  | yes      | yes        | ---       | yes         | yes   | yes  |
 | =claude-tmux=   | ---  | ---      | ---        | ---       | ---         | ---   | ---  |
 
 Three things that table is really saying:
@@ -50,8 +51,10 @@ Three things that table is really saying:
   [[file:tool-executor.org][AiToolExecutor]] --- runs it and reports the result, and it publishes on the
   same stream. So an HTTP provider plus an executor gives you the full
   picture; the provider alone gives you half of it by design.
-- *Cost is rare.* Only the two CLI wrappers that report =total_cost_usd= can
-  answer it. Everywhere else =ai_event_get_cost_micros()= is *-1*, meaning
+- *Cost is rare.* =claude-code= and =grok-build= report =total_cost_usd=.
+  =codex-cli= does not; it prices =gpt-6-astra= from published rates
+  ($10/M input, $50/M output) and leaves every other model unpriced.
+  Everywhere else =ai_event_get_cost_micros()= is *-1*, meaning
   "unknown" --- not zero, which would read as free.
 - *=claude-tmux= reports nothing yet.* It drives =claude= through a tmux
   session and reads the finished JSONL transcript rather than a stream, so

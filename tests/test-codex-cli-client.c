@@ -73,6 +73,51 @@ static void test_parse(void)
     g_assert_cmpstr(ai_cli_client_get_session_id(cli), ==, "thread-test");
     g_assert_cmpint(ai_usage_get_input_tokens(ai_response_get_usage(response)), ==, 20);
     g_assert_cmpint(ai_usage_get_output_tokens(ai_response_get_usage(response)), ==, 3);
+    /* gpt-6-astra is $10/M input, $50/M output: 20*10 + 3*50 micro-dollars. */
+    g_assert_cmpint(ai_response_get_cost_micros(response), ==, 350);
+}
+
+static void test_astra_usage_event_cost(void)
+{
+    g_autoptr(AiCodexCliClient) c = ai_codex_cli_client_new();
+    g_autoptr(AiResponse) response = ai_response_new("", AI_CODEX_CLI_MODEL_GPT_6_ASTRA);
+    g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+    g_autoptr(GError) error = NULL;
+    AiEvent *event;
+
+    g_assert_true(AI_CLI_CLIENT_GET_CLASS(c)->parse_stream_events(
+        AI_CLI_CLIENT(c),
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":1000000}}",
+        response, events, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(events->len, ==, 1);
+    event = g_ptr_array_index(events, 0);
+    g_assert_cmpint(ai_event_get_kind(event), ==, AI_EVENT_USAGE);
+    g_assert_cmpint(ai_event_get_cost_micros(event), ==, 60000000);
+    g_assert_cmpint(ai_response_get_cost_micros(response), ==, 60000000);
+}
+
+static void test_unpriced_model_omits_cost(void)
+{
+    g_autoptr(AiCodexCliClient) c = ai_codex_cli_client_new();
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+    AiEvent *event;
+
+    ai_cli_client_set_model(AI_CLI_CLIENT(c), AI_CODEX_CLI_MODEL_GPT_5_5);
+    response = AI_CLI_CLIENT_GET_CLASS(c)->parse_json_output(AI_CLI_CLIENT(c), ok_json, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(ai_response_get_cost_micros(response), ==, -1);
+
+    g_assert_true(AI_CLI_CLIENT_GET_CLASS(c)->parse_stream_events(
+        AI_CLI_CLIENT(c),
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":3}}",
+        response, events, &error));
+    g_assert_no_error(error);
+    event = g_ptr_array_index(events, 0);
+    g_assert_cmpint(ai_event_get_kind(event), ==, AI_EVENT_USAGE);
+    g_assert_cmpint(ai_event_get_cost_micros(event), ==, -1);
 }
 
 static void test_malformed(void)
@@ -372,6 +417,8 @@ static void test_event_translation(void)
     g_assert_cmpstr(ai_tool_use_get_id(ai_event_get_tool_use(g_ptr_array_index(events, 2))), ==, "c");
     g_assert_cmpstr(ai_tool_result_get_content(ai_event_get_tool_result(g_ptr_array_index(events, 3))), ==, "/tmp");
     g_assert_false(ai_tool_result_get_is_error(ai_event_get_tool_result(g_ptr_array_index(events, 3))));
+    g_assert_cmpint(ai_event_get_cost_micros(g_ptr_array_index(events, 5)), ==, 350);
+    g_assert_cmpint(ai_response_get_cost_micros(response), ==, 350);
 }
 
 static void test_tool_variants(void)
@@ -676,6 +723,8 @@ int main(int argc, char **argv)
     g_test_add_func("/codex/registration", test_registration);
     g_test_add_func("/codex/argv", test_argv);
     g_test_add_func("/codex/parse", test_parse);
+    g_test_add_func("/codex/astra-cost", test_astra_usage_event_cost);
+    g_test_add_func("/codex/unpriced", test_unpriced_model_omits_cost);
     g_test_add_func("/codex/malformed", test_malformed);
     g_test_add_data_func("/codex/process/sync", GINT_TO_POINTER(0), test_subprocess);
     g_test_add_data_func("/codex/process/async", GINT_TO_POINTER(1), test_subprocess);

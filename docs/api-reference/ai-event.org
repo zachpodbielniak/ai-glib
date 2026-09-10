@@ -106,7 +106,9 @@ Two of those are easy to misread:
 - =cost_micros= is *-1* for "the provider does not report cost", not zero. A
   zero would read as "this turn was free", which for an unpriced local model
   is true and for a rate-limited API call is a lie. opencode reports no cost
-  at all, so every one of its usage events carries -1.
+  at all, so every one of its usage events carries -1. Codex exec is the same
+  for unpriced models; =gpt-6-astra= is priced at $10/M input and $50/M
+  output because the CLI never sends a USD total.
 - =timestamp= is monotonic rather than wall-clock. The only thing anybody asks
   of it is how long a tool took, and a clock adjustment mid-run must not
   answer that with a negative number.
