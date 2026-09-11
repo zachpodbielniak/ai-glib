@@ -876,6 +876,37 @@ ai_resource_get_path(AiResource *self)
 }
 
 /**
+ * ai_resource_prefix_skill_dir:
+ * @self: an #AiResource
+ * @text: the body as it will be handed to the model, already expanded
+ *
+ * For a skill, prefix @text with the directory the skill was read from, so
+ * relative paths such as references/ have something to resolve against.
+ * Applied after expansion so the path can never be read as a substitution.
+ * The discovery path is preserved without resolving symbolic links.
+ *
+ * Returns: (transfer full): a copy of @text, prefixed for file-backed skills
+ */
+gchar *
+ai_resource_prefix_skill_dir(
+	AiResource  *self,
+	const gchar *text
+){
+	g_autofree gchar *dir = NULL;
+	const gchar *path;
+
+	g_return_val_if_fail(AI_IS_RESOURCE(self), NULL);
+	g_return_val_if_fail(text != NULL, NULL);
+
+	path = ai_resource_get_path(self);
+	if (ai_resource_get_kind(self) != AI_RESOURCE_SKILL || path == NULL)
+		return g_strdup(text);
+
+	dir = g_path_get_dirname(path);
+	return g_strdup_printf("Base directory for this skill: %s\n\n%s", dir, text);
+}
+
+/**
  * ai_resource_get_origin:
  * @self: an #AiResource
  *

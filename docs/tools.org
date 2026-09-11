@@ -245,7 +245,12 @@ watching one object sees the subagent's tool calls too.
 |-----------+--------+----------|
 | =name=    | string | yes      |
 
-Returns a skill's body, so the model can load a written procedure for
+Returns a skill's body prefixed with =Base directory for this skill: <directory>=
+and a blank line when the skill has a file path. The directory is the one
+where the skill was discovered, preserving symlinks, so the model can resolve
+relative references. The body is not expanded by this tool; placeholders and
+shell syntax remain literal. In-memory skills without a path return their
+body unchanged. This lets the model load a written procedure for
 itself rather than waiting to be handed one. Appears alongside =task=
 when a registry is configured.
 

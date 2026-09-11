@@ -30,6 +30,8 @@ const gchar    *ai_resource_get_body        (AiResource *self);
 const gchar    *ai_resource_get_path        (AiResource *self);
 const gchar    *ai_resource_get_origin      (AiResource *self);
 
+gchar *ai_resource_prefix_skill_dir (AiResource *self, const gchar *text);
+
 /* Any frontmatter key. A sequence comes back joined with ", ". */
 const gchar *ai_resource_get_meta         (AiResource *self, const gchar *key);
 
@@ -51,6 +53,15 @@ const gchar *ai_resource_scope_to_string (AiResourceScope scope);
 Pass =name= to =ai_resource_new_from_file()= when the path alone does not
 say it --- that is how a namespaced command in =git/status.md= becomes
 =git:status=. A frontmatter =name:= still wins over both.
+
+=ai_resource_prefix_skill_dir()= returns a newly allocated string. For a
+file-backed =AI_RESOURCE_SKILL=, it prepends
+=Base directory for this skill: <directory>= and a blank line to =text=.
+The directory comes from =ai_resource_get_path()= without resolving symlinks.
+Other resource kinds and pathless skills return an unchanged copy of =text=.
+Pass non-NULL text after any template or shell expansion so the directory
+cannot be interpreted as substitution syntax. The resource body is unchanged.
+Both slash-command expansion and the =skill= tool use this helper.
 
 ** Properties
 All read-only: =kind=, =scope=, =name=, =description=, =body=, =path=,

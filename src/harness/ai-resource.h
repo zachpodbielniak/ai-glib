@@ -98,6 +98,12 @@ ai_resource_get_body(AiResource *self);
 const gchar *
 ai_resource_get_path(AiResource *self);
 
+gchar *
+ai_resource_prefix_skill_dir(
+	AiResource  *self,
+	const gchar *text
+);
+
 const gchar *
 ai_resource_get_origin(AiResource *self);
 

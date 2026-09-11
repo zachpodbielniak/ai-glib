@@ -2713,7 +2713,7 @@ tool_skill (
         return NULL;
     }
 
-    return g_strdup (ai_resource_get_body (resource));
+	return ai_resource_prefix_skill_dir(resource, ai_resource_get_body(resource));
 }
 
 /* ================================================================

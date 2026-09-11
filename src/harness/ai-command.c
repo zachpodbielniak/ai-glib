@@ -1370,6 +1370,7 @@ ai_command_set_resolve(
         AiResource        *resource = ai_command_get_resource(command);
         g_auto(GStrv)      argv = ai_command_split_arguments(result->arguments);
         gboolean           shell_allowed;
+		g_autofree gchar *expanded = NULL;
 
         switch (self->shell_policy)
         {
@@ -1387,10 +1388,11 @@ ai_command_set_resolve(
                 break;
         }
 
-        result->prompt = expand_body(ai_resource_get_body(resource),
+        expanded = expand_body(ai_resource_get_body(resource),
                                      result->arguments,
                                      (const gchar *const *)argv,
                                      cwd, shell_allowed, cancellable);
+		result->prompt = ai_resource_prefix_skill_dir(resource, expanded);
 
 		/* Skills describe a procedure, not necessarily an argument template.
 		 * Preserve the full task even when the body uses only $1 or mentions
