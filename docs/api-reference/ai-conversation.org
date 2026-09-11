@@ -213,3 +213,11 @@ void         ai_conversation_clear_carried_context(AiConversation *self);
 written into it, so a host reading =system-prompt= back sees what it set.
 The host's own instructions come *last*, so they keep their force over a
 digest that may be tens of kilobytes.
+
+** Image-bearing turns
+
+=ai_conversation_send_images_async(self, display_text, text, images, cancellable, callback, user_data)= is the structured counterpart of =send_full_async()=. =images= is a borrowed =GList= of =AiImageContent= objects; the new user message takes references synchronously before the function returns. The caller may immediately release the list and its image references. =text= may be NULL or empty when images are present. A non-image block is rejected with =AI_ERROR_INVALID_REQUEST= before history or transcript mutation. =display_text= optionally overrides transcript text; an attachment marker is appended without image bytes. Complete with =ai_conversation_send_images_finish()= (or the equivalent =send_finish()=).
+
+=ai_conversation_send_input_images_async(self, line, images, cancellable, callback, user_data)= preserves those blocks through the usual command/mention pipeline. =line= is non-NULL, but may be empty for an image-only turn. =ai_conversation_send_input_images_finish()= has the same result and optional =out_command= output as =send_input_finish()=. A resolved local built-in does not send a turn or consume attachments; the frontend should retain its image draft when no turn starts. Images reach streaming, non-streaming and local-tool calls through the same message list.
+
+The library APIs do not read the clipboard, decode image files, enforce ai-tui's draft limits or promise model vision support. The frontend owns those policies. Existing text-only APIs delegate with a NULL image list, preserving their behavior and ABI. See [[file:../tui.org][Pasting images]] for the supported transport matrix, clipboard helpers, temporary-file lifecycle and end-to-end tests.

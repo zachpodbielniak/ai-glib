@@ -116,8 +116,8 @@ append_projected_part(GString *out, const gchar *part)
  * blocks gain explicit, deterministic markers so a CLI reached after a
  * provider switch can see the tool exchange that produced the current state.
  */
-gchar *
-ai_cli_client_project_message(AiMessage *message)
+static gchar *
+project_message(AiMessage *message, gboolean multimodal)
 {
     g_autoptr(GString) body = NULL;
     g_autoptr(GString) out = NULL;
@@ -176,10 +176,11 @@ ai_cli_client_project_message(AiMessage *message)
                 ai_image_content_get_image(AI_IMAGE_CONTENT(block));
             g_autofree gchar *part = g_strdup_printf(
                 "[Image: mime=%s; bytes=%" G_GSIZE_FORMAT
-                "; binary content is not representable in a CLI stdin prompt]",
+                "%s]",
                 image != NULL && ai_image_get_mime_type(image) != NULL
                     ? ai_image_get_mime_type(image) : "unknown",
-                image != NULL ? ai_image_get_size(image) : 0);
+                image != NULL ? ai_image_get_size(image) : 0,
+				multimodal ? "" : "; binary content is not representable in a CLI stdin prompt");
 
             append_projected_part(body, part);
         }
@@ -209,6 +210,21 @@ ai_cli_client_project_message(AiMessage *message)
 
     g_string_append_len(out, body->str, body->len);
     return g_string_free(g_steal_pointer(&out), FALSE);
+}
+
+/* Text-only wrappers retain the explicit unsupported-image warning. */
+gchar *
+ai_cli_client_project_message(AiMessage *message)
+{
+	return project_message(message, FALSE);
+}
+
+/* These callers transport the payload separately, so the text marker must
+ * not incorrectly tell the model that no image was delivered. */
+gchar *
+ai_cli_client_project_multimodal_message(AiMessage *message)
+{
+	return project_message(message, TRUE);
 }
 
 /*
@@ -2812,4 +2828,69 @@ ai_cli_client_stream_run_finish(
     g_return_val_if_fail(g_task_is_valid(result, self), NULL);
 
     return g_task_propagate_pointer(G_TASK(result), error);
+}
+
+/* Test the same projected slice used by argv and stdin builders: resumed
+ * sessions must not attach historical images a second time. */
+gboolean
+ai_cli_messages_have_images(GList *messages)
+{
+	GList *l;
+	GList *b;
+
+	for (l = messages; l != NULL; l = l->next)
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+			if (AI_IS_IMAGE_CONTENT(b->data)) return TRUE;
+	return FALSE;
+}
+
+/* A native session already owns images from its earlier turns. This slice
+ * applies even when legacy text projection still repeats textual history. */
+GList *
+ai_cli_client_messages_for_images(AiCliClient *self, GList *messages)
+{
+	const gchar *session = ai_cli_client_get_session_id(self);
+
+	if (ai_cli_client_get_session_persistence(self) && session != NULL && *session)
+		return g_list_last(messages);
+	return messages;
+}
+
+/* Anthropic-style CLI input is one newline-delimited user event. Keep the
+ * existing text projection (including its role boundaries) and attach the
+ * actual image blocks alongside it, using their established wire serializer. */
+gchar *
+ai_cli_image_user_event(GList *messages, const gchar *text)
+{
+	g_autoptr(JsonBuilder) builder = json_builder_new();
+	g_autoptr(JsonNode) root = NULL;
+	g_autofree gchar *json = NULL;
+	GList *l;
+	GList *b;
+
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "type");
+	json_builder_add_string_value(builder, "user");
+	json_builder_set_member_name(builder, "message");
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "role");
+	json_builder_add_string_value(builder, "user");
+	json_builder_set_member_name(builder, "content");
+	json_builder_begin_array(builder);
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "type");
+	json_builder_add_string_value(builder, "text");
+	json_builder_set_member_name(builder, "text");
+	json_builder_add_string_value(builder, text);
+	json_builder_end_object(builder);
+	for (l = messages; l != NULL; l = l->next)
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+			if (AI_IS_IMAGE_CONTENT(b->data))
+				json_builder_add_value(builder, ai_content_block_to_json(b->data));
+	json_builder_end_array(builder);
+	json_builder_end_object(builder);
+	json_builder_end_object(builder);
+	root = json_builder_get_root(builder);
+	json = json_to_string(root, FALSE);
+	return g_strconcat(json, "\n", NULL);
 }

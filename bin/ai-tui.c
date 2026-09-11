@@ -32,6 +32,7 @@
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
 #include "ai-tui-panel.h"
+#include "ai-tui-images.h"
 
 /* ================================================================
  * Options
@@ -387,6 +388,9 @@ typedef struct
 	gint approval_answer;
 	gboolean sending;
 	gboolean pasting;
+	GList *images;                 /* AiImageContent references in the draft */
+	GCancellable *clipboard_cancel;
+	gboolean clipboard_pending;
 	gboolean skip_permissions;
 
     GString        *input;
@@ -1190,6 +1194,13 @@ draw_input(App *app)
 		mvwaddstr(app->input_win, 0, 2, title);
 	}
 	draw_sweep(app, app->input_win, 0, busy ? 30 : 13, width - (busy ? 32 : 15));
+	if (app->images != NULL || app->clipboard_pending)
+	{
+		g_autofree gchar *attachments = g_strdup_printf(" %u images%s ",
+			g_list_length(app->images), app->clipboard_pending ? " (reading)" : "");
+		gint at = MAX(2, width - (gint)strlen(attachments) - 2);
+		mvwaddnstr(app->input_win, 0, at, attachments, width - at - 1);
+	}
 	wattrset(app->input_win, border);
 	pen.width = MAX(1, width - INPUT_GUTTER - 2);
     pen.max_rows = rows;
@@ -2001,6 +2012,7 @@ show_help(App *app)
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
                     "  ^G           edit the prompt in $EDITOR\n"
+					"  ^V           attach clipboard image (up to 4, 5 MiB each)\n"
 					"  Delete       delete the next Unicode character\n"
 					"  ^W / ^K      kill previous word / to line end\n"
 					"  ^Y           yank the last killed text\n"
@@ -2885,6 +2897,11 @@ static gboolean
 handle_interrupt(App *app)
 {
 	app->pasting = FALSE;
+	if (app->clipboard_pending)
+	{
+		g_cancellable_cancel(app->clipboard_cancel);
+		return FALSE;
+	}
 	if (app->approval_prompt != NULL)
 	{
 		app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
@@ -2909,8 +2926,9 @@ handle_interrupt(App *app)
         return FALSE;
     }
 
-    if (app->input->len > 0)
+    if (app->input->len > 0 || app->images != NULL)
     {
+		g_clear_list(&app->images, g_object_unref);
         g_string_truncate(app->input, 0);
         app->cursor = 0;
         app->history_pos = -1;
@@ -2969,6 +2987,53 @@ search_step(App *app, gint direction)
 			return;
 		}
 	}
+}
+
+/* A completed clipboard read belongs to the draft, never the running turn. */
+static void
+on_image_pasted(GObject *source, GAsyncResult *result, gpointer data)
+{
+	App *app = data;
+	g_autoptr(GError) error = NULL;
+	AiImageContent *image = g_task_propagate_pointer(G_TASK(result), &error);
+	g_autofree gchar *notice = NULL;
+
+	(void)source;
+	app->clipboard_pending = FALSE;
+	g_clear_object(&app->clipboard_cancel);
+	if (image != NULL)
+	{
+		app->images = g_list_append(app->images, image);
+		notice = g_strdup_printf("%u image(s) attached; Enter sends, Ctrl+C clears draft",
+		                         g_list_length(app->images));
+		ui_feedback(app, notice, AI_STYLE_COMMAND);
+	}
+	else
+		ui_feedback(app, error->message, AI_STYLE_ERROR);
+	app_schedule_redraw(app);
+}
+
+/* Terminal paste carries text only; Ctrl+V explicitly reads the desktop's
+ * image selection. Keep the original Wayland MIME bytes, with an X11 PNG
+ * fallback. Missing utilities and unavailable selections are visible errors. */
+static void
+paste_image(App *app)
+{
+	const gchar *wayland[] = { "wl-paste", "--no-newline", "--type", "image", NULL };
+	const gchar *x11[] = { "xclip", "-selection", "clipboard", "-t", "image/png", "-o", NULL };
+
+	if (app->clipboard_pending) return;
+	if (g_list_length(app->images) >= TUI_IMAGE_MAX_COUNT)
+	{
+		ui_feedback(app, "At most four images per draft; Ctrl+C clears the draft", AI_STYLE_ERROR);
+		return;
+	}
+	completion_close(app);
+	app->clipboard_pending = TRUE;
+	app->clipboard_cancel = g_cancellable_new();
+	ui_feedback(app, "Reading clipboard image...", AI_STYLE_COMMAND);
+	tui_clipboard_read_async(g_getenv("WAYLAND_DISPLAY") != NULL ? wayland : x11,
+	                         app->clipboard_cancel, 5000, on_image_pasted, app);
 }
 
 static gboolean
@@ -3059,6 +3124,9 @@ drain_keys(App *app)
 		if (kind == OK && ch >= 256) continue;
         switch (ch)
         {
+			case 22: /* ^V: attach the clipboard image */
+				paste_image(app);
+				break;
 			case KEY_RESIZE:
 				clearok(curscr, TRUE);
 				break;
@@ -3310,7 +3378,7 @@ drain_keys(App *app)
                 break;
 
             case 4:   /* ^D: quit, on an empty line */
-                if (app->input->len == 0)
+                if (app->input->len == 0 && app->images == NULL && !app->clipboard_pending)
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
@@ -3922,14 +3990,40 @@ draw_completion(App *app)
     wnoutrefresh(app->transcript_win);
 }
 
+/* Local commands must remain usable with an unsupported provider and images
+ * queued, especially /provider and /quit. Lookup is metadata-only: never run
+ * prompt expansion twice just to decide whether an attachment can be sent. */
+static gboolean
+image_draft_is_local_command(App *app)
+{
+	g_autofree gchar *line = g_strdup(app->input->str);
+	g_autofree gchar *name = NULL;
+	g_autoptr(AiCommand) command = NULL;
+
+	g_strstrip(line);
+	if (opt_no_expand || app->commands == NULL || line[0] != '/') return FALSE;
+	name = g_strndup(line + 1, strcspn(line + 1, " \t\r\n"));
+	command = ai_command_set_lookup(app->commands, name);
+	return command != NULL && ai_command_get_kind(command) == AI_COMMAND_BUILTIN;
+}
+
 static void
 app_send(App *app)
 {
     g_autofree gchar *line = NULL;
+	GObject *provider = ai_conversation_get_provider(app->conversation);
 	/* Enter while busy leaves the entire draft, cursor and history intact. */
-	if (app->sending || ai_conversation_get_busy(app->conversation)) return;
+	if (app->sending || app->clipboard_pending || ai_conversation_get_busy(app->conversation)) return;
+	if (app->images != NULL && !image_draft_is_local_command(app) &&
+		(AI_IS_CLAUDE_TMUX_CLIENT(provider) || (AI_IS_CLI_CLIENT(provider) &&
+		!AI_IS_CODEX_CLI_CLIENT(provider) && !AI_IS_CLAUDE_CODE_CLIENT(provider) &&
+		!AI_IS_ANTIGRAVITY_CLIENT(provider))))
+	{
+		ui_feedback(app, "This CLI wrapper cannot forward images; choose an HTTP provider, codex-cli, claude-code or antigravity", AI_STYLE_ERROR);
+		return;
+	}
 
-    if (app->input->len == 0)
+    if (app->input->len == 0 && app->images == NULL)
     {
         return;
     }
@@ -3941,7 +4035,7 @@ app_send(App *app)
     app->cursor = 0;
     app->history_pos = -1;
 
-    if (line[0] == '\0')
+    if (line[0] == '\0' && app->images == NULL)
     {
         return;
     }
@@ -3961,13 +4055,18 @@ app_send(App *app)
      */
     if (opt_no_expand)
     {
-        ai_conversation_send_async(app->conversation, line, app->cancellable,
+        ai_conversation_send_images_async(app->conversation, NULL, line, app->images, app->cancellable,
                                    on_sent, app);
+		if (ai_conversation_get_busy(app->conversation))
+			g_clear_list(&app->images, g_object_unref);
         return;
     }
 
-    ai_conversation_send_input_async(app->conversation, line,
+    ai_conversation_send_input_images_async(app->conversation, line, app->images,
                                      app->cancellable, on_input_sent, app);
+	/* Local built-ins and resolution errors leave attachments in the draft. */
+	if (ai_conversation_get_busy(app->conversation))
+		g_clear_list(&app->images, g_object_unref);
 }
 
 /* First turn from leftover argv, once the loop is running. */
@@ -4957,6 +5056,12 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	if (app.clipboard_pending)
+	{
+		g_cancellable_cancel(app.clipboard_cancel);
+		while (app.clipboard_pending) g_main_context_iteration(NULL, TRUE);
+	}
+	g_clear_list(&app.images, g_object_unref);
 	if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
 	if (app.redraw_id != 0)
 	{

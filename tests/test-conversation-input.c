@@ -868,16 +868,82 @@ test_clear_empties_the_panel_but_not_the_brigade(void)
 	}
 }
 
+/* Attachments survive expansion, CLI passthrough and the local tool runner.
+ * Built-ins keep ownership with the draft; invalid blocks cannot start a turn. */
+static void
+test_image_pipeline(gconstpointer data)
+{
+	guint mode = GPOINTER_TO_UINT(data);
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiCommandSet) commands = command_set_with("inspect", AI_RESOURCE_COMMAND,
+		"---\ndescription: inspect fixture\n---\nInspect @pixel.txt");
+	g_autoptr(GBytes) bytes = g_bytes_new_static("\211PNG\r\n\032\n", 8);
+	g_autoptr(AiContentBlock) image = mode == 4 ?
+		AI_CONTENT_BLOCK(ai_text_content_new("not an image")) :
+		AI_CONTENT_BLOCK(ai_image_content_new_from_bytes(bytes, "image/png"));
+	g_autoptr(GList) images = g_list_append(NULL, image);
+	const gchar *line = mode == 0 ? "/inspect" : mode == 2 ? "/help" : "Inspect @pixel.txt";
+	Outcome outcome = { NULL, FALSE, NULL, NULL };
+	GList *blocks;
+
+	write_file("pixel.txt", "expanded pixel context");
+	ai_conversation_set_command_set(conversation, commands);
+	ai_conversation_set_working_directory(conversation, sandbox);
+	ai_conversation_set_passthrough_commands(conversation, mode == 1);
+	ai_conversation_set_local_tools(conversation, mode == 3);
+	ai_mock_provider_push_text(mock, "seen");
+	outcome.loop = g_main_loop_new(NULL, FALSE);
+	ai_conversation_send_input_images_async(conversation, line, images, NULL, on_sent, &outcome);
+	g_clear_object(&image);
+	g_clear_pointer(&images, g_list_free);
+	g_main_loop_run(outcome.loop);
+	g_main_loop_unref(outcome.loop);
+	if (mode == 4)
+	{
+		g_assert_error(outcome.error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+		g_assert_null(ai_conversation_get_messages(conversation));
+	}
+	else if (mode == 2)
+	{
+		g_assert_no_error(outcome.error);
+		g_assert_nonnull(outcome.command);
+		g_assert_null(ai_conversation_get_messages(conversation));
+	}
+	else
+	{
+		g_assert_no_error(outcome.error);
+		g_assert_true(outcome.ok);
+		blocks = ai_message_get_content_blocks(ai_conversation_get_messages(conversation)->data);
+		g_assert_cmpuint(g_list_length(blocks), ==, 2);
+		g_assert_true(AI_IS_IMAGE_CONTENT(blocks->next->data));
+		g_assert_true(g_bytes_equal(bytes, ai_image_get_bytes(ai_image_content_get_image(blocks->next->data))));
+		g_assert_nonnull(strstr(last_user_message(conversation), mode == 1 ? "@pixel.txt" : "expanded pixel context"));
+	}
+	outcome_clear(&outcome);
+}
+
 int
 main(int argc, char *argv[])
 {
 	GError *error = NULL;
 	int     status;
 
+	guint image_mode;
 	g_test_init(&argc, &argv, NULL);
+	for (image_mode = 0; image_mode < 5; image_mode++)
+	{
+		g_autofree gchar *path = g_strdup_printf("/ai-glib/input/images/%u", image_mode);
+		g_test_add_data_func(path, GUINT_TO_POINTER(image_mode), test_image_pipeline);
+	}
 
 	sandbox = g_dir_make_tmp("ai-glib-convinput-XXXXXX", &error);
 	g_assert_no_error(error);
+	/* Keep registry discovery and local-tool tests away from user state. */
+	g_setenv("HOME", sandbox, TRUE);
+	g_setenv("XDG_CONFIG_HOME", sandbox, TRUE);
+	g_setenv("XDG_STATE_HOME", sandbox, TRUE);
+	g_setenv("XDG_CACHE_HOME", sandbox, TRUE);
 
 	g_test_add_func("/ai-glib/input/http-expands-mentions",
 	                test_http_provider_expands_mentions);

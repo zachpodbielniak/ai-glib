@@ -581,7 +581,7 @@ ai_antigravity_client_build_stdin(
 	{
 		AiMessage *msg = l->data;
 		g_autofree gchar *projected =
-			ai_cli_client_project_message(msg);
+			ai_cli_client_project_multimodal_message(msg);
 
 		if (projected == NULL || projected[0] == '\0')
 			continue;
@@ -600,7 +600,9 @@ ai_antigravity_client_build_stdin(
 	{
 		g_autofree gchar *flat = g_string_free(prompt, FALSE);
 
-		return agy_user_event_json(flat);
+		if (ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
+            return ai_cli_image_user_event(ai_cli_client_messages_for_images(client, messages), flat);
+        return agy_user_event_json(flat);
 	}
 }
 

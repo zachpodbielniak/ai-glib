@@ -888,8 +888,14 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup(self->mcp_config_path));
     }
 
+    if (ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
+    {
+        g_ptr_array_add(args, g_strdup("--input-format"));
+        g_ptr_array_add(args, g_strdup("stream-json"));
+    }
+
     /* Output format */
-    if (streaming)
+    if (streaming || ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
     {
         g_ptr_array_add(args, g_strdup("--output-format"));
         g_ptr_array_add(args, g_strdup("stream-json"));
@@ -1031,7 +1037,7 @@ ai_claude_code_client_build_stdin(
     for (l = messages; l != NULL; l = l->next)
     {
         AiMessage *msg = l->data;
-        g_autofree gchar *projected = ai_cli_client_project_message(msg);
+        g_autofree gchar *projected = ai_cli_client_project_multimodal_message(msg);
 
         if (projected != NULL && projected[0] != '\0')
         {
@@ -1050,6 +1056,11 @@ ai_claude_code_client_build_stdin(
         "Tool use is fine, but you MUST provide a text summary of "
         "your work when finished. Never end your turn on tool calls alone.");
 
+    if (ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
+    {
+        g_autofree gchar *flat = g_string_free(prompt, FALSE);
+        return ai_cli_image_user_event(ai_cli_client_messages_for_images(client, messages), flat);
+    }
     return g_string_free(prompt, FALSE);
 }
 
@@ -1103,9 +1114,33 @@ ai_claude_code_client_parse_json_output(
     g_autoptr(AiResponse) response = NULL;
 
     parser = json_parser_new();
-    if (!json_parser_load_from_data(parser, json, -1, error))
+    if (!json_parser_load_from_data(parser, json, -1, NULL) ||
+		ai_json_root_object(parser) == NULL)
     {
-        return NULL;
+		g_auto(GStrv) lines = g_strsplit(json, "\n", -1);
+		guint i;
+		gboolean found = FALSE;
+
+		/* Image input requires stream-json output even for a non-streaming
+		 * caller. Select the result envelope; never accept a partial event. */
+		for (i = 0; lines[i] != NULL; i++)
+		{
+			if (json_parser_load_from_data(parser, lines[i], -1, NULL))
+			{
+				JsonObject *candidate = ai_json_root_object(parser);
+				if (candidate != NULL && g_strcmp0(ai_json_get_string(candidate, "type", NULL), "result") == 0)
+				{
+					found = TRUE;
+					break;
+				}
+			}
+		}
+		if (!found)
+		{
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+			                    "Expected a Claude result JSON object");
+			return NULL;
+		}
     }
 
     /* NULL root: see the note in the streaming parser. */

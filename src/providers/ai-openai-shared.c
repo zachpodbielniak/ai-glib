@@ -343,7 +343,29 @@ ai_openai_shared_serialize_messages_array(
             /* user role */
             if (images != NULL)
             {
-                emit_multimodal_user_message(builder, text, images);
+				if (flags & AI_OPENAI_SERIALIZE_OLLAMA_IMAGES)
+				{
+					/* Native /api/chat wants a string plus raw base64 images,
+					 * unlike /v1/chat/completions' image_url content parts. */
+					GList *image;
+					json_builder_begin_object(builder);
+					json_builder_set_member_name(builder, "role");
+					json_builder_add_string_value(builder, "user");
+					json_builder_set_member_name(builder, "content");
+					json_builder_add_string_value(builder, text != NULL ? text : "");
+					json_builder_set_member_name(builder, "images");
+					json_builder_begin_array(builder);
+					for (image = images; image != NULL; image = image->next)
+					{
+						g_autofree gchar *base64 = ai_image_dup_base64(
+							ai_image_content_get_image(AI_IMAGE_CONTENT(image->data)));
+						json_builder_add_string_value(builder, base64);
+					}
+					json_builder_end_array(builder);
+					json_builder_end_object(builder);
+				}
+				else
+					emit_multimodal_user_message(builder, text, images);
             }
             else if (text != NULL)
             {

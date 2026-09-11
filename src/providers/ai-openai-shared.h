@@ -33,11 +33,14 @@ G_BEGIN_DECLS
  *     emitted as a JSON object (not a string). Required by Ollama's
  *     /api/chat endpoint, which rejects the OpenAI string form even though
  *     the rest of the message shape is OpenAI-compatible.
+ * @AI_OPENAI_SERIALIZE_OLLAMA_IMAGES: native /api/chat image arrays of base64
+ *     strings alongside text content, rather than OpenAI image_url parts.
  */
 typedef enum
 {
     AI_OPENAI_SERIALIZE_DEFAULT         = 0,
-    AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT  = 1 << 0
+    AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT  = 1 << 0,
+	AI_OPENAI_SERIALIZE_OLLAMA_IMAGES = 1 << 1
 } AiOpenAISerializeFlags;
 
 /*

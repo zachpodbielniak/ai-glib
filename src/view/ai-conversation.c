@@ -33,6 +33,7 @@
 #include "core/ai-native-session.h"
 #include "core/ai-streamable.h"
 #include "model/ai-message.h"
+#include "model/ai-image-content.h"
 
 struct _AiConversation
 {
@@ -810,7 +811,39 @@ ai_conversation_send_full_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
+	ai_conversation_send_images_async(self, display_text, text, NULL,
+	                                  cancellable, callback, user_data);
+}
+
+/**
+ * ai_conversation_send_images_async:
+ * @self: an #AiConversation
+ * @display_text: (nullable): transcript text, or %NULL to display @text
+ * @text: (nullable): text to send; may be empty for an image-only turn
+ * @images: (nullable) (element-type AiImageContent) (transfer none): images
+ * @cancellable: (nullable): cancellation token
+ * @callback: (scope async): completion callback
+ * @user_data: callback data
+ *
+ * Sends text and image content blocks in one user message. The message takes
+ * references to the images before returning; callers may release their list.
+ * The transcript records an attachment marker without embedding image bytes.
+ * Complete with ai_conversation_send_finish().
+ */
+void
+ai_conversation_send_images_async(
+    AiConversation      *self,
+    const gchar         *display_text,
+    const gchar         *text,
+    GList               *images,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
     GTask *task;
+    GList *l;
+    g_autoptr(AiMessage) message = NULL;
+    g_autofree gchar *display = NULL;
     g_autoptr(AiViewBlock) turn = NULL;
     g_autofree gchar *system_prompt = NULL;
 
@@ -826,12 +859,27 @@ ai_conversation_send_full_async(
         return;
     }
 
-    if (text == NULL || text[0] == '\0')
+    if ((text == NULL || text[0] == '\0') && images == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
                                 "nothing to send");
         g_object_unref(task);
         return;
+    }
+
+    for (l = images; l != NULL; l = l->next)
+    {
+		AiImage *image = AI_IS_IMAGE_CONTENT(l->data) ?
+			ai_image_content_get_image(l->data) : NULL;
+
+        if (image == NULL || ai_image_get_bytes(image) == NULL ||
+			ai_image_get_size(image) == 0 || ai_image_get_mime_type(image) == NULL)
+        {
+            g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                                    "attachment must be an image content block with bytes and a MIME type");
+            g_object_unref(task);
+            return;
+        }
     }
 
     /*
@@ -841,13 +889,18 @@ ai_conversation_send_full_async(
      * was actually sent would make a surprising answer impossible to
      * explain.
      */
-    turn = ai_view_turn_block_new(display_text != NULL ? display_text : text);
+    display = g_strdup_printf("%s%s", display_text != NULL ? display_text :
+                              (text != NULL ? text : ""), images != NULL ? "\n[Images attached]" : "");
+    turn = ai_view_turn_block_new(display);
     ai_transcript_append(self->transcript, turn);
 
     close_open_blocks(self);
     self->open_tools = NULL;
 
-    self->messages = g_list_append(self->messages, ai_message_new_user(text));
+    message = ai_message_new_user(text != NULL ? text : "");
+    for (l = images; l != NULL; l = l->next)
+        ai_message_add_content_block(message, g_object_ref(l->data));
+    self->messages = g_list_append(self->messages, g_steal_pointer(&message));
 
     self->task = task;
     self->cancellable = cancellable != NULL
@@ -2735,6 +2788,32 @@ ai_conversation_send_input_async(
     GAsyncReadyCallback  callback,
     gpointer             user_data
 ){
+	ai_conversation_send_input_images_async(self, line, NULL, cancellable,
+	                                        callback, user_data);
+}
+
+/**
+ * ai_conversation_send_input_images_async:
+ * @self: an #AiConversation
+ * @line: input to resolve and expand; may be empty with images
+ * @images: (nullable) (element-type AiImageContent) (transfer none): images
+ * @cancellable: (nullable): cancellation token
+ * @callback: (scope async): completion callback
+ * @user_data: callback data
+ *
+ * Runs the normal command and mention pipeline while retaining image blocks.
+ * Local built-ins do not send images; frontends should keep those attachments
+ * in the draft. Complete with ai_conversation_send_input_finish().
+ */
+void
+ai_conversation_send_input_images_async(
+    AiConversation      *self,
+    const gchar         *line,
+    GList               *images,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
     g_autoptr(AiCommandResult) resolved = NULL;
     g_autoptr(GError)          local_error = NULL;
     g_autofree gchar          *expanded = NULL;
@@ -2781,7 +2860,7 @@ ai_conversation_send_input_async(
                 expanded = ai_mention_expand(to_send != NULL ? to_send : "",
                                              self->working_directory, 0,
                                              NULL);
-                ai_conversation_send_full_async(self, line, expanded,
+                ai_conversation_send_images_async(self, line, expanded, images,
                                                 cancellable, callback,
                                                 user_data);
                 return;
@@ -2797,14 +2876,14 @@ ai_conversation_send_input_async(
         /* Byte-for-byte. The wrapped CLI resolves its own mentions and
          * its own commands, and doing it twice would be worse than not
          * at all. */
-        ai_conversation_send_async(self, line, cancellable, callback,
+        ai_conversation_send_images_async(self, NULL, line, images, cancellable, callback,
                                    user_data);
         return;
     }
 
     expanded = ai_mention_expand(line, self->working_directory, 0, NULL);
 
-    ai_conversation_send_full_async(self, line, expanded, cancellable,
+    ai_conversation_send_images_async(self, line, expanded, images, cancellable,
                                     callback, user_data);
 }
 
@@ -2841,4 +2920,44 @@ ai_conversation_send_input_finish(
     }
 
     return g_task_propagate_boolean(G_TASK(result), error);
+}
+
+/**
+ * ai_conversation_send_images_finish:
+ * @self: an #AiConversation
+ * @result: asynchronous result
+ * @error: (nullable): error return location
+ *
+ * Completes ai_conversation_send_images_async().
+ *
+ * Returns: whether the turn succeeded
+ */
+gboolean
+ai_conversation_send_images_finish(
+	AiConversation *self,
+	GAsyncResult *result,
+	GError **error
+){
+	return ai_conversation_send_finish(self, result, error);
+}
+
+/**
+ * ai_conversation_send_input_images_finish:
+ * @self: an #AiConversation
+ * @result: asynchronous result
+ * @out_command: (out) (optional) (transfer full) (nullable): resolved local command
+ * @error: (nullable): error return location
+ *
+ * Completes ai_conversation_send_input_images_async().
+ *
+ * Returns: whether the turn or local command resolution succeeded
+ */
+gboolean
+ai_conversation_send_input_images_finish(
+	AiConversation *self,
+	GAsyncResult *result,
+	AiCommandResult **out_command,
+	GError **error
+){
+	return ai_conversation_send_input_finish(self, result, out_command, error);
 }

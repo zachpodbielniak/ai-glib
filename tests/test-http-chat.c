@@ -1381,10 +1381,118 @@ test_many_streams_on_one_client(void)
 	tserver_free(ts);
 }
 
+/* Exercise image-bearing conversation input through each actual HTTP sender,
+ * in streaming and ordinary mode. Capture the wire request on loopback. */
+static void
+image_turn_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Turn *turn = data;
+
+	g_assert_true(ai_conversation_send_input_finish(AI_CONVERSATION(source), result, NULL, &turn->error));
+	g_assert_no_error(turn->error);
+	g_main_loop_quit(turn->loop);
+}
+
+static void
+test_conversation_images(gconstpointer data)
+{
+	guint variant = GPOINTER_TO_UINT(data);
+	guint kind = variant / 2;
+	gboolean streaming = variant % 2;
+	TServer *server = tserver_new();
+	g_autoptr(GObject) client = NULL;
+	g_autoptr(AiConversation) conversation = NULL;
+	g_autoptr(GBytes) bytes = g_bytes_new_static("\211PNG\r\n\032\n\0binary", 15);
+	g_autoptr(AiImageContent) image = ai_image_content_new_from_bytes(bytes, "image/png");
+	g_autoptr(GList) images = g_list_append(NULL, image);
+	g_autoptr(JsonParser) parser = NULL;
+	g_autofree gchar *expected = g_base64_encode(g_bytes_get_data(bytes, NULL), g_bytes_get_size(bytes));
+	g_autofree gchar *transcript = NULL;
+	JsonObject *request;
+	JsonObject *message;
+	JsonObject *part;
+	JsonArray *content;
+	const gchar *encoded;
+	const gchar *responses[] = { openai_ok_body, grok_ok_body, claude_ok_body, gemini_ok_body, ollama_ok_body };
+	const gchar *streams[] = { openai_sse_body, grok_sse_body, claude_sse_body, gemini_sse_body, ollama_ndjson_body };
+	Turn *turn = turn_new();
+
+	switch (kind)
+	{
+		case 0: client = G_OBJECT(make_openai(server)); break;
+		case 1: client = G_OBJECT(make_grok(server)); break;
+		case 2: client = G_OBJECT(make_claude(server)); break;
+		case 3: client = G_OBJECT(make_gemini(server)); break;
+		default: client = G_OBJECT(make_ollama(server)); break;
+	}
+	if (streaming)
+		tserver_set_response_full(server, SOUP_STATUS_OK,
+			kind == 4 ? "application/x-ndjson" : "text/event-stream", streams[kind]);
+	else
+		tserver_set_response(server, SOUP_STATUS_OK, responses[kind]);
+	conversation = ai_conversation_new(client);
+	ai_conversation_set_stream(conversation, streaming);
+	ai_conversation_send_input_images_async(conversation, "Describe the pixel", images, NULL, image_turn_done, turn);
+	/* The call takes refs before returning, rather than borrowing UI state. */
+	g_clear_object(&image);
+	g_clear_pointer(&images, g_list_free);
+	g_main_loop_run(turn->loop);
+	g_assert_cmpuint(tserver_hits(server), ==, 1);
+	request = tserver_last_json(server, &parser);
+	if (kind == 3)
+	{
+		message = json_array_get_object_element(json_object_get_array_member(request, "contents"), 0);
+		content = json_object_get_array_member(message, "parts");
+		g_assert_cmpstr(json_object_get_string_member(json_array_get_object_element(content, 0), "text"), ==, "Describe the pixel");
+		part = json_object_get_object_member(json_array_get_object_element(content, 1), "inlineData");
+		g_assert_cmpstr(json_object_get_string_member(part, "mimeType"), ==, "image/png");
+		encoded = json_object_get_string_member(part, "data");
+	}
+	else
+	{
+		message = json_array_get_object_element(json_object_get_array_member(request, "messages"), 0);
+		if (kind == 4)
+		{
+			g_assert_cmpstr(json_object_get_string_member(message, "content"), ==, "Describe the pixel");
+			encoded = json_array_get_string_element(json_object_get_array_member(message, "images"), 0);
+		}
+		else
+		{
+			content = json_object_get_array_member(message, "content");
+			g_assert_cmpstr(json_object_get_string_member(json_array_get_object_element(content, 0), "text"), ==, "Describe the pixel");
+			part = json_array_get_object_element(content, 1);
+			if (kind == 2)
+			{
+				part = json_object_get_object_member(part, "source");
+				g_assert_cmpstr(json_object_get_string_member(part, "media_type"), ==, "image/png");
+				encoded = json_object_get_string_member(part, "data");
+			}
+			else
+			{
+				encoded = json_object_get_string_member(json_object_get_object_member(part, "image_url"), "url");
+				g_assert_true(g_str_has_prefix(encoded, "data:image/png;base64,"));
+				encoded += strlen("data:image/png;base64,");
+			}
+		}
+	}
+	g_assert_cmpstr(encoded, ==, expected);
+	transcript = ai_transcript_to_text(ai_conversation_get_transcript(conversation), 0);
+	g_assert_nonnull(strstr(transcript, "Images attached"));
+	g_assert_null(strstr(transcript, expected));
+	turn_free(turn);
+	tserver_free(server);
+}
+
 int
 main(int argc, char *argv[])
 {
+	guint image_variant;
 	g_test_init(&argc, &argv, NULL);
+	for (image_variant = 0; image_variant < 10; image_variant++)
+	{
+		g_autofree gchar *path = g_strdup_printf("/ai-glib/http-chat/images/%u", image_variant);
+		g_test_add_data_func(path, GUINT_TO_POINTER(image_variant), test_conversation_images);
+	}
 
 	g_test_add_func("/ai-glib/http-chat/openai/round-trip",
 	                test_openai_chat_round_trip);

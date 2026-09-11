@@ -5,6 +5,8 @@
 #include "config.h"
 #include <string.h>
 #include <math.h>
+#include <glib/gstdio.h>
+#include "model/ai-image-content.h"
 #include "providers/ai-codex-cli-client.h"
 #include "core/ai-cli-client-private.h"
 #include "core/ai-json-util.h"
@@ -22,6 +24,8 @@ struct _AiCodexCliClient
     gchar *profile;
     gchar *turn_system_prompt;
     gchar **mcp_overrides;
+	gchar *image_directory;
+	GList *image_files;
     gboolean skip_permissions;
     gboolean continue_session;
     gboolean search;
@@ -84,6 +88,70 @@ static void
 arg(GPtrArray *args, const gchar *value)
 {
     g_ptr_array_add(args, g_strdup(value));
+}
+
+/* Codex accepts local paths, not inline bytes. Own private copies until the
+ * next invocation or finalization, including failed and cancelled turns. */
+static void
+clear_image_files(AiCodexCliClient *self)
+{
+	GList *l;
+
+	for (l = self->image_files; l != NULL; l = l->next)
+		g_unlink(l->data);
+	g_clear_list(&self->image_files, g_free);
+	if (self->image_directory != NULL)
+		g_rmdir(self->image_directory);
+	g_clear_pointer(&self->image_directory, g_free);
+}
+
+static gboolean
+append_image_files(AiCodexCliClient *self, GList *messages, GPtrArray *args)
+{
+	GList *l;
+	GList *b;
+	guint index = 0;
+
+	clear_image_files(self);
+	messages = ai_cli_client_messages_for_images(AI_CLI_CLIENT(self), messages);
+	if (!ai_cli_messages_have_images(messages)) return TRUE;
+	self->image_directory = g_dir_make_tmp("ai-glib-codex-images-XXXXXX", NULL);
+	if (self->image_directory == NULL) return FALSE;
+	for (l = messages; l != NULL; l = l->next)
+	{
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+		{
+			AiImage *image;
+			GBytes *bytes;
+			const gchar *mime;
+			const gchar *suffix;
+			g_autofree gchar *name = NULL;
+			g_autofree gchar *path = NULL;
+			gsize size;
+			gconstpointer data;
+
+			if (!AI_IS_IMAGE_CONTENT(b->data)) continue;
+			image = ai_image_content_get_image(AI_IMAGE_CONTENT(b->data));
+			bytes = ai_image_get_bytes(image);
+			mime = ai_image_get_mime_type(image);
+			suffix = g_strcmp0(mime, "image/jpeg") == 0 ? "jpg" :
+			         g_strcmp0(mime, "image/webp") == 0 ? "webp" :
+			         g_strcmp0(mime, "image/gif") == 0 ? "gif" : "png";
+			name = g_strdup_printf("image-%u.%s", ++index, suffix);
+			path = g_build_filename(self->image_directory, name, NULL);
+			data = g_bytes_get_data(bytes, &size);
+			if (!g_file_set_contents_full(path, data, (gssize)size,
+			                             G_FILE_SET_CONTENTS_NONE, 0600, NULL))
+			{
+				clear_image_files(self);
+				return FALSE;
+			}
+			arg(args, "--image");
+			arg(args, path);
+			self->image_files = g_list_append(self->image_files, g_steal_pointer(&path));
+		}
+	}
+	return TRUE;
 }
 
 static gchar **
@@ -160,6 +228,7 @@ build_argv(AiCliClient *client, GList *messages, const gchar *system_prompt,
         if (session != NULL && *session) arg(args, session);
         else arg(args, "--last");
     }
+    if (!append_image_files(self, messages, args)) return NULL;
     arg(args, "-");
     g_ptr_array_add(args, NULL);
     return (gchar **)g_ptr_array_free(g_steal_pointer(&args), FALSE);
@@ -181,7 +250,7 @@ build_stdin(AiCliClient *client, GList *messages)
     messages = ai_cli_client_messages_for_prompt(client, messages);
     for (l = messages; l != NULL; l = l->next)
     {
-        g_autofree gchar *text = ai_cli_client_project_message(l->data);
+        g_autofree gchar *text = ai_cli_client_project_multimodal_message(l->data);
         if (text != NULL && *text)
         {
             if (prompt->len > 0) g_string_append(prompt, "\n\n");
@@ -494,6 +563,7 @@ static void
 finalize(GObject *object)
 {
     AiCodexCliClient *self = AI_CODEX_CLI_CLIENT(object);
+    clear_image_files(self);
     g_free(self->sandbox);
     g_free(self->additional_directories);
     g_free(self->profile);

@@ -150,6 +150,42 @@ ai_conversation_send_full_async(
     gpointer             user_data
 );
 
+void
+ai_conversation_send_images_async(
+	AiConversation *self,
+	const gchar *display_text,
+	const gchar *text,
+	GList *images,
+	GCancellable *cancellable,
+	GAsyncReadyCallback callback,
+	gpointer user_data
+);
+
+void
+ai_conversation_send_input_images_async(
+	AiConversation *self,
+	const gchar *line,
+	GList *images,
+	GCancellable *cancellable,
+	GAsyncReadyCallback callback,
+	gpointer user_data
+);
+
+gboolean
+ai_conversation_send_images_finish(
+	AiConversation *self,
+	GAsyncResult *result,
+	GError **error
+);
+
+gboolean
+ai_conversation_send_input_images_finish(
+	AiConversation *self,
+	GAsyncResult *result,
+	AiCommandResult **out_command,
+	GError **error
+);
+
 gboolean
 ai_conversation_send_full_finish(
     AiConversation  *self,

@@ -8,6 +8,7 @@
  */
 
 #include "config.h"
+#include "model/ai-image-content.h"
 
 #include <string.h>
 
@@ -163,6 +164,22 @@ ai_gemini_client_build_request(
                 json_builder_add_string_value(builder, text != NULL ? text : "");
                 json_builder_end_object(builder);
             }
+			else if (AI_IS_IMAGE_CONTENT(block))
+			{
+				AiImage *image = ai_image_content_get_image(AI_IMAGE_CONTENT(block));
+				g_autofree gchar *base64 = ai_image_dup_base64(image);
+
+				/* Both streaming and ordinary requests use this builder. */
+				json_builder_begin_object(builder);
+				json_builder_set_member_name(builder, "inlineData");
+				json_builder_begin_object(builder);
+				json_builder_set_member_name(builder, "mimeType");
+				json_builder_add_string_value(builder, ai_image_get_mime_type(image));
+				json_builder_set_member_name(builder, "data");
+				json_builder_add_string_value(builder, base64);
+				json_builder_end_object(builder);
+				json_builder_end_object(builder);
+			}
             else if (AI_IS_TOOL_USE(block) && role == AI_ROLE_ASSISTANT)
             {
                 AiToolUse *tu = AI_TOOL_USE(block);

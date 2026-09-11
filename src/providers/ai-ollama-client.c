@@ -78,7 +78,7 @@ ai_ollama_client_build_request(
      * assistant messages). */
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT);
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT | AI_OPENAI_SERIALIZE_OLLAMA_IMAGES);
     json_builder_end_array(builder);
 
     /* Tools — Ollama accepts the OpenAI tool definition shape. */
@@ -1057,7 +1057,7 @@ ai_ollama_client_build_stream_request(
 
     json_builder_set_member_name(builder, "messages");
     json_builder_begin_array(builder);
-    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT);
+    ai_openai_shared_serialize_messages_array(builder, messages, system_prompt, AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT | AI_OPENAI_SERIALIZE_OLLAMA_IMAGES);
     json_builder_end_array(builder);
 
     if (tools != NULL)
