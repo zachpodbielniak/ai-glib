@@ -1120,6 +1120,7 @@ test_help_lists_commands_from_disk(void)
 
 	/* And the built-ins, which exist before any file is read. */
 	g_assert_nonnull(strstr(run->stdout_data, "/quit"));
+	g_assert_nonnull(strstr(run->stdout_data, "/exit"));
 	g_assert_nonnull(strstr(run->stdout_data, "/clear"));
 	g_assert_nonnull(strstr(run->stdout_data, "/reset"));
 
@@ -1763,6 +1764,21 @@ test_reset_dump(void)
 {
 	gchar *box = sandbox_new();
 	const gchar *args[] = { "--dump", "/reset", "-p", "grok-build", NULL };
+	Run *run = run_tui_in(box, args);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_cmpstr(run->stdout_data, ==, "");
+	g_assert_cmpstr(run->stderr_data, ==, "");
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* /exit is a local built-in: --dump must leave without sending a turn. */
+static void
+test_exit_dump(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = { "--dump", "/exit", "-p", "grok-build", NULL };
 	Run *run = run_tui_in(box, args);
 
 	g_assert_cmpint(run->status, ==, 0);
@@ -2500,6 +2516,7 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "clear", NULL },
 	{ "reset", NULL },
 	{ "quit", NULL },
+	{ "exit", NULL },
 	{ "model", "Model:" },
 	{ "provider", "Provider: Grok Build" },
 	{ "tools", "local tools are off" },
@@ -2546,7 +2563,8 @@ test_builtin_enter(gconstpointer data)
 	tmux_command("/expand command-audit-sentinel", "Would send:");
 	tmux_send(TUI_SESSION, command);
 	tmux_send(TUI_SESSION, "Enter");
-	if (g_str_equal(test_case->name, "quit"))
+	if (g_str_equal(test_case->name, "quit") ||
+	    g_str_equal(test_case->name, "exit"))
 		g_assert_true(tmux_wait_for_exit(TUI_SESSION));
 	else
 	{
@@ -3044,6 +3062,7 @@ main(int argc, char *argv[])
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
 	g_test_add_func("/ai-glib/tui/reset-session", test_reset_session);
 	g_test_add_func("/ai-glib/tui/reset-dump", test_reset_dump);
+	g_test_add_func("/ai-glib/tui/exit-dump", test_exit_dump);
 
 	tui_binary = find_tui_binary(argv[0]);
 

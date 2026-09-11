@@ -2398,7 +2398,7 @@ handle_builtin(App *app, AiCommandResult *result)
     const gchar *name = ai_command_result_get_name(result);
     const gchar *arguments = ai_command_result_get_arguments(result);
 
-    if (g_strcmp0(name, "quit") == 0)
+    if (g_strcmp0(name, "quit") == 0 || g_strcmp0(name, "exit") == 0)
     {
         app->running = FALSE;
 

@@ -248,7 +248,8 @@ is armed the status bar says =^C again to quit=; let it lapse and the
 next one starts over rather than quitting.
 
 =C-d= on an empty line quits outright, as it does in a shell, and =/quit=
-works when no turn is in flight; use =C-c= to cancel a running turn first.
+or =/exit= works when no turn is in flight; use =C-c= to cancel a running
+turn first.
 
 Note that =C-c= reaches ai-tui as =SIGINT= rather than as a keystroke:
 =cbreak()= leaves =ISIG= on, so the terminal driver signals before
@@ -369,6 +370,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/clear=            | Empty the transcript, the history and the todos   |
 | =/reset=            | Start a fresh session and return to the splash screen |
 | =/quit=             | Exit                                              |
+| =/exit=             | Exit, same as =/quit=                             |
 | =/model [NAME]=     | Show or switch the model without restarting       |
 | =/provider [NAME]=  | Show or switch the provider, preserving context   |
 | =/tools=            | The tools the model can call                      |

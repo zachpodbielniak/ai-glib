@@ -251,7 +251,7 @@ Two rules, in order:
    then opencode, then grok.
 
 A built-in always beats a file, so a =quit.md= will not take away
-=/quit=.
+=/quit=, and an =exit.md= will not take away =/exit=.
 
 A skill and a command may share a name --- they are looked up separately
 --- but only one of them appears in =/help=, because typing the name

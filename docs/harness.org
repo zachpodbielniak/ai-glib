@@ -293,6 +293,7 @@ before a single file has been read.
 | =/help=      |              | every command, skill and agent, with origins  |
 | =/clear=     |              | empty the transcript, the history and the todos |
 | =/quit=      |              | leave                                         |
+| =/exit=      |              | leave, same as =/quit=                        |
 | =/model=     | =[model]=    | show or change the model                      |
 | =/provider=  | =[provider]= | show or switch provider, preserving context   |
 | =/tools=     |              | the tools the model can call                  |
@@ -307,8 +308,8 @@ before a single file has been read.
 | =/export=    | =<format> [path]= | write it as text, markdown or org        |
 
 A built-in always beats a file of the same name. That is not politeness:
-a stray =quit.md= in a scanned directory must not be able to take away
-the way out of the program.
+a stray =quit.md= or =exit.md= in a scanned directory must not be able to
+take away the way out of the program.
 
 *** Placeholders
 | In the body   | Becomes                                          |

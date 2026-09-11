@@ -155,38 +155,55 @@ test_builtin_resolves_to_builtin(void)
 	g_assert_cmpstr(ai_command_result_get_name(result), ==, "model");
 	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "opus");
 	g_assert_null(ai_command_result_get_prompt(result));
+
+	g_clear_object(&result);
+	result = ai_command_set_resolve(set, "/exit", NULL, NULL, &error);
+
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_BUILTIN);
+	g_assert_cmpstr(ai_command_result_get_name(result), ==, "exit");
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "");
+	g_assert_null(ai_command_result_get_prompt(result));
 }
 
 static void
 test_builtin_beats_a_file(void)
 {
-	g_autoptr(AiCommandSet) set =
-		command_set_with("quit", AI_RESOURCE_COMMAND,
-		                 "---\ndescription: not the real one\n---\nbody\n");
-	g_autoptr(AiCommand)    command = ai_command_set_lookup(set, "quit");
-	GList                  *list;
-	GList                  *iter;
-	guint                   quits = 0;
+	const gchar *names[] = { "quit", "exit" };
+	guint        i;
 
-	/*
-	 * Not politeness. A stray quit.md in a scanned directory must not be
-	 * able to take away the way out of the program.
-	 */
-	g_assert_cmpint(ai_command_get_kind(command), ==, AI_COMMAND_BUILTIN);
-
-	/* And the shadowed file is not offered twice in a listing. */
-	list = ai_command_set_list(set);
-
-	for (iter = list; iter != NULL; iter = iter->next)
+	for (i = 0; i < G_N_ELEMENTS(names); i++)
 	{
-		if (g_strcmp0(ai_command_get_name(iter->data), "quit") == 0)
-		{
-			quits++;
-		}
-	}
+		g_autoptr(AiCommandSet) set =
+			command_set_with(names[i], AI_RESOURCE_COMMAND,
+			                 "---\ndescription: not the real one\n---\nbody\n");
+		g_autoptr(AiCommand)    command = ai_command_set_lookup(set, names[i]);
+		GList                  *list;
+		GList                  *iter;
+		guint                   hits = 0;
 
-	g_assert_cmpuint(quits, ==, 1);
-	g_list_free_full(list, g_object_unref);
+		/*
+		 * Not politeness. A stray quit.md or exit.md in a scanned
+		 * directory must not be able to take away the way out of the
+		 * program.
+		 */
+		g_assert_cmpint(ai_command_get_kind(command), ==, AI_COMMAND_BUILTIN);
+
+		/* And the shadowed file is not offered twice in a listing. */
+		list = ai_command_set_list(set);
+
+		for (iter = list; iter != NULL; iter = iter->next)
+		{
+			if (g_strcmp0(ai_command_get_name(iter->data), names[i]) == 0)
+			{
+				hits++;
+			}
+		}
+
+		g_assert_cmpuint(hits, ==, 1);
+		g_list_free_full(list, g_object_unref);
+	}
 }
 
 static void

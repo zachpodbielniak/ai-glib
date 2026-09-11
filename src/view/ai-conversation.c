@@ -1532,9 +1532,9 @@ ai_conversation_class_init(AiConversationClass *klass)
      * arriving. Setting it explicitly overrides the guess in either
      * direction.
      *
-     * Purely local built-ins --- `/quit`, `/clear` --- still run locally
-     * even under passthrough, because the wrapped CLI has no opinion
-     * about this program's transcript.
+     * Purely local built-ins --- `/quit`, `/exit`, `/clear` --- still
+     * run locally even under passthrough, because the wrapped CLI has
+     * no opinion about this program's transcript.
      */
     properties[PROP_PASSTHROUGH_COMMANDS] =
         g_param_spec_boolean("passthrough-commands", NULL, NULL, FALSE,
