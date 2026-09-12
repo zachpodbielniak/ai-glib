@@ -49,6 +49,7 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "exit",     "Leave, same as /quit",                       NULL },
     { "model",    "List models or switch with /model MODEL_ID", "[model]" },
     { "provider", "List providers or switch with /provider NAME", "[provider]" },
+    { "effort",   "List effort levels or switch with /effort LEVEL", "[level]" },
     { "tools",    "List the tools the model can call",          NULL },
     { "commands", "List commands, and what shadows what",       NULL },
     { "skills",   "List skills",                                NULL },

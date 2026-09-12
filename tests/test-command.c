@@ -157,6 +157,16 @@ test_builtin_resolves_to_builtin(void)
 	g_assert_null(ai_command_result_get_prompt(result));
 
 	g_clear_object(&result);
+	result = ai_command_set_resolve(set, "/effort high", NULL, NULL, &error);
+
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_BUILTIN);
+	g_assert_cmpstr(ai_command_result_get_name(result), ==, "effort");
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "high");
+	g_assert_null(ai_command_result_get_prompt(result));
+
+	g_clear_object(&result);
 	result = ai_command_set_resolve(set, "/exit", NULL, NULL, &error);
 
 	g_assert_no_error(error);
