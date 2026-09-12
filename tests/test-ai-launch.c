@@ -602,6 +602,105 @@ test_paths_and_ollama(Fixture *f, gconstpointer data)
 	}
 }
 
+/* Bare flags stay unquoted; prompts, empty values, and metacharacter paths
+ * stay shell-quoted so the printed line is still pasteable.
+ */
+static void
+test_command_quoting(Fixture *f, gconstpointer data)
+{
+	const Case *c = (const Case *)data;
+	g_autofree gchar *exe = g_build_filename(f->tools, "claude", NULL);
+	g_autofree gchar *quoted_exe = g_shell_quote(exe);
+	g_autofree gchar *work = g_build_filename(f->dir, "work-plain", NULL);
+	g_autofree gchar *cwd_plain = g_strconcat("working-directory=", work, NULL);
+	g_autofree gchar *work_special = g_build_filename(f->dir, "work ' $; space", NULL);
+	g_autofree gchar *cwd_special = g_strconcat("working-directory=", work_special, NULL);
+	const gchar *simple[] = { "--launch-cmd-print", "-p", "claude-code",
+		"-m", "fable", "--skip-permissions", NULL };
+	const gchar *prompted[] = { "--launch-cmd-print", "-p", "claude-code",
+		"-m", "fable", "hello world", NULL };
+	const gchar *hostile[] = { "--launch-cmd-print", "-p", "claude-code",
+		"-m", "fable", "--", "-dash 'single' $HOME", NULL };
+	const gchar *empty_tools[] = { "--launch-cmd-print", "-p", "claude-code",
+		"-m", "fable", "--set", "tools=", NULL };
+	const gchar *plain_cwd[] = { "--launch-cmd", "-p", "claude-code",
+		"-m", "fable", "--set", cwd_plain, NULL };
+	const gchar *special_cwd[] = { "--launch-cmd", "-p", "claude-code",
+		"-m", "fable", "--set", cwd_special, NULL };
+	g_autoptr(Run) run = NULL;
+
+	if (!g_file_test(binaries[c->frontend], G_FILE_TEST_IS_EXECUTABLE))
+	{
+		g_test_skip("frontend not built");
+		return;
+	}
+	g_assert_cmpint(g_mkdir(work, 0700), ==, 0);
+	g_assert_cmpint(g_mkdir(work_special, 0700), ==, 0);
+
+	run = run_program(f, binaries[c->frontend], simple, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *expected = g_strdup_printf(
+			"%s --model fable --effort medium --dangerously-skip-permissions --print\n",
+			quoted_exe);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+	g_clear_pointer(&run, run_free);
+
+	run = run_program(f, binaries[c->frontend], prompted, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *quoted = g_shell_quote("hello world");
+		g_autofree gchar *expected = g_strdup_printf(
+			"%s --model fable --effort medium --print -- %s\n", quoted_exe, quoted);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+	g_clear_pointer(&run, run_free);
+
+	run = run_program(f, binaries[c->frontend], hostile, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *quoted = g_shell_quote("-dash 'single' $HOME");
+		g_autofree gchar *expected = g_strdup_printf(
+			"%s --model fable --effort medium --print -- %s\n", quoted_exe, quoted);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+	g_clear_pointer(&run, run_free);
+
+	run = run_program(f, binaries[c->frontend], empty_tools, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *expected = g_strdup_printf(
+			"%s --model fable --effort medium --tools '' --print\n", quoted_exe);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+	g_clear_pointer(&run, run_free);
+
+	run = run_program(f, binaries[c->frontend], plain_cwd, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *expected = g_strdup_printf(
+			"(cd -- %s && %s --model fable --effort medium)\n", work, quoted_exe);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+	g_clear_pointer(&run, run_free);
+
+	run = run_program(f, binaries[c->frontend], special_cwd, "", 0);
+	g_assert_cmpint(run->status, ==, 0);
+	{
+		g_autofree gchar *quoted = g_shell_quote(work_special);
+		g_autofree gchar *expected = g_strdup_printf(
+			"(cd -- %s && %s --model fable --effort medium)\n", quoted, quoted_exe);
+
+		g_assert_cmpstr(run->out, ==, expected);
+	}
+}
+
 /* Refused combinations and secret-valued properties must fail before running
  * anything or consuming stdin. Check diagnostics, not merely exit status.
  */
@@ -718,6 +817,7 @@ main(int argc, char **argv)
 		Case *app = g_new0(Case, 1);
 		g_autofree gchar *defaults_path = g_strdup_printf("/ai-glib/launch/%s/defaults", name);
 		g_autofree gchar *paths_path = g_strdup_printf("/ai-glib/launch/%s/paths-ollama", name);
+		g_autofree gchar *quoting_path = g_strdup_printf("/ai-glib/launch/%s/command-quoting", name);
 		g_autofree gchar *errors_path = g_strdup_printf("/ai-glib/launch/%s/errors", name);
 
 		binaries[frontend] = g_build_filename(dir, "..", "bin", name, NULL);
@@ -725,6 +825,7 @@ main(int argc, char **argv)
 		g_ptr_array_add(cases, app);
 		g_test_add(defaults_path, Fixture, app, fixture_setup, test_defaults, fixture_teardown);
 		g_test_add(paths_path, Fixture, app, fixture_setup, test_paths_and_ollama, fixture_teardown);
+		g_test_add(quoting_path, Fixture, app, fixture_setup, test_command_quoting, fixture_teardown);
 		g_test_add(errors_path, Fixture, app, fixture_setup, test_errors, fixture_teardown);
 		for (provider = 0; provider < G_N_ELEMENTS(providers); provider++)
 			for (mode = 0; mode < G_N_ELEMENTS(modes); mode++)

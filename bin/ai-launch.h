@@ -99,6 +99,34 @@ ai_launch_value(GPtrArray *args, const gchar *flag, const gchar *text)
 		ai_launch_pair(args, flag, text);
 }
 
+/* Bare tokens are flags, model ids, and simple paths. Quote empty strings and
+ * anything a shell would split or expand: prompts, spaced filenames, metacharacters.
+ */
+static inline gchar *
+ai_launch_quote_arg(const gchar *text)
+{
+	const guchar *p;
+
+	if (text != NULL && *text != '\0')
+	{
+		for (p = (const guchar *)text; *p != '\0'; p++)
+		{
+			guchar c = *p;
+
+			if ((c >= 'A' && c <= 'Z') ||
+				(c >= 'a' && c <= 'z') ||
+				(c >= '0' && c <= '9'))
+				continue;
+			if (strchr("_@%+=:,./-", (gint)c) != NULL)
+				continue;
+			break;
+		}
+		if (*p == '\0')
+			return g_strdup(text);
+	}
+	return g_shell_quote(text != NULL ? text : "");
+}
+
 /* Map booleans to switches, scalars to one value, CSV/strv to repeated flags.
  * CSV splitting matches the existing wrappers; strv entries stay indivisible.
  */
@@ -695,12 +723,12 @@ ai_launch_run(GObject *provider, gboolean command_only, gboolean print_mode,
 	{
 		if (cwd != NULL && *cwd != '\0')
 		{
-			g_autofree gchar *quoted = g_shell_quote(cwd);
+			g_autofree gchar *quoted = ai_launch_quote_arg(cwd);
 			g_string_append_printf(command, "(cd -- %s && ", quoted);
 		}
 		for (i = 0; i < args->len; i++)
 		{
-			g_autofree gchar *quoted = g_shell_quote((const gchar *)g_ptr_array_index(args, i));
+			g_autofree gchar *quoted = ai_launch_quote_arg((const gchar *)g_ptr_array_index(args, i));
 			if (i != 0) g_string_append_c(command, ' ');
 			g_string_append(command, quoted);
 		}

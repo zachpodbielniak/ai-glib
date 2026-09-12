@@ -26,7 +26,7 @@ piping.
 | =-m=, =--model ID=      | Omitted/=default=: saved ai model only for the matching provider, else native. Image mode defaults to the native image model. =ollama/<id>= selects Ollama transport on Claude Code providers |
 | =--setup=              | Numbered setup wizard for independent ai, ai-tui, or library defaults; no prompt or TTY required |
 | =--launch=             | Replace this process with the provider's native interactive CLI |
-| =--launch-cmd=         | Print a shell-quoted native interactive command; do not execute it |
+| =--launch-cmd=         | Print a native interactive shell command; do not execute it |
 | =--launch-cmd-print=   | Print the native CLI's plain-text noninteractive command; do not execute it |
 | =-s=, =--system TEXT=   | System prompt                                                      |
 | =--effort LEVEL=        | Effort / thinking level (CLI providers)                            |
@@ -86,7 +86,7 @@ ai --launch-cmd -p default -m default "Explain this project"
 ai --launch-cmd-print -p grok-build "summarize the changes"
 #+end_src
 
-=--launch-cmd= and =--launch-cmd-print= only print commands. They do not run a CLI, read a prompt from stdin, or require an installed executable. Output is shell syntax with each literal argument quoted, not a whitespace-delimited argv list; execute it with a shell if desired, not unquoted command substitution. Plain commands do not contain =exec=, so pasting one does not replace your interactive shell. A configured working directory is represented by a =cd= subshell.
+=--launch-cmd= and =--launch-cmd-print= only print commands. They do not run a CLI, read a prompt from stdin, or require an installed executable. Output is pasteable shell syntax, not a whitespace-delimited argv list: ordinary flags and tokens stay bare, and only empty values or strings that a shell would split or expand (prompts, filenames with spaces, metacharacters) are single-quoted. Execute it with a shell if desired, not unquoted command substitution. Plain commands do not contain =exec=, so pasting one does not replace your interactive shell. A configured working directory is represented by a =cd= subshell.
 
 #+begin_src bash
 # The generated command reads stdin when no positional prompt was supplied.
