@@ -1833,6 +1833,184 @@ test_alt_enter_inserts_a_newline(void)
 	sandbox_free(box);
 }
 
+/* Attach an actual tmux client on script's private PTY: injecting packets
+ * into a pane alone would not prove tmux forwards its default wheel binding.
+ * No developer server, configuration or physical terminal is involved. */
+static void
+test_tmux_forward_wheel(void)
+{
+	g_autofree gchar *script = g_find_program_in_path("script");
+	g_autofree gchar *command = NULL;
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *pane = NULL;
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) client = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *enable[] = { "set-option", "-g", "mouse", "on", NULL };
+	const gchar *detach[] = { "detach-client", "-s", TUI_SESSION, NULL };
+	const gchar *flags[] = { "display-message", "-p", "-t", TUI_SESSION,
+		"#{mouse_any_flag}", NULL };
+	const gchar *attached[] = { "display-message", "-p", "-t", TUI_SESSION,
+		"#{session_attached}", NULL };
+	const gchar *wheel = "\033[<64;10;6M\033[<64;10;6M";
+	gint64 deadline;
+
+	if (script == NULL)
+	{
+		g_test_message("script unavailable; attached tmux forwarding check skipped");
+		return;
+	}
+	out = tmux_run(flags);
+	g_assert_cmpstr(out, ==, "1\n");
+	g_clear_pointer(&out, g_free);
+	out = tmux_run(enable);
+	command = g_strdup_printf("tmux -L '%s' -f /dev/null attach-session -t %s",
+		tmux_socket, TUI_SESSION);
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+		G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+	g_subprocess_launcher_setenv(launcher, "TERM", "xterm-256color", TRUE);
+	client = g_subprocess_launcher_spawn(launcher, &error,
+		script, "-q", "-e", "-c", command, "/dev/null", NULL);
+	g_assert_no_error(error);
+	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	do
+	{
+		g_clear_pointer(&out, g_free);
+		out = tmux_run(attached);
+		if (g_strcmp0(out, "1\n") == 0) break;
+		g_usleep(50 * 1000);
+	} while (g_get_monotonic_time() < deadline);
+	g_assert_cmpstr(out, ==, "1\n");
+	/* Let the client's initial resize settle before writing its input. */
+	g_usleep(150 * 1000);
+	tmux_send(TUI_SESSION, "C-l");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+	g_assert_true(g_output_stream_write_all(g_subprocess_get_stdin_pipe(client),
+		wheel, strlen(wheel), NULL, NULL, &error));
+	g_assert_no_error(error);
+	g_assert_true(tmux_wait_for(TUI_SESSION, "[scrolled]"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "scroll-row-79"));
+	g_clear_pointer(&out, g_free);
+	out = tmux_run(detach);
+	g_assert_true(g_subprocess_wait_check(client, NULL, &error));
+	g_assert_no_error(error);
+	tmux_send(TUI_SESSION, "C-l");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+}
+
+/* Real ncurses input, including the mouse protocol negotiated with tmux.
+ * Unique rows make this assert viewport movement rather than just a badge. */
+static void
+test_transcript_scroll(void)
+{
+	g_autoptr(GString) ndjson = g_string_new(NULL);
+	g_autofree gchar *pane = NULL;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *release = NULL;
+	const gchar *terms[] = { "TERM=xterm-256color", "TERM=tmux-256color" };
+	guint i;
+	guint term;
+	Stub *stub;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	for (i = 0; i < 80; i++)
+		g_string_append_printf(ndjson,
+			"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+			"\"delta\":{\"type\":\"text_delta\",\"text\":\"scroll-row-%02u\\n\"}}}\n", i);
+	stub = stub_new(ndjson->str);
+	/* Hold the result until the reader has scrolled away. A bounded wait
+	 * keeps a failed assertion from leaving a forever-running child. */
+	script = g_strdup_printf(
+		"#!/bin/sh\ncat > '%s/stdin.log'\ncat '%s/stdout'\n"
+		"tries=0\nwhile [ ! -f '%s/release' ] && [ \"$tries\" -lt 1000 ]; do\n"
+		"  sleep 0.01\n  tries=$((tries + 1))\ndone\n"
+		"printf '%%s\\n' '{\"type\":\"result\",\"session_id\":\"scroll\"}'\n",
+		stub->dir, stub->dir, stub->dir);
+	sandbox_write(stub->dir, "grok", script);
+	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
+	release = g_build_filename(stub->dir, "release", NULL);
+	for (term = 0; term < G_N_ELEMENTS(terms); term++)
+	{
+		const gchar *flags[] = { "display-message", "-p", "-t", TUI_SESSION,
+			"#{mouse_sgr_flag}", NULL };
+		g_autofree gchar *sgr = NULL;
+		g_autoptr(GString) burst = g_string_new(NULL);
+		const gchar *up;
+		const gchar *down;
+
+		g_unlink(release);
+		tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, terms[term], "--no-animation");
+		/* Select the encoding actually requested by ncurses: terminfo
+		 * versions differ, and tmux translates the outer protocol. */
+		sgr = tmux_run(flags);
+		up = g_strcmp0(sgr, "1\n") == 0 ? "\033[<64;10;6M" : "\033[M`*&";
+		down = g_strcmp0(sgr, "1\n") == 0 ? "\033[<65;10;6M" : "\033[Ma*&";
+		tmux_send(TUI_SESSION, "scroll probe");
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+		tmux_send(TUI_SESSION, "draft-preserved");
+		/* Wheel events over the header are consumed without moving the
+		 * transcript or inserting protocol bytes into the draft. */
+		tmux_send(TUI_SESSION, g_strcmp0(sgr, "1\n") == 0
+			? "\033[<64;1;1M" : "\033[M`!!");
+		g_usleep(100 * 1000);
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_null(strstr(pane, "[scrolled]"));
+		g_assert_nonnull(strstr(pane, "draft-preserved"));
+
+		/* Wheel-up over the transcript must preserve the composer. */
+		tmux_send(TUI_SESSION, up);
+		tmux_send(TUI_SESSION, up);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "[scrolled]"));
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_null(strstr(pane, "scroll-row-79"));
+		g_assert_nonnull(strstr(pane, "draft-preserved"));
+		sandbox_write(stub->dir, "release", "done");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_nonnull(strstr(pane, "[scrolled]"));
+		g_assert_null(strstr(pane, "scroll-row-79"));
+		tmux_send(TUI_SESSION, down);
+		tmux_send(TUI_SESSION, down);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+
+		/* Overscroll in one input burst, then move down immediately. */
+		for (i = 0; i < 30; i++) g_string_append(burst, "\033[5~");
+		tmux_send(TUI_SESSION, burst->str);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-00"));
+		g_string_append(burst, "\033[6~");
+		tmux_send(TUI_SESSION, burst->str);
+		g_usleep(150 * 1000);
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_null(strstr(pane, "scroll-row-00"));
+		g_assert_nonnull(strstr(pane, "[scrolled]"));
+		tmux_resize("110", "28");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "[scrolled]"));
+		tmux_send(TUI_SESSION, "C-l");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+
+		/* Editor handoff must restore mouse reporting as well as drawing. */
+		tmux_send(TUI_SESSION, "C-g");
+		g_usleep(150 * 1000);
+		tmux_send(TUI_SESSION, up);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "[scrolled]"));
+		tmux_send(TUI_SESSION, down);
+		g_assert_true(tmux_wait_for(TUI_SESSION, "scroll-row-79"));
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_null(strstr(pane, "[scrolled]"));
+		g_assert_nonnull(strstr(pane, "draft-preserved"));
+		test_tmux_forward_wheel();
+		tmux_kill(TUI_SESSION);
+	}
+	stub_free(stub);
+}
+
 static void
 test_enter_sends_the_prompt(void)
 {
@@ -3186,6 +3364,7 @@ main(int argc, char *argv[])
 
 	g_test_add_func("/ai-glib/ai-tui/keys/enter-sends",
 	                test_enter_sends_the_prompt);
+	g_test_add_func("/ai-glib/ai-tui/transcript-scroll", test_transcript_scroll);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",

@@ -232,6 +232,7 @@ one that refuses to start.
 | =C-a= / =C-e=              | Start / end of line                               |
 | =C-u=                      | Clear the input                                   |
 | =PgUp= / =PgDn=            | Scroll the transcript, or page the completion menu |
+| Mouse wheel               | Scroll three rows over the transcript |
 | =Tab=                      | Take a completion, or step to the next            |
 | =Shift-Tab=                | Toggle read-only / skip-permissions               |
 | =Escape=                   | Dismiss the completion menu                       |
@@ -248,7 +249,13 @@ These interface shortcuts use ordinary Ctrl-letter combinations; no function key
 *** Searching and following
 =C-f= opens a separate, append-only search field. Type a case-sensitive substring; matching rendered rows are highlighted and the view jumps to the first match. =Enter= or =Down= advances, =Up= or =Shift-Enter= goes back, and navigation wraps. =Backspace= edits the query and =C-u= clears it. =Escape= or =C-f= closes search and restores the untouched draft. The result count is matching rows, not occurrences; text hidden inside a collapsed block is not searched until expanded, and a match does not span a wrap boundary.
 
-=PgUp= and =PgDn= scroll incrementally rather than jumping straight to the bottom. Scrolling away pauses following even if a turn completes while you read. =C-l=, sending a prompt, or reaching the bottom with =PgDn= resumes following. Search and history remain in memory only; the redesign does not persist prompts to disk. Existing explicit export/save commands still do so.
+=PgUp= and =PgDn= scroll half a viewport; the mouse wheel scrolls three rendered rows per notch when the pointer is over the transcript. Scrolling away pauses following even if a turn completes while you read. =C-l=, sending a prompt, or scrolling down to the bottom resumes following. Scroll positions are clamped on every input event, so scrolling past the top does not delay a subsequent downward scroll. Wheel events over the composer or side panel are ignored and never alter the draft. Wheel scrolling also works while searching or reviewing a tool approval. Search and input history remain in memory only; use the explicit export/save commands to persist the transcript.
+
+*** Scrolling inside tmux
+
+Enable tmux mouse forwarding with =tmux set -g mouse on=, or add =set -g mouse on= to your tmux configuration. ai-tui advertises application mouse support through ncurses, so tmux's standard wheel bindings forward wheel events to its transcript instead of entering copy mode. Leave any active tmux copy mode first. With tmux mouse support disabled, use =PgUp= / =PgDn= directly, without the tmux prefix. Custom wheel bindings must forward application mouse events (using =send-keys -M=). ai-tui does not change your tmux configuration.
+
+ncurses selects SGR or legacy X10 mouse reporting from terminfo and restores it after returning from =C-g='s editor. Terminal regression tests run inside isolated tmux sessions with =xterm-256color= and =tmux-256color=, checking visible transcript rows, negotiated wheel encodings, page boundaries, resize, editor return and draft preservation. When =script= (Fedora package =util-linux=) is available, they also attach a real tmux client on a private PTY and verify that tmux's default wheel binding forwards terminal mouse input to ai-tui.
 
 *** Writing more than one line
 =Alt-Enter= inserts a newline and works everywhere. =Shift-Enter= does the

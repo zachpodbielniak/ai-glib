@@ -2008,6 +2008,7 @@ show_help(App *app)
 					"  ^F search transcript (case-sensitive matching rows)\n"
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
+					"  Mouse wheel  scroll transcript three rows\n"
                     "  Enter        send\n"
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
@@ -3036,6 +3037,22 @@ paste_image(App *app)
 	                         app->clipboard_cancel, 5000, on_image_pasted, app);
 }
 
+/* Clamp each input event, not just each redraw: a burst at the top must
+ * not accumulate an invisible negative offset before the next wheel-down.
+ * Reaching the bottom resumes following streamed output. */
+static void
+scroll_transcript(
+	App  *app,
+	gint  delta
+){
+	gint bottom;
+
+	if (app->tiny || app->transcript_win == NULL) return;
+	bottom = MAX(0, app->row_count - getmaxy(app->transcript_win));
+	app->scroll = CLAMP(app->scroll + delta, 0, bottom);
+	app->follow = app->scroll == bottom;
+}
+
 static gboolean
 drain_keys(App *app)
 {
@@ -3047,6 +3064,23 @@ drain_keys(App *app)
     {
 		gchar utf8[8] = { 0 };
 		ch = (gint)value;
+		/* Consume mouse packets before approval/search/paste handling so
+		 * they never become draft text or approval answers. ncurses decodes
+		 * the negotiated mouse protocol, including tmux's forwarded input.
+		 * Only the transcript owns wheel events; other panels keep focus. */
+		if (kind == KEY_CODE_YES && ch == KEY_MOUSE)
+		{
+			MEVENT event;
+
+			if (getmouse(&event) == OK && !app->tiny && !app->pasting &&
+				wenclose(app->transcript_win, event.y, event.x))
+			{
+				if (event.bstate & BUTTON4_PRESSED) scroll_transcript(app, -3);
+				else if (event.bstate & BUTTON5_PRESSED) scroll_transcript(app, 3);
+			}
+			app_schedule_redraw(app);
+			continue;
+		}
 		/* A bracketed paste is an edit, never a sequence of commands. In
 		 * particular its newlines must not submit half a prompt. */
 		if (kind == KEY_CODE_YES && ch == KEY_PASTE_START)
@@ -3272,8 +3306,7 @@ drain_keys(App *app)
                     break;
                 }
 
-                app->follow = FALSE;
-                app->scroll -= getmaxy(app->transcript_win) / 2;
+                scroll_transcript(app, -MAX(1, getmaxy(app->transcript_win) / 2));
                 break;
 
             case KEY_NPAGE:
@@ -3282,8 +3315,7 @@ drain_keys(App *app)
                     break;
                 }
 
-                app->scroll += MAX(1, getmaxy(app->transcript_win) / 2);
-                app->follow = app->scroll >= MAX(0, app->row_count - getmaxy(app->transcript_win));
+                scroll_transcript(app, MAX(1, getmaxy(app->transcript_win) / 2));
                 break;
 
             case '\t':
@@ -4959,6 +4991,10 @@ main(int argc, char *argv[])
     noecho();
     nonl();
     curs_set(1);
+	/* Advertise application mouse handling to terminals and tmux. Let
+	 * ncurses own protocol selection and restoration across endwin(). */
+	mousemask(BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+	mouseinterval(0);
 
     {
         gint height;
