@@ -263,6 +263,8 @@ a file rather than printed. All the image options below are listed by
 =ai --help=: a long complete help beats a short one that omits most of the mode
 it is documenting.
 
+Antigravity is available through =ai --image-gen -p agy "a mountain lake at sunrise"= (alias =-p antigravity=). It uses the authenticated CLI's native =generate_image= tool and returns one image in the backend's encoding. =--aspect= is a prompt hint; =-m= selects the agent invoking the tool. Let the CLI choose the output extension, or ensure an explicit =-o= path matches the native format. See [[file:providers/antigravity.org][Antigravity]] for permissions, supported parameters and the library API.
+
 *** Model discovery
 =--list-image-models= prints every image model with its limits and capabilities,
 generated from the providers' own tables rather than a hand-maintained list:

@@ -12,6 +12,7 @@ A GLib/GObject-based C library for interacting with AI providers.
   conditioning (up to 14 references on Nano Banana Pro), editing, masks and
   variations; unsupported options are reconciled per model rather than sent and
   rejected (see [[file:docs/examples/image-generation.org][docs/examples/image-generation.org]])
+- *Antigravity images*: =ai --image-gen -p agy= and =AiImageGenerator= invoke the authenticated CLI's native =generate_image= tool and return one image (see [[file:docs/providers/antigravity.org][Antigravity]])
 - *Event stream*: watch a turn happen --- prose, reasoning, tool calls,
   token counts --- through one normalized signal on every provider (see
   [[file:docs/events.org][docs/events.org]])

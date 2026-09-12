@@ -13,6 +13,9 @@ Implemented by:
 | =AiGeminiClient=  | Nano Banana, Nano Banana 2, Nano Banana Pro, Imagen 4 / 3  |
 | =AiGrokClient=    | Grok Imagine, Grok 2 Image                                |
 | =AiGrokBuildClient= | Grok Build image_gen and image_edit tools (=grok-build-media=) |
+| =AiAntigravityClient= | Native =generate_image= through the authenticated =agy= CLI |
+
+Antigravity returns one image with native encoding and accepts an aspect-ratio prompt hint. Its model selects the agent invoking the tool, not the image backend; references and editing are not exposed. Both synchronous and asynchronous APIs are supported. See [[file:../providers/antigravity.org][Antigravity image generation]] for capabilities and artifact semantics.
 
 Claude and Ollama do not implement it -- neither exposes an image-generation
 API -- so check with =AI_IS_IMAGE_GENERATOR()= before casting.
