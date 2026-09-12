@@ -173,51 +173,14 @@ Grok uses an OpenAI-compatible API:
 - *Vision*: Supported on vision models
 - *Real-time Info*: Access to X (Twitter) data
 - *System Prompts*: Full support
-- *Image Generation*: Basic support via =AiImageGenerator= interface
+- *Image Generation*: Imagine generation and edits via =AiImageGenerator=
+- *Video Generation*: Text, image and reference generation via =AiVideoGenerator=
 
 ** Tool Calling
 Grok's API is OpenAI-compatible, so ai-glib uses the same wire-format serializer as the OpenAI client. See the [[file:openai.org#tool-calling][OpenAI Tool Calling section]] for the details --- the behavior is identical: tool definitions wrapped in ={type:"function", ...}=, prior assistant tool calls round-tripped as =tool_calls=, and tool results emitted as separate =role:"tool"= messages.
 
 ** Image Generation
-*** Capability matrix
-| Model                        | Refs | Max n | Notable                        |
-|------------------------------+------+-------+--------------------------------|
-| =grok-imagine-image=         |    1 |    10 | single input image             |
-| =grok-imagine-image-quality= |    1 |    10 | single input image             |
-| =grok-2-image=               |    0 |    10 | legacy; no reference images    |
-
-Grok has the thinnest image API of the three providers: prompt, model, count and
-response format. Everything else an =AiImageRequest= can express is declared
-unsupported, so it is dropped by the validator rather than sent and rejected.
-Pass =AI_IMAGE_VALIDATE_STRICT= (or =ai --strict=) if you would rather know.
-
-Grok provides basic image generation through an OpenAI-compatible API.
-
-*** Image / Video Models
-| Define                                     | Model ID                   | Description                  |
-|--------------------------------------------+----------------------------+------------------------------|
-| =AI_GROK_IMAGE_MODEL_GROK_IMAGINE=         | grok-imagine-image         | Grok Imagine image (default) |
-| =AI_GROK_IMAGE_MODEL_GROK_IMAGINE_QUALITY= | grok-imagine-image-quality | High-quality image           |
-| =AI_GROK_VIDEO_MODEL_GROK_IMAGINE=         | grok-imagine-video         | Grok Imagine video           |
-| =AI_GROK_IMAGE_MODEL_GROK_2_IMAGE=         | grok-2-image               | Retired upstream             |
-
-*** Default Model
-#+begin_src C
-#define AI_GROK_IMAGE_DEFAULT_MODEL  AI_GROK_IMAGE_MODEL_GROK_IMAGINE
-#+end_src
-
-*** Supported Parameters
-Grok's image generation is basic and ignores most parameters:
-
-| Parameter       | Support | Notes             |
-|-----------------+---------+-------------------|
-| prompt          | Yes     | Required          |
-| model           | Yes     | Only grok-2-image |
-| size            | No      | Ignored           |
-| quality         | No      | Ignored           |
-| style           | No      | Ignored           |
-| count           | Yes     | Number of images  |
-| response_format | Yes     | url or b64_json   |
+=AiImageGenerator= supports generation and JSON editing. The current defaults and complete capability matrix are listed under “Imagine image and video APIs” below. =AI_GROK_IMAGE_DEFAULT_MODEL= resolves to =AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0=. Existing Imagine and retired Grok 2 image constants remain source-compatible.
 
 *** Image Generation Example
 #+begin_src C
@@ -255,7 +218,7 @@ int main(void)
     );
     g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
 
-    /* Model is optional - defaults to grok-imagine-image */
+    /* Model is optional - defaults to grok-imagine-image-2.0 */
     ai_image_request_set_model(request, AI_GROK_IMAGE_MODEL_GROK_IMAGINE);
 
     ai_image_generator_generate_image_async(
@@ -273,7 +236,7 @@ int main(void)
 
 *** Notes
 - Grok image generation uses an OpenAI-compatible endpoint
-- Size, quality, and style parameters are accepted but ignored
+- Pixel size and style have no Imagine wire equivalent; use aspect ratio and resolution. Quality auto/low/medium is supported by image 2.0.
 - Images are typically returned as URLs
 
 ** Links
@@ -282,3 +245,36 @@ int main(void)
 
 * Event coverage
 On [[file:../events.org][the event stream]] this provider reports text and usage.
+
+* Imagine image and video APIs
+=AiGrokClient= implements both =AiImageGenerator= and =AiVideoGenerator=. Images default to =AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0=; videos default to =AI_GROK_VIDEO_MODEL_GROK_IMAGINE_1_5=. Existing image and video model constants remain available. Authentication uses =XAI_API_KEY= or =GROK_API_KEY= through the existing client configuration.
+
+** Image capability matrix
+| Feature | Imagine image 2.0 | Imagine image / quality | Grok 2 Image legacy |
+| Generation count | 1–10 | 1–10 | 1–10 |
+| JSON image editing | yes | yes | no |
+| Reference images | up to 5 | up to 5 | none |
+| Aspect ratio | documented ratios | documented ratios | omitted |
+| Resolution | 1k / 2k | 1k / 2k | omitted |
+| Quality | auto / low / medium | omitted | omitted |
+| Response | URL or base64 | URL or base64 | URL or base64 |
+
+Adding reference images automatically selects the edits endpoint; explicit =AI_IMAGE_OPERATION_EDIT= requires a reference. The wire representation is JSON, including base64 data URLs. Four-kilopixel output and unsupported image 2.0 quality values fail before HTTP dispatch. Unsupported OpenAI size/style fields are not serialized. Reference labels are folded into the prompt for image editing, video reference images and the video starting frame; the caller’s original prompt remains unchanged.
+
+#+begin_src bash
+ai -p grok --image-gen --resolution 2k --aspect 16:9 -o lake.png 'A lake at dawn'
+ai -p grok --image-gen --ref lake.png -o painting.png 'Restyle as an oil painting'
+ai -p grok --video-gen --duration 8 --resolution 1080p -o lake.mp4 'A lake at dawn'
+ai -p grok --video-gen --video-op image-to-video --ref lake.png --duration 8 -o animated.mp4 'Slow camera pan'
+ai -p grok --video-gen --video-op reference-to-video --ref lake.png --resolution 720p -o reference.mp4 'Explore this landscape'
+#+end_src
+
+** Video request and transport
+Construct =AiVideoRequest= with a prompt and set its operation to =generate=, =image-to-video=, or =reference-to-video=. Supply one =AiImage= via =ai_video_request_set_image()= for image-to-video, or up to seven images via =ai_video_request_add_reference_image()= for reference-to-video. Video 1.5 supports up to three preset voice identifiers via =ai_video_request_set_voices()=; reference-to-video may consist entirely of voices. Call =ai_video_generator_generate_video()= or its async/finish pair, then save the resulting =AiVideoResponse= with =ai_video_response_save_to_file()=.
+
+Duration accepts 1–15 seconds; the default is left to the server. Resolutions are 480p/720p, plus 1080p for video 1.5 text/image generation. Reference video is capped at 720p. =generate-audio= is a tri-state: unset follows the service default, false requests silence, true explicitly requests audio. The default poll interval is one second and the overall deadline ten minutes, both configurable per request.
+
+All requests capture the caller's thread-default context. Owned timeout sources and cancellation handle both pending polls and active network requests. Cancellation stops local waiting; it does not cancel or refund a submitted remote job. Initial job creation is not retried automatically, preventing duplicate generation charges after an ambiguous network failure. Transient polling failures follow the configured HTTP retry policy within the overall deadline. Failed, expired, malformed and moderation-rejected results are errors, not empty success responses.
+
+** Specification and limitations
+The exact official HTTP reference and model guides used for this implementation are downloaded under =docs/specs/= with source URLs, SHA-256 checksums and reconciliation notes in [[file:../specs/xai-imagine-provenance.org][Imagine specification provenance]]. The public video API covers generation, image animation, references and preset voices; video editing/extension, last-frame constraints, custom audio, uploaded file IDs and persistent storage configuration are not exposed. Output URLs are temporary: save the media promptly. Loopback tests verify wire behavior without paid live calls.

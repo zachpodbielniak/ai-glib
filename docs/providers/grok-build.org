@@ -613,3 +613,29 @@ unlikely to use.
 =grok mcp doctor NAME --json= is the only check that reports the truth.
 =grok mcp list= reads the config file without applying either the merge or the
 trust rule, so it prints servers that will never run.
+
+* Image and video generation
+
+=AiGrokBuildClient= implements =AiImageGenerator= and =AiVideoGenerator=. The =ai= binary can therefore use =--image-gen= and =--video-gen= with =-p grok-build=. These are agent-mediated operations: Grok Build exposes media tools to its agent, rather than a direct command-line tool invocation. The library restricts the available built-ins with =--tools= and requests the selected operation with structured parameters on stdin.
+
+The image/video interface model identifier is =grok-build-media=. It represents the tool surface, not an Imagine HTTP model. =AiCliClient:model= selects the coordinating agent model; Grok Build's own configuration selects the underlying media model. Setting an HTTP Imagine model as the media request model is an error.
+
+| Request | Grok Build tool | Parameters |
+|---------+-----------------+------------|
+| Image generation | =image_gen= | =prompt=, =aspect_ratio= |
+| Image edit or image request with references | =image_edit= | =prompt=, =images=, =aspect_ratio= |
+| Video with a first frame | =image_to_video= | =image=, =prompt=, =duration=, =resolution_name= |
+| Video with style/content references or preset voices | =reference_to_video= | =images=, =voices=, =prompt=, =aspect_ratio=, =duration=, =resolution_name= |
+| Text-to-video | =image_gen= then =image_to_video= | Generate a first frame, then animate it |
+
+Image references are staged in a private temporary directory with MIME-derived file extensions. The stdin prompt carries absolute paths, so large binary images consume no chat-text token budget. Owned reference files are removed after completion or cancellation; caller files are never changed. The installed tool schemas also accept data URLs, but this adapter deliberately uses local files for practical image sizes. Image roles are appended to the media prompt as labelled starting-image or indexed reference-image descriptions; they have no native tool-schema field. Image edits accept multiple references. Image requests support up to ten output artifacts by requesting repeated tool calls; a result with fewer artifacts fails rather than silently succeeding. Unsupported image parameters follow the image capability validator's usual lenient projection on a request copy. A single-image edit retains the source aspect ratio according to the tool's documented behavior.
+
+=image_to_video= supports 6 or 10 seconds. =reference_to_video= supports 1 through 15 seconds, up to seven images and up to three preset voices; at least one image or voice is required. Both accept =480p= and =720p=. Name reference images in the prompt as =<IMAGE_0>=, =<IMAGE_1>=, and voices as =<AUDIO_0>=, =<AUDIO_1>=. =ai_video_request_set_voices()= supplies the voice identifiers; unknown voices are validated by Grok Build. Explicit audio enable/disable is unsupported by these tool schemas and raises =AI_ERROR_INVALID_REQUEST=. An existing first frame determines =image_to_video='s aspect ratio; setting another aspect ratio on that request is rejected.
+
+Each operation uses a fresh client/session that copies the original client's execution configuration and environment. The caller's chat session, model, tool settings, and request object remain unchanged. The =tools= GObject property maps to =--tools= and limits which built-ins the agent sees; the existing =allowed-tools= property maps to =--allow= permission rules. Media runs set their own tool availability and permission allowlist. Cancellation and deadlines use the existing asynchronous CLI subprocess pipeline; video requests apply their =timeout-ms= bound.
+
+Only successful =tool_result= records matched to the requested media tool's =tool_use= identifier produce results. Structured =MediaGenOutput= artifacts supply =absolute_path= or =uploaded_url=; ordinary assistant prose is never interpreted as an artifact. Local images are loaded into =AiGeneratedImage= bytes; local video results are =file://= URLs and can be copied with =ai_video_response_save_to_file()=. An unavailable tool, failed tool result, malformed artifact, missing file, or absent result is an error. This adapter depends on Grok Build's agent actually invoking its media tools; it cannot guarantee parameter compliance by a remote model.
+
+** Schema evidence and validation
+
+The integration was checked against the installed =grok 1.0.25= executable, =grok --help=, its bundled media-tool descriptions and Rust schema names on 2026-09-11. The executable documents =ImageGenInput= (two fields), =ImageEditInput= (three), =ImageToVideoInput= (four), =ReferenceToVideoInput= (six), and =MediaGenOutput= (four). Its bundled =/imagine-video= instructions explicitly describe first-frame generation followed by =image_to_video=; there is no direct text-to-video tool in that workflow. No authenticated generation or paid API call was made to establish these schemas. Hermetic tests cover stdin/argv selection, all four tools, text-to-video orchestration instructions, image bytes, local video URLs, voice parameters, readable staged references and their cleanup on success/timeout, session isolation, errors, malformed results, short batches, cancellation, and deadlines.

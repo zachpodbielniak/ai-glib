@@ -102,6 +102,8 @@ G_DECLARE_FINAL_TYPE(AiGrokClient, ai_grok_client, AI, GROK_CLIENT, AiClient)
 /*
  * Image / Video Generation Models (Grok Imagine)
  */
+#define AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0 "grok-imagine-image-2.0"
+#define AI_GROK_VIDEO_MODEL_GROK_IMAGINE_1_5 "grok-imagine-video-1.5"
 #define AI_GROK_IMAGE_MODEL_GROK_IMAGINE         "grok-imagine-image"
 #define AI_GROK_IMAGE_MODEL_GROK_IMAGINE_QUALITY "grok-imagine-image-quality"
 #define AI_GROK_VIDEO_MODEL_GROK_IMAGINE         "grok-imagine-video"
@@ -110,7 +112,7 @@ G_DECLARE_FINAL_TYPE(AiGrokClient, ai_grok_client, AI, GROK_CLIENT, AiClient)
  * Legacy image model (retired upstream).
  */
 #define AI_GROK_IMAGE_MODEL_GROK_2_IMAGE    "grok-2-image"
-#define AI_GROK_IMAGE_DEFAULT_MODEL         AI_GROK_IMAGE_MODEL_GROK_IMAGINE
+#define AI_GROK_IMAGE_DEFAULT_MODEL         AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0
 
 /**
  * ai_grok_client_new:

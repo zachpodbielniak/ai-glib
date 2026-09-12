@@ -1251,6 +1251,99 @@ test_cli_report_errors(void)
 	run_clear(&run);
 }
 
+/* Media mode validation must run before any provider invocation. */
+static void
+test_cli_video_validation(void)
+{
+	const gchar *cases[][8] = {
+		{ "--video-gen", "--image-gen", "prompt", NULL },
+		{ "--video-gen", "--dry-run", "prompt", NULL },
+		{ "--video-gen", "--stream", "prompt", NULL },
+		{ "--duration", "6", "prompt", NULL },
+		{ "--video-gen", "--duration", "0", "prompt", NULL },
+		{ "--video-gen", "--video-poll-interval", "0", "prompt", NULL },
+		{ "--video-gen", "--video-timeout", "-1", "prompt", NULL },
+		{ "--video-gen", "--video-op", "typo", "prompt", NULL },
+		{ "--video-gen", "--quality", "high", "prompt", NULL },
+		{ "--video-gen", "-p", "claude", "prompt", NULL }
+	};
+	guint i;
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		Run run = { NULL, NULL, 0 };
+		run_ai(cases[i], NULL, &run);
+		g_assert_cmpint(run.exit_status, ==, 2);
+		g_assert_nonnull(strstr(run.stderr_data, "video"));
+		run_clear(&run);
+	}
+}
+
+/* Drive the real binary from structured tool results through the library to
+ * saved artifacts for every requested Grok Build media tool. */
+static void
+test_cli_media_artifacts(void)
+{
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *dir = g_dir_make_tmp("ai-cli-media-XXXXXX", &error);
+	g_autofree gchar *source = NULL;
+	g_autofree gchar *output = NULL;
+	guint i;
+	const gchar *tools[] = { "image_gen", "image_edit", "image_to_video", "reference_to_video" };
+	g_assert_no_error(error);
+	source = g_build_filename(dir, "source.png", NULL);
+	output = g_build_filename(dir, "output.media", NULL);
+	g_assert_true(g_file_set_contents(source, "media-artifact", -1, &error));
+	g_assert_no_error(error);
+	for (i = 0; i < G_N_ELEMENTS(tools); i++)
+	{
+		g_autofree gchar *payload = NULL;
+		g_autofree gchar *stub = NULL;
+		g_autofree gchar *stub_dir = NULL;
+		g_autofree gchar *saved = NULL;
+		gsize size;
+		Run run = { NULL, NULL, 0 };
+		const gchar *args[16];
+		guint arg = 0;
+
+		payload = g_strdup_printf(
+			"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"m\",\"name\":\"%s\",\"input\":{}}]}}\n"
+			"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"m\",\"content\":{\"absolute_path\":\"%s\"}}]}}\n"
+			"{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}\n", tools[i], source);
+		stub_dir = stub_dir_new(payload, &stub);
+		args[arg++] = i < 2 ? "--image-gen" : "--video-gen";
+		args[arg++] = "-p";
+		args[arg++] = "grok-build";
+		args[arg++] = "-m";
+		args[arg++] = "grok-build-media";
+		args[arg++] = "-o";
+		args[arg++] = output;
+		if (i > 0)
+		{
+			args[arg++] = "--ref";
+			args[arg++] = source;
+		}
+		if (i == 3)
+		{
+			args[arg++] = "--video-op";
+			args[arg++] = "reference-to-video";
+		}
+		args[arg++] = "create media";
+		args[arg] = NULL;
+		run_ai(args, stub, &run);
+		g_test_message("%s: %s", tools[i], run.stderr_data);
+		g_assert_cmpint(run.exit_status, ==, 0);
+		g_assert_nonnull(strstr(run.stdout_data, output));
+		g_assert_true(g_file_get_contents(output, &saved, &size, &error));
+		g_assert_no_error(error);
+		g_assert_cmpmem(saved, size, "media-artifact", 14);
+		run_clear(&run);
+		stub_dir_free((gchar *)g_steal_pointer(&stub_dir), (gchar *)g_steal_pointer(&stub));
+		g_assert_cmpint(g_remove(output), ==, 0);
+	}
+	g_assert_cmpint(g_remove(source), ==, 0);
+	g_assert_cmpint(g_rmdir(dir), ==, 0);
+}
+
 int
 main(
 	int   argc,
@@ -1272,6 +1365,8 @@ main(
 
 	g_test_add_func("/ai-glib/ai-cli/list-providers",
 	                test_cli_list_providers);
+	g_test_add_func("/ai-glib/ai-cli/media/validation", test_cli_video_validation);
+	g_test_add_func("/ai-glib/ai-cli/media/artifacts", test_cli_media_artifacts);
 	g_test_add_func("/ai-glib/ai-cli/help-mentions-provider",
 	                test_cli_help_mentions_provider);
 	g_test_add_func("/ai-glib/ai-cli/provider-aliases",

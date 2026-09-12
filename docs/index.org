@@ -171,3 +171,7 @@ ai-glib is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 Use =openai-compatible= (alias =http=) with your own API root, token and
 model ID. See [[file:providers/openai-compatible.org][the OpenAI-compatible provider guide]] for
 configuration, supported APIs, examples and compatibility limits.
+
+* Video generation
+
+Generate MP4 artifacts with =ai --video-gen -p grok= or =-p grok-build=. The same functionality is available through =AiVideoGenerator= and =AiVideoRequest= for text-to-video, image animation and reference-conditioned video with optional preset voices. See [[file:api-reference/ai-video-generator.org][the video interface]], [[file:cli.org][CLI flags and examples]], and [[file:specs/xai-imagine-provenance.org][Imagine specification snapshots]]. Grok Build also implements =AiImageGenerator= through its =image_gen= and =image_edit= tools.

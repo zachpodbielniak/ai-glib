@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "providers/ai-grok-build-client.h"
+#include "providers/ai-grok-media.h"
 #include "providers/ai-grok-home-overlay.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-cli-client-private.h"
@@ -51,6 +52,7 @@ struct _AiGrokBuildClient
      */
     gchar   *permission_mode;
     gchar   *allowed_tools;
+    gchar   *tools;
     gchar   *disallowed_tools;
     gchar   *sandbox;
     gint     max_turns;          /* 0 means "unset" */
@@ -80,7 +82,9 @@ G_DEFINE_TYPE_WITH_CODE(AiGrokBuildClient, ai_grok_build_client, AI_TYPE_CLI_CLI
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
                                               ai_grok_build_client_provider_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
-                                              ai_grok_build_client_streamable_init))
+                                              ai_grok_build_client_streamable_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_IMAGE_GENERATOR, ai_grok_media_image_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_VIDEO_GENERATOR, ai_grok_media_video_init))
 
 /*
  * Property IDs.
@@ -92,6 +96,7 @@ enum
     PROP_SKIP_PERMISSIONS,
     PROP_PERMISSION_MODE,
     PROP_ALLOWED_TOOLS,
+    PROP_TOOLS,
     PROP_DISALLOWED_TOOLS,
     PROP_SANDBOX,
     PROP_MAX_TURNS,
@@ -124,6 +129,9 @@ ai_grok_build_client_get_property(
             break;
         case PROP_PERMISSION_MODE:
             g_value_set_string(value, self->permission_mode);
+            break;
+        case PROP_TOOLS:
+            g_value_set_string(value, self->tools);
             break;
         case PROP_ALLOWED_TOOLS:
             g_value_set_string(value, self->allowed_tools);
@@ -175,6 +183,10 @@ ai_grok_build_client_set_property(
         case PROP_PERMISSION_MODE:
             g_free(self->permission_mode);
             self->permission_mode = g_value_dup_string(value);
+            break;
+        case PROP_TOOLS:
+            g_free(self->tools);
+            self->tools = g_value_dup_string(value);
             break;
         case PROP_ALLOWED_TOOLS:
             g_free(self->allowed_tools);
@@ -344,6 +356,10 @@ emit_permission_args(AiGrokBuildClient *self, GPtrArray *args)
         }
     }
 
+    if (self->tools != NULL) {
+        g_ptr_array_add(args, g_strdup("--tools"));
+        g_ptr_array_add(args, g_strdup(self->tools));
+    }
     emit_rule_flag(args, "--allow", self->allowed_tools);
     /* Authorize the published parent allowlist even in normal mode. This
      * shared builder also covers resumed and text-synthesis retry turns. */
@@ -1163,6 +1179,8 @@ ai_grok_build_client_parse_stream_events(
     }
 
     obj = json_node_get_object(root);
+    if (!ai_grok_media_parse_event(client, obj, error))
+        return FALSE;
     type = ai_json_get_string(obj, "type", NULL);
 
     if (g_strcmp0(type, "error") == 0)
@@ -1384,6 +1402,7 @@ ai_grok_build_client_finalize(GObject *object)
     g_free(self->permission_mode);
     g_free(self->allowed_tools);
     g_free(self->disallowed_tools);
+    g_free(self->tools);
     g_free(self->sandbox);
     g_free(self->agent);
     g_free(self->rules);
@@ -1524,6 +1543,16 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
                             "auto, dontAsk, bypassPermissions, plan)",
                             NULL,
                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiGrokBuildClient:tools:
+     *
+     * Comma-separated built-in tools exposed to the agent via --tools.
+     * This controls availability; allowed-tools controls permission rules.
+     */
+    properties[PROP_TOOLS] =
+        g_param_spec_string("tools", "Tools", "Built-in tool allowlist (--tools)",
+                            NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     /**
      * AiGrokBuildClient:allowed-tools:

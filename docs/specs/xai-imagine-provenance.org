@@ -1,0 +1,32 @@
+#+title: xAI Imagine wire reference snapshots
+#+description: Official HTTP reference downloads and reconciliation used by ai-glib
+#+authors: ai-glib contributors
+#+categories: development api specifications
+#+created: 2026-09-11T12:00:00-04:00
+#+updated: 2026-09-11T12:00:00-04:00
+#+version: 1
+
+* Provenance
+These are unmodified Markdown downloads supplied by docs.x.ai's “View as Markdown” links, retrieved 2026-09-11. They preserve the upstream REST field specification and its model-capability supplements. The guessed machine-readable endpoint =https://api.x.ai/openapi.json= returned HTTP 404; these files are the official REST reference, not an invented OpenAPI schema. Upstream content retains its original ownership; the snapshots are reference material, not ai-glib-authored documentation.
+
+| Local snapshot | Official source | SHA-256 |
+| xai-images-2026-09-11.md | https://docs.x.ai/developers/rest-api-reference/inference/images.md | e3158db8f0dff197d2625aedba920f2d3c863d3ee5c0e41df1772e8835593b19 |
+| xai-videos-2026-09-11.md | https://docs.x.ai/developers/rest-api-reference/inference/videos.md | b94adf120f1f4d9bf93816f5f9d0ea34db06c0b3a6e5dbf901430c2db82691eb |
+| xai-video-generation-2026-09-11.md | https://docs.x.ai/developers/model-capabilities/video/generation.md | 1244cf4cf0db626a8362e011f6134dbb21510400501310867acb9cbae483651d |
+| xai-reference-to-video-2026-09-11.md | https://docs.x.ai/developers/model-capabilities/video/reference-to-video.md | 38240ad07b6318e4644a6ffa4e3518a87f2c98cb0798a3773ba302f6d97b401b |
+| xai-image-generation-2026-09-11.md | https://docs.x.ai/developers/model-capabilities/images/generation.md | 3e8a8d6a4782d667b0915d408f3fb4df7de905e5b462d1f937ecec20b1baeef6 |
+| xai-multi-image-editing-2026-09-11.md | https://docs.x.ai/developers/model-capabilities/images/multi-image-editing.md | 5f654c23e7fd4f814fe2e489f76343afd581652d90437ab3dfef0494cf0ffa0e |
+| xai-imagine-overview-2026-09-11.md | https://docs.x.ai/developers/model-capabilities/imagine.md | d8bf6e3d72fc01fd1f7f2f81b16fcf6c7d4bdeb9167cccea465f4eca3b31db9d |
+
+* Reconciliation
+The REST video field listing omits =generate_audio=, but the video-generation capability page documents it explicitly and includes a REST curl example sending false. ai-glib follows that explicit example. Similarly, image 2.0 =quality= appears in the image-generation guide (auto/low/medium), although the REST field listing omits it. The provider gates quality on image 2.0.
+
+The Markdown rendition omits some warning callout contents. The rendered reference-to-video page states seven reference images, three preset voices, and a maximum 720p resolution; the rendered Imagine overview states five reference images for image editing. These model limits are enforced locally. Video duration is 1–15 seconds; 1080p applies to video 1.5 text/image generation. Image generation count is 1–10.
+
+* Implemented projection
+Image generation uses =POST /v1/images/generations=; any input reference selects =POST /v1/images/edits= with =image: {url: data-URL}= for one reference or =images: [{url: data-URL}, ...]= for several. The library does not send OpenAI multipart bodies to Imagine.
+
+Video generation submits =POST /v1/videos/generations= and polls =GET /v1/videos/{request_id}= until done, failed, expired, cancellation, or the request deadline. Image-to-video uses =image=; reference-to-video uses =reference_images= and optional =reference_audios= voice identifiers. The initial POST is never automatically retried because it is not idempotent. Poll GETs use the existing bounded HTTP retry mechanism, and the total deadline cancels both I/O and polling waits.
+
+* Scope
+This version exposes text/image/reference video generation and preset voices. Video editing/extension, exact last-frame pinning, custom audio clips, Files API IDs, storage options and signed output uploads are outside the public video request contract. Local image bytes are encoded as data URLs. Temporary output URLs must be saved promptly. Tests use loopback HTTP; no paid live generation was performed.

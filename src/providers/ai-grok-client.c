@@ -16,6 +16,7 @@
 #include "core/ai-json-util.h"
 #include "providers/ai-openai-shared.h"
 #include "providers/ai-image-shared.h"
+#include "providers/ai-grok-video.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"
 #include "core/ai-event.h"
@@ -52,7 +53,9 @@ G_DEFINE_TYPE_WITH_CODE(AiGrokClient, ai_grok_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
                                               ai_grok_client_streamable_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_IMAGE_GENERATOR,
-                                              ai_grok_client_image_generator_init))
+                                              ai_grok_client_image_generator_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_VIDEO_GENERATOR,
+                                              ai_grok_video_generator_init))
 
 /*
  * Build request uses OpenAI format.
@@ -1232,13 +1235,9 @@ ai_grok_client_streamable_init(AiStreamableInterface *iface)
 /*
  * AiImageGenerator interface implementation
  *
- * Grok exposes the thinnest image API of the supported providers: an
- * OpenAI-compatible endpoint that accepts only prompt, model, n and
- * response_format.  Everything else the request can express is declared
- * unsupported here, so it is dropped by the shared validator rather than
- * sent and rejected.
- *
- * Endpoint: POST /v1/images/generations
+ * Imagine generations and edits use JSON requests. The provider projects
+ * the shared request onto the selected model's documented capabilities.
+ * See docs/specs/xai-imagine-provenance.org for versioned wire references.
  */
 
 typedef struct
@@ -1260,41 +1259,44 @@ grok_image_gen_data_free(GrokImageGenData *data)
 static GList *
 ai_grok_client_list_image_models(AiImageGenerator *generator)
 {
-    GList *models = NULL;
-    AiImageModelInfo *info;
+	GList *models = NULL;
+	AiImageModelInfo *info;
 
-    (void)generator;
+	(void)generator;
 
-    /*
-     * grok-imagine accepts a single input image, which is enough for
-     * "restyle this" but not for multi-image conditioning.
-     */
-    info = ai_image_model_info_new(
-        AI_GROK_IMAGE_MODEL_GROK_IMAGINE, "Grok Imagine", AI_PROVIDER_GROK,
-        AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_URL_RESPONSE |
-        AI_IMAGE_CAP_REFERENCE_IMAGES);
-    ai_image_model_info_set_max_count(info, 10);
-    ai_image_model_info_set_max_reference_images(info, 1);
-    ai_image_model_info_set_notes(info, "Prompt, count and response format only");
-    models = g_list_append(models, info);
+	/* Current Imagine image models use JSON edits and multi-reference inputs. */
+	{
+		const gchar *ids[] = { AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0,
+			AI_GROK_IMAGE_MODEL_GROK_IMAGINE, AI_GROK_IMAGE_MODEL_GROK_IMAGINE_QUALITY };
+		const gchar *aspects[] = { "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2",
+			"9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1", "21:9", "5:2", "auto", NULL };
+		guint i;
+		for (i = 0; i < G_N_ELEMENTS(ids); i++) {
+			info = ai_image_model_info_new(ids[i], ids[i], AI_PROVIDER_GROK,
+				AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_URL_RESPONSE |
+				AI_IMAGE_CAP_REFERENCE_IMAGES | AI_IMAGE_CAP_MULTI_REFERENCE |
+				AI_IMAGE_CAP_ASPECT_RATIO | AI_IMAGE_CAP_RESOLUTION_TIER |
+				(i == 0 ? AI_IMAGE_CAP_QUALITY : 0));
+			ai_image_model_info_set_max_count(info, 10);
+			ai_image_model_info_set_max_reference_images(info, 5);
+			ai_image_model_info_set_aspect_ratios(info, aspects);
+			if (i == 0) {
+				const gchar *qualities[] = { "auto", "low", "medium", NULL };
+				ai_image_model_info_set_qualities(info, qualities);
+			}
+			ai_image_model_info_set_notes(info, "JSON generation/edit; resolution 1k or 2k");
+			models = g_list_append(models, info);
+		}
+	}
 
-    info = ai_image_model_info_new(
-        AI_GROK_IMAGE_MODEL_GROK_IMAGINE_QUALITY, "Grok Imagine (quality)",
-        AI_PROVIDER_GROK,
-        AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_URL_RESPONSE |
-        AI_IMAGE_CAP_REFERENCE_IMAGES);
-    ai_image_model_info_set_max_count(info, 10);
-    ai_image_model_info_set_max_reference_images(info, 1);
-    models = g_list_append(models, info);
+	info = ai_image_model_info_new(
+		AI_GROK_IMAGE_MODEL_GROK_2_IMAGE, "Grok 2 Image", AI_PROVIDER_GROK,
+		AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_URL_RESPONSE);
+	ai_image_model_info_set_max_count(info, 10);
+	ai_image_model_info_set_notes(info, "Legacy; no reference images");
+	models = g_list_append(models, info);
 
-    info = ai_image_model_info_new(
-        AI_GROK_IMAGE_MODEL_GROK_2_IMAGE, "Grok 2 Image", AI_PROVIDER_GROK,
-        AI_IMAGE_CAP_MULTI_COUNT | AI_IMAGE_CAP_URL_RESPONSE);
-    ai_image_model_info_set_max_count(info, 10);
-    ai_image_model_info_set_notes(info, "Legacy; no reference images");
-    models = g_list_append(models, info);
-
-    return models;
+	return models;
 }
 
 static void
@@ -1365,94 +1367,174 @@ on_grok_image_response(
     grok_image_gen_data_free(data);
 }
 
+/* Project exactly the documented Imagine fields; edits use image(s), not multipart. */
+static JsonNode *
+grok_build_image_json(AiImageRequest *request, const gchar *model, const AiImageModelInfo *info)
+{
+	g_autoptr(JsonBuilder) builder = json_builder_new();
+	g_autofree gchar *prompt = ai_image_shared_prompt_with_roles(request);
+	GList *references = ai_image_request_get_reference_images(request);
+	GList *iter;
+	AiImageResolution resolution = ai_image_request_get_resolution(request);
+	const gchar *aspect = ai_image_request_get_aspect_ratio(request);
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "model");
+	json_builder_add_string_value(builder, model);
+	json_builder_set_member_name(builder, "prompt");
+	json_builder_add_string_value(builder, prompt);
+	json_builder_set_member_name(builder, "n");
+	json_builder_add_int_value(builder, ai_image_request_get_count(request));
+	json_builder_set_member_name(builder, "response_format");
+	json_builder_add_string_value(builder, ai_image_request_get_response_format(request) == AI_IMAGE_RESPONSE_URL ? "url" : "b64_json");
+	if (info != NULL && ai_image_model_info_supports(info, AI_IMAGE_CAP_ASPECT_RATIO) && aspect != NULL) {
+		json_builder_set_member_name(builder, "aspect_ratio");
+		json_builder_add_string_value(builder, aspect);
+	}
+	if (info != NULL && ai_image_model_info_supports(info, AI_IMAGE_CAP_RESOLUTION_TIER) && resolution != AI_IMAGE_RESOLUTION_AUTO) {
+		json_builder_set_member_name(builder, "resolution");
+		json_builder_add_string_value(builder, resolution == AI_IMAGE_RESOLUTION_1K ? "1k" : "2k");
+	}
+	if (info != NULL && ai_image_model_info_supports(info, AI_IMAGE_CAP_QUALITY)) {
+		const gchar *quality = ai_image_quality_to_string(ai_image_request_get_quality(request));
+		if (quality != NULL) {
+			json_builder_set_member_name(builder, "quality");
+			json_builder_add_string_value(builder, quality);
+		}
+	}
+	if (references != NULL && info != NULL && ai_image_model_info_supports(info, AI_IMAGE_CAP_REFERENCE_IMAGES)) {
+		json_builder_set_member_name(builder, references->next != NULL ? "images" : "image");
+		if (references->next != NULL) json_builder_begin_array(builder);
+		for (iter = references; iter != NULL; iter = iter->next) {
+			AiImage *image = (AiImage *)iter->data;
+			g_autofree gchar *base64 = ai_image_dup_base64(image);
+			g_autofree gchar *url = g_strdup_printf("data:%s;base64,%s", ai_image_get_mime_type(image), base64);
+			json_builder_begin_object(builder);
+			json_builder_set_member_name(builder, "url");
+			json_builder_add_string_value(builder, url);
+			json_builder_end_object(builder);
+		}
+		if (references->next != NULL) json_builder_end_array(builder);
+	}
+	ai_image_shared_apply_extras(builder, request);
+	json_builder_end_object(builder);
+	return json_builder_get_root(builder);
+}
+
 static void
 ai_grok_client_generate_image_async(
-    AiImageGenerator    *generator,
-    AiImageRequest      *request,
-    GCancellable        *cancellable,
-    GAsyncReadyCallback  callback,
-    gpointer             user_data
+	AiImageGenerator    *generator,
+	AiImageRequest      *request,
+	GCancellable        *cancellable,
+	GAsyncReadyCallback  callback,
+	gpointer             user_data
 ){
-    AiGrokClient *self = AI_GROK_CLIENT(generator);
-    AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
-    g_autoptr(JsonNode) request_json = NULL;
-    g_autoptr(SoupMessage) msg = NULL;
-    g_autofree gchar *url = NULL;
-    g_autofree gchar *request_body = NULL;
-    g_autoptr(GBytes) body_bytes = NULL;
-    g_autoptr(GError) error = NULL;
-    const AiImageModelInfo *info;
-    gsize request_len = 0;
-    AiConfig *config;
-    const gchar *base_url;
-    const gchar *model;
-    GrokImageGenData *data;
-    GTask *task;
+	AiGrokClient *self = AI_GROK_CLIENT(generator);
+	AiClientClass *klass = AI_CLIENT_GET_CLASS(self);
+	g_autoptr(AiImageRequest) projected = ai_image_request_copy(request);
+	g_autoptr(JsonNode) request_json = NULL;
+	g_autoptr(SoupMessage) msg = NULL;
+	g_autofree gchar *url = NULL;
+	g_autofree gchar *request_body = NULL;
+	g_autoptr(GBytes) body_bytes = NULL;
+	g_autoptr(GError) error = NULL;
+	const AiImageModelInfo *info;
+	gsize request_len = 0;
+	AiConfig *config;
+	const gchar *base_url;
+	const gchar *model;
+	GrokImageGenData *data;
+	GTask *task;
 
-    task = g_task_new(self, cancellable, callback, user_data);
+	/* The shared validator normalizes fields; never mutate caller state. */
+	request = projected;
+	task = g_task_new(self, cancellable, callback, user_data);
 
-    model = ai_image_request_get_model(request);
-    if (model == NULL)
-    {
-        model = AI_GROK_IMAGE_DEFAULT_MODEL;
-    }
+	model = ai_image_request_get_model(request);
+	if (model == NULL)
+	{
+		model = AI_GROK_IMAGE_DEFAULT_MODEL;
+	}
 
-    info = ai_image_generator_get_model_info(generator, model);
+	info = ai_image_generator_get_model_info(generator, model);
 
-    if (!ai_image_request_validate(request, info, AI_IMAGE_VALIDATE_NONE,
-                                   &error))
-    {
-        g_task_return_error(task, g_steal_pointer(&error));
-        g_object_unref(task);
-        return;
-    }
+	if (!ai_image_request_validate(request, info, AI_IMAGE_VALIDATE_NONE,
+								   &error))
+	{
+		g_task_return_error(task, g_steal_pointer(&error));
+		g_object_unref(task);
+		return;
+	}
 
-    request_json = ai_image_shared_build_openai_json(request, model, info);
-    if (request_json == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Failed to build image request");
-        g_object_unref(task);
-        return;
-    }
+	if (ai_image_request_get_resolution(request) == AI_IMAGE_RESOLUTION_4K ||
+		(ai_image_request_get_operation(request) == AI_IMAGE_OPERATION_EDIT &&
+		 ai_image_request_get_reference_image_count(request) == 0)) {
+		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"Imagine supports 1k/2k resolution; edits require reference images");
+		g_object_unref(task);
+		return;
+	}
+	if (g_strcmp0(model, AI_GROK_IMAGE_MODEL_GROK_IMAGINE_2_0) == 0 &&
+		ai_image_request_get_quality(request) != AI_IMAGE_QUALITY_AUTO &&
+		ai_image_request_get_quality(request) != AI_IMAGE_QUALITY_LOW &&
+		ai_image_request_get_quality(request) != AI_IMAGE_QUALITY_MEDIUM) {
+		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"Imagine image 2.0 quality must be auto, low or medium");
+		g_object_unref(task);
+		return;
+	}
+	if (ai_image_request_get_reference_image_count(request) > 0 &&
+		(info == NULL || !ai_image_model_info_supports(info, AI_IMAGE_CAP_REFERENCE_IMAGES))) {
+		g_task_return_new_error(task, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+			"Selected image model has no registered reference-image support");
+		g_object_unref(task);
+		return;
+	}
+	request_json = grok_build_image_json(request, model, info);
+	if (request_json == NULL)
+	{
+		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+								"Failed to build image request");
+		g_object_unref(task);
+		return;
+	}
 
-    {
-        g_autoptr(JsonGenerator) gen = json_generator_new();
-        json_generator_set_root(gen, request_json);
-        request_body = json_generator_to_data(gen, &request_len);
-    }
+	{
+		g_autoptr(JsonGenerator) gen = json_generator_new();
+		json_generator_set_root(gen, request_json);
+		request_body = json_generator_to_data(gen, &request_len);
+	}
 
-    config = ai_client_get_config(AI_CLIENT(self));
-    base_url = ai_config_get_base_url(config, AI_PROVIDER_GROK);
-    url = g_strconcat(base_url, GROK_IMAGES_ENDPOINT, NULL);
+	config = ai_client_get_config(AI_CLIENT(self));
+	base_url = ai_config_get_base_url(config, AI_PROVIDER_GROK);
+	url = g_strconcat(base_url, ai_image_request_get_reference_image_count(request) > 0 ? "/v1/images/edits" : GROK_IMAGES_ENDPOINT, NULL);
 
-    msg = soup_message_new("POST", url);
-    if (msg == NULL)
-    {
-        g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-                                "Invalid Grok base URL: %s", base_url);
-        g_object_unref(task);
-        return;
-    }
+	msg = soup_message_new("POST", url);
+	if (msg == NULL)
+	{
+		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+								"Invalid Grok base URL: %s", base_url);
+		g_object_unref(task);
+		return;
+	}
 
-    body_bytes = g_bytes_new_take(g_steal_pointer(&request_body), request_len);
-    soup_message_set_request_body_from_bytes(msg, "application/json", body_bytes);
+	body_bytes = g_bytes_new_take(g_steal_pointer(&request_body), request_len);
+	soup_message_set_request_body_from_bytes(msg, "application/json", body_bytes);
 
-    klass->add_auth_headers(AI_CLIENT(self), msg);
+	klass->add_auth_headers(AI_CLIENT(self), msg);
 
-    data = g_slice_new0(GrokImageGenData);
-    data->client = g_object_ref(self);
-    data->task = task;
-    data->model = g_strdup(model);
+	data = g_slice_new0(GrokImageGenData);
+	data->client = g_object_ref(self);
+	data->task = task;
+	data->model = g_strdup(model);
 
-    ai_image_shared_send_async(
-        ai_client_get_soup_session(AI_CLIENT(self)),
-        msg,
-        body_bytes,
-        ai_config_get_max_retries(config),
-        cancellable,
-        on_grok_image_response,
-        data);
+	ai_image_shared_send_async(
+		ai_client_get_soup_session(AI_CLIENT(self)),
+		msg,
+		body_bytes,
+		ai_config_get_max_retries(config),
+		cancellable,
+		on_grok_image_response,
+		data);
 }
 
 static AiImageResponse *

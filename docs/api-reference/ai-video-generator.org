@@ -1,0 +1,75 @@
+#+title: AiVideoGenerator
+#+description: Provider-neutral asynchronous video generation and completed artifact handling
+#+authors: ai-glib contributors
+#+categories: api media video
+#+created: 2026-09-11T00:00:00-04:00
+#+updated: 2026-09-11T00:00:00-04:00
+#+version: 1
+
+* Overview
+
+=AiVideoGenerator= is a GObject interface for generating videos through =AiGrokClient= (Imagine HTTP) and =AiGrokBuildClient= (installed Grok Build media tools). It parallels =AiImageGenerator= while keeping video polling, result URLs, audio options and duration separate from image parameters. Test =AI_IS_VIDEO_GENERATOR(provider)= before casting. The asynchronous API delivers a completed artifact, including provider polling; it does not return an unfinished remote job as success.
+
+* AiVideoRequest
+
+Create a request with =ai_video_request_new(prompt)=. Requests are boxed values with =copy= and =free= functions and =g_autoptr= support. String setters copy their inputs; image setters and reference additions copy the =AiImage= metadata and retain its immutable bytes. The provider copies all inputs before the asynchronous start function returns, so the caller can release or reuse its request immediately.
+
+| Field | Accessors and default |
+|-------+-----------------------|
+| Prompt | =get_prompt= / =set_prompt=; nonempty description required |
+| Model | =get_model= / =set_model=; NULL selects the provider media default |
+| Operation | =get_operation= / =set_operation=; NULL infers from inputs |
+| First frame | =get_image= / =set_image=; optional =AiImage= |
+| References | =add_reference_image=, =get_reference_images=, =get_reference_image_count= |
+| Voices | =get_voices= / =set_voices=; optional NULL-terminated preset identifiers |
+| Duration | =get_duration= / =set_duration=; seconds, -1 means provider default |
+| Aspect ratio | =get_aspect_ratio= / =set_aspect_ratio=; NULL means provider default |
+| Resolution | =get_resolution= / =set_resolution=; string such as 480p, 720p or 1080p |
+| Audio | =get_generate_audio= / =set_generate_audio=; =AI_TRI_UNSET= uses provider default |
+| Polling | =get_poll_interval_ms= / =set_poll_interval_ms=; 1000 milliseconds |
+| Deadline | =get_timeout_ms= / =set_timeout_ms=; 600000 milliseconds |
+
+All accessor names have the =ai_video_request_= prefix. Polling and timeout must be positive. Providers validate supported combinations and reject invalid requests before dispatch. Their constraints differ; consult [[file:../providers/grok.org][Grok HTTP]] and [[file:../providers/grok-build.org][Grok Build]]. Explicit operations are =generate=, =image-to-video= and =reference-to-video=. When omitted, references or voices select reference-to-video, otherwise a first frame selects image-to-video, otherwise generation starts from text. Video editing and extension endpoints are not exposed by this interface version.
+
+* Synchronous generation
+
+#+begin_src C
+#include <ai-glib.h>
+
+/* Generate and save a six-second video using the provider's default model. */
+static gboolean
+save_video(GError **error)
+{
+	g_autoptr(AiGrokClient) client = ai_grok_client_new();
+	g_autoptr(AiVideoRequest) request = ai_video_request_new("Waves beneath a lighthouse at dawn");
+	g_autoptr(AiVideoResponse) response = NULL;
+
+	ai_video_request_set_duration(request, 6);
+	ai_video_request_set_resolution(request, "720p");
+	response = ai_video_generator_generate_video(AI_VIDEO_GENERATOR(client),
+	                                             request, NULL, error);
+	if (response == NULL)
+		return FALSE;
+	return ai_video_response_save_to_file(response, "lighthouse.mp4", NULL, error);
+}
+#+end_src
+
+The sync wrapper runs the async operation on a private =GMainContext=. It does not dispatch unrelated UI or application sources. A loopback test server on the caller's global context therefore must run on another thread.
+
+* Asynchronous generation and cancellation
+
+=ai_video_generator_generate_video_async(generator, request, cancellable, callback, user_data)= captures the initiating thread-default main context. Complete it exactly once with =ai_video_generator_generate_video_finish()= in the callback. The request may be freed after the start call; keep callback user data alive until completion. Every implementation must provide the async/finish pair; a missing pair completes with =AI_ERROR_NOT_SUPPORTED= rather than leaving the callback uncalled.
+
+HTTP generation submits the job once and polls on the task context. Initial submission is not retried because it can create a second paid job. Retry/backoff applies to polling GETs. Deadline and cancellation interrupt active I/O and pending polling. Owned =GSource= pointers permit teardown even when the final object reference is released on another context. Cancellation stops local activity but cannot retract an already accepted remote job or guarantee that it will not be charged. Grok Build uses the request timeout as the subprocess deadline and propagates cancellation to its existing CLI execution machinery.
+
+* AiVideoResponse
+
+A response owns an artifact URL, producing model, optional request ID and duration. Read them with =ai_video_response_get_url()=, =get_model()=, =get_request_id()= and =get_duration()=. Unknown duration is -1 seconds. Use =copy= to keep a result independently and =free= or =g_autoptr(AiVideoResponse)= to release it. The response does not own or delete the external artifact.
+
+=ai_video_response_save_to_file(response, path, cancellable, error)= streams HTTP(S) or local =file://= artifacts with bounded memory. It does not send provider credentials to artifact URLs. Existing files are replaced after a successful copy; cancellation or read/write failure aborts the replacement stream. HTTP downloads use a 120-second inactivity timeout. Save provider URLs promptly because they expire. This helper is synchronous and belongs in a worker when a UI must remain responsive.
+
+* Models and tests
+
+=ai_video_generator_get_default_model()= reports the provider's video model independently of its chat configuration. Grok HTTP defaults to =AI_GROK_VIDEO_MODEL_GROK_IMAGINE_1_5=. Grok Build reports =AI_GROK_BUILD_MODEL_MEDIA= because the wrapped tools choose their own media model; configure its agent model through =AiCliClient:model=.
+
+=tests/test-video.c= exercises boxed ownership, local artifact saving, cancellation and absent interface methods. =tests/test-grok-imagine.c= exercises HTTP payloads, polling, errors and context-safe deadlines on a threaded loopback server. =tests/test-grok-build-media.c= exercises the four wrapped tools with a fake subprocess. CLI regression tests verify actual output bytes from all four media tools and reject conflicting mode/option combinations. Tests do not make paid live generation calls. The downloaded HTTP reference and source checksums are in [[file:../specs/xai-imagine-provenance.org][specification provenance]].

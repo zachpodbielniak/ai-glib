@@ -76,6 +76,14 @@ static gboolean  opt_continue        = FALSE;
 /* Image mode.  Negative / NULL means "not given", so an untouched flag
  * leaves the corresponding request parameter unset. */
 static gboolean  opt_image_gen          = FALSE;
+static gboolean  opt_video_gen          = FALSE;
+static gchar    *opt_video_op           = NULL;
+static gchar    *opt_video_image        = NULL;
+static gchar   **opt_video_voices       = NULL;
+static gint      opt_video_duration     = -1;
+static gint      opt_video_timeout      = 600000;
+static gint      opt_video_poll         = 1000;
+static gboolean  opt_video_no_audio     = FALSE;
 static gchar    *opt_image_out          = NULL;
 static gchar    *opt_image_op           = NULL;
 static gchar   **opt_image_refs         = NULL;
@@ -166,6 +174,22 @@ static const GOptionEntry option_entries[] = {
 	{ "image-gen", 'I', 0, G_OPTION_ARG_NONE, &opt_image_gen,
 	  "Generate an image instead of text; see the image options below",
 	  NULL },
+	{ "video-gen", 0, 0, G_OPTION_ARG_NONE, &opt_video_gen,
+	  "Generate a video with grok or grok-build; save with -o FILE", NULL },
+	{ "video-op", 0, 0, G_OPTION_ARG_STRING, &opt_video_op,
+	  "generate, image-to-video or reference-to-video (default: infer from inputs)", "OP" },
+	{ "video-image", 0, 0, G_OPTION_ARG_FILENAME, &opt_video_image,
+	  "Image to animate as the first frame; --ref supplies conditioning images", "FILE" },
+	{ "duration", 0, 0, G_OPTION_ARG_INT, &opt_video_duration,
+	  "Video duration in seconds (provider-specific limits)", "SECONDS" },
+	{ "voice", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_video_voices,
+	  "Preset voice for reference-to-video; repeatable", "NAME" },
+	{ "no-audio", 0, 0, G_OPTION_ARG_NONE, &opt_video_no_audio,
+	  "Request a silent video (Grok HTTP)", NULL },
+	{ "video-timeout", 0, 0, G_OPTION_ARG_INT, &opt_video_timeout,
+	  "Total video generation timeout in milliseconds (default: 600000)", "MS" },
+	{ "video-poll-interval", 0, 0, G_OPTION_ARG_INT, &opt_video_poll,
+	  "Video HTTP polling interval in milliseconds (default: 1000)", "MS" },
 
 	/*
 	 * Image options are listed here rather than in a GOptionGroup of
@@ -175,7 +199,9 @@ static const GOptionEntry option_entries[] = {
 	 * that omits most of the mode it is documenting.
 	 */
 	{ "image-out", 'o', 0, G_OPTION_ARG_FILENAME, &opt_image_out,
-	  "Write the image here (default: auto-numbered output-0000.png)", "FILE" },
+	  "Write media here (default: output-0000.png or output-0000.mp4)", "FILE" },
+	{ "video-out", 0, 0, G_OPTION_ARG_FILENAME, &opt_image_out,
+	  "Alias for -o in video mode", "FILE" },
 	{ "image-op", 0, 0, G_OPTION_ARG_STRING, &opt_image_op,
 	  "generate, edit, variation or upscale (default: generate, or edit "
 	  "when --ref is given)", "OP" },
@@ -190,11 +216,11 @@ static const GOptionEntry option_entries[] = {
 	{ "mask", 0, 0, G_OPTION_ARG_FILENAME, &opt_image_mask,
 	  "Edit mask; transparent areas are the ones regenerated", "FILE" },
 	{ "aspect", 0, 0, G_OPTION_ARG_STRING, &opt_image_aspect,
-	  "Aspect ratio, e.g. 16:9 (Gemini and Imagen)", "RATIO" },
+	  "Image/video aspect ratio, e.g. 16:9", "RATIO" },
 	{ "size", 0, 0, G_OPTION_ARG_STRING, &opt_image_size,
 	  "Pixel size, e.g. 1024x1024 or auto (OpenAI)", "WxH" },
 	{ "resolution", 0, 0, G_OPTION_ARG_STRING, &opt_image_resolution,
-	  "Resolution tier: 1k, 2k or 4k (Nano Banana Pro, Imagen)", "TIER" },
+	  "Image resolution: 1k, 2k, 4k; video: 480p, 720p, 1080p", "TIER" },
 	{ "count", 'n', 0, G_OPTION_ARG_INT, &opt_image_count,
 	  "How many images to generate", "N" },
 	{ "quality", 0, 0, G_OPTION_ARG_STRING, &opt_image_quality,
@@ -573,9 +599,12 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_CLI_CLIENT(provider))
 	{
 		AiCliClient *c = AI_CLI_CLIENT(provider);
-		/* Frontend turns may run indefinitely; --set can opt into a deadline. */
-		ai_cli_client_set_process_timeout_ms(c, 0);
-		if (opt_model != NULL)
+		/* Media operations retain a bounded default; chat turns may run
+		 * indefinitely. --set remains the explicit client override. */
+		if (!opt_image_gen && !opt_video_gen)
+			ai_cli_client_set_process_timeout_ms(c, 0);
+		if (opt_model != NULL &&
+		    !(AI_IS_GROK_BUILD_CLIENT(provider) && (opt_image_gen || opt_video_gen)))
 			ai_cli_client_set_model(c, opt_model);
 		if (opt_system != NULL)
 			ai_cli_client_set_system_prompt(c, opt_system);
@@ -1112,7 +1141,8 @@ static int
 list_image_models(AiConfig *config, const gchar *provider_name)
 {
 	static const AiProviderType all[] = {
-		AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI, AI_PROVIDER_GROK
+		AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI, AI_PROVIDER_GROK,
+		AI_PROVIDER_GROK_BUILD
 	};
 	gsize i;
 	gboolean any = FALSE;
@@ -1185,7 +1215,7 @@ generate_images(GObject *provider, const gchar *prompt)
 	if (!AI_IS_IMAGE_GENERATOR(provider))
 	{
 		g_printerr("ai: provider does not support image generation "
-		           "(try -p openai, -p gemini or -p grok)\n");
+		           "(try -p openai, -p gemini, -p grok or -p grok-build)\n");
 		return 2;
 	}
 
@@ -1353,6 +1383,82 @@ generate_images(GObject *provider, const gchar *prompt)
 	return 0;
 }
 
+/* Build provider-neutral video parameters and stream the final artifact to disk.
+ * A single --ref animates that image unless reference mode is explicit. */
+static gint
+generate_video(GObject *provider, const gchar *prompt)
+{
+	g_autoptr(AiVideoRequest) request = NULL;
+	g_autoptr(AiVideoResponse) response = NULL;
+	g_autoptr(AiImageRequest) references = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *path = NULL;
+	const gchar *operation;
+	GList *iter;
+	guint count;
+
+	if (!AI_IS_VIDEO_GENERATOR(provider))
+	{
+		g_printerr("ai: provider does not support video generation (try -p grok or -p grok-build)\n");
+		return 2;
+	}
+	request = ai_video_request_new(prompt);
+	references = ai_image_request_new(prompt);
+	if (!image_add_references(references, &error))
+		goto failed;
+	count = ai_image_request_get_reference_image_count(references);
+	operation = opt_video_op;
+	if (operation == NULL)
+	{
+		if (opt_video_voices != NULL || count > 1 ||
+		    (opt_video_image != NULL && count > 0))
+			operation = "reference-to-video";
+		else if (opt_video_image != NULL || count == 1)
+			operation = "image-to-video";
+		else
+			operation = "generate";
+	}
+	ai_video_request_set_operation(request, operation);
+	ai_video_request_set_model(request, opt_model);
+	ai_video_request_set_duration(request, opt_video_duration);
+	ai_video_request_set_aspect_ratio(request, opt_image_aspect);
+	ai_video_request_set_resolution(request, opt_image_resolution);
+	ai_video_request_set_poll_interval_ms(request, (guint)opt_video_poll);
+	ai_video_request_set_timeout_ms(request, (guint)opt_video_timeout);
+	ai_video_request_set_voices(request, (const gchar * const *)opt_video_voices);
+	if (opt_video_no_audio)
+		ai_video_request_set_generate_audio(request, AI_TRI_FALSE);
+	if (opt_video_image != NULL)
+	{
+		g_autoptr(AiImage) image = ai_image_new_from_file(opt_video_image, &error);
+		if (image == NULL)
+			goto failed;
+		ai_video_request_set_image(request, image);
+	}
+	for (iter = ai_image_request_get_reference_images(references);
+	     iter != NULL; iter = iter->next)
+	{
+		if (g_str_equal(operation, "image-to-video") && count == 1 &&
+		    opt_video_image == NULL)
+			ai_video_request_set_image(request, (AiImage *)iter->data);
+		else
+			ai_video_request_add_reference_image(request, (AiImage *)iter->data);
+	}
+	response = ai_video_generator_generate_video(AI_VIDEO_GENERATOR(provider),
+	                                             request, NULL, &error);
+	if (response == NULL)
+		goto failed;
+	path = opt_image_out != NULL ? g_strdup(opt_image_out) : image_auto_filename(".mp4", 0);
+	if (!ai_video_response_save_to_file(response, path, NULL, &error))
+		goto failed;
+	printf("%s\n", path);
+	return 0;
+
+failed:
+	g_printerr("ai: %s\n", error != NULL ? error->message : "video generation failed");
+	return 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1375,10 +1481,14 @@ main(int argc, char *argv[])
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "
-		"it to a file; the image options below apply in that mode.");
+		"it to a file. With --video-gen, generate and save a video.");
 
 	g_option_context_set_description(
 		ctx,
+		"Video examples:\n"
+		"  ai --video-gen -p grok --duration 6 --resolution 720p -o lake.mp4 \"mist over a lake\"\n"
+		"  ai --video-gen -p grok-build --ref photo.png -o motion.mp4 \"animate the clouds\"\n"
+		"  ai --video-gen -p grok --video-op reference-to-video --ref character.png --voice eve \"a greeting\"\n\n"
 		"Image examples:\n"
 		"  ai --image-gen -o sunset.png \"a sunset over mountains\"\n"
 		"  ai --image-gen -p gemini --aspect 16:9 --resolution 2k \\\n"
@@ -1422,7 +1532,7 @@ main(int argc, char *argv[])
 	}
 
 	{
-		gint mcp_status = mcp_early(argc, argv[0], opt_launch || opt_launch_cmd || opt_launch_cmd_print || opt_setup || opt_image_gen || opt_image_list_models || opt_interactive || opt_dry_run || opt_usage || opt_history, &error);
+		gint mcp_status = mcp_early(argc, argv[0], opt_launch || opt_launch_cmd || opt_launch_cmd_print || opt_setup || opt_image_gen || opt_video_gen || opt_image_list_models || opt_interactive || opt_dry_run || opt_usage || opt_history, &error);
 		if (mcp_status >= 0) { if (error != NULL) g_printerr("ai: %s\n", error->message); return mcp_status; }
 		if (mcp_requested() && !opt_mcp_server && opt_mcp_socket == NULL) { g_printerr("ai: MCP tool options require --mcp-server or --mcp-socket\n"); return 2; }
 	}
@@ -1457,7 +1567,7 @@ main(int argc, char *argv[])
 	if ((opt_usage && opt_history) ||
 	    (opt_report_json && !opt_usage && !opt_history) ||
 	    ((opt_usage || opt_history) && (argc > 1 || opt_launch || opt_launch_cmd ||
-	     opt_launch_cmd_print || opt_setup || opt_image_gen || opt_image_list_models ||
+	     opt_launch_cmd_print || opt_setup || opt_image_gen || opt_video_gen || opt_image_list_models ||
 	     opt_interactive || opt_dry_run || opt_stream || opt_continue)) ||
 	    opt_report_limit < 1 || opt_report_limit > 1000)
 	{
@@ -1466,13 +1576,48 @@ main(int argc, char *argv[])
 	}
 	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
 	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
-	     (opt_setup || opt_image_gen || opt_image_list_models || opt_interactive || opt_dry_run)))
+	     (opt_setup || opt_image_gen || opt_video_gen || opt_image_list_models || opt_interactive || opt_dry_run)))
 	{
 		g_printerr("ai: choose one launch mode; it cannot be combined with setup, image, interactive, or dry-run modes\n");
 		return 2;
 	}
 
 	config = ai_config_new();
+	/* Reject conflicting modes before anything can start a paid request. */
+	if ((opt_video_gen && (opt_image_gen || opt_image_list_models ||
+	                      opt_setup || opt_stream || opt_interactive ||
+	                      opt_dry_run || opt_continue)) ||
+	    (!opt_video_gen && (opt_video_op != NULL || opt_video_image != NULL ||
+	                       opt_video_voices != NULL || opt_video_no_audio ||
+	                       opt_video_duration != -1 || opt_video_timeout != 600000 ||
+	                       opt_video_poll != 1000)))
+	{
+		g_printerr("ai: video options require --video-gen and cannot be combined with other modes\n");
+		return 2;
+	}
+	if (opt_video_gen &&
+	    (opt_video_duration == 0 || opt_video_duration < -1 ||
+	     opt_video_timeout <= 0 || opt_video_poll <= 0 ||
+	     (opt_video_op != NULL && !g_str_equal(opt_video_op, "generate") &&
+	      !g_str_equal(opt_video_op, "image-to-video") &&
+	      !g_str_equal(opt_video_op, "reference-to-video"))))
+	{
+		g_printerr("ai: invalid video operation, duration, timeout or polling interval\n");
+		return 2;
+	}
+	if (opt_video_gen && (opt_image_op != NULL || opt_image_mask != NULL ||
+	    opt_image_size != NULL || opt_image_count != 0 || opt_image_quality != NULL ||
+	    opt_image_style != NULL || opt_image_background != NULL ||
+	    opt_image_format != NULL || opt_image_compression != -1 ||
+	    opt_image_negative != NULL || opt_image_seed != -1 || opt_image_guidance != -1 ||
+	    opt_image_steps != 0 || opt_image_strength != -1 || opt_image_moderation != NULL ||
+	    opt_image_person != NULL || opt_image_language != NULL ||
+	    opt_image_fidelity != NULL || opt_image_no_watermark || opt_image_url ||
+	    opt_image_extra != NULL || opt_image_strict))
+	{
+		g_printerr("ai: image-only options cannot be used with --video-gen\n");
+		return 2;
+	}
 	if (opt_setup)
 		return ai_setup_run(config);
 
@@ -1502,7 +1647,7 @@ main(int argc, char *argv[])
 		return 2;
 	}
 	/* Saved models are chat defaults, never image-generation defaults. */
-	if (opt_image_gen)
+	if (opt_image_gen || opt_video_gen)
 	{
 		if (g_strcmp0(opt_model, "default") == 0)
 			g_clear_pointer(&opt_model, g_free);
@@ -1679,6 +1824,13 @@ main(int argc, char *argv[])
 			g_free(prompt);
 			prompt = expanded;
 		}
+	}
+
+	if (opt_video_gen)
+	{
+		status = generate_video(provider, prompt);
+		g_object_unref(provider);
+		return status;
 	}
 
 	/* Image mode diverges here: it needs the prompt but none of the

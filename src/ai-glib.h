@@ -32,6 +32,7 @@
 #include "core/ai-image-capabilities.h"
 #include "core/ai-embedder.h"
 #include "core/ai-image-generator.h"
+#include "core/ai-video-generator.h"
 #include "core/ai-client.h"
 #include "core/ai-tool-endpoint.h"
 #include "core/ai-tool-endpoint-consumer.h"
@@ -64,6 +65,8 @@
 #include "model/ai-image-content.h"
 #include "model/ai-embedding.h"
 #include "model/ai-image-request.h"
+#include "model/ai-video-request.h"
+#include "model/ai-video-response.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"
 

@@ -451,3 +451,42 @@ configuration, supported APIs, examples and compatibility limits.
 ** MCP server
 
 =ai --mcp-server --mcp-tools conversation_status,conversation_send,conversation_transcript= exposes a headless conversation to MCP clients. Tools are disabled by default; =--mcp-all-tools= grants the complete host catalog. =--mcp-socket= selects a private Unix socket, and =--mcp-connect= bridges a client to an existing server. All MCP flags begin with =--mcp-=. See [[file:mcp.org][MCP hosting and provider integration]] for schemas, transport modes, provider delivery, and complete examples.
+
+* Grok images and videos
+
+Both =grok= (Imagine HTTP) and =grok-build= (installed Grok Build media tools) support =--image-gen=. The latter selects =image_gen= without references and =image_edit= with =--ref=. Use =--list-image-models -p grok-build= to inspect its capability table. Video generation uses =--video-gen= and the same provider selection and output flag =-o FILE=; =--video-out FILE= is an alias. The default video filename is the next available =output-NNNN.mp4=.
+
+#+begin_src bash
+ai -p grok-build --image-gen -o scene.png 'A lighthouse in fog'
+ai -p grok-build --image-gen --ref scene.png -o night.png 'Make this a moonlit scene'
+ai -p grok --video-gen --duration 6 --resolution 720p -o sea.mp4 'Waves below a lighthouse'
+ai -p grok-build --video-gen --ref scene.png --duration 6 -o scene.mp4 'Slowly move toward the lighthouse'
+ai -p grok --video-gen --video-op reference-to-video --ref scene.png --voice eve -o narrated.mp4 'A narrator describes the coast using <AUDIO_0>'
+#+end_src
+
+** Video options and input selection
+
+| Option | Meaning |
+|--------+---------|
+| =--video-op OP= | =generate=, =image-to-video=, or =reference-to-video=; omitted infers from inputs |
+| =--video-image FILE= | Explicit first frame to animate |
+| =--ref FILE= | Repeatable image input; a single reference infers image-to-video, multiple references infer reference-to-video |
+| =--ref-role ROLE= | Ordered label for reference images |
+| =--duration SECONDS= | HTTP: 1–15; Grok Build image-to-video: 6 or 10; Grok Build reference-to-video: 1–15 |
+| =--aspect RATIO= | Provider-supported aspect ratio; unavailable with an existing first frame in Grok Build |
+| =--resolution TIER= | 480p or 720p; HTTP video 1.5 also supports 1080p for text/image-to-video |
+| =--voice NAME= | Repeatable preset voice identifiers; selects reference-to-video when operation is omitted |
+| =--no-audio= | Ask Grok HTTP for a silent video; Grok Build rejects this unsupported tool parameter |
+| =--video-timeout MS= | Total generation/polling deadline, default 600000 milliseconds |
+| =--video-poll-interval MS= | HTTP polling cadence, default 1000 milliseconds |
+| =-o FILE= / =--video-out FILE= | Save the completed MP4 artifact |
+
+To use a single image as conditioning rather than as the starting frame, explicitly pass =--video-op reference-to-video --ref FILE=. The library infers reference-to-video whenever its reference-image list is populated; the single-=--ref= animation convenience belongs to the CLI. The current providers reject combining a first frame with conditioning references. Voices may also be used without images. Image-only settings such as masks, quality, count and image extras are rejected in video mode. Video mode is mutually exclusive with image, streaming chat, interactive, launch, resume, setup and dry-run modes.
+
+** Models and execution
+
+Saved chat model defaults do not become media model defaults. For Grok HTTP, =-m= selects an Imagine media model. Grok Build advertises =grok-build-media= because its four tools have no model parameter; =-m grok-build-media= is valid, and =--set model=grok-4.6= separately selects the agent's chat model. Grok Build configuration chooses the underlying media model. Text-to-video in Grok Build orchestrates =image_gen= followed by =image_to_video= because it has no standalone text-to-video tool.
+
+Grok Build calls run in an isolated session with only the necessary tools enabled. Results must contain a successful structured media tool result with an artifact path or URL; a prose claim of success is an error. Requests are agent-mediated: exact tool arguments depend on the wrapped CLI agent following the supplied structured instruction. Neither provider is tested by spending real generation credits in the normal test suite.
+
+HTTP video generation submits once, then polls to completion with retry handling for polling requests. The library rejects unknown or malformed status replies, reports expired jobs and moderation errors, and honors cancellation and timeout while waiting or receiving data. The CLI streams the final artifact to disk without buffering the entire video. URLs expire, so save them promptly. See [[file:api-reference/ai-video-generator.org][the public video API]], [[file:providers/grok.org][Imagine HTTP]], [[file:providers/grok-build.org][Grok Build]], and [[file:specs/xai-imagine-provenance.org][the downloaded specification and provenance]].

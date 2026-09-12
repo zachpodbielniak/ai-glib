@@ -44,6 +44,9 @@ G_DECLARE_FINAL_TYPE(AiGrokBuildClient, ai_grok_build_client, AI, GROK_BUILD_CLI
 /*
  * Floating alias for the newest build model.
  */
+/* Virtual media-tool model; the coordinating agent uses the chat model. */
+#define AI_GROK_BUILD_MODEL_MEDIA "grok-build-media"
+
 #define AI_GROK_BUILD_MODEL_LATEST      AI_GROK_BUILD_MODEL_GROK_4_6
 
 
