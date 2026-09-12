@@ -338,6 +338,7 @@ attr_for_tag(AiStyleTag tag)
 #define KEY_SHIFT_ENTER (KEY_MAX + 1)
 #define KEY_PASTE_START (KEY_MAX + 2)
 #define KEY_PASTE_END (KEY_MAX + 3)
+#define KEY_CTRL_C (KEY_MAX + 4)
 
 /*
  * How long a first ^C stays armed, in milliseconds.
@@ -3085,20 +3086,38 @@ handle_interrupt(App *app)
 }
 
 static gboolean
+app_quit_from_interrupt(App *app)
+{
+	if (!handle_interrupt(app))
+	{
+		app_schedule_redraw(app);
+		return FALSE;
+	}
+
+	app->running = FALSE;
+	if (app->loop != NULL)
+		g_main_loop_quit(app->loop);
+	return TRUE;
+}
+
+static gboolean
+key_is_interrupt(gint kind, wint_t value)
+{
+	return (kind == OK && value == 3) ||
+		(kind == KEY_CODE_YES && value == (wint_t)KEY_CTRL_C);
+}
+
+static gboolean
 on_sigint(gpointer user_data)
 {
-    App *app = user_data;
+	App *app = user_data;
 
-    if (handle_interrupt(app))
-    {
-        app->running = FALSE;
-        g_main_loop_quit(app->loop);
-        return G_SOURCE_REMOVE;
-    }
+	/* A CSI-u Ctrl-C is a keystroke, not SIGINT. Traditional terminals
+	 * still raise the signal; either path is one interrupt. */
+	if (app_quit_from_interrupt(app))
+		return G_SOURCE_REMOVE;
 
-    app_schedule_redraw(app);
-
-    return G_SOURCE_CONTINUE;
+	return G_SOURCE_CONTINUE;
 }
 
 /* Search operates on rendered rows, so navigation and highlighting agree
@@ -3241,6 +3260,15 @@ drain_keys(App *app)
 			app_schedule_redraw(app);
 			continue;
 		}
+		/* gst/tmux may deliver Ctrl-C as CSI-u rather than SIGINT. Treat
+		 * both encodings as one interrupt, before approval or search steal
+		 * Escape from an unmapped sequence. */
+		if (key_is_interrupt(kind, value))
+		{
+			if (app_quit_from_interrupt(app))
+				return G_SOURCE_REMOVE;
+			continue;
+		}
 		/* Unicode scalar values overlap KEY_* numerically. Only ncurses'
 		 * KEY_CODE_YES result authorizes interpreting one as a function key. */
 		if (kind == OK && g_unichar_validate((gunichar)value) && !g_unichar_iscntrl((gunichar)value))
@@ -3251,7 +3279,7 @@ drain_keys(App *app)
 			case 'y': case 'Y': app->approval_answer = AI_TOOL_APPROVAL_ALLOW; break;
 			case 'n': case 'N': case 27: app->approval_answer = AI_TOOL_APPROVAL_DENY; break;
 			case 'a': case 'A': app->approval_answer = AI_TOOL_APPROVAL_ALLOW_ALWAYS; break;
-			case 'd': case 'D': case 3: app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL; break;
+			case 'd': case 'D': app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL; break;
 			default: break;
 			}
 			app_schedule_redraw(app);
@@ -3259,12 +3287,12 @@ drain_keys(App *app)
 			continue;
 		}
 		/* Do not submit or edit a draft while it cannot be seen. */
-		if (app->tiny && !((kind == OK && (ch == 3 || ch == 4)) ||
+		if (app->tiny && !((kind == OK && ch == 4) ||
 			(kind == KEY_CODE_YES && ch == KEY_RESIZE))) continue;
 		if (app->searching && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
 			(kind == OK && (ch == 12 || ch == 15 || ch == 16 || ch == 20))))
 		{
-			if (kind == OK && (ch == 27 || ch == 6 || ch == 3)) app->searching = FALSE;
+			if (kind == OK && (ch == 27 || ch == 6)) app->searching = FALSE;
 			else if ((kind == KEY_CODE_YES && (ch == KEY_UP || ch == KEY_SHIFT_ENTER || ch == KEY_LEFT))) search_step(app, -1);
 			else if ((kind == OK && (ch == '\n' || ch == '\r')) || (kind == KEY_CODE_YES && (ch == KEY_ENTER || ch == KEY_DOWN || ch == KEY_RIGHT))) search_step(app, 1);
 			else
@@ -3532,15 +3560,6 @@ drain_keys(App *app)
             case 2:   /* ^B: toggle the selected block */
                 completion_close(app);
                 toggle_selected(app);
-                break;
-
-            case 3:   /* ^C: stop the turn, clear the line, drop the queue, then quit */
-                if (handle_interrupt(app))
-                {
-                    app->running = FALSE;
-                    g_main_loop_quit(app->loop);
-                    return G_SOURCE_REMOVE;
-                }
                 break;
 
             case 4:   /* ^D: quit, on an empty line */
@@ -5280,6 +5299,16 @@ main(int argc, char *argv[])
      */
     define_key("\033[13;2u", KEY_SHIFT_ENTER);
     define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
+	/* gst's negotiated keyboard protocol and xterm modifyOtherKeys send
+	 * Ctrl-C as CSI rather than byte 3, so ISIG never raises SIGINT. */
+	define_key("\033[99;5u", KEY_CTRL_C);
+	define_key("\033[99;5:1u", KEY_CTRL_C);
+	define_key("\033[99;5:2u", KEY_CTRL_C);
+	define_key("\033[67;5u", KEY_CTRL_C);
+	define_key("\033[3;5u", KEY_CTRL_C);
+	define_key("\033[27;5;99~", KEY_CTRL_C);
+	define_key("\033[27;5;67~", KEY_CTRL_C);
+	define_key("\033[27;5;3~", KEY_CTRL_C);
 	/* tmux and terminals also emit the numeric Home/End forms, which
 	 * xterm terminfo may omit in favor of application-cursor sequences. */
 	define_key("\033[1~", KEY_HOME);

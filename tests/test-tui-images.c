@@ -174,6 +174,11 @@ test_composer(void)
 	g_assert_true(handle_interrupt(&app) == FALSE);
 	g_assert_null(app.images);
 	g_assert_cmpuint(app.input->len, ==, 0);
+	if (app.interrupt_id != 0)
+	{
+		g_source_remove(app.interrupt_id);
+		app.interrupt_id = 0;
+	}
 
 	/* Image-only messages and --no-expand use the same structured path. */
 	opt_no_expand = TRUE;
@@ -188,6 +193,58 @@ test_composer(void)
 	app_clear_send_queue(&app);
 	g_string_free(app.input, TRUE);
 	g_ptr_array_unref(app.history);
+	delwin(app.input_win);
+	endwin();
+	delscreen(screen);
+	fclose(input);
+	fclose(output);
+}
+
+/* Two idle interrupts leave. CSI-u is how gst delivers Ctrl-C once
+ * keyboard protocol is negotiated, and it must not be treated as Escape. */
+static void
+test_idle_double_interrupt_quits(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	App app = { 0 };
+
+	app.conversation = conversation;
+	app.input = g_string_new(NULL);
+	g_assert_false(handle_interrupt(&app));
+	g_assert_cmpuint(app.interrupt_id, !=, 0);
+	g_assert_true(handle_interrupt(&app));
+	g_string_free(app.input, TRUE);
+}
+
+static void
+test_csi_u_ctrl_c_quits(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	FILE *input = tmpfile();
+	FILE *output = tmpfile();
+	SCREEN *screen = newterm("xterm", output, input);
+	App app = { 0 };
+
+	g_assert_nonnull(screen);
+	app.conversation = conversation;
+	app.input = g_string_new(NULL);
+	app.input_win = newwin(5, 80, 0, 0);
+	app.loop = g_main_loop_new(NULL, FALSE);
+	nodelay(app.input_win, TRUE);
+	keypad(app.input_win, TRUE);
+	/* define_key() is covered by the tmux CSI-u case; here the decoded
+	 * keycode must take the same path as byte 3. */
+	ungetch(KEY_CTRL_C);
+	g_assert_cmpint(drain_keys(&app), ==, G_SOURCE_CONTINUE);
+	g_assert_cmpuint(app.interrupt_id, !=, 0);
+	g_assert_cmpuint(app.input->len, ==, 0);
+	ungetch(KEY_CTRL_C);
+	g_assert_cmpint(drain_keys(&app), ==, G_SOURCE_REMOVE);
+
+	g_main_loop_unref(app.loop);
+	g_string_free(app.input, TRUE);
 	delwin(app.input_win);
 	endwin();
 	delscreen(screen);
@@ -470,6 +527,10 @@ main(int argc, char **argv)
 	g_test_add_func("/tui-images/missing-helper", test_missing_helper);
 	g_test_add_func("/tui-images/formats", test_formats);
 	g_test_add_func("/tui-images/composer", test_composer);
+	g_test_add_func("/tui-images/idle-double-interrupt-quits",
+		test_idle_double_interrupt_quits);
+	g_test_add_func("/tui-images/csi-u-ctrl-c-quits",
+		test_csi_u_ctrl_c_quits);
 	g_test_add_func("/tui-images/draft-rejection", test_draft_rejection);
 	g_test_add_func("/tui-images/codex-files", test_codex_files);
 	g_test_add_data_func("/tui-images/claude-event", GINT_TO_POINTER(1), test_cli_event);

@@ -299,10 +299,14 @@ next one starts over rather than quitting.
 prompt is still queued; =/quit= or =/exit= works when no turn is in
 flight; use =C-c= to cancel a running turn first.
 
-Note that =C-c= reaches ai-tui as =SIGINT= rather than as a keystroke:
-=cbreak()= leaves =ISIG= on, so the terminal driver signals before
-ncurses sees the byte. Handling it as a signal is what keeps =C-z= and
-flow control working, which =raw()= would take away.
+=C-c= is one interrupt whether it arrives as =SIGINT= or as a keystroke.
+=cbreak()= leaves =ISIG= on, so a traditional terminal raises =SIGINT=
+before ncurses sees byte 3; that path is what keeps =C-z= and flow control
+working, which =raw()= would take away. gst's negotiated keyboard protocol
+and xterm =modifyOtherKeys= send Ctrl-C as CSI-u (for example
+=CSI 99;5u=) instead of byte 3, so no signal is raised. Those sequences
+are registered as the same interrupt as =SIGINT=. A release event is
+ignored; a press or repeat counts.
 
 *** =C-g=: write it in your editor
 Writes the current prompt to a temporary =.md= file, hands the terminal

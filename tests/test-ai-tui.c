@@ -2363,6 +2363,38 @@ test_two_interrupts_quit(void)
 }
 
 /*
+ * gst's keyboard protocol sends Ctrl-C as CSI 99;5u, which never raises
+ * SIGINT. Two of those must still leave, the same as two ^C keystrokes.
+ */
+static void
+test_two_csi_u_interrupts_quit(void)
+{
+	Stub  *stub;
+	gchar *box;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	box = sandbox_new();
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+
+	tmux_send(TUI_SESSION, "\033[99;5u");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "again to quit"));
+
+	tmux_send(TUI_SESSION, "\033[99;5u");
+
+	g_assert_true(tmux_wait_for_exit(TUI_SESSION));
+
+	stub_free(stub);
+	sandbox_free(box);
+}
+
+/*
  * And a lone one, left to expire, does not.
  *
  * Without the timer the flag would simply stay set, so a ^C now and
@@ -3491,6 +3523,8 @@ main(int argc, char *argv[])
 	                test_one_interrupt_clears_and_stays);
 	g_test_add_func("/ai-glib/ai-tui/keys/two-interrupts-quit",
 	                test_two_interrupts_quit);
+	g_test_add_func("/ai-glib/ai-tui/keys/two-csi-u-interrupts-quit",
+	                test_two_csi_u_interrupts_quit);
 	g_test_add_func("/ai-glib/ai-tui/keys/expired-interrupt",
 	                test_an_expired_interrupt_does_not_quit);
 	g_test_add_func("/ai-glib/ai-tui/keys/escape-still-dismisses",
