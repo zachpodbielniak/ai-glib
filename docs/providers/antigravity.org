@@ -275,6 +275,38 @@ $ ai -p antigravity --set mode=plan --set sandbox --set additional-directories=/
 ** Tests
 - =tests/test-antigravity-client.c= — argv, stdin, and both parsers in isolation
 - =tests/test-antigravity-subprocess.c= — a stub =agy= script records argv, cwd and stdin
+- =tests/test-antigravity-image.c= — 27 image-generation cases using =tests/fixtures/agy-image-stub.bash= and an isolated temporary home; no account, credentials or network required
+
+*** Image-generation coverage
+| Area | Assertions |
+|------+------------|
+| Library success | Returned bytes and MIME type, response model, progress signal on the calling context |
+| Launch and state | Prompt travels over stdin, model and timeout flags, sandbox and permission preservation, unchanged chat model and session |
+| Async lifecycle | Private main context, request released before completion, concurrent calls with separate artifacts |
+| Cancellation | Cancellation before launch and during execution; subprocess timeout |
+| Validation | Strict rejection of unsupported count and seed, lenient count clamping without mutating the request, rejection of editing and references before launch |
+| Tool and process failures | Tool error despite terminal SUCCESS, terminal error, nonzero exit, malformed JSON, missing result and mismatched conversation or image name |
+| Artifact checks | Missing and non-image files, symlinks, hard links, FIFOs, oversized or stale files, symlinked conversation directories, multiple matching artifacts and traversal attempts |
+| CLI integration | Actual =ai --image-gen= output bytes, =--list-image-models -p agy= discovery and =--strict= with an alternate agent model |
+
+Run from the repository root after initializing the bundled submodules:
+
+#+begin_src sh
+make tests
+G_DEBUG=fatal-warnings ./build/release/tests/test-antigravity-image
+shellcheck tests/fixtures/agy-image-stub.bash
+make test
+make test-gi
+#+end_src
+
+=make test= runs the full suite and the zero-warning GIR gate; =make test-gi= runs the binding smoke tests when PyGObject is available. To exercise the image cases with both sanitizers:
+
+#+begin_src sh
+make DEBUG=1 ASAN=1 UBSAN=1 all build/debug/tests/test-antigravity-image
+G_DEBUG=fatal-warnings ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ./build/debug/tests/test-antigravity-image
+#+end_src
+
+A live smoke test is separate from the hermetic suite: =ai --image-gen -p agy "a mountain lake at sunrise"= requires an authenticated CLI and consumes its quota. Automated tests do not invoke the real =agy= binary.
 
 ** See also
 - [[file:claude-code.org][AiClaudeCodeClient]] — the equivalent wrapper for =claude --print=
