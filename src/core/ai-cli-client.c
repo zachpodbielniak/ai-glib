@@ -1517,6 +1517,14 @@ ai_cli_client_chat_sync(
             }
         }
 
+		/* A signal is not an exit status; querying it as one emits a GLib
+		 * critical, turning a child crash into a crash in its host. */
+		if (g_subprocess_get_if_signaled(subprocess))
+		{
+			g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+				"CLI terminated by signal %d", g_subprocess_get_term_sig(subprocess));
+			return NULL;
+		}
         exit_status = g_subprocess_get_exit_status(subprocess);
         msg = ai_cli_client_format_exit_error(exit_status,
                                               stderr_data,

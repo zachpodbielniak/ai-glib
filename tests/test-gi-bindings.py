@@ -29,6 +29,19 @@ def main():
     gi.require_version("AiGlib", "1.0")
     from gi.repository import AiGlib, Gio  # noqa: E402
 
+    # OpenCode options remain usable through GIR, including exact file paths.
+    opencode: AiGlib.OpenCodeClient = AiGlib.OpenCodeClient.new()
+    opencode.props.command = "test"
+    opencode.props.directory = "/remote/project"
+    opencode.props.username = "fixture-user"
+    opencode.props.password = "fixture-password"
+    opencode.props.file_paths = ["a,b.txt", "two words.txt"]
+    assert opencode.props.command == "test"
+    assert opencode.props.directory == "/remote/project"
+    assert opencode.props.username == "fixture-user"
+    assert opencode.props.password == "fixture-password"
+    assert opencode.props.file_paths == ["a,b.txt", "two words.txt"]
+
     compatible = AiGlib.OpenAICompatibleClient.new()
     compatible.props.base_url = "http://localhost:8000/v1"
     compatible.props.api_key = "local-token"
@@ -163,7 +176,8 @@ def main():
     assert isinstance(grok, AiGlib.Streamable)
     assert grok.get_provider_type() == AiGlib.ProviderType.GROK_BUILD
     assert grok.get_name() == "Grok Build"
-    assert grok.get_default_model() == "grok-4.6"
+    # ImageGenerator also defines get_default_model; select the chat interface.
+    assert AiGlib.Provider.get_default_model(grok) == "grok-4.6"
 
     # Provider name round-trip, including the one that must not collide
     # with the HTTP "grok" provider

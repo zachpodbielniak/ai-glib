@@ -432,6 +432,9 @@ test_properties(Fixture *f, gconstpointer data)
 		g_test_skip("frontend not built");
 		return;
 	}
+	/* Preserve explicit denial rules in the native launch environment. */
+	if (strcmp(p->executable, "opencode") == 0)
+		g_subprocess_launcher_setenv(f->launcher, "OPENCODE_PERMISSION", "{\"bash\":\"deny\"}", TRUE);
 	for (resume = 0; resume < 2; resume++)
 	{
 		const gchar *args[] = { modes[c->mode], "-p", p->name,
@@ -450,7 +453,8 @@ test_properties(Fixture *f, gconstpointer data)
 		if (strcmp(p->executable, "opencode") == 0)
 		{
 			g_autofree gchar *permission = record_read(f, "permission", NULL);
-			g_assert_cmpstr(permission, ==, "{\"*\":\"allow\"}");
+			/* --auto answers prompts without overriding configured denies. */
+			g_assert_cmpstr(permission, ==, "{\"bash\":\"deny\"}");
 		}
 		if (strcmp(p->executable, "codex") == 0)
 		{
@@ -467,6 +471,21 @@ test_properties(Fixture *f, gconstpointer data)
 		}
 		else
 			g_assert_cmpint(arg_index(argv, "--continue"), >=, 0);
+	}
+	if (strcmp(p->executable, "opencode") == 0 && c->mode == 2)
+	{
+		const gchar *args[] = { modes[c->mode], "-p", p->name,
+			"--set", "command=test", "--set", "directory=/remote/project",
+			"--set", "password=fixture-secret", "arguments", NULL };
+		g_autoptr(Run) run = NULL;
+		g_auto(GStrv) argv = NULL;
+		g_subprocess_launcher_setenv(f->launcher, "OPENCODE_SERVER_PASSWORD", "fixture-secret", TRUE);
+		run = execute_command(f, c, args, "", 0);
+		argv = record_argv(f);
+		g_assert_cmpint(run->status, ==, 0);
+		assert_pair(argv, "--command", "test");
+		assert_pair(argv, "--dir", "/remote/project");
+		g_assert_cmpint(arg_index(argv, "fixture-secret"), ==, -1);
 	}
 	if (strcmp(p->executable, "claude") == 0)
 	{

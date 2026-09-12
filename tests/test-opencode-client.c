@@ -10,6 +10,7 @@
 
 #include "providers/ai-opencode-client.h"
 #include "core/ai-error.h"
+#include "core/ai-event.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
 #include "core/ai-config.h"
@@ -1550,6 +1551,104 @@ test_opencode_property_round_trip(void)
 	g_assert_true(share && fork && cont && thinking && pure && print_logs);
 }
 
+/* Whole-output and incremental parsers must agree on step-local accounting. */
+static void
+test_current_events(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autoptr(AiResponse) streamed = ai_response_new("", "test");
+	g_autoptr(AiResponse) parsed = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+	g_autoptr(GString) output = g_string_new("");
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	const gchar *lines[] = {
+		"{\"type\":\"reasoning\",\"part\":{\"text\":\"considering\"}}",
+		"{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":3},\"cost\":0.125,\"reason\":\"tool-calls\"}}",
+		"{\"type\":\"tool_use\",\"part\":{\"id\":\"prt_1\",\"callID\":\"call_1\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"output\":\"ok\"}}}",
+		"{\"type\":\"text\",\"part\":{\"text\":\"answer\",\"sessionID\":\"ses_part\"}}",
+		"{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":20,\"output\":7},\"cost\":0.25,\"reason\":\"length\"}}",
+		NULL
+	};
+	guint i;
+	gboolean thinking = FALSE, call = FALSE;
+	for (i = 0; lines[i] != NULL; i++)
+	{
+		g_string_append_printf(output, "%s\n", lines[i]);
+		g_assert_true(klass->parse_stream_events(AI_CLI_CLIENT(client), lines[i], streamed, events, &error));
+		g_assert_no_error(error);
+	}
+	parsed = call_parse_json_output(client, output->str, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_usage_get_input_tokens(ai_response_get_usage(parsed)), ==, 30);
+	g_assert_cmpint(ai_usage_get_output_tokens(ai_response_get_usage(parsed)), ==, 10);
+	g_assert_cmpint(ai_response_get_cost_micros(parsed), ==, 375000);
+	g_assert_cmpint(ai_response_get_cost_micros(streamed), ==, 375000);
+	g_assert_cmpint(ai_usage_get_input_tokens(ai_response_get_usage(streamed)), ==, 30);
+	g_assert_cmpint(ai_response_get_stop_reason(parsed), ==, AI_STOP_REASON_MAX_TOKENS);
+	g_assert_cmpint(ai_response_get_stop_reason(streamed), ==, AI_STOP_REASON_MAX_TOKENS);
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(client)), ==, "ses_part");
+	for (i = 0; i < events->len; i++)
+	{
+		AiEvent *event = g_ptr_array_index(events, i);
+		if (ai_event_get_kind(event) == AI_EVENT_THINKING_DELTA)
+		{
+			g_assert_cmpstr(ai_event_get_text(event), ==, "considering");
+			thinking = TRUE;
+		}
+		if (ai_event_get_kind(event) == AI_EVENT_TOOL_FINISHED)
+		{
+			g_assert_cmpstr(ai_event_get_tool_use_id(event), ==, "call_1");
+			call = TRUE;
+		}
+	}
+	g_assert_true(thinking);
+	g_assert_true(call);
+}
+
+/* New strings and exact path arrays are owned independently of the caller. */
+static void
+test_current_properties(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_auto(GStrv) argv = NULL;
+	g_auto(GStrv) paths = NULL;
+	g_autofree gchar *username = NULL;
+	g_autofree gchar *password = NULL;
+	const gchar *files[] = { "a,b", "file with spaces", NULL };
+	g_object_set(client, "command", "check", "directory", "/server/project",
+		"username", "u", "password", "p", "file-paths", files, NULL);
+	g_object_get(client, "username", &username, "password", &password,
+		"file-paths", &paths, NULL);
+	g_assert_cmpstr(username, ==, "u");
+	g_assert_cmpstr(password, ==, "p");
+	g_assert_cmpstr(paths[0], ==, "a,b");
+	argv = build_argv_for(client);
+	g_assert_cmpstr(argv_value_after(argv, "--command"), ==, "check");
+	g_assert_cmpstr(argv_value_after(argv, "--dir"), ==, "/server/project");
+	g_assert_cmpstr(argv_value_after(argv, "--file"), ==, "a,b");
+	g_assert_cmpint(argv_index_of(argv, "--password"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--username"), ==, -1);
+	g_object_set(client, "command", NULL, "directory", NULL, "file-paths", NULL,
+		"username", NULL, "password", NULL, NULL);
+	g_clear_pointer(&argv, g_strfreev);
+	argv = build_argv_for(client);
+	g_assert_cmpint(argv_index_of(argv, "--command"), ==, -1);
+	g_assert_cmpint(argv_index_of(argv, "--file"), ==, -1);
+}
+
+/* An explicit error type fails even if its detail member is missing. */
+static void
+test_error_without_detail(void)
+{
+	g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+	g_autoptr(AiResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	response = call_parse_json_output(client, "{\"type\":\"error\"}", &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+}
+
 int
 main(
 	int   argc,
@@ -1557,6 +1656,9 @@ main(
 )
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/ai-glib/opencode-client/current-events", test_current_events);
+	g_test_add_func("/ai-glib/opencode-client/current-properties", test_current_properties);
+	g_test_add_func("/ai-glib/opencode-client/error-without-detail", test_error_without_detail);
 
 	/* Basic construction / interfaces */
 	g_test_add_func("/ai-glib/opencode-client/new", test_opencode_client_new);

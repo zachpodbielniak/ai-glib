@@ -18,6 +18,7 @@
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
+#include <math.h>
 
 /*
  * Private structure for AiOpenCodeClient.
@@ -37,6 +38,11 @@ struct _AiOpenCodeClient
     gchar   *files;          /* CSV -> repeated --file */
     gchar   *attach;         /* URL of a running opencode server */
     gchar   *log_level;
+	gchar *command;
+	gchar *username;
+	gchar *password;
+	gchar *directory;
+	gchar **file_paths;
     gint     port;           /* 0 means "unset" */
     gboolean share;
     gboolean fork_session;
@@ -72,17 +78,15 @@ enum
     PROP_THINKING,
     PROP_PURE,
     PROP_PRINT_LOGS,
+	PROP_COMMAND,
+	PROP_USERNAME,
+	PROP_PASSWORD,
+	PROP_DIRECTORY,
+	PROP_FILE_PATHS,
     N_PROPS
 };
 
 static GParamSpec *oc_properties[N_PROPS];
-
-/*
- * The JSON value set as OPENCODE_PERMISSION when skip_permissions is
- * enabled. This auto-approves every permission category including
- * external_directory and doom_loop (the only two that default to "ask").
- */
-#define OPENCODE_PERMISSION_ALLOW_ALL "{\"*\":\"allow\"}"
 
 /*
  * Interface implementations forward declarations.
@@ -107,6 +111,11 @@ ai_opencode_client_get_property(
 
     switch (prop_id)
     {
+		case PROP_COMMAND: g_value_set_string(value, self->command); break;
+		case PROP_USERNAME: g_value_set_string(value, self->username); break;
+		case PROP_PASSWORD: g_value_set_string(value, self->password); break;
+		case PROP_DIRECTORY: g_value_set_string(value, self->directory); break;
+		case PROP_FILE_PATHS: g_value_set_boxed(value, self->file_paths); break;
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
@@ -163,6 +172,26 @@ ai_opencode_client_set_property(
 
     switch (prop_id)
     {
+		case PROP_COMMAND:
+			g_free(self->command);
+			self->command = g_value_dup_string(value);
+			break;
+		case PROP_USERNAME:
+			g_free(self->username);
+			self->username = g_value_dup_string(value);
+			break;
+		case PROP_PASSWORD:
+			g_free(self->password);
+			self->password = g_value_dup_string(value);
+			break;
+		case PROP_DIRECTORY:
+			g_free(self->directory);
+			self->directory = g_value_dup_string(value);
+			break;
+		case PROP_FILE_PATHS:
+			g_strfreev(self->file_paths);
+			self->file_paths = g_value_dup_boxed(value);
+			break;
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
@@ -223,9 +252,8 @@ ai_opencode_client_set_property(
  * a directory to bound what the CLI could reach got the directory the
  * parent process was started in.
  *
- * OPENCODE_PERMISSION is set alongside --auto rather than instead of it:
- * the flag is the documented mechanism, the variable covers opencode
- * builds that predate it, and they agree.
+ * --auto answers permission prompts while preserving explicit denies.
+ * Do not replace OPENCODE_PERMISSION: that would erase the caller's rules.
  */
 static GSubprocess *
 ai_opencode_client_spawn(
@@ -257,12 +285,22 @@ ai_opencode_client_spawn(
      * business is the one variable that is opencode's own.
      */
     launcher = ai_cli_client_create_launcher(client, flags);
+	/* OpenCode resolves local attachments against PWD before process.cwd().
+	 * A launcher chdir alone leaves the inherited shell's PWD stale. */
+	{
+		const gchar *cwd = ai_cli_client_get_working_directory(client);
+		if (cwd != NULL && cwd[0] != '\0')
+		{
+			g_autofree gchar *absolute = g_canonicalize_filename(cwd, NULL);
+			g_subprocess_launcher_setenv(launcher, "PWD", absolute, TRUE);
+		}
+	}
 
-    if (self->skip_permissions)
-    {
-        g_subprocess_launcher_setenv(launcher, "OPENCODE_PERMISSION",
-                                     OPENCODE_PERMISSION_ALLOW_ALL, TRUE);
-    }
+	/* Credentials stay off argv, including dry-run and retry commands. */
+	if (self->username != NULL)
+		g_subprocess_launcher_setenv(launcher, "OPENCODE_SERVER_USERNAME", self->username, TRUE);
+	if (self->password != NULL)
+		g_subprocess_launcher_setenv(launcher, "OPENCODE_SERVER_PASSWORD", self->password, TRUE);
 
     return g_subprocess_launcher_spawnv(launcher, argv, error);
 }
@@ -353,6 +391,16 @@ static void
 emit_execution_args(AiOpenCodeClient *self, GPtrArray *args)
 {
     const gchar *cwd;
+	const gchar *effort;
+	g_autofree gchar *absolute_cwd = NULL;
+
+	/* Variants are provider-defined strings; preserve them on retries. */
+	effort = ai_cli_client_get_effort_level(AI_CLI_CLIENT(self));
+	if (effort != NULL && effort[0] != '\0')
+	{
+		g_ptr_array_add(args, g_strdup("--variant"));
+		g_ptr_array_add(args, g_strdup(effort));
+	}
 
     if (self->agent != NULL && self->agent[0] != '\0')
     {
@@ -374,6 +422,15 @@ emit_execution_args(AiOpenCodeClient *self, GPtrArray *args)
      * path on the remote server.
      */
     cwd = ai_cli_client_get_working_directory(AI_CLI_CLIENT(self));
+	if (self->directory != NULL && self->directory[0] != '\0')
+		cwd = self->directory;
+	else if (cwd != NULL && cwd[0] != '\0' &&
+	         (self->attach == NULL || self->attach[0] == '\0'))
+	{
+		/* The launcher already changed cwd; do not resolve it twice. */
+		absolute_cwd = g_canonicalize_filename(cwd, NULL);
+		cwd = absolute_cwd;
+	}
     if (cwd != NULL && cwd[0] != '\0')
     {
         g_ptr_array_add(args, g_strdup("--dir"));
@@ -511,16 +568,21 @@ ai_opencode_client_build_argv(
 
     /* File attachments, one --file per item. */
     emit_repeated_flag(args, "--file", self->files);
+	if (self->file_paths != NULL)
+	{
+		gsize i;
+		for (i = 0; self->file_paths[i] != NULL; i++)
+		{
+			g_ptr_array_add(args, g_strdup("--file"));
+			g_ptr_array_add(args, g_strdup(self->file_paths[i]));
+		}
+	}
+	if (self->command != NULL && self->command[0] != '\0')
+	{
+		g_ptr_array_add(args, g_strdup("--command"));
+		g_ptr_array_add(args, g_strdup(self->command));
+	}
 
-    /* Variant (effort level) */
-    {
-        const gchar *effort = ai_cli_client_get_effort_level(client);
-        if (effort != NULL && effort[0] != '\0')
-        {
-            g_ptr_array_add(args, g_strdup("--variant"));
-            g_ptr_array_add(args, g_strdup(effort));
-        }
-    }
 
     /* Agent, server, directory, permissions and the global flags. */
     emit_execution_args(self, args);
@@ -548,6 +610,20 @@ ai_opencode_client_build_stdin(
     GList *l;
 
     prompt = g_string_new("");
+	/* A command consumes literal arguments, not a chat/system wrapper. */
+	if (self->command != NULL && self->command[0] != '\0')
+	{
+		for (l = messages; l != NULL; l = l->next)
+		{
+			AiMessage *message = l->data;
+			if (ai_message_get_role(message) == AI_ROLE_USER)
+			{
+				g_autofree gchar *text = ai_message_get_text(message);
+				g_string_assign(prompt, text != NULL ? text : "");
+			}
+		}
+		return g_string_free(prompt, FALSE);
+	}
     messages = ai_cli_client_messages_for_prompt(client, messages);
 
     /* A resumed native session already carries its system prompt. */
@@ -590,6 +666,43 @@ ai_opencode_client_build_stdin(
     return g_string_free(prompt, FALSE);
 }
 
+/* Add step-local accounting to the turn, without overflowing AiUsage's ints.
+ * Cost is supplied by OpenCode in dollars, independently of token pricing. */
+static void
+oc_finish_step(JsonObject *part, AiResponse *response)
+{
+	JsonObject *tokens = ai_json_get_object(part, "tokens");
+	AiUsage *previous = ai_response_get_usage(response);
+	const gchar *reason = ai_json_get_string(part, "reason", "stop");
+	gdouble cost = ai_json_get_double(part, "cost", -1);
+
+	if (tokens != NULL)
+	{
+		gint64 input = CLAMP(ai_json_get_int(tokens, "input", 0), 0, G_MAXINT);
+		gint64 output = CLAMP(ai_json_get_int(tokens, "output", 0), 0, G_MAXINT);
+		g_autoptr(AiUsage) usage = NULL;
+		if (previous != NULL)
+		{
+			input += ai_usage_get_input_tokens(previous);
+			output += ai_usage_get_output_tokens(previous);
+		}
+		usage = ai_usage_new((gint)MIN(input, G_MAXINT), (gint)MIN(output, G_MAXINT));
+		ai_response_set_usage(response, usage);
+	}
+	if (isfinite(cost) && cost >= 0 && cost < (gdouble)G_MAXINT64 / 1000000.0)
+	{
+		gint64 micros = (gint64)(cost * 1000000.0);
+		gint64 previous_cost = MAX(ai_response_get_cost_micros(response), 0);
+		ai_response_set_cost_micros(response,
+			micros > G_MAXINT64 - previous_cost ? G_MAXINT64 : previous_cost + micros);
+	}
+	ai_response_set_stop_reason(response,
+		g_str_equal(reason, "length") ? AI_STOP_REASON_MAX_TOKENS :
+		g_str_equal(reason, "content-filter") ? AI_STOP_REASON_CONTENT_FILTER :
+		g_str_equal(reason, "tool-calls") ? AI_STOP_REASON_TOOL_USE :
+		g_str_equal(reason, "error") ? AI_STOP_REASON_ERROR : AI_STOP_REASON_END_TURN);
+}
+
 /*
  * Parse JSON output from the opencode CLI.
  *
@@ -609,8 +722,8 @@ ai_opencode_client_parse_json_output(
     g_autoptr(GString) tool_summary = NULL;
     gchar **lines;
     gint i;
-    gint input_tokens = 0;
-    gint output_tokens = 0;
+	/* A later empty turn must never reuse a previous turn's tool summary. */
+	g_clear_pointer(&AI_OPENCODE_CLIENT(client)->last_tool_summary, g_free);
 
     /* Create response */
     response = ai_response_new("", ai_cli_client_get_model(client));
@@ -651,18 +764,19 @@ ai_opencode_client_parse_json_output(
         /* Check for error — the "error" field may be a plain string or
          * a JSON object with a "message" sub-field (e.g. opencode
          * permission errors).  Handle both forms gracefully. */
-        if (json_object_has_member(obj, "error"))
+        if (json_object_has_member(obj, "error") ||
+            g_strcmp0(ai_json_get_string(obj, "type", NULL), "error") == 0)
         {
             JsonNode *err_node = json_object_get_member(obj, "error");
             const gchar *err_msg = NULL;
             g_autofree gchar *err_msg_tmp = NULL;
 
-            if (JSON_NODE_HOLDS_VALUE(err_node) &&
+            if (err_node != NULL && JSON_NODE_HOLDS_VALUE(err_node) &&
                 json_node_get_value_type(err_node) == G_TYPE_STRING)
             {
                 err_msg = json_node_get_string(err_node);
             }
-            else if (JSON_NODE_HOLDS_OBJECT(err_node))
+            else if (err_node != NULL && JSON_NODE_HOLDS_OBJECT(err_node))
             {
                 JsonObject *err_obj = json_node_get_object(err_node);
                 /* Try "message" first (most common), then "error" */
@@ -721,7 +835,9 @@ ai_opencode_client_parse_json_output(
 
         /* Capture sessionID for session persistence */
         {
-            const gchar *sid = ai_json_get_string(obj, "sessionID", "");
+            const gchar *sid = ai_json_get_string(obj, "sessionID", NULL);
+			if (sid == NULL)
+				sid = ai_json_get_string(ai_json_get_object(obj, "part"), "sessionID", "");
 
             if (sid[0] != '\0' && ai_cli_client_get_session_persistence(client))
             {
@@ -789,18 +905,7 @@ ai_opencode_client_parse_json_output(
         }
         else if (g_strcmp0(type, "step_finish") == 0)
         {
-            /* Extract usage from part.tokens */
-            {
-                JsonObject *tokens =
-                    ai_json_get_object(ai_json_get_object(obj, "part"),
-                                       "tokens");
-
-                if (tokens != NULL)
-                {
-                    input_tokens = (gint)ai_json_get_int(tokens, "input", 0);
-                    output_tokens = (gint)ai_json_get_int(tokens, "output", 0);
-                }
-            }
+			oc_finish_step(ai_json_get_object(obj, "part"), response);
         }
     }
 
@@ -832,12 +937,6 @@ ai_opencode_client_parse_json_output(
                   json_output ? json_output : "(null)");
     }
 
-    /* Set usage if we got tokens */
-    if (input_tokens > 0 || output_tokens > 0)
-    {
-        g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
-        ai_response_set_usage(response, usage);
-    }
 
     return (AiResponse *)g_steal_pointer(&response);
 }
@@ -877,9 +976,9 @@ oc_emit_tool_part(
         tool = "tool";
 
     /* opencode has spelled this both ways across versions. */
-    id = ai_json_get_string(part, "id", NULL);
+    id = ai_json_get_string(part, "callID", NULL);
     if (id == NULL)
-        id = ai_json_get_string(part, "callID", NULL);
+        id = ai_json_get_string(part, "id", NULL);
     if (id == NULL)
         id = "";
 
@@ -971,7 +1070,7 @@ ai_opencode_client_parse_stream_events(
 
     /* Startup and MCP failures can arrive as an error event with exit 0.
      * Reuse the nonstreaming decoder so neither delivery mode hides them. */
-    if (json_object_has_member(obj, "error"))
+    if (json_object_has_member(obj, "error") || g_strcmp0(type, "error") == 0)
     {
         g_autoptr(AiResponse) failed = ai_opencode_client_parse_json_output(client, line, error);
         return failed != NULL;
@@ -999,21 +1098,18 @@ ai_opencode_client_parse_stream_events(
     {
         oc_emit_tool_part(part, out_events);
     }
+	else if (g_strcmp0(type, "reasoning") == 0)
+	{
+		const gchar *text = ai_json_get_string(part, "text", "");
+		if (text[0] != '\0')
+			g_ptr_array_add(out_events, ai_event_new_thinking_delta(text));
+	}
     else if (g_strcmp0(type, "step_finish") == 0)
     {
-        JsonObject *tokens = part != NULL ? ai_json_get_object(part, "tokens") : NULL;
-
-        if (tokens != NULL)
-        {
-            gint input_tokens = (gint)ai_json_get_int(tokens, "input", 0);
-            gint output_tokens = (gint)ai_json_get_int(tokens, "output", 0);
-            g_autoptr(AiUsage) usage = ai_usage_new(input_tokens, output_tokens);
-
-            ai_response_set_usage(response, usage);
-
-            /* opencode reports no cost at all, hence -1 rather than 0. */
-            g_ptr_array_add(out_events, ai_event_new_usage(usage, -1));
-        }
+		oc_finish_step(part, response);
+		if (ai_response_get_usage(response) != NULL)
+			g_ptr_array_add(out_events, ai_event_new_usage(
+				ai_response_get_usage(response), ai_response_get_cost_micros(response)));
     }
 
     return TRUE;
@@ -1063,6 +1159,11 @@ ai_opencode_client_finalize(GObject *object)
     g_free(self->turn_system_prompt);
 
     g_free(self->saved_opencode_config);
+	g_free(self->command);
+	g_free(self->username);
+	g_free(self->password);
+	g_free(self->directory);
+	g_strfreev(self->file_paths);
     G_OBJECT_CLASS(ai_opencode_client_parent_class)->finalize(object);
 }
 
@@ -1153,6 +1254,7 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
      * from the launcher, so it is the one that overrides spawn.
      */
     cli_class->spawn = ai_opencode_client_spawn;
+	cli_class->check_exit_status = TRUE;
 
     /**
      * AiOpenCodeClient:skip-permissions:
@@ -1160,14 +1262,8 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
      * Whether to auto-approve every permission prompt, enabling fully
      * autonomous headless operation.
      *
-     * This passes `--auto` -- opencode's equivalent of Claude Code's
-     * `--dangerously-skip-permissions` -- and additionally sets
-     * OPENCODE_PERMISSION in the child environment, which covers opencode
-     * builds predating the flag. The two agree, so setting both is safe.
-     *
-     * As with every other provider, the working directory rather than this
-     * property is the boundary that matters. See
-     * #AiCliClient:working-directory.
+     * This passes `--auto`, answering prompts but preserving explicit
+     * denies in the OpenCode configuration and OPENCODE_PERMISSION.
      */
     oc_properties[PROP_SKIP_PERMISSIONS] =
         g_param_spec_boolean("skip-permissions",
@@ -1223,10 +1319,9 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
      * #AiCliClient:working-directory names a path on that server rather
      * than a local one.
      *
-     * Credentials for a password-protected server are deliberately not
-     * exposed as properties: an argv is visible to every process on the
-     * machine. opencode reads OPENCODE_SERVER_USERNAME and
-     * OPENCODE_SERVER_PASSWORD from the environment instead.
+     * The username and password properties override the corresponding
+     * OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD environment
+     * variables in the child, without exposing credentials on argv.
      */
     oc_properties[PROP_ATTACH] =
         g_param_spec_string("attach",
@@ -1342,6 +1437,48 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
                              FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+	/**
+	 * AiOpenCodeClient:command:
+	 *
+	 * Named OpenCode command; the last user message supplies literal arguments.
+	 */
+	oc_properties[PROP_COMMAND] = g_param_spec_string("command", "command",
+		"Named OpenCode command; the last user message supplies literal arguments.", NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/**
+	 * AiOpenCodeClient:username:
+	 *
+	 * Server username, delivered through OPENCODE_SERVER_USERNAME in the child environment.
+	 */
+	oc_properties[PROP_USERNAME] = g_param_spec_string("username", "username",
+		"Server username, delivered through OPENCODE_SERVER_USERNAME in the child environment.", NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/**
+	 * AiOpenCodeClient:password:
+	 *
+	 * Server password, delivered through OPENCODE_SERVER_PASSWORD, never argv.
+	 */
+	oc_properties[PROP_PASSWORD] = g_param_spec_string("password", "password",
+		"Server password, delivered through OPENCODE_SERVER_PASSWORD, never argv.", NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/**
+	 * AiOpenCodeClient:directory:
+	 *
+	 * OpenCode --dir override, independent of the local working-directory; useful for remote servers.
+	 */
+	oc_properties[PROP_DIRECTORY] = g_param_spec_string("directory", "directory",
+		"OpenCode --dir override, independent of the local working-directory; useful for remote servers.", NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/**
+	 * AiOpenCodeClient:file-paths:
+	 *
+	 * Exact attachment paths as a string vector, including commas and spaces.
+	 * Appended after the legacy comma-separated files property.
+	 */
+	oc_properties[PROP_FILE_PATHS] = g_param_spec_boxed("file-paths", "File paths",
+		"Exact attachment paths (--file)", G_TYPE_STRV,
+		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, oc_properties);
 }
 
@@ -1379,19 +1516,119 @@ ai_opencode_client_get_default_model(AiProvider *provider)
     return AI_OPENCODE_DEFAULT_MODEL;
 }
 
-/*
- * Async chat completion callback data.
- */
+/* Each async subprocess owns its cancellation and deadline sources. Sources
+ * attach to the caller's context and are destroyed by pointer on completion. */
+typedef struct
+{
+	GSubprocess *process; /* borrowed from the enclosing operation */
+	GCancellable *cancellable;
+	GSource *deadline;
+	GSource *cancel_source;
+	gboolean timed_out;
+} OcIo;
+
+static gboolean
+oc_io_timeout(gpointer user_data)
+{
+	OcIo *io = user_data;
+	io->timed_out = TRUE;
+	g_subprocess_force_exit(io->process);
+	g_cancellable_cancel(io->cancellable);
+	return G_SOURCE_REMOVE;
+}
+
+static gboolean
+oc_io_cancel(GCancellable *cancellable, gpointer user_data)
+{
+	OcIo *io = user_data;
+	(void)cancellable;
+	g_subprocess_force_exit(io->process);
+	g_cancellable_cancel(io->cancellable);
+	return G_SOURCE_REMOVE;
+}
+
+static void
+oc_io_start(OcIo *io, AiCliClient *client, GSubprocess *process, GTask *task)
+{
+	GCancellable *caller = g_task_get_cancellable(task);
+	gint timeout = ai_cli_client_get_process_timeout_ms(client);
+	io->process = process;
+	io->cancellable = g_cancellable_new();
+	if (timeout > 0)
+	{
+		io->deadline = g_timeout_source_new(timeout);
+		g_source_set_callback(io->deadline, oc_io_timeout, io, NULL);
+		g_source_attach(io->deadline, g_task_get_context(task));
+	}
+	if (caller != NULL)
+	{
+		io->cancel_source = g_cancellable_source_new(caller);
+		g_source_set_callback(io->cancel_source, G_SOURCE_FUNC(oc_io_cancel), io, NULL);
+		g_source_attach(io->cancel_source, g_task_get_context(task));
+	}
+}
+
+static void
+oc_io_clear(OcIo *io)
+{
+	if (io->deadline != NULL)
+	{
+		g_source_destroy(io->deadline);
+		g_clear_pointer(&io->deadline, g_source_unref);
+	}
+	if (io->cancel_source != NULL)
+	{
+		g_source_destroy(io->cancel_source);
+		g_clear_pointer(&io->cancel_source, g_source_unref);
+	}
+	g_clear_object(&io->cancellable);
+}
+
+/* Finish pipe communication before parsing; a timeout is never a fallback
+ * answer, and killing a process must not call get_exit_status on a signal. */
+static gboolean
+oc_io_finish(OcIo *io, GAsyncResult *result, gchar **out, gchar **err, GError **error)
+{
+	gboolean ok = g_subprocess_communicate_utf8_finish(io->process, result, out, err, error);
+	if (!ok)
+		g_subprocess_force_exit(io->process);
+	if (io->timed_out)
+	{
+		g_clear_error(error);
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_TIMEOUT, "OpenCode process exceeded its deadline");
+		ok = FALSE;
+	}
+	oc_io_clear(io);
+	return ok;
+}
+
+static void
+oc_exit_error(GSubprocess *process, const gchar *out, const gchar *err, GError **error)
+{
+	if (g_subprocess_get_if_signaled(process))
+		g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+			"OpenCode terminated by signal %d", g_subprocess_get_term_sig(process));
+	else
+	{
+		g_autofree gchar *message = ai_cli_client_format_exit_error(
+			g_subprocess_get_exit_status(process), err, out);
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, message);
+	}
+}
+
+/* Async chat completion callback data. */
 typedef struct
 {
     AiOpenCodeClient *client;
     GTask            *task;
     GSubprocess      *subprocess;
+	OcIo io;
 } ChatAsyncData;
 
 static void
 chat_async_data_free(ChatAsyncData *data)
 {
+	oc_io_clear(&data->io);
     /*
      * g_task_return_*() does NOT consume the reference the async function
      * took from g_task_new(); it owns that until the operation is finished
@@ -1421,15 +1658,19 @@ typedef struct
     GTask            *task;
     GSubprocess      *subprocess;
     gchar            *tool_summary;
+	AiResponse *original;
+	OcIo io;
 } RetryAsyncData;
 
 static void
 retry_async_data_free(RetryAsyncData *data)
 {
+	oc_io_clear(&data->io);
     g_clear_object(&data->task);
     g_clear_object(&data->client);
     g_clear_object(&data->subprocess);
     g_free(data->tool_summary);
+	g_clear_object(&data->original);
     g_slice_free(RetryAsyncData, data);
 }
 
@@ -1447,13 +1688,12 @@ on_retry_communicate_complete(
     AiCliClientClass *klass;
     AiResponse *response = NULL;
 
-    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
-                                               &stdout_data, &stderr_data,
-                                               &error))
+	(void)source;
+    if (!oc_io_finish(&data->io, result, &stdout_data, &stderr_data, &error))
     {
-		/* Cancelling communication closes pipes but does not terminate the child. */
-		g_subprocess_force_exit(G_SUBPROCESS(source));
-        goto fallback;
+		g_task_return_error(data->task, g_steal_pointer(&error));
+		retry_async_data_free(data);
+		return;
     }
 
     if (!g_subprocess_get_successful(data->subprocess))
@@ -1469,6 +1709,27 @@ on_retry_communicate_complete(
     if (response != NULL &&
         ai_response_get_content_blocks(response) != NULL)
     {
+		/* The summary is another paid step of the same logical turn. */
+		AiUsage *first = ai_response_get_usage(data->original);
+		AiUsage *second = ai_response_get_usage(response);
+		gint64 first_cost = ai_response_get_cost_micros(data->original);
+		gint64 second_cost = ai_response_get_cost_micros(response);
+		if (first != NULL)
+		{
+			gint64 input = ai_usage_get_input_tokens(first);
+			gint64 output = ai_usage_get_output_tokens(first);
+			g_autoptr(AiUsage) total = NULL;
+			if (second != NULL)
+			{
+				input += ai_usage_get_input_tokens(second);
+				output += ai_usage_get_output_tokens(second);
+			}
+			total = ai_usage_new((gint)MIN(input, G_MAXINT), (gint)MIN(output, G_MAXINT));
+			ai_response_set_usage(response, total);
+		}
+		if (first_cost >= 0 && second_cost >= 0)
+			ai_response_set_cost_micros(response,
+				first_cost > G_MAXINT64 - second_cost ? G_MAXINT64 : first_cost + second_cost);
         /* Re-prompt succeeded — return the synthesized text */
         g_task_return_pointer(data->task, response, g_object_unref);
         retry_async_data_free(data);
@@ -1481,8 +1742,7 @@ fallback:
     g_clear_error(&error);
     g_debug("opencode: re-prompt failed, using tool summary as fallback");
 
-    response = ai_response_new("",
-        ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
+    response = g_object_ref(data->original);
     {
         g_autoptr(AiTextContent) tc = ai_text_content_new(data->tool_summary);
         ai_response_add_content_block(response,
@@ -1502,6 +1762,7 @@ static gboolean
 attempt_text_retry(
     AiOpenCodeClient *client,
     GTask            *task,
+    AiResponse       *original,
     const gchar      *tool_summary
 )
 {
@@ -1519,6 +1780,10 @@ attempt_text_retry(
 
     model = ai_cli_client_get_model(AI_CLI_CLIENT(client));
     sid   = ai_cli_client_get_session_id(AI_CLI_CLIENT(client));
+	/* Without a captured session, a retry would start an unrelated turn. */
+	if (sid == NULL || sid[0] == '\0' || (g_task_get_cancellable(task) != NULL &&
+	    g_cancellable_is_cancelled(g_task_get_cancellable(task))))
+		return FALSE;
 
     rargs = g_ptr_array_new_with_free_func(g_free);
     g_ptr_array_add(rargs, g_strdup(exe));
@@ -1553,6 +1818,8 @@ attempt_text_retry(
     retry->task        = task;
     retry->subprocess  = rproc;   /* takes ownership */
     retry->tool_summary = g_strdup(tool_summary);
+	retry->original = g_object_ref(original);
+	oc_io_start(&retry->io, AI_CLI_CLIENT(client), rproc, task);
 
     g_debug("opencode: no text in response, re-prompting for summary "
               "(session=%s)", sid ? sid : "(none)");
@@ -1561,7 +1828,7 @@ attempt_text_retry(
         rproc,
         "Provide a concise plain-text summary of what you just did. "
         "Do NOT use any tools.",
-        NULL, on_retry_communicate_complete, retry);
+        retry->io.cancellable, on_retry_communicate_complete, retry);
 
     return TRUE;
 }
@@ -1579,11 +1846,9 @@ on_chat_communicate_complete(
     AiCliClientClass *klass;
     AiResponse *response;
 
-    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
-                                               &stdout_data, &stderr_data, &error))
+	(void)source;
+    if (!oc_io_finish(&data->io, result, &stdout_data, &stderr_data, &error))
     {
-		/* Cancelling communication closes pipes but does not terminate the child. */
-		g_subprocess_force_exit(G_SUBPROCESS(source));
         g_task_return_error(data->task, g_steal_pointer(&error));
         chat_async_data_free(data);
         return;
@@ -1620,14 +1885,8 @@ on_chat_communicate_complete(
     {
         if (!g_subprocess_get_successful(data->subprocess))
         {
-            g_task_return_new_error(data->task, AI_ERROR,
-                                    AI_ERROR_CLI_EXECUTION,
-                                    "CLI exited with status %d: %s",
-                                    g_subprocess_get_exit_status(
-                                        data->subprocess),
-                                    (stderr_data != NULL &&
-                                     stderr_data[0] != '\0')
-                                    ? stderr_data : "Unknown error");
+			oc_exit_error(data->subprocess, stdout_data, stderr_data, &error);
+			g_task_return_error(data->task, g_steal_pointer(&error));
         }
         else
         {
@@ -1640,6 +1899,16 @@ on_chat_communicate_complete(
         return;
     }
 
+	/* Structured errors get first refusal, but text is not proof of success. */
+	if (!g_subprocess_get_successful(data->subprocess))
+	{
+		g_object_unref(response);
+		oc_exit_error(data->subprocess, stdout_data, stderr_data, &error);
+		g_task_return_error(data->task, g_steal_pointer(&error));
+		chat_async_data_free(data);
+		return;
+	}
+
     /*
      * If the AI only made tool calls without synthesizing text, attempt
      * a follow-up prompt asking it to summarize; fall back to raw
@@ -1648,7 +1917,7 @@ on_chat_communicate_complete(
     if (ai_response_get_content_blocks(response) == NULL &&
         data->client->last_tool_summary != NULL)
     {
-        if (attempt_text_retry(data->client, data->task,
+        if (attempt_text_retry(data->client, data->task, response,
                                 data->client->last_tool_summary))
         {
             g_object_unref(response);
@@ -1658,9 +1927,6 @@ on_chat_communicate_complete(
         }
 
         /* Retry could not start — use tool summary as fallback */
-        g_object_unref(response);
-        response = ai_response_new("",
-            ai_cli_client_get_model(AI_CLI_CLIENT(data->client)));
         {
             g_autoptr(AiTextContent) tc = ai_text_content_new(
                 data->client->last_tool_summary);
@@ -1698,6 +1964,11 @@ ai_opencode_client_chat_async(
     (void)tools;  /* Tools not yet supported via CLI */
 
     task = g_task_new(self, cancellable, callback, user_data);
+	if (g_task_return_error_if_cancelled(task))
+	{
+		g_object_unref(task);
+		return;
+	}
 
     /* Resolve executable path */
     executable = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
@@ -1726,7 +1997,7 @@ ai_opencode_client_chat_async(
     /* Build prompt to send to opencode via stdin */
     stdin_buf = klass->build_stdin(AI_CLI_CLIENT(self), messages);
 
-    /* Spawn subprocess (with OPENCODE_PERMISSION when skip_permissions) */
+    /* Spawn with caller environment, credentials and the MCP endpoint. */
     subprocess = ai_cli_client_spawn(
         AI_CLI_CLIENT(self), (const gchar *const *)argv,
         G_SUBPROCESS_FLAGS_STDIN_PIPE |
@@ -1745,9 +2016,10 @@ ai_opencode_client_chat_async(
     data->client = g_object_ref(self);
     data->task = task;
     data->subprocess = g_object_ref(subprocess);
+	oc_io_start(&data->io, AI_CLI_CLIENT(self), subprocess, task);
 
     /* Start async communication — stdin_buf is the prompt piped to opencode */
-    g_subprocess_communicate_utf8_async(subprocess, stdin_buf, cancellable,
+    g_subprocess_communicate_utf8_async(subprocess, stdin_buf, data->io.cancellable,
                                         on_chat_communicate_complete, data);
 }
 
@@ -1761,43 +2033,92 @@ ai_opencode_client_chat_finish(
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
+/* Models belong to the installed CLI and its configured providers. Static
+ * header constants remain conveniences, never an availability catalogue. */
+static void
+oc_models_free(gpointer data)
+{
+	g_list_free_full(data, g_free);
+}
+
+static void
+oc_models_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	ChatAsyncData *data = user_data;
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *err = NULL;
+	g_autoptr(GError) error = NULL;
+	g_auto(GStrv) lines = NULL;
+	GList *models = NULL;
+	gsize i;
+
+	(void)source;
+	if (!oc_io_finish(&data->io, result, &out, &err, &error))
+		goto failed;
+	if (!g_subprocess_get_successful(data->subprocess))
+	{
+		oc_exit_error(data->subprocess, out, err, &error);
+		goto failed;
+	}
+	lines = g_strsplit(out != NULL ? out : "", "\n", -1);
+	for (i = 0; lines[i] != NULL; i++)
+	{
+		const gchar *slash;
+		g_strstrip(lines[i]);
+		slash = strchr(lines[i], '/');
+		/* Ignore plugin banners; retain exact provider/model identifiers. */
+		if (slash == NULL || slash == lines[i] || slash[1] == '\0' ||
+		    strpbrk(lines[i], " \t\r\033") != NULL)
+			continue;
+		if (g_list_find_custom(models, lines[i], (GCompareFunc)g_strcmp0) == NULL)
+			models = g_list_prepend(models, g_strdup(lines[i]));
+	}
+	g_task_return_pointer(data->task, g_list_reverse(models), oc_models_free);
+	chat_async_data_free(data);
+	return;
+failed:
+	g_task_return_error(data->task, g_steal_pointer(&error));
+	chat_async_data_free(data);
+}
+
 static void
 ai_opencode_client_list_models_async(
-    AiProvider          *provider,
-    GCancellable        *cancellable,
-    GAsyncReadyCallback  callback,
-    gpointer             user_data
+	AiProvider *provider,
+	GCancellable *cancellable,
+	GAsyncReadyCallback callback,
+	gpointer user_data
 ){
-    GTask *task;
-    GList *models = NULL;
+	AiOpenCodeClient *self = AI_OPENCODE_CLIENT(provider);
+	g_autoptr(GTask) task = g_task_new(provider, cancellable, callback, user_data);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *exe = NULL;
+	g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(GSubprocess) process = NULL;
+	ChatAsyncData *data;
 
-    (void)cancellable;
-
-    /* Return static list of popular models */
-    task = g_task_new(provider, NULL, callback, user_data);
-
-    /*
-     * Anthropic models.  Only IDs that are still served upstream are
-     * advertised — the retired SONNET_4 / OPUS_4 / HAIKU_3_5 defines
-     * remain in the header for source compat but are deliberately not
-     * offered here.
-     */
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_FABLE_5));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_OPUS_5));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_SONNET_5));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5));
-
-    /* OpenAI models */
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_GPT_4O));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_O3));
-
-    /* Google models */
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_GEMINI_2_FLASH));
-    models = g_list_append(models, g_strdup(AI_OPENCODE_MODEL_GEMINI_2_5_PRO));
-
-    g_task_return_pointer(task, models, NULL);
-    g_object_unref(task);
+	if (g_task_return_error_if_cancelled(task))
+		return;
+	exe = ai_cli_client_resolve_executable(AI_CLI_CLIENT(self), &error);
+	if (exe == NULL)
+		goto failed;
+	g_ptr_array_add(args, g_steal_pointer(&exe));
+	g_ptr_array_add(args, g_strdup("models"));
+	if (self->pure)
+		g_ptr_array_add(args, g_strdup("--pure"));
+	g_ptr_array_add(args, NULL);
+	process = ai_cli_client_spawn(AI_CLI_CLIENT(self), (const gchar * const *)args->pdata,
+		G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+	if (process == NULL)
+		goto failed;
+	data = g_slice_new0(ChatAsyncData);
+	data->client = g_object_ref(self);
+	data->task = g_steal_pointer(&task);
+	data->subprocess = g_steal_pointer(&process);
+	oc_io_start(&data->io, AI_CLI_CLIENT(self), data->subprocess, data->task);
+	g_subprocess_communicate_utf8_async(data->subprocess, NULL, data->io.cancellable, oc_models_done, data);
+	return;
+failed:
+	g_task_return_error(task, g_steal_pointer(&error));
 }
 
 static GList *
@@ -1926,11 +2247,8 @@ ai_opencode_client_get_skip_permissions(AiOpenCodeClient *self)
  * @self: an #AiOpenCodeClient
  * @skip: whether to auto-approve all permission prompts
  *
- * Sets whether to auto-approve all opencode permission prompts by
- * injecting the OPENCODE_PERMISSION environment variable into the
- * child process. When enabled, the opencode CLI will not prompt for
- * approval on any operation (including external directory access),
- * allowing fully autonomous headless operation.
+ * Sets whether to answer OpenCode permission prompts through --auto.
+ * Explicit denies in the CLI configuration or environment remain effective.
  */
 void
 ai_opencode_client_set_skip_permissions(

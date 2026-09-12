@@ -1,403 +1,146 @@
-* OpenCode Provider
-The OpenCode provider (=AiOpenCodeClient=) is a wrapper around the =opencode= CLI tool. It provides access to multiple AI providers (Anthropic, OpenAI, Google) through a unified command-line interface.
+#+title: OpenCode CLI provider
+#+description: Headless OpenCode options, event translation, lifecycle and compatibility tests
 
-** Overview
-| Property      | Value                                |
-|---------------+--------------------------------------|
-| Type          | =AI_PROVIDER_OPENCODE=               |
-| Name          | "OpenCode"                           |
-| Default Model | =anthropic/claude-sonnet-5=          |
-| Interface     | CLI (subprocess)                     |
+* Supported contract
 
-** Requirements
-- The =opencode= CLI must be installed and configured
-- The CLI must be available in =$PATH= or specified via environment variable
-- API keys for the desired providers must be configured in OpenCode
+=AiOpenCodeClient= wraps =opencode run --format json=. Audited against the installed OpenCode *1.18.29* binary and its versioned implementation on 2026-09-11. Both synchronous and asynchronous chat and streaming are supported. OpenCode performs its own model calls and tool execution; ai-glib owns the subprocess, input projection, event translation, cancellation and deadline.
 
-** Installation
-Install the OpenCode CLI following its official documentation.
+The executable resolves through =executable-path=, then =OPENCODE_PATH=, then =opencode= on =PATH=. Configure model-provider credentials in OpenCode as usual. Server attachment credentials are separate from model API keys.
 
-** Environment Variables
-| Variable        | Description                                    |
-|-----------------+------------------------------------------------|
-| =OPENCODE_PATH= | Override the path to the =opencode= executable |
+* Options
 
-** Available Models
-OpenCode supports models from multiple providers:
+Every applicable headless =run= option is available as a GObject property. Scalar properties are reachable from =ai --set NAME=VALUE=. The =file-paths= string vector is intended for C and language bindings; =files= retains the scalar CLI interface.
 
-*** Anthropic Models
-Current generation. Model IDs are passed through to Anthropic verbatim, so
-these match the =claude= provider's IDs with an =anthropic/= prefix.
+| Property | OpenCode option | Behavior |
+|----------+-----------------+----------|
+| =model= | =--model= | Arbitrary =provider/model= ID; defaults to =AI_OPENCODE_DEFAULT_MODEL= |
+| =effort-level= | =--variant= | Arbitrary provider-defined variant; default =medium=; empty string omits it |
+| =agent= | =--agent= | Agent profile |
+| =command= | =--command= | Named command; last user message is passed as literal command arguments |
+| =session-id= | =--session= | Explicit native session; takes precedence over continue |
+| =continue-session= | =--continue= | Continue the most recent session when no explicit ID is set |
+| =fork-session= | =--fork= | Only emitted with an explicit session or continue |
+| =share= | =--share= | Requests session sharing; false by default |
+| =title= | =--title= | Nonempty session title; otherwise OpenCode derives one |
+| =files= | =--file= | Legacy comma-separated paths; trims whitespace and ignores empty entries |
+| =file-paths= | =--file= | String vector preserving commas and spaces; appended after =files= |
+| =attach= | =--attach= | URL of an existing OpenCode server |
+| =username= | =--username= equivalent | Child =OPENCODE_SERVER_USERNAME=; never argv |
+| =password= | =--password= equivalent | Child =OPENCODE_SERVER_PASSWORD=; never argv |
+| =working-directory= | Local cwd and =--dir= | Local process directory; relative local paths are canonicalized for =--dir= |
+| =directory= | =--dir= | Overrides only OpenCode's directory, independently of local cwd; useful for remote attachment |
+| =port= | =--port= | Local server port; zero leaves selection to OpenCode |
+| =thinking= | =--thinking= | Enables completed reasoning events |
+| =skip-permissions= | =--auto= | Approves requested permissions while preserving explicit denies |
+| =pure= | =--pure= | Disables external plugins |
+| =log-level= | =--log-level= | =DEBUG=, =INFO=, =WARN= or =ERROR=; invalid values are reported and omitted |
+| =print-logs= | =--print-logs= | OpenCode diagnostics on stderr |
+| =process-timeout-ms= | Library deadline | Per subprocess, including async retries and model discovery; 30 minutes by default; zero disables |
 
-| Define                               | Model ID                       | Description                     |
-|--------------------------------------+--------------------------------+---------------------------------|
-| =AI_OPENCODE_MODEL_CLAUDE_FABLE_5=   | ="anthropic/claude-fable-5"=   | Most capable                    |
-| =AI_OPENCODE_MODEL_CLAUDE_OPUS_5=    | ="anthropic/claude-opus-5"=    | Flagship                        |
-| =AI_OPENCODE_MODEL_CLAUDE_SONNET_5=  | ="anthropic/claude-sonnet-5"=  | Balanced (default)              |
-| =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5= | ="anthropic/claude-haiku-4-5"= | Fastest (there is no Haiku 5)   |
+=--format json= is owned by the transport. =--interactive= and the hidden interactive/replay/demo options are deliberately excluded: they require terminal UI and conflict with the JSON protocol. =--help= and =--version= are inspection commands, not model turns. Hidden =--yolo= and =--dangerously-skip-permissions= aliases are represented by the canonical =skip-permissions= / =--auto= mapping.
 
-Older generations. The defines are kept for source compatibility, but the
-three marked retired name IDs Anthropic has already withdrawn upstream — a
-request naming one of them will fail.
+Setting =username= or =password= to NULL restores inheritance from the caller's environment. An empty string is an explicit empty override. Do not put a real password in a shell's =--set password= argument; use =OPENCODE_SERVER_PASSWORD= or set the GObject property in the embedding application.
 
-| Define                              | Model ID                                | Description                    |
-|-------------------------------------+-----------------------------------------+--------------------------------|
-| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4_5= | ="anthropic/claude-opus-4-5-20251101"=  | Still available                |
-| =AI_OPENCODE_MODEL_CLAUDE_SONNET_4= | ="anthropic/claude-sonnet-4-20250514"=  | Retired 2026-06-15             |
-| =AI_OPENCODE_MODEL_CLAUDE_OPUS_4=   | ="anthropic/claude-opus-4-20250514"=    | Retired 2026-06-15             |
-| =AI_OPENCODE_MODEL_CLAUDE_HAIKU_3_5=| ="anthropic/claude-3-5-haiku-20241022"= | Retired 2026-02-19             |
+** Permission correction
 
-*** Anthropic Convenience Alias
-| Define                           | Points To                            | Description                |
-|----------------------------------+--------------------------------------+----------------------------|
-| =AI_OPENCODE_MODEL_CLAUDE_HAIKU= | =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5= | Latest Haiku               |
+The provider formerly injected =OPENCODE_PERMISSION={"*":"allow"}= alongside =--auto=. That overrides configured denial rules and is not equivalent to OpenCode's documented auto-approval. The provider now emits only =--auto= and preserves the caller's =OPENCODE_PERMISSION=. Older binaries without =--auto= are outside this audited contract.
 
-This alias previously expanded to the Haiku 3.5 ID, which is retired; it now
-tracks Haiku 4.5. As with the =claude= provider's aliases, =g-ir-scanner=
-does not export a define whose value is another define, so bindings should
-use =AI_OPENCODE_MODEL_CLAUDE_HAIKU_4_5=.
+** Remote attachment and local files
 
-*** OpenAI Models
-| Define                          | Model ID               |
-|---------------------------------+------------------------|
-| =AI_OPENCODE_MODEL_GPT_4O=      | ="openai/gpt-4o"=      |
-| =AI_OPENCODE_MODEL_GPT_4O_MINI= | ="openai/gpt-4o-mini"= |
-| =AI_OPENCODE_MODEL_O3=          | ="openai/o3"=          |
-| =AI_OPENCODE_MODEL_O3_MINI=     | ="openai/o3-mini"=     |
-
-*** Google Models
-| Define                             | Model ID                                |
-|------------------------------------+-----------------------------------------|
-| =AI_OPENCODE_MODEL_GEMINI_2_FLASH= | ="google/gemini-2.0-flash"=             |
-| =AI_OPENCODE_MODEL_GEMINI_2_5_PRO= | ="google/gemini-2.5-pro-preview-05-06"= |
-
-** Usage
-*** Basic Usage
-#+begin_src C
-#include <ai-glib.h>
-
-int main(void)
-{
-    g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
-    g_autoptr(AiMessage) msg = ai_message_new_user("Hello!");
-    GList *messages = g_list_append(NULL, msg);
-
-    /* Async chat request */
-    ai_provider_chat_async(
-        AI_PROVIDER(client),
-        messages,
-        NULL,  /* system prompt */
-        4096,  /* max tokens */
-        NULL,  /* tools */
-        NULL,  /* cancellable */
-        on_chat_complete,
-        user_data
-    );
-
-    g_list_free(messages);
-    return 0;
-}
-#+end_src
-
-*** Switching models inside OpenCode
-OpenCode can route models from several upstream providers without replacing
-the =AiOpenCodeClient=:
+Use =working-directory= for the local files and =directory= for the remote project. The launcher also updates =PWD= because OpenCode consults it when resolving local attachments. A remote path need not exist locally:
 
 #+begin_src C
-g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
-
-/* Use Anthropic Claude */
-ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_OPENCODE_MODEL_CLAUDE_SONNET_4);
-
-/* Switch to OpenAI GPT-4o */
-ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_OPENCODE_MODEL_GPT_4O);
-
-/* Switch to Google Gemini */
-ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_OPENCODE_MODEL_GEMINI_2_FLASH);
+/* The local cwd and the server's project path are independent. */
+g_object_set(client,
+	"attach", "http://localhost:4096",
+	"working-directory", "/home/user/local-files",
+	"directory", "/srv/remote-project",
+	"username", "opencode",
+	NULL);
 #+end_src
 
-*** Streaming
-OpenCode supports streaming responses:
+OpenCode 1.18.29 uploads local regular files to an attached server; it rejects local directories without a shared filesystem and files larger than 10 MiB. Those errors are propagated from the binary. For local execution OpenCode resolves file references itself.
 
-#+begin_src C
-g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
+* Prompt and command handling
 
-/* Connect to streaming signals */
-g_signal_connect(client, "stream-start", G_CALLBACK(on_stream_start), NULL);
-g_signal_connect(client, "delta", G_CALLBACK(on_delta), NULL);
-g_signal_connect(client, "stream-end", G_CALLBACK(on_stream_end), NULL);
+Chat input is piped through stdin, keeping long conversations below argv limits. Portable history is projected to text; the system prompt is wrapped in =<system>= tags on a new native session because OpenCode has no separate system-prompt flag. Resumed sessions already carry their system context. A plain-text completion instruction is appended for ordinary chat.
 
-/* Start streaming chat */
-ai_streamable_chat_stream_async(
-    AI_STREAMABLE(client),
-    messages,
-    system_prompt,
-    max_tokens,
-    NULL,  /* tools */
-    NULL,  /* cancellable */
-    on_stream_complete,
-    user_data
-);
-#+end_src
-
-*** Custom Executable Path
-#+begin_src C
-g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
-
-/* Set custom executable path */
-ai_cli_client_set_executable_path(AI_CLI_CLIENT(client), "/opt/opencode/bin/opencode");
-#+end_src
-
-** Options
-Everything =opencode run= accepts that makes sense headlessly is a GObject
-property, so bindings get it natively and the =ai= CLI reaches it through
-=--set= without needing a flag of its own.
-
-*** Tool access
-#+begin_src C
-/* Auto-approve everything not explicitly denied. */
-g_object_set(client, "skip-permissions", TRUE, NULL);
-#+end_src
-
-This passes =--auto=, opencode's equivalent of Claude Code's
-=--dangerously-skip-permissions=, *and* sets =OPENCODE_PERMISSION= in the
-child environment. The variable alone used to be the whole mechanism, which
-meant a synchronous call never got it: the inherited pipeline spawns without
-the client's launcher. The flag closes that gap; the variable stays for
-opencode builds that predate it.
-
-As everywhere else, the working directory rather than this property is the
-real boundary — see below.
-
-*** Session and run options
-| Property             | Flag           | Notes                                                        |
-|----------------------+----------------+--------------------------------------------------------------|
-| =agent=              | =--agent=      | Which agent to run as                                        |
-| =title=              | =--title=      | Session title; otherwise derived from the piped prompt        |
-| =files=              | =--file=       | Comma-separated; one =--file= per item                        |
-| =share=              | =--share=      | Publishes a shareable link. Off by default                    |
-| =continue-session=   | =--continue=   | Resume the most recent session; an explicit session id wins. =ai -p opencode -c= |
-| =fork-session=       | =--fork=       | Branch the continued session. Only emitted when there is one  |
-| =attach=             | =--attach=     | URL of a running opencode server                              |
-| =port=               | =--port=       | Local server port; 0 omits the flag                           |
-| =thinking=           | =--thinking=   | Emit reasoning blocks                                         |
-| =pure=               | =--pure=       | Run without external plugins                                  |
-| =log-level=          | =--log-level=  | =DEBUG=, =INFO=, =WARN=, =ERROR=. Anything else is reported and omitted |
-| =print-logs=         | =--print-logs= | Logs to stderr; does not disturb the parsed stdout            |
-
-Credentials for a password-protected =--attach= server are deliberately
-*not* properties: an argv is visible to every process on the machine.
-opencode reads =OPENCODE_SERVER_USERNAME= and =OPENCODE_SERVER_PASSWORD=
-from the environment instead.
-
-*** Entering from an =AiConversation= provider switch
-Replacing the conversation provider with an =AiOpenCodeClient= is different
-from changing the OpenCode model above. The former preserves
-=AiConversation='s completed messages but clears this client's =session-id=
-and =continue-session=. OpenCode starts a fresh native session, receiving the
-portable history through its stdin projection; completed tool calls/results
-are labelled text rather than imported native events.
-
-No OpenCode session database is read or merged, and =--continue= is not
-emitted for the switched turn. A new session id captured from that turn may
-be resumed normally afterwards. The conversation working directory is
-applied as both cwd and =--dir=, a compatible MCP endpoint is delivered, and
-local ai-glib tools are disabled because OpenCode runs its own.
-
-See [[file:../provider-switching.org][Provider switching]] for details.
-
-*** Working directory
-#+begin_src C
-ai_cli_client_set_working_directory(AI_CLI_CLIENT(client), "/srv/project");
-#+end_src
-
-This does two things: it becomes the child's working directory, and it is
-passed as =--dir=, which is what tells opencode which project it is in and
-therefore which session store to use. When =attach= is set, =--dir= names a
-path on the remote server.
-
-Until recently the directory was applied *only* when =skip-permissions= was
-also on — the launcher that carried it was created solely to inject the
-permission variable. A caller who named a directory to bound what the CLI
-could reach, without also bypassing permissions, got the directory the
-parent process happened to start in.
-
-*** From the =ai= CLI
-#+begin_example
-$ ai -p opencode --skip-permissions "fix the failing test"
-$ ai -p opencode --set agent=build --set title=nightly --set pure "run the suite"
-$ ai -p opencode --set log-level=DEBUG --set print-logs --dry-run "hi"
-#+end_example
-
-** CLI Invocation Details
-The prompt is piped on stdin rather than passed as an argument, so it never
-appears in the command line or runs into =ARG_MAX=.
-
-#+begin_src sh
-opencode run --format json --model anthropic/claude-sonnet-5 --variant medium
-#+end_src
-
-=--format= has only two values, =default= and =json=; there is no
-=stream-json=. Streaming and non-streaming therefore spawn the *same*
-command, and the difference is on this side: the streaming path reads the
-JSON events line by line as they arrive instead of waiting for the process
-to exit.
-
-Inspect the exact command with:
+=command= changes the meaning of stdin: the last user message supplies exact arguments, without system tags, previous messages or the completion instruction. An ordinary prompt beginning with =/name= is *not* a named-command invocation in =opencode run=. Use =command=name= explicitly. Terminal-only commands such as interactive session management are not headless commands. =AiConversation='s local built-ins still run locally; its passthrough behavior does not synthesize =--command=.
 
 #+begin_example
-$ ai -p opencode --dry-run "hi"
+ai -p opencode --set command=test "src/example.c --verbose"
+ai -p opencode --set agent=build --set pure --set thinking "explain this function"
+ai -p opencode --set attach=http://localhost:4096 --set directory=/srv/project "inspect the tests"
+ai -p opencode --dry-run "hi"
 #+end_example
 
-** Response Format
-=--format json= produces NDJSON — one JSON event per line, not a single
-document:
+* Models
 
-#+begin_src json
-{"type":"step_start","sessionID":"ses_..."}
-{"type":"text","part":{"text":"response text"}}
-{"type":"tool_use","part":{"tool":"bash","state":{"status":"completed"}}}
-{"type":"step_finish","part":{"tokens":{"input":100,"output":50}}}
+=ai_provider_list_models_async()= executes the installed binary's =opencode models= and returns its configured =provider/model= IDs. Discovery has cancellation, deadline and exit-status handling; the list no longer advertises a stale static selection. The command uses local OpenCode configuration even when =attach= is set: it is not the remote server's model catalogue. OpenCode may refresh its own model cache according to its configuration; ai-glib does not force =--refresh=.
+
+The =AI_OPENCODE_MODEL_*= constants in [[file:../../src/providers/ai-opencode-client.h][the public header]] remain source-compatible convenience strings, not availability guarantees. Arbitrary model IDs can be supplied through =model=. Retired model constants remain defined so old source continues to compile.
+
+* Response and event translation
+
+OpenCode writes NDJSON with =type=, =timestamp=, =sessionID= and usually =part=. Both output parsers use type-checked accessors; unrelated plugin output and unknown events are ignored rather than treated as fatal protocol changes.
+
+| Wire event | Library behavior |
+|------------+------------------|
+| =step_start= | Captures session identity; no premature turn completion |
+| =text= | Appends =part.text=; streaming emits =AI_EVENT_TEXT_DELTA= |
+| =reasoning= | Streaming emits =AI_EVENT_THINKING_DELTA=; requires =thinking= |
+| =tool_use= | Streaming emits tool start and completed/error result with the input and output |
+| =step_finish= | Adds step-local input/output counts and dollar cost to turn totals; records stop reason |
+| =error= | Fails the turn, even with exit status zero or missing error details |
+
+These are *completed parts*, not token-by-token deltas from OpenCode: text and reasoning become visible when the CLI emits the finished part. Reasoning remains separate from user-visible text. =AiResponse= has no reasoning-content or cache-token breakdown type; nonstreaming output contains text, and =AiUsage= exposes the sums of OpenCode's =input= and =output= fields. Cost is taken directly from OpenCode, in micro-dollars, so cache and reasoning pricing is not recomputed from those two counts.
+
+Tool identity prefers =part.callID= (the model call ID); =part.id= is a distinct OpenCode part ID and is only a fallback. Completed and failed tools each emit start and finish so consumers can display tool lifecycles consistently. The =sessionID= on an event, or a part when the top-level field is absent, is retained when =session-persistence= is enabled.
+
+=step_finish.reason= maps =length= to max tokens, =content-filter= to content filtering, =tool-calls= to tool use, and =error= to an error stop reason; normal completion maps to end of turn. A subsequent step updates the stop reason without resetting accumulated usage or cost. Integer totals saturate instead of wrapping on malformed or excessive counts.
+
+An error payload may be a string, an object with =message=, or OpenCode's ={name, data: {message}}= shape. Structured errors take precedence over generic process diagnostics, but emitted text never makes a nonzero exit successful. All three execution modes check process success.
+
+** Tool-only fallback and lifecycle
+
+For compatibility, async chat can request one plain-text summary after a tool-only turn, provided it captured a session ID. The retry preserves model, variant, agent, cwd, remote directory, attachment server, credentials, permissions and global execution flags. It resumes the captured session without re-forking, re-sharing, re-running a named command or re-attaching the original files. A failed best-effort summary falls back to the original tool summary. Cancellation and deadline errors are returned, not converted to fallback text. A later empty response never reuses an earlier turn's tool summary.
+
+Synchronous chat retains the tool-only parser result; streaming exposes tool events directly. The summary retry is specific to async chat. Cancellation and deadlines kill the child and close pending communication; each async source belongs to the initiating thread-default context and is destroyed by pointer on completion.
+
+* MCP endpoints and provider switching
+
+OpenCode has no =--mcp-config=. =AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE= is delivered through =OPENCODE_CONFIG=, with OpenCode's ={mcp: {name: {type: "local", command: [...], environment: {...}}}}= schema. The caller's previous setting is restored on revocation. The Claude-shaped MCP endpoint kind is rejected.
+
+Local MCP configuration cannot be injected into an already running attached server; that combination is rejected instead of pretending tools were delivered. Configure the remote server separately. =OPENCODE_CONFIG_CONTENT= is intentionally not used for host-tool injection because its precedence would override project settings.
+
+On a conversation provider switch, portable completed history enters a fresh native session; =session-id= and =continue-session= are cleared. Subsequent turns may resume the newly captured ID. See [[file:../provider-switching.org][provider switching]], [[file:../native-session.org][native session context]], [[file:../tools.org][host tools]], and [[file:../events.org][normalized events]].
+
+* Verification
+
+Fedora build dependencies: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libdex-devel=, =libyaml-devel=; =ncurses-devel= for the TUI; =gobject-introspection-devel= and =python3-gobject= for bindings. The bundled =yaml-glib= and =mcp-glib= submodules must be initialized.
+
+- =tests/test-opencode-client.c=: options, exact file paths, prompt/command projection, malformed events, accounting, reasoning and tool IDs.
+- =tests/test-opencode-subprocess.c=: actual pipes, large prompts, local/remote directory split, credential environment, explicit-deny preservation, session capture, errors, cancellation, deadlines, retries and model discovery on private contexts.
+- =tests/test-opencode-live.c=: opt-in installed-binary test against a loopback fixture model, with isolated HOME/XDG state and no real provider credentials.
+- =tests/test-cli-events.c=, =tests/test-cli-malformed.c= and =tests/test-ai-launch.c=: shared integration contracts.
+- =make test= includes the GIR warning gate; =make test-gi= verifies the new properties through PyGObject.
+
+#+begin_src bash
+make tests
+AI_GLIB_TEST_OPENCODE="$(command -v opencode)" build/release/tests/test-opencode-live
+make test
+make test-gi
 #+end_src
 
-The parser reads every line, accumulates =text= parts, captures =sessionID=
-for session continuity, renders =tool_use= events into a fallback summary,
-and takes token counts from =step_finish=. Unparseable lines are skipped:
-a plugin writing to stdout should not fail the run.
+* Audit references
 
-An error arrives as an =error= member, in one of three shapes — a plain
-string, an object with =message=, or opencode's own nesting:
+- [[https://opencode.ai/docs/cli/][Official CLI reference]]
+- [[https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/cli/cmd/run.ts][OpenCode 1.18.29 run implementation]]
+- [[https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/session/processor.ts][OpenCode 1.18.29 step accounting]]
+- Installed =opencode --version=, =opencode run --help= and =opencode models --help=.
 
-#+begin_src json
-{"type":"error","error":{"name":"UnknownError",
-                         "data":{"message":"Unexpected server error."}}}
-#+end_src
+** API limits and native launch
 
-All three are read. The third used to fall through to serialising the whole
-object, so a failed run reported raw JSON as its error message instead of
-the sentence inside it; it now reports =UnknownError: Unexpected server
-error.=
+OpenCode has no =--max-tokens= flag, so =max_tokens= is not translated into a run option. Model output limits belong to OpenCode configuration. The =tools= argument is not a set of local callbacks for this provider; use the MCP endpoint mechanism for host tools. Generic inline image content is not converted into =--file= attachments by this provider; use explicit file paths when the selected OpenCode model supports them.
 
-A failing opencode run exits non-zero *and* prints that event on stdout,
-with stderr empty. The parsed message therefore takes precedence over the
-exit status — see [[../api-reference/ai-cli-client.org][=AiCliClient=]] for how that ordering works.
-
-** Multi-Provider Comparison
-Use OpenCode to easily compare responses from different providers:
-
-#+begin_src C
-static void
-compare_providers(const gchar *prompt)
-{
-    const gchar *models[] = {
-        AI_OPENCODE_MODEL_CLAUDE_SONNET_4,
-        AI_OPENCODE_MODEL_GPT_4O,
-        AI_OPENCODE_MODEL_GEMINI_2_FLASH,
-        NULL
-    };
-
-    for (int i = 0; models[i] != NULL; i++)
-    {
-        g_autoptr(AiOpenCodeClient) client = ai_opencode_client_new();
-        ai_cli_client_set_model(AI_CLI_CLIENT(client), models[i]);
-
-        g_print("Testing model: %s\n", models[i]);
-        /* Run chat and compare responses... */
-    }
-}
-#+end_src
-
-** Error Handling
-#+begin_src C
-g_autoptr(GError) error = NULL;
-g_autoptr(AiResponse) response = ai_cli_client_chat_sync(
-    AI_CLI_CLIENT(client), messages, NULL, &error);
-
-if (error != NULL)
-{
-    switch (error->code)
-    {
-        case AI_ERROR_CLI_NOT_FOUND:
-            g_printerr("OpenCode CLI not found. Install it or set OPENCODE_PATH.\n");
-            break;
-        case AI_ERROR_CLI_EXECUTION:
-            g_printerr("CLI execution failed: %s\n", error->message);
-            break;
-        case AI_ERROR_CLI_PARSE_ERROR:
-            g_printerr("Failed to parse CLI output: %s\n", error->message);
-            break;
-        default:
-            g_printerr("Error: %s\n", error->message);
-            break;
-    }
-}
-#+end_src
-
-** Comparison with HTTP API Providers
-| Feature            | HTTP Providers        | OpenCode CLI            |
-|--------------------+-----------------------+-------------------------|
-| Multiple providers | Separate clients      | Single client           |
-| Authentication     | Per-provider API keys | Centralized config      |
-| Performance        | Direct HTTP           | Subprocess overhead     |
-| Offline capability | No                    | Depends on CLI          |
-| Feature parity     | Full                  | Limited to CLI features |
-
-** When to Use OpenCode
-- *Multi-provider testing*: Compare responses across different AI providers
-- *Centralized configuration*: Manage API keys in one place (the OpenCode config)
-- *CLI-first workflows*: When integrating with shell scripts or CLI tools
-- *Provider abstraction*: Switch providers without code changes
-
-** See Also
-- [[file:claude.org][AiClaudeClient]] - Direct HTTP API client for Claude
-- [[file:openai.org][AiOpenAIClient]] - Direct HTTP API client for OpenAI
-- [[file:gemini.org][AiGeminiClient]] - Direct HTTP API client for Gemini
-- [[../api-reference/ai-cli-client.org][AiCliClient]] - Base class for CLI providers
-
-* Event coverage
-On [[file:../events.org][the event stream]] this provider reports text, tool start, tool results, usage.
-
-** Slash commands and mentions
-This provider resolves =@= file references and its own slash commands
-itself, so ai-glib passes a line through byte-for-byte rather than
-expanding first --- doing it twice would be worse than not at all, and
-=/compact= and its friends would never arrive.
-
-=AiConversation:passthrough-commands= defaults to =TRUE= here for that
-reason. ai-glib's own built-ins (=/help=, =/clear=, =/quit=, =/exit= and the
-listings) still run locally, because the wrapped tool has no opinion
-about this program's transcript.
-
-See [[file:../harness.org::*Passthrough][the harness layer]].
-
-* Extra MCP servers
-
-opencode has *no* =--mcp-config= flag --- verified against 1.18.18, whose
-=run --help= lists none. What it honours is the =OPENCODE_CONFIG= environment
-variable naming a JSON file, merged after the global config and before the
-project one. That makes it additive and deferential to the user's own
-=opencode.json=, the same posture as claude's =--mcp-config= without
-=--strict-mcp-config=.
-
-Delivery is therefore an environment variable, which the client sets when it is
-handed an =AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE= endpoint:
-
-#+begin_src c
-g_autoptr (AiAgentEndpoint) ep =
-  ai_agent_endpoint_new (AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE, path);
-
-ai_tool_endpoint_consumer_apply (AI_TOOL_ENDPOINT_CONSUMER (client), ep, NULL);
-#+end_src
-
-The kind is distinct from =AI_ENDPOINT_KIND_MCP_CONFIG= because the *schema*
-differs, not merely the delivery. opencode nests servers under =mcp= and spells
-one =\{"type": "local", "command": [...], "environment": \{...\}\}=; a claude-shaped
-file handed to opencode is silently ignored. The client refuses the claude kind
-rather than accept a file it knows opencode cannot read.
-
-=OPENCODE_CONFIG_CONTENT= would take the JSON inline and is deliberately not
-used: it merges at ="local"= scope and so *beats* the user's project config,
-which is more authority than a tool injection should take, and a large blob in
-the environment adds an =E2BIG= failure mode for nothing.
-
-See [[file:../tools.org][Tools]] for the contract.
+=ai --launch-cmd-print= and the corresponding =ai-tui= mode also map the command, directory and attachment properties to native =opencode run= options. Command output refuses credential property overrides that differ from inherited environment values, so it cannot print a new secret. Interactive launch remains governed by OpenCode's terminal options and rejects unsupported headless properties. All native launch modes preserve explicit permission denies.

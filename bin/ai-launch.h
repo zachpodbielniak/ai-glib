@@ -172,8 +172,7 @@ ai_launch_environment(gchar ***env, GHashTable *table, gboolean command_only)
 			g_printerr("ai-glib launch: invalid environment entry\n");
 			return FALSE;
 		}
-		if (command_only && g_strcmp0(g_environ_getenv(*env, name), text) != 0 &&
-			!(strcmp(name, "OPENCODE_PERMISSION") == 0 && strcmp(text, "{\"*\":\"allow\"}") == 0))
+		if (command_only && g_strcmp0(g_environ_getenv(*env, name), text) != 0)
 		{
 			g_printerr("ai-glib launch: command output cannot represent custom environment safely; use inherited environment\n");
 			return FALSE;
@@ -396,7 +395,6 @@ ai_launch_run(GObject *provider, gboolean command_only, gboolean print_mode,
 		else
 		{
 			ai_launch_arg(args, "--auto");
-			env = g_environ_setenv(env, "OPENCODE_PERMISSION", "{\"*\":\"allow\"}", TRUE);
 		}
 	}
 	if (claude || type == AI_PROVIDER_GROK_BUILD)
@@ -546,6 +544,23 @@ ai_launch_run(GObject *provider, gboolean command_only, gboolean print_mode,
 			ai_launch_option(provider, seen, args, "fork-session", "--fork", FALSE);
 		if (print_mode)
 		{
+			const gchar *names[] = { "username", "password" };
+			const gchar *variables[] = { "OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD" };
+			guint credential;
+			for (credential = 0; credential < G_N_ELEMENTS(names); credential++)
+			{
+				g_autofree gchar *value = ai_launch_property(provider, seen, names[credential]);
+				if (value == NULL) continue;
+				if (command_only && g_strcmp0(g_environ_getenv(env, variables[credential]), value) != 0)
+				{
+					g_printerr("ai-glib launch: use inherited %s for command output\n", variables[credential]);
+					return 2;
+				}
+				env = g_environ_setenv(env, variables[credential], value, TRUE);
+			}
+			ai_launch_option(provider, seen, args, "command", "--command", FALSE);
+			ai_launch_option(provider, seen, args, "directory", "--dir", FALSE);
+			ai_launch_option(provider, seen, args, "file-paths", "--file", TRUE);
 			ai_launch_option(provider, seen, args, "title", "--title", FALSE);
 			ai_launch_option(provider, seen, args, "files", "--file", TRUE);
 			ai_launch_option(provider, seen, args, "attach", "--attach", FALSE);
@@ -683,9 +698,6 @@ ai_launch_run(GObject *provider, gboolean command_only, gboolean print_mode,
 			g_autofree gchar *quoted = g_shell_quote(cwd);
 			g_string_append_printf(command, "(cd -- %s && ", quoted);
 		}
-		if (g_strcmp0(g_environ_getenv(env, "OPENCODE_PERMISSION"), "{\"*\":\"allow\"}") == 0 &&
-			g_strcmp0(g_getenv("OPENCODE_PERMISSION"), "{\"*\":\"allow\"}") != 0)
-			g_string_append(command, "'env' 'OPENCODE_PERMISSION={\"*\":\"allow\"}' ");
 		for (i = 0; i < args->len; i++)
 		{
 			g_autofree gchar *quoted = g_shell_quote((const gchar *)g_ptr_array_index(args, i));
@@ -710,6 +722,11 @@ ai_launch_run(GObject *provider, gboolean command_only, gboolean print_mode,
 			g_printerr("ai-glib launch: cannot change working directory: %s\n", g_strerror(saved_errno));
 			return 126;
 		}
+	}
+	if (type == AI_PROVIDER_OPENCODE && cwd != NULL && *cwd != '\0')
+	{
+		g_autofree gchar *actual_cwd = g_get_current_dir();
+		env = g_environ_setenv(env, "PWD", actual_cwd, TRUE);
 	}
 	g_ptr_array_add(args, NULL);
 	fflush(NULL);
