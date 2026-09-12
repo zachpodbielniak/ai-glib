@@ -2934,30 +2934,48 @@ test_theme_fallbacks(void)
 }
 
 static void
-test_busy_keeps_draft(void)
+test_busy_queues_follow_up(void)
 {
 	Stub *stub;
 	g_autofree gchar *script = NULL;
+	g_autofree gchar *second = NULL;
 	g_autofree gchar *pane = NULL;
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
-	script = g_strdup_printf("#!/bin/sh\ncat > '%s/stdin.log'\n"
-		"while [ ! -f '%s/release' ]; do sleep 0.05; done\ncat '%s/stdout'\n",
+	second = g_strdup(
+		"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"the follow-up\"}}}\n"
+		"{\"type\":\"result\",\"result\":\"the follow-up\",\"session_id\":\"s2\"}\n");
+	sandbox_write(stub->dir, "stdout.2", second);
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"n=1\n"
+		"if [ -f '%s/call' ]; then n=$(($(cat '%s/call') + 1)); fi\n"
+		"echo \"$n\" > '%s/call'\n"
+		"cat > '%s/stdin.'\"$n\".log\n"
+		"if [ \"$n\" -eq 1 ]; then\n"
+		"  while [ ! -f '%s/release' ]; do sleep 0.05; done\n"
+		"  cat '%s/stdout'\n"
+		"else\n"
+		"  cat '%s/stdout.2'\n"
+		"fi\n",
+		stub->dir, stub->dir, stub->dir, stub->dir,
 		stub->dir, stub->dir, stub->dir);
 	sandbox_write(stub->dir, "grok", script);
+	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
 	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
 	tmux_send(TUI_SESSION, "first request");
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
 	tmux_send(TUI_SESSION, "second-draft");
 	tmux_send(TUI_SESSION, "Enter");
-	g_usleep(150000);
-	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED 1"));
 	pane = tmux_capture(TUI_SESSION);
 	g_assert_null(strstr(pane, "the reply"));
 	sandbox_write(stub->dir, "release", "ready\n");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
 	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the follow-up"));
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }
@@ -3293,7 +3311,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/composer-editing", test_composer_editing);
 	g_test_add_func("/ai-glib/ai-tui/keys/command-paths", test_command_paths);
 	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
-	g_test_add_func("/ai-glib/ai-tui/keys/busy-draft", test_busy_keeps_draft);
+	g_test_add_func("/ai-glib/ai-tui/keys/busy-queue", test_busy_queues_follow_up);
 	g_test_add_func("/ai-glib/ai-tui/keys/control-shortcuts", test_control_shortcuts);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/activity-motion", GINT_TO_POINTER(FALSE), test_activity_motion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/reduced-motion", GINT_TO_POINTER(TRUE), test_activity_motion);

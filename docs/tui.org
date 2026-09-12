@@ -32,7 +32,7 @@ Copy an image or screenshot to the desktop clipboard, focus the composer, and pr
 
 *** Draft behavior
 
-Clipboard reads are asynchronous, have a five-second deadline, and do not interrupt a running model turn. =Enter= while a clipboard read or model turn is active leaves the draft intact. A completed read attaches to the next draft. =C-c= first cancels a clipboard read or running turn; when idle, it clears the draft text and all attached images. =C-u= clears text only. =C-d= exits only when both the text and image draft are empty and no clipboard read is pending.
+Clipboard reads are asynchronous, have a five-second deadline, and do not interrupt a running model turn. =Enter= while a clipboard read is active leaves the draft intact. =Enter= during a running turn queues the current draft (text and images) and clears the composer; the next item is sent when the turn finishes. A completed clipboard read attaches to the next draft. =C-c= first cancels a clipboard read or running turn; when idle, it clears the draft, then drops queued prompts. =C-u= clears text only. =C-d= exits only when the text and image draft are empty, the send queue is empty, and no clipboard read is pending.
 
 Sending transfers the images into the conversation's user message before releasing the draft references. Text history recall restores text only, so recalling a question does not silently reattach a screenshot. Local slash commands and command-resolution failures leave the images queued for the next model turn. Mentions and prompt/skill expansion operate on text and preserve the separate image content blocks. =--no-expand= also preserves image blocks. If a provider call fails after submission, the submitted images remain in conversation history, just like the submitted text; they are no longer draft attachments.
 
@@ -63,7 +63,7 @@ Codex requires files: ai-glib writes copies into a private temporary directory (
 
 Fedora build packages are =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libdex-devel=, =libyaml-devel=, =ncurses-devel= and =sqlite-devel=. GIR verification additionally needs =gobject-introspection-devel=. The repository builds its bundled =mcp-glib= and =yaml-glib=. The clipboard helpers above are needed only for real desktop pasting; automated tests replace the selection owner with a hermetic subprocess.
 
-=make tests= builds the tests and binaries; =make test= runs the complete suite and the warning-free GIR check. =tests/test-tui-images.c= exercises the real clipboard reader, Ctrl+V/Enter dispatch, image-only drafts, busy draft retention, attachment limits, binary/MIME handling, missing helpers, invalid/oversized input, cancellation, stalled owners, CLI JSON input and private Codex file lifetime. =tests/test-conversation-input.c= covers attachments through command/mention expansion, passthrough, built-ins, invalid content and the local tool runner. =tests/test-http-chat.c= captures actual requests on loopback for all five HTTP providers in both streaming and ordinary mode. These tests do not require model credentials or contact external providers.
+=make tests= builds the tests and binaries; =make test= runs the complete suite and the warning-free GIR check. =tests/test-tui-images.c= exercises the real clipboard reader, Ctrl+V/Enter dispatch, image-only drafts, queued follow-ups while a turn is in flight, attachment limits, binary/MIME handling, missing helpers, invalid/oversized input, cancellation, stalled owners, CLI JSON input and private Codex file lifetime. =tests/test-conversation-input.c= covers attachments through command/mention expansion, passthrough, built-ins, invalid content and the local tool runner. =tests/test-http-chat.c= captures actual requests on loopback for all five HTTP providers in both streaming and ordinary mode. These tests do not require model credentials or contact external providers.
 
 ** Herdr integration
 
@@ -282,11 +282,11 @@ Words are separated by Unicode whitespace, so filenames and punctuation stay tog
 
 Bracketed paste is enabled while ai-tui owns the terminal. A multiline paste is inserted into the composer without submitting any of its lines; press =Enter= explicitly when ready. Terminals without bracketed paste support cannot distinguish a pasted newline from a typed =Enter=, so use =C-g= for multiline text there. Pasted approval answers are ignored: approvals require a deliberate key. Control characters other than newlines and tabs are discarded in bracketed input; tabs are displayed as a single blank but retained in the prompt.
 
-Pressing =Enter= during a running turn preserves the entire draft instead of discarding it; the composer is labeled =DRAFT / waiting for turn=. This is not an automatic send queue. The draft remains for you to submit after the turn ends. Navigating back down past the newest history item also restores the draft you were editing.
+Pressing =Enter= during a running turn queues the entire draft (text and images) instead of discarding it. The composer is labeled =QUEUED n / waiting for turn= and is then empty for the next follow-up. Queued prompts send in order when the current turn finishes, including after a failed turn. A cancelled turn leaves the queue in place: an empty =Enter= sends the next item, and =C-c= while idle drops it. The queue holds 32 prompts; a full queue keeps the draft and says so. Navigating back down past the newest history item also restores the draft you were editing.
 
 *** =C-c= takes one thing at a time
 First close an active search or deny a pending approval; otherwise stop the turn, close the completion menu, throw away the
-half-written line, and only then --- pressed twice inside a second and a
+half-written line, drop queued follow-ups, and only then --- pressed twice inside a second and a
 half, with nothing left to interrupt --- leave.
 
 Every step short of the last is recoverable, which is the point. The key
@@ -295,9 +295,9 @@ that ends the session and loses the conversation with it. While a =C-c=
 is armed the status bar says =^C again to quit=; let it lapse and the
 next one starts over rather than quitting.
 
-=C-d= on an empty line quits outright, as it does in a shell, and =/quit=
-or =/exit= works when no turn is in flight; use =C-c= to cancel a running
-turn first.
+=C-d= on an empty line quits outright, as it does in a shell, unless a
+prompt is still queued; =/quit= or =/exit= works when no turn is in
+flight; use =C-c= to cancel a running turn first.
 
 Note that =C-c= reaches ai-tui as =SIGINT= rather than as a keystroke:
 =cbreak()= leaves =ISIG= on, so the terminal driver signals before

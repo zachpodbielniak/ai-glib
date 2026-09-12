@@ -325,6 +325,10 @@ attr_for_tag(AiStyleTag tag)
  */
 #define AGENT_MAX_CONCURRENT (4)
 
+/* Follow-ups typed during a turn. Enter queues rather than discarding
+ * the draft; the next item is sent when the current turn finishes. */
+#define SEND_QUEUE_LIMIT (32)
+
 /*
  * A keycode of our own, for a key ncurses has no name for.
  *
@@ -362,6 +366,12 @@ static const gchar *SPINNER_FRAMES[] = {
 
 typedef struct
 {
+	gchar *text;
+	GList *images; /* (element-type AiImageContent) */
+} QueuedPrompt;
+
+typedef struct
+{
     AiConversation *conversation;
 	AiMcpHost *mcp_host;
 	AiTuiHerdr *herdr;
@@ -389,6 +399,7 @@ typedef struct
 	gboolean sending;
 	gboolean pasting;
 	GList *images;                 /* AiImageContent references in the draft */
+	GQueue send_queue;             /* QueuedPrompt, FIFO follow-ups */
 	GCancellable *clipboard_cancel;
 	gboolean clipboard_pending;
 	gboolean skip_permissions;
@@ -705,6 +716,7 @@ app_awaiting_user(App *app)
 {
 	return app->awaiting_since != 0 && app->input->len == 0 &&
 		app->approval_prompt == NULL && !app->searching &&
+		g_queue_is_empty(&app->send_queue) &&
 		!ai_conversation_get_busy(app->conversation);
 }
 
@@ -873,6 +885,10 @@ draw_status(App *app)
             ai_conversation_get_activity(app->conversation);
         g_autofree gchar *elapsed = format_elapsed(
             ai_conversation_get_activity_elapsed(app->conversation));
+		guint queued = g_queue_get_length(&app->send_queue);
+		g_autofree gchar *queued_note = queued > 0
+			? g_strdup_printf(" · %u queued", queued)
+			: g_strdup("");
 
         /*
          * The glyph animates, the words come from the conversation, and
@@ -880,13 +896,14 @@ draw_status(App *app)
          * "^C to stop" is there because the moment somebody wants it is
          * the moment they are watching this line.
          */
-        line = g_strdup_printf(" %s%s%s   %s %s… (%s · ^C to stop)%s",
+        line = g_strdup_printf(" %s%s%s   %s %s… (%s · ^C to stop%s)%s",
                                ai_provider_get_name(AI_PROVIDER(provider)),
                                model != NULL ? " / " : "",
                                model != NULL ? model : "",
                                 opt_no_animation ? "*" : SPINNER_FRAMES[app->spinner_frame],
                                activity != NULL ? activity : "Working",
                                elapsed,
+                               queued_note,
                                app->follow ? "" : "   [scrolled]");
     }
     else
@@ -904,6 +921,8 @@ draw_status(App *app)
                                model != NULL ? model : "",
                                app->interrupt_id != 0
                                    ? "^C again to quit"
+                                   : g_queue_get_length(&app->send_queue) > 0
+                                       ? "queued prompts · Enter to send"
                                    : app_awaiting_user(app)
                                        ? "your turn · type to reply"
                                        : "ready",
@@ -1188,12 +1207,27 @@ draw_input(App *app)
 	wattrset(app->input_win, border);
 	draw_frame(app->input_win);
 	{
-		const gchar *label = busy ? " DRAFT / waiting for turn "
-			: awaiting ? " YOUR TURN " : " COMPOSE ";
-		g_autofree gchar *title = fit_to_width(label, width - 4);
+		guint queued = g_queue_get_length(&app->send_queue);
+		g_autofree gchar *label = NULL;
+		g_autofree gchar *title = NULL;
+		gint title_cols;
+
+		if (busy && queued > 0)
+			label = g_strdup_printf(" QUEUED %u / waiting for turn ", queued);
+		else if (busy)
+			label = g_strdup(" DRAFT / waiting for turn ");
+		else if (queued > 0)
+			label = g_strdup_printf(" QUEUED %u ", queued);
+		else if (awaiting)
+			label = g_strdup(" YOUR TURN ");
+		else
+			label = g_strdup(" COMPOSE ");
+		title = fit_to_width(label, width - 4);
+		title_cols = (gint)ai_style_text_width(title);
 		mvwaddstr(app->input_win, 0, 2, title);
+		draw_sweep(app, app->input_win, 0, 2 + title_cols,
+			width - (4 + title_cols));
 	}
-	draw_sweep(app, app->input_win, 0, busy ? 30 : 13, width - (busy ? 32 : 15));
 	if (app->images != NULL || app->clipboard_pending)
 	{
 		g_autofree gchar *attachments = g_strdup_printf(" %u images%s ",
@@ -1562,6 +1596,10 @@ app_schedule_redraw(App *app)
 
 static void
 app_send(App *app);
+static gboolean
+app_flush_send_queue(App *app);
+static void
+app_clear_send_queue(App *app);
 
 static void
 input_insert(App *app, const gchar *text)
@@ -2009,7 +2047,7 @@ show_help(App *app)
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
 					"  Mouse wheel  scroll transcript three rows\n"
-                    "  Enter        send\n"
+                    "  Enter        send (queues while a turn is running)\n"
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
                     "  ^G           edit the prompt in $EDITOR\n"
@@ -2018,7 +2056,7 @@ show_help(App *app)
 					"  ^W / ^K      kill previous word / to line end\n"
 					"  ^Y           yank the last killed text\n"
                     "  ^C           stop the turn, then clear the line,\n"
-                    "               then quit on a second press\n"
+                    "               then drop queued prompts, then quit\n"
                     "  ^D           quit, on an empty line\n"
                     "  Tab          complete /command or @path\n"
                     "  ^N           cycle tool and thinking blocks\n"
@@ -2886,11 +2924,11 @@ interrupt_arm(App *app)
 /*
  * ^C, which does whatever there is to interrupt.
  *
- * In order: stop a turn, throw away a half-written prompt, and only then
- * --- pressed twice, close together, with nothing left to interrupt ---
- * leave. Every step short of the last is recoverable, which is the point:
- * the key somebody reaches for to stop a runaway answer should not also
- * be the key that ends the session and loses the conversation with it.
+ * In order: stop a turn, throw away a half-written prompt, drop queued
+ * follow-ups, and only then --- pressed twice, close together, with
+ * nothing left to interrupt --- leave. Every step short of the last is
+ * recoverable, which is the point: the key somebody reaches for to stop
+ * a runaway answer should not also be the key that ends the session.
  *
  * Returns %TRUE when the program should stop.
  */
@@ -2939,6 +2977,18 @@ handle_interrupt(App *app)
         interrupt_arm(app);
         return FALSE;
     }
+
+	if (!g_queue_is_empty(&app->send_queue))
+	{
+		guint n = g_queue_get_length(&app->send_queue);
+		g_autofree gchar *notice = g_strdup_printf(
+			"Dropped %u queued prompt%s", n, n == 1 ? "" : "s");
+
+		app_clear_send_queue(app);
+		ui_feedback(app, notice, AI_STYLE_STATUS);
+		interrupt_arm(app);
+		return FALSE;
+	}
 
     if (app->interrupt_id != 0)
     {
@@ -3400,7 +3450,7 @@ drain_keys(App *app)
                 toggle_selected(app);
                 break;
 
-            case 3:   /* ^C: stop the turn, clear the line, then quit */
+            case 3:   /* ^C: stop the turn, clear the line, drop the queue, then quit */
                 if (handle_interrupt(app))
                 {
                     app->running = FALSE;
@@ -3410,7 +3460,8 @@ drain_keys(App *app)
                 break;
 
             case 4:   /* ^D: quit, on an empty line */
-                if (app->input->len == 0 && app->images == NULL && !app->clipboard_pending)
+                if (app->input->len == 0 && app->images == NULL && !app->clipboard_pending &&
+					g_queue_is_empty(&app->send_queue))
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
@@ -3523,23 +3574,67 @@ on_resize(gpointer user_data)
  * ================================================================ */
 
 static void
+queued_prompt_free(gpointer data)
+{
+	QueuedPrompt *item = data;
+
+	if (item == NULL)
+		return;
+	g_free(item->text);
+	g_list_free_full(item->images, g_object_unref);
+	g_free(item);
+}
+
+static void
+app_clear_send_queue(App *app)
+{
+	g_queue_clear_full(&app->send_queue, queued_prompt_free);
+}
+
+static gboolean
+send_error_is_cancelled(const GError *error)
+{
+	return error != NULL &&
+		(g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+		 g_error_matches(error, AI_ERROR, AI_ERROR_CANCELLED));
+}
+
+static void
+app_finish_send(
+	App          *app,
+	const GError *error,
+	gboolean      was_turn
+){
+	app->sending = FALSE;
+	app_sync_herdr(app);
+
+	/* Dump tests never set running; interactive shutdown has no dump loop
+	 * and must not start another turn. */
+	if (app->running || app->dump_loop != NULL)
+	{
+		/* A cancelled turn leaves the queue in place so Enter can send it.
+		 * Anything else that finished is followed by the next queued prompt. */
+		if (!send_error_is_cancelled(error) && app_flush_send_queue(app))
+			return;
+
+		if (was_turn)
+			ui_turn_finished(app, error);
+	}
+
+	app_schedule_redraw(app);
+
+	if (app->dump_loop != NULL && !app->dump_waiting_models)
+		g_main_loop_quit(app->dump_loop);
+}
+
+static void
 on_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 {
     App *app = user_data;
     g_autoptr(GError) error = NULL;
 
     ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
-	app->sending = FALSE;
-	app_sync_herdr(app);
-
-    /* The full error is in the transcript; chrome carries only the outcome. */
-	ui_turn_finished(app, error);
-    app_schedule_redraw(app);
-
-    if (app->dump_loop != NULL)
-    {
-        g_main_loop_quit(app->dump_loop);
-    }
+	app_finish_send(app, error, TRUE);
 }
 
 /*
@@ -3558,27 +3653,27 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 
     ai_conversation_send_input_finish(AI_CONVERSATION(source), result,
                                       &command, &error);
-	app->sending = FALSE;
-	app_sync_herdr(app);
 
     if (error != NULL)
     {
         say(app, "%s", error->message);
-		ui_turn_finished(app, error);
+		app_finish_send(app, error, TRUE);
     }
     else if (command != NULL)
     {
+		app->sending = FALSE;
+		app_sync_herdr(app);
         handle_builtin(app, command);
+		/* /quit clears running; dump mode never sets it. Flush only when
+		 * the interactive session is still alive. */
+		if (app->running && app_flush_send_queue(app))
+			return;
+		app_schedule_redraw(app);
+		if (app->dump_loop != NULL && !app->dump_waiting_models)
+			g_main_loop_quit(app->dump_loop);
     }
 	else
-		ui_turn_finished(app, NULL);
-
-    app_schedule_redraw(app);
-
-    if (app->dump_loop != NULL && !app->dump_waiting_models)
-    {
-        g_main_loop_quit(app->dump_loop);
-    }
+		app_finish_send(app, NULL, TRUE);
 }
 
 /* ================================================================
@@ -4039,40 +4134,87 @@ image_draft_is_local_command(App *app)
 	return command != NULL && ai_command_get_kind(command) == AI_COMMAND_BUILTIN;
 }
 
-static void
-app_send(App *app)
+static gboolean
+image_draft_is_rejected(App *app)
 {
-    g_autofree gchar *line = NULL;
 	GObject *provider = ai_conversation_get_provider(app->conversation);
-	/* Enter while busy leaves the entire draft, cursor and history intact. */
-	if (app->sending || app->clipboard_pending || ai_conversation_get_busy(app->conversation)) return;
-	if (app->images != NULL && !image_draft_is_local_command(app) &&
-		(AI_IS_CLAUDE_TMUX_CLIENT(provider) || (AI_IS_CLI_CLIENT(provider) &&
+
+	if (app->images == NULL || image_draft_is_local_command(app))
+		return FALSE;
+	if (AI_IS_CLAUDE_TMUX_CLIENT(provider) || (AI_IS_CLI_CLIENT(provider) &&
 		!AI_IS_CODEX_CLI_CLIENT(provider) && !AI_IS_CLAUDE_CODE_CLIENT(provider) &&
-		!AI_IS_ANTIGRAVITY_CLIENT(provider))))
+		!AI_IS_ANTIGRAVITY_CLIENT(provider)))
 	{
 		ui_feedback(app, "This CLI wrapper cannot forward images; choose an HTTP provider, codex-cli, claude-code or antigravity", AI_STYLE_ERROR);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void
+app_enqueue_draft(App *app, const gchar *line)
+{
+	QueuedPrompt *item;
+
+	if (g_queue_get_length(&app->send_queue) >= SEND_QUEUE_LIMIT)
+	{
+		ui_feedback(app, "Send queue is full", AI_STYLE_ERROR);
 		return;
 	}
 
+	item = g_new0(QueuedPrompt, 1);
+	item->text = g_strdup(line);
+	item->images = app->images;
+	app->images = NULL;
+	g_queue_push_tail(&app->send_queue, item);
+	g_ptr_array_add(app->history, g_strdup(line));
+	g_string_truncate(app->input, 0);
+	app->cursor = 0;
+	app->history_pos = -1;
+	app->follow = TRUE;
+	app_schedule_redraw(app);
+}
+
+static void
+app_send_from_composer(
+	App      *app,
+	gboolean  record_history
+){
+    g_autofree gchar *line = NULL;
+
+	if (app->clipboard_pending)
+		return;
+	if (image_draft_is_rejected(app))
+		return;
+
     if (app->input->len == 0 && app->images == NULL)
     {
+		if (!app->sending && !ai_conversation_get_busy(app->conversation))
+			app_flush_send_queue(app);
         return;
     }
 
     line = g_strdup(app->input->str);
     g_strstrip(line);
 
-    g_string_truncate(app->input, 0);
-    app->cursor = 0;
-    app->history_pos = -1;
-
     if (line[0] == '\0' && app->images == NULL)
     {
+		g_string_truncate(app->input, 0);
+		app->cursor = 0;
         return;
     }
 
-    g_ptr_array_add(app->history, g_strdup(line));
+	if (app->sending || ai_conversation_get_busy(app->conversation))
+	{
+		app_enqueue_draft(app, line);
+		return;
+	}
+
+    g_string_truncate(app->input, 0);
+    app->cursor = 0;
+    app->history_pos = -1;
+	if (record_history)
+		g_ptr_array_add(app->history, g_strdup(line));
 
     app->follow = TRUE;
 	app->sending = TRUE;
@@ -4099,6 +4241,32 @@ app_send(App *app)
 	/* Local built-ins and resolution errors leave attachments in the draft. */
 	if (ai_conversation_get_busy(app->conversation))
 		g_clear_list(&app->images, g_object_unref);
+}
+
+static gboolean
+app_flush_send_queue(App *app)
+{
+	QueuedPrompt *item;
+
+	if (app->sending || ai_conversation_get_busy(app->conversation) ||
+		g_queue_is_empty(&app->send_queue))
+		return FALSE;
+
+	item = g_queue_pop_head(&app->send_queue);
+	g_string_assign(app->input, item->text != NULL ? item->text : "");
+	app->cursor = (guint)app->input->len;
+	g_clear_list(&app->images, g_object_unref);
+	app->images = item->images;
+	item->images = NULL;
+	queued_prompt_free(item);
+	app_send_from_composer(app, FALSE);
+	return app->sending || ai_conversation_get_busy(app->conversation);
+}
+
+static void
+app_send(App *app)
+{
+	app_send_from_composer(app, TRUE);
 }
 
 /* First turn from leftover argv, once the loop is running. */
@@ -4250,6 +4418,7 @@ app_reset(App *app)
 	/* Forget drafts and navigation as well as the visible conversation. */
 	g_ptr_array_set_size(app->history, 0);
 	g_string_truncate(app->input, 0);
+	app_clear_send_queue(app);
 	g_clear_pointer(&app->history_draft, g_free);
 	g_clear_pointer(&app->kill_buffer, g_free);
 	g_clear_pointer(&app->row_cache, g_ptr_array_unref);
@@ -5098,6 +5267,7 @@ main(int argc, char *argv[])
 		while (app.clipboard_pending) g_main_context_iteration(NULL, TRUE);
 	}
 	g_clear_list(&app.images, g_object_unref);
+	app_clear_send_queue(&app);
 	if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
 	if (app.redraw_id != 0)
 	{

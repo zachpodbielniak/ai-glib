@@ -154,6 +154,7 @@ test_composer(void)
 	g_assert_cmpuint(g_list_length(app.images), ==, TUI_IMAGE_MAX_COUNT);
 
 	ai_mock_provider_push_text(mock, "A pixel");
+	ai_mock_provider_push_text(mock, "Another look");
 	unget_wch('\n');
 	drain_keys(&app);
 	g_assert_null(app.images);
@@ -161,12 +162,15 @@ test_composer(void)
 	g_string_assign(app.input, "next draft");
 	app.images = g_list_append(NULL, png_image());
 	app_send(&app);
-	g_assert_cmpstr(app.input->str, ==, "next draft");
-	g_assert_nonnull(app.images);
+	g_assert_cmpuint(app.input->len, ==, 0);
+	g_assert_null(app.images);
+	g_assert_cmpuint(g_queue_get_length(&app.send_queue), ==, 1);
 	g_main_loop_run(loop);
+	g_assert_true(g_queue_is_empty(&app.send_queue));
 	blocks = ai_message_get_content_blocks(ai_conversation_get_messages(conversation)->data);
 	g_assert_cmpuint(g_list_length(blocks), ==, 5);
 	g_assert_true(AI_IS_IMAGE_CONTENT(blocks->next->data));
+	g_assert_cmpuint(g_list_length(ai_conversation_get_messages(conversation)), >=, 3);
 	g_assert_true(handle_interrupt(&app) == FALSE);
 	g_assert_null(app.images);
 	g_assert_cmpuint(app.input->len, ==, 0);
@@ -181,6 +185,7 @@ test_composer(void)
 	opt_no_expand = FALSE;
 	g_assert_null(app.images);
 	g_clear_object(&app.cancellable);
+	app_clear_send_queue(&app);
 	g_string_free(app.input, TRUE);
 	g_ptr_array_unref(app.history);
 	delwin(app.input_win);
@@ -221,6 +226,7 @@ test_draft_rejection(void)
 	g_assert_null(ai_conversation_get_messages(conversation));
 	g_clear_object(&app.cancellable);
 	g_clear_list(&app.images, g_object_unref);
+	app_clear_send_queue(&app);
 	g_string_free(app.input, TRUE);
 	g_ptr_array_unref(app.history);
 }
