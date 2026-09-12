@@ -1123,6 +1123,7 @@ test_help_lists_commands_from_disk(void)
 	g_assert_nonnull(strstr(run->stdout_data, "/exit"));
 	g_assert_nonnull(strstr(run->stdout_data, "/clear"));
 	g_assert_nonnull(strstr(run->stdout_data, "/reset"));
+	g_assert_nonnull(strstr(run->stdout_data, "/effort"));
 
 	run_free(run);
 	sandbox_free(box);
@@ -1411,6 +1412,78 @@ test_model_command_no_op(void)
 	sandbox_free(box);
 }
 
+/* /effort with no argument reports; with one it says what changed, since
+ * a level the provider will reject is only detected on the next turn. */
+static void
+test_effort_command_reports(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *show[] = { "--dump", "/effort", "-p", "grok-build", NULL };
+	const gchar *change[] = {
+		"--dump", "/effort high", "-p", "grok-build", "--effort", "low",
+		NULL
+	};
+	Run *run = run_tui_in(box, show);
+
+	g_assert_nonnull(strstr(run->stdout_data, "Effort:"));
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Available levels:"));
+	g_assert_nonnull(strstr(run->stdout_data, "medium"));
+	g_assert_nonnull(strstr(run->stdout_data, "xhigh"));
+	g_assert_nonnull(strstr(run->stdout_data, "/effort LEVEL"));
+	run_free(run);
+
+	run = run_tui_in(box, change);
+	g_assert_nonnull(strstr(run->stdout_data, "Effort switched from"));
+	g_assert_nonnull(strstr(run->stdout_data, "low"));
+	g_assert_nonnull(strstr(run->stdout_data, "high"));
+	g_assert_nonnull(strstr(run->stdout_data, "Context preserved"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* Setting the effort to what it already is is not a "switch". */
+static void
+test_effort_command_no_op(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *args[] = {
+		"--dump", "/effort medium", "-p", "grok-build", NULL
+	};
+	Run *run = run_tui_in(box, args);
+
+	g_assert_null(strstr(run->stdout_data, "Effort switched"));
+	g_assert_nonnull(strstr(run->stdout_data, "Effort: medium"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
+/* HTTP providers have no effort-level property; say so rather than
+ * pretending the next turn will honour it. */
+static void
+test_effort_command_http_unsupported(void)
+{
+	gchar *box = sandbox_new();
+	const gchar *show[] = { "--dump", "/effort", "-p", "claude", NULL };
+	const gchar *change[] = {
+		"--dump", "/effort high", "-p", "claude", NULL
+	};
+	Run *run = run_tui_in(box, show);
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "no effort-level"));
+	run_free(run);
+
+	run = run_tui_in(box, change);
+	g_assert_nonnull(strstr(run->stdout_data, "Effort unchanged"));
+	g_assert_nonnull(strstr(run->stdout_data, "no effort-level"));
+
+	run_free(run);
+	sandbox_free(box);
+}
+
 static void
 test_expand_inlines_a_mention(void)
 {
@@ -1565,7 +1638,14 @@ static void
 test_switch_command_enter(gconstpointer data)
 {
 	const gchar *command = data;
-	const gchar *notice = g_str_equal(command, "/model") ? "Model:" : "Provider:";
+	const gchar *notice;
+
+	if (g_str_equal(command, "/model"))
+		notice = "Model:";
+	else if (g_str_equal(command, "/effort"))
+		notice = "Effort:";
+	else
+		notice = "Provider:";
 	Stub *stub;
 	g_autofree gchar *stdin_path = NULL;
 	g_autofree gchar *partial = g_strndup(command, 4);
@@ -2697,6 +2777,7 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "exit", NULL },
 	{ "model", "Model:" },
 	{ "provider", "Provider: Grok Build" },
+	{ "effort", "Effort:" },
 	{ "tools", "local tools are off" },
 	{ "commands", "Commands from disk" },
 	{ "skills", "Skills" },
@@ -3371,6 +3452,11 @@ main(int argc, char *argv[])
 	                test_context_command_clear_when_empty);
 	g_test_add_func("/ai-glib/ai-tui/model-reports", test_model_command_reports);
 	g_test_add_func("/ai-glib/ai-tui/model-no-op", test_model_command_no_op);
+	g_test_add_func("/ai-glib/ai-tui/effort-reports",
+	                test_effort_command_reports);
+	g_test_add_func("/ai-glib/ai-tui/effort-no-op", test_effort_command_no_op);
+	g_test_add_func("/ai-glib/ai-tui/effort-http",
+	                test_effort_command_http_unsupported);
 	g_test_add_func("/ai-glib/ai-tui/expand-mention",
 	                test_expand_inlines_a_mention);
 	g_test_add_func("/ai-glib/ai-tui/expand-unknown",
@@ -3386,6 +3472,8 @@ main(int argc, char *argv[])
 	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",
+	                     test_switch_command_enter);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/effort-enter", "/effort",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/switch-context", GINT_TO_POINTER(FALSE),
 	                     test_switch_context_delivery);

@@ -1930,6 +1930,36 @@ show_providers(App *app, GObject *provider)
 	say(app, "%s", out->str);
 }
 
+/* Enumerate the same effort nicks accepted by AiEffortLevel. */
+static void
+show_effort(App *app, GObject *provider)
+{
+	g_autoptr(GEnumClass) levels = g_type_class_ref(AI_TYPE_EFFORT_LEVEL);
+	g_autoptr(GString) out = g_string_new(NULL);
+	guint i;
+
+	if (!AI_IS_CLI_CLIENT(provider))
+	{
+		say(app, "Effort: this provider has no effort-level.\n"
+		         "Switch to a CLI provider, then type /effort LEVEL.");
+		return;
+	}
+
+	{
+		const gchar *current =
+			ai_cli_client_get_effort_level(AI_CLI_CLIENT(provider));
+
+		g_string_append_printf(out, "Effort: %s\nAvailable levels:\n",
+		                       current != NULL && current[0] != '\0'
+		                           ? current : "(default)");
+	}
+
+	for (i = 0; i < levels->n_values; i++)
+		g_string_append_printf(out, "  %s\n", levels->values[i].value_nick);
+	g_string_append(out, "To switch, type /effort LEVEL (for example, /effort high).");
+	say(app, "%s", out->str);
+}
+
 /* /help, /commands, /skills, /agents --- one listing, filtered. */
 static void
 list_resources(App *app, AiResourceKind kind, const gchar *heading)
@@ -2584,6 +2614,60 @@ handle_builtin(App *app, AiCommandResult *result)
              */
             say(app, "Model switched from %s to %s. Context preserved.",
                 previous != NULL ? previous : "the default", requested);
+        }
+    }
+    else if (g_strcmp0(name, "effort") == 0)
+    {
+        GObject          *provider =
+            ai_conversation_get_provider(app->conversation);
+        g_autofree gchar *requested = NULL;
+
+        if (arguments != NULL)
+        {
+            requested = g_strdup(arguments);
+            g_strstrip(requested);
+        }
+
+        if (requested == NULL || requested[0] == '\0')
+        {
+            show_effort(app, provider);
+        }
+        else if (!AI_IS_CLI_CLIENT(provider))
+        {
+            say(app, "Effort unchanged: this provider has no effort-level.");
+        }
+        else if (ai_conversation_get_busy(app->conversation))
+        {
+            /*
+             * Same rule as /model: half a turn at one effort and half
+             * at another is not a transcript anybody can reason about.
+             */
+            say(app, "Effort unchanged: a turn is in flight.");
+        }
+        else
+        {
+            const gchar      *current =
+                ai_cli_client_get_effort_level(AI_CLI_CLIENT(provider));
+            g_autofree gchar *previous = g_strdup(current);
+
+            if (g_strcmp0(previous, requested) == 0)
+            {
+                say(app, "Effort: %s", requested);
+            }
+            else
+            {
+                ai_cli_client_set_effort_level(AI_CLI_CLIENT(provider),
+                                               requested);
+                /*
+                 * Say it out loud.  A level the provider will reject
+                 * is only detected when the next turn is built, so the
+                 * report is what makes that failure explicable.
+                 */
+                say(app, "Effort switched from %s to %s. Context preserved.",
+                    previous != NULL && previous[0] != '\0'
+                        ? previous : "the default",
+                    requested);
+            }
         }
     }
     else if (g_strcmp0(name, "context") == 0)

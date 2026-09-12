@@ -382,7 +382,7 @@ to the input history and the transcript when it is not --- one key, two
 jobs, decided by what is on screen. Press =Escape= first if you want the
 history back with a half-typed command still on the line.
 
-A fully typed command such as =/model= or =/provider= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider=, leaving it in the composer so you can add an argument. =Tab= always completes without submitting. Path completions also remain in the composer.
+A fully typed command such as =/model=, =/provider= or =/effort= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider=, leaving it in the composer so you can add an argument. =Tab= always completes without submitting. Path completions also remain in the composer.
 
 =Home= / =C-a= and =End= / =C-e= refresh completion at the new cursor position, just like the arrow keys. Before the initial slash there is no token to complete, so =Tab= leaves the draft unchanged. Terminal tests exercise every registered built-in with one =Enter=, including missing-argument feedback, and check that these local commands never invoke the provider.
 
@@ -421,6 +421,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/exit=             | Exit, same as =/quit=                             |
 | =/model [NAME]=     | Show or switch the model without restarting       |
 | =/provider [NAME]=  | Show or switch the provider, preserving context   |
+| =/effort [LEVEL]=   | Show or switch reasoning effort (CLI providers)   |
 | =/tools=            | The tools the model can call                      |
 | =/commands=         | Commands from disk, and what shadows what         |
 | =/skills=           | Skills                                            |
@@ -554,6 +555,30 @@ why the change is reported rather than applied silently.
 See [[file:provider-switching.org][Provider switching]] for the exact
 migration table and limits, and [[file:native-session.org][Native session
 import]] for what the carried history contains.
+
+*** Changing the effort
+=/effort= with no argument reports the current reasoning effort and lists
+the canonical levels (=low=, =medium=, =high=, =xhigh=, =max=). With a
+level it changes it for the next turn and keeps everything else:
+
+#+begin_example
+> /effort high
+Effort switched from medium to high. Context preserved.
+#+end_example
+
+Like =/model=, it is refused while a turn is in flight. The name is not
+validated here: a level the provider will reject fails on the *next* turn,
+which is why the change is reported rather than applied silently. OpenCode
+accepts provider-defined variants as well as those names.
+
+HTTP providers have no =effort-level= property. =/effort= says so rather
+than pretending the next turn will honour it; switch to a CLI wrapper
+first. Cursor bakes effort into the model id --- use =/model= or
+=--set model-params= instead.
+
+The startup =--effort= flag still applies to the first provider and to a
+later =/provider= that constructs a new CLI client. Use =/effort= after
+the switch to change it for the rest of the session.
 
 *** Skill discovery
 The =/= menu discovers =.agents/skills/<name>/SKILL.md= relative to the working directory and =~/.agents/skills/<name>/SKILL.md=; flat =<name>.md= files work too. These are the source of truth: project =.agents= wins over home =.agents=, and both win over same-named skills in other harness directories. Unique skills from the other common locations remain available, with one menu entry per name. A frontmatter =name:= overrides the filename-derived name used for deduplication. Built-ins and explicit commands retain their existing priority over skills with the same slash name.
