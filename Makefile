@@ -380,6 +380,7 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 

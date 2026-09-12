@@ -280,3 +280,77 @@ $ ai -p antigravity --set mode=plan --set sandbox --set additional-directories=/
 - [[file:claude-code.org][AiClaudeCodeClient]] — the equivalent wrapper for =claude --print=
 - [[file:grok-build.org][AiGrokBuildClient]] — the equivalent wrapper for =grok=
 - [[../cli.org][The =ai= CLI]] - =ai -p antigravity= / =ai -p agy=
+
+** Image generation through =generate_image=
+=AiAntigravityClient= implements =AiImageGenerator=. It asks the authenticated =agy= agent to invoke its native =generate_image= tool once and returns the generated artifact as an =AiGeneratedImage= containing base64 bytes and the detected MIME type. This uses the CLI account's quota; no Gemini API key is required.
+
+#+begin_src sh
+ai --list-image-models -p agy
+ai --image-gen -p agy --aspect 16:9 "a mountain lake at sunrise"
+ai -I -p antigravity -o landscape.jpg "a mountain lake at sunrise"
+#+end_src
+
+The default output filename follows the returned MIME type. An explicit =-o= path does not transcode the bytes: naming a JPEG =picture.png= does not turn it into PNG. PNG, JPEG, GIF and WebP signatures are recognized.
+
+*** Library API
+Use the same synchronous or asynchronous interface as the HTTP providers:
+
+#+begin_src C
+#include <ai-glib.h>
+
+int
+main(void)
+{
+	g_autoptr(AiAntigravityClient) client = ai_antigravity_client_new();
+	g_autoptr(AiImageRequest) request = ai_image_request_new("a mountain lake at sunrise");
+	g_autoptr(AiImageResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	AiGeneratedImage *image;
+
+	/* The aspect ratio is a prompt hint; agy controls final dimensions. */
+	ai_image_request_set_aspect_ratio(request, "16:9");
+	response = ai_image_generator_generate_image(AI_IMAGE_GENERATOR(client), request, NULL, &error);
+	if (response == NULL)
+	{
+		g_printerr("Image generation failed: %s\n", error->message);
+		return 1;
+	}
+
+	/* Bytes remain valid independently of agy's on-disk artifact. */
+	image = ai_image_response_get_image(response, 0);
+	if (!ai_generated_image_save_to_file(image, "landscape.jpg", &error))
+	{
+		g_printerr("Saving image failed: %s\n", error->message);
+		return 1;
+	}
+	return 0;
+}
+#+end_src
+
+For asynchronous use, call =ai_image_generator_generate_image_async()= and collect the response with =ai_image_generator_generate_image_finish()=. The work runs off the calling thread; completion and the =image-progress= signal run on the initiating thread-default context when the result is collected. =GCancellable= and =process-timeout-ms= bound the subprocess through the existing CLI transport helper.
+
+*** Model selection and capabilities
+The request's model (=-m= in =ai=) selects the agent that invokes the image tool, not the image-generation backend. It defaults to the client's =model= property, then =AI_ANTIGRAVITY_DEFAULT_MODEL=. The response's model field records that agent model. =agy= controls the underlying image model. Discovery lists the known agent models with the same image-tool capabilities; newer valid =agy --model= identifiers may also be used.
+
+| Capability | Behavior |
+|------------+----------|
+| Text-to-image | One native =generate_image= call per request |
+| Aspect ratio | Passed as a prompt hint; exact dimensions are not guaranteed |
+| Count | One image; larger counts clamp to one under normal validation |
+| References, editing, variation, upscale | Not supported by this adapter; rejected before spawning |
+| Size, quality, format, transparency, seed | Not exposed; unsupported knobs are dropped by normal validation |
+| Strict validation | Call =ai_image_request_validate()= with the default model descriptor and =AI_IMAGE_VALIDATE_STRICT= to reject unsupported settings |
+| Partial previews | Not supported |
+
+Validation and launch preparation copy the request. The caller's original request is unchanged. CLI properties such as =skip-permissions=, =sandbox=, =agent=, =print-timeout=, working directory and child environment retain their normal meaning. Image calls always start a fresh conversation and do not use or update =session-id= or =continue-session=.
+
+*** Permissions, artifacts and failures
+The normal =agy= permission policy applies. Image generation does not enable =skip-permissions= automatically. If local policy requires review for =generate_image=, allow that tool in agy's configuration or explicitly use the existing =--skip-permissions= CLI option (the =skip-permissions= GObject property). Headless permission denials are errors.
+
+Current =agy= stream events can omit the output pathname even after successful generation. The adapter assigns a unique =ImageName=, requires a matching completed =generate_image= event and a successful terminal result in the same UUID conversation, then searches only =~/.gemini/antigravity-cli/brain/<conversation-id>/= for that name's artifacts. A per-client =HOME= environment override selects the corresponding store. Returned prose paths are never opened. Files must be recent, regular, unlinked to other files, no larger than 64 MiB, and carry a recognized raster signature; symlinked conversation directories and files are rejected. Multiple matching images are treated as an ambiguous result. Original artifacts remain in agy's store.
+
+A terminal chat status of =SUCCESS= alone is insufficient: the image tool may have failed while the agent successfully explained that failure. Tool errors, nonzero process exits, missing completion events and missing readable artifacts all return =GError=. The adapter does not automatically retry paid generations. Changes to agy's event schema, artifact naming or store location may require updating this adapter.
+
+The protocol follows [[https://antigravity.google/docs/cli/headless/][Antigravity's headless mode documentation]]; artifact behavior was checked against the locally installed CLI on 2026-09-11.
+
+When the selected agent model ends in =-low=, =-medium= or =-high=, that encoded effort takes precedence and the adapter omits =--effort=. This avoids agy rejecting the high default model together with the base client's medium default. For other model names, the normal =effort-level= property is forwarded.

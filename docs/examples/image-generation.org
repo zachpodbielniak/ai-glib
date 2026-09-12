@@ -2,7 +2,7 @@
 Generate images from text prompts, optionally conditioned on reference images.
 
 ** Overview
-Image generation goes through the =AiImageGenerator= interface. Three providers
+Image generation goes through the =AiImageGenerator= interface. Four providers
 implement it:
 
 | Provider | Models                                                    | Reference images                          |
@@ -10,6 +10,9 @@ implement it:
 | OpenAI   | GPT Image 2 / 1.5 / 1, DALL-E 3 / 2                       | up to 16 (GPT Image); 1 + mask (DALL-E 2) |
 | Gemini   | Nano Banana, Nano Banana 2, Nano Banana Pro, Imagen 4 / 3 | up to 14 (Nano Banana Pro); none (Imagen) |
 | Grok     | Grok Imagine, Grok Imagine Quality, Grok 2 Image          | 1 (Imagine); none (Grok 2)                |
+| Antigravity | Native =generate_image= through =agy=; agent model is selectable | Not exposed by this adapter |
+
+For the authenticated CLI route, use =ai --image-gen -p agy "a brass telescope"=. It returns one native-format image; =--aspect= is a prompt hint. The selected model orchestrates the tool call, while =agy= controls the image backend. See [[file:../providers/antigravity.org][Antigravity]] for the C example, permissions and artifact handling.
 
 Claude and Ollama expose no image API and do not implement the interface, so
 check with =AI_IS_IMAGE_GENERATOR()= before casting.

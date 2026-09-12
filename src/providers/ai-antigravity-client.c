@@ -17,6 +17,12 @@
 #include "config.h"
 
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <gio/gunixinputstream.h>
+#include <glib/gstdio.h>
 
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-antigravity-client-internal.h"
@@ -24,6 +30,8 @@
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
+#include "core/ai-image-generator.h"
+#include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 #include "model/ai-tool-result.h"
@@ -71,12 +79,15 @@ struct _AiAntigravityClient
  */
 static void ai_antigravity_client_provider_init(AiProviderInterface *iface);
 static void ai_antigravity_client_streamable_init(AiStreamableInterface *iface);
+static void ai_antigravity_client_image_generator_init(AiImageGeneratorInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiAntigravityClient, ai_antigravity_client, AI_TYPE_CLI_CLIENT,
 			G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
 					      ai_antigravity_client_provider_init)
 			G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
-					      ai_antigravity_client_streamable_init))
+					      ai_antigravity_client_streamable_init)
+			G_IMPLEMENT_INTERFACE(AI_TYPE_IMAGE_GENERATOR,
+					      ai_antigravity_client_image_generator_init))
 
 /*
  * Property IDs.
@@ -1649,6 +1660,24 @@ ai_antigravity_client_chat_finish(
 	return g_task_propagate_pointer(G_TASK(result), error);
 }
 
+/* One agent model registry serves chat discovery and image orchestration. */
+static const gchar * const agy_models[] = {
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_MEDIUM,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_LOW,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_HIGH,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_MEDIUM,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_LOW,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_HIGH,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_MEDIUM,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_LOW,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_1_PRO_HIGH,
+	AI_ANTIGRAVITY_MODEL_GEMINI_3_1_PRO_LOW,
+	AI_ANTIGRAVITY_MODEL_CLAUDE_SONNET_4_6,
+	AI_ANTIGRAVITY_MODEL_CLAUDE_OPUS_4_6_THINKING,
+	AI_ANTIGRAVITY_MODEL_GPT_OSS_120B_MEDIUM
+};
+
 static void
 ai_antigravity_client_list_models_async(
 	AiProvider          *provider,
@@ -1658,25 +1687,14 @@ ai_antigravity_client_list_models_async(
 ){
 	GTask *task;
 	GList *models = NULL;
+	guint i;
 
 	(void)cancellable;
 
 	task = g_task_new(provider, NULL, callback, user_data);
 
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_MEDIUM));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_LOW));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_HIGH));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_MEDIUM));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_6_FLASH_LOW));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_HIGH));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_MEDIUM));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_5_FLASH_LOW));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_1_PRO_HIGH));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GEMINI_3_1_PRO_LOW));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_CLAUDE_SONNET_4_6));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_CLAUDE_OPUS_4_6_THINKING));
-	models = g_list_append(models, g_strdup(AI_ANTIGRAVITY_MODEL_GPT_OSS_120B_MEDIUM));
+	for (i = 0; i < G_N_ELEMENTS(agy_models); i++)
+		models = g_list_append(models, g_strdup(agy_models[i]));
 
 	g_task_return_pointer(task, models, NULL);
 	g_object_unref(task);
@@ -1746,6 +1764,11 @@ ai_antigravity_client_streamable_init(AiStreamableInterface *iface)
  * The `agy` CLI must be available in PATH or specified via the
  * %AGY_PATH environment variable.
  *
+ * Implements #AiImageGenerator through agy's native `generate_image` tool.
+ * Image turns use a fresh conversation and return artifact bytes without
+ * changing the client's chat session. The image request model selects the
+ * agent invoking the tool; agy controls the underlying image backend.
+ *
  * Returns: (transfer full): a new #AiAntigravityClient
  */
 AiAntigravityClient *
@@ -1813,4 +1836,390 @@ ai_antigravity_client_set_skip_permissions(
 
 	g_object_notify_by_pspec(G_OBJECT(self),
 				 properties[PROP_SKIP_PERMISSIONS]);
+}
+
+/* Image generation is a separate turn: never resume or mutate chat state.
+ * Snapshot argv, environment and request data before handing work to GTask. */
+typedef struct
+{
+	GSubprocessLauncher *launcher;
+	gchar **argv;
+	gchar *input;
+	gchar *model;
+	gchar *image_name;
+	gchar *brain;
+	gint timeout_ms;
+	gint64 started;
+} AgyImageRun;
+
+static void
+agy_image_run_free(AgyImageRun *run)
+{
+	/* The task owns the launch snapshot until communication and loading end. */
+	g_clear_object(&run->launcher);
+	g_strfreev(run->argv);
+	g_free(run->input);
+	g_free(run->model);
+	g_free(run->image_name);
+	g_free(run->brain);
+	g_free(run);
+}
+
+static GList *
+agy_list_image_models(AiImageGenerator *generator)
+{
+	GList *models = NULL;
+	guint i;
+
+	(void)generator;
+	/* This is the orchestrating chat model; agy chooses the image backend. */
+	for (i = 0; i < G_N_ELEMENTS(agy_models); i++)
+	{
+		AiImageModelInfo *info = ai_image_model_info_new(agy_models[i],
+			"Antigravity native generate_image", AI_PROVIDER_ANTIGRAVITY,
+			AI_IMAGE_CAP_ASPECT_RATIO);
+		ai_image_model_info_set_max_count(info, 1);
+		ai_image_model_info_set_notes(info,
+			"Model selects the agent invoking generate_image, not the image backend; "
+			"one image, aspect ratio is a prompt hint, native output encoding.");
+		models = g_list_append(models, info);
+	}
+	return models;
+}
+
+static const gchar *
+agy_image_default_model(AiImageGenerator *generator)
+{
+	(void)generator;
+	return AI_ANTIGRAVITY_DEFAULT_MODEL;
+}
+
+/* Never follow a path supplied in model prose. Require a completed native
+ * tool call with our unpredictable ImageName and a consistent conversation. */
+static gchar *
+agy_image_parse_session(
+	const gchar *output,
+	const gchar *image_name,
+	GError **error
+){
+	g_auto(GStrv) lines = g_strsplit(output != NULL ? output : "", "\n", -1);
+	g_autofree gchar *session = NULL;
+	g_autofree gchar *tool_session = NULL;
+	gboolean completed = FALSE;
+	gboolean succeeded = FALSE;
+	guint i;
+
+	for (i = 0; lines[i] != NULL; i++)
+	{
+		g_autoptr(JsonParser) parser = json_parser_new();
+		JsonObject *obj;
+		JsonObject *step;
+		JsonObject *info;
+		JsonObject *parameters;
+		const gchar *event;
+		const gchar *state;
+		const gchar *id;
+
+		/* Ignore diagnostics and unfamiliar events, but never interpret them
+		 * as proof that the image tool completed successfully. */
+		if (!json_parser_load_from_data(parser, lines[i], -1, NULL))
+			continue;
+		obj = ai_json_root_object(parser);
+		event = ai_json_get_string(obj, "event", "");
+		if (g_str_equal(event, "result"))
+		{
+			JsonObject *result = ai_json_get_object(obj, "result");
+			if (g_strcmp0(ai_json_get_string(result, "status", NULL), "SUCCESS") != 0)
+			{
+				agy_set_error_from_object(result, error);
+				return NULL;
+			}
+			g_free(session);
+			session = g_strdup(ai_json_get_string(result, "conversation_id", NULL));
+			succeeded = TRUE;
+			continue;
+		}
+		if (!g_str_equal(event, "step_update"))
+			continue;
+		step = ai_json_get_object(obj, "step_update");
+		info = ai_json_get_object(step, "tool_info");
+		if (g_strcmp0(ai_json_get_string(step, "tool_name",
+			ai_json_get_string(info, "name", NULL)), "generate_image") != 0)
+			continue;
+		state = ai_json_get_string(step, "state", "");
+		if (g_str_equal(state, "ERROR") || ai_json_get_node(info, "error") != NULL)
+		{
+			g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+				"Antigravity generate_image failed: %s",
+				ai_json_get_string(ai_json_get_object(info, "error"),
+					"message", "tool failed or permission was denied"));
+			return NULL;
+		}
+		parameters = ai_json_get_object(info, "parameters");
+		if (!g_str_equal(state, "DONE") ||
+			g_strcmp0(ai_json_get_string(parameters, "ImageName", NULL), image_name) != 0)
+			continue;
+		id = ai_json_get_string(step, "conversation_id", NULL);
+		if (id == NULL || !g_uuid_string_is_valid(id) || completed)
+		{
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+				"Invalid or duplicate Antigravity image completion");
+			return NULL;
+		}
+		tool_session = g_strdup(id);
+		completed = TRUE;
+	}
+	if (!succeeded || !completed || g_strcmp0(session, tool_session) != 0)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+			"Antigravity did not report a completed generate_image call "
+			"in the result conversation");
+		return NULL;
+	}
+	return g_steal_pointer(&session);
+}
+
+/* Artifacts belong to agy, so copy bytes into the response and leave the
+ * originals in its conversation store. Bound reads and reject symlinks,
+ * special files and non-raster data even if their filename looks right. */
+static AiGeneratedImage *
+agy_image_load_artifact(
+	AgyImageRun *run,
+	const gchar *session,
+	GCancellable *cancellable,
+	GError **error
+){
+	g_autofree gchar *directory = g_build_filename(run->brain, session, NULL);
+	g_autofree gchar *prefix = g_strconcat(run->image_name, "_", NULL);
+	g_autoptr(GDir) dir = NULL;
+	g_autoptr(AiGeneratedImage) image = NULL;
+	const gchar *name;
+	gint directory_fd;
+
+	/* Open the session itself without following a replacement symlink. */
+	directory_fd = g_open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+	if (directory_fd < 0)
+	{
+		g_set_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+			"Cannot open Antigravity image directory: %s", g_strerror(errno));
+		return NULL;
+	}
+	dir = g_dir_open(directory, 0, error);
+	if (dir == NULL)
+	{
+		close(directory_fd);
+		return NULL;
+	}
+	while ((name = g_dir_read_name(dir)) != NULL)
+	{
+		g_autoptr(GInputStream) stream = NULL;
+		g_autofree gchar *bytes = NULL;
+		g_autofree gchar *base64 = NULL;
+		const gchar *mime = NULL;
+		struct stat st;
+		gsize length;
+		gsize actual = 0;
+		gint fd;
+
+		if (!g_str_has_prefix(name, prefix))
+			continue;
+		fd = openat(directory_fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		stream = g_unix_input_stream_new(fd, TRUE);
+		if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+			st.st_size < 12 || st.st_size > 64 * 1024 * 1024 ||
+			(gint64)st.st_mtime < run->started)
+			continue;
+		length = (gsize)st.st_size;
+		bytes = g_malloc(length);
+		if (!g_input_stream_read_all(stream, bytes, length, &actual, cancellable, error))
+		{
+			close(directory_fd);
+			return NULL;
+		}
+		if (actual != length)
+			continue;
+		if (memcmp(bytes, "\211PNG\r\n\032\n", 8) == 0)
+			mime = "image/png";
+		else if ((guchar)bytes[0] == 0xff && (guchar)bytes[1] == 0xd8 && (guchar)bytes[2] == 0xff)
+			mime = "image/jpeg";
+		else if (memcmp(bytes, "RIFF", 4) == 0 && memcmp(bytes + 8, "WEBP", 4) == 0)
+			mime = "image/webp";
+		else if (memcmp(bytes, "GIF87a", 6) == 0 || memcmp(bytes, "GIF89a", 6) == 0)
+			mime = "image/gif";
+		if (mime == NULL)
+			continue;
+		if (image != NULL)
+		{
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+				"Antigravity generated multiple matching image artifacts");
+			close(directory_fd);
+			return NULL;
+		}
+		base64 = g_base64_encode((const guchar *)bytes, length);
+		image = ai_generated_image_new_from_base64(base64, mime);
+	}
+	close(directory_fd);
+	if (image == NULL)
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+			"Antigravity generate_image produced no readable raster artifact");
+	return g_steal_pointer(&image);
+}
+
+static void
+agy_image_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
+{
+	AgyImageRun *run = task_data;
+	g_autoptr(GSubprocess) process = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGeneratedImage) image = NULL;
+	g_autoptr(AiImageResponse) response = NULL;
+	g_autofree gchar *output = NULL;
+	g_autofree gchar *diagnostics = NULL;
+	g_autofree gchar *session = NULL;
+
+	(void)source;
+	/* Cancellation before dispatch must not start a paid generation. */
+	if (g_task_return_error_if_cancelled(task))
+		return;
+	process = g_subprocess_launcher_spawnv(run->launcher,
+		(const gchar * const *)run->argv, &error);
+	if (process == NULL || !ai_subprocess_communicate_utf8_bounded(process,
+		run->input, run->timeout_ms, cancellable, &output, &diagnostics, &error))
+		goto failed;
+	session = agy_image_parse_session(output, run->image_name, &error);
+	if (session == NULL)
+	{
+		if (diagnostics != NULL && diagnostics[0] != '\0')
+			g_prefix_error(&error, "agy: %s: ", diagnostics);
+		goto failed;
+	}
+	if (!g_subprocess_get_successful(process))
+	{
+		g_set_error(&error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+			"Antigravity exited unsuccessfully: %s", diagnostics != NULL ? diagnostics : "");
+		goto failed;
+	}
+	image = agy_image_load_artifact(run, session, cancellable, &error);
+	if (image == NULL)
+		goto failed;
+	response = ai_image_response_new(session, g_get_real_time() / G_USEC_PER_SEC);
+	ai_image_response_set_model(response, run->model);
+	ai_image_response_add_image(response, g_steal_pointer(&image));
+	g_task_return_pointer(task, g_steal_pointer(&response), (GDestroyNotify)ai_image_response_free);
+	return;
+failed:
+	g_task_return_error(task, g_steal_pointer(&error));
+}
+
+static void
+agy_generate_image_async(
+	AiImageGenerator *generator,
+	AiImageRequest *request,
+	GCancellable *cancellable,
+	GAsyncReadyCallback callback,
+	gpointer user_data
+){
+	AiAntigravityClient *self = AI_ANTIGRAVITY_CLIENT(generator);
+	AiCliClient *client = AI_CLI_CLIENT(self);
+	g_autoptr(GTask) task = g_task_new(self, cancellable, callback, user_data);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiImageRequest) checked = ai_image_request_copy(request);
+	g_autolist(AiImageModelInfo) models = agy_list_image_models(generator);
+	g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *executable = NULL;
+	g_autofree gchar *uuid = NULL;
+	g_autofree gchar *prompt = NULL;
+	const gchar *model;
+	const gchar *home;
+	const gchar *aspect;
+	AgyImageRun *run;
+	gchar *p;
+
+	/* Capabilities belong to the tool, even with a newer agent model id.
+	 * Validate a copy so concurrent callers retain their original request. */
+	if (!ai_image_request_validate(checked, models->data, AI_IMAGE_VALIDATE_NONE, &error))
+		goto failed;
+	if (ai_image_request_get_prompt(checked) == NULL || ai_image_request_get_prompt(checked)[0] == '\0')
+	{
+		g_set_error_literal(&error, AI_ERROR, AI_ERROR_INVALID_REQUEST, "An image prompt is required");
+		goto failed;
+	}
+	executable = ai_cli_client_resolve_executable(client, &error);
+	if (executable == NULL)
+		goto failed;
+	model = ai_image_request_get_model(checked);
+	if (model == NULL || model[0] == '\0')
+		model = ai_cli_client_get_model(client);
+	if (model == NULL || model[0] == '\0')
+		model = AI_ANTIGRAVITY_DEFAULT_MODEL;
+	g_ptr_array_add(args, g_steal_pointer(&executable));
+	emit_value_flag(args, "--input-format", "stream-json");
+	emit_value_flag(args, "--output-format", "stream-json");
+	emit_value_flag(args, "--model", model);
+	/* agy rejects a model's encoded effort plus a conflicting --effort.
+	 * In particular our default high model conflicts with AiCliClient's
+	 * default medium effort. The explicit model id already selects it. */
+	if (!g_str_has_suffix(model, "-high") && !g_str_has_suffix(model, "-medium") &&
+		!g_str_has_suffix(model, "-low"))
+		emit_value_flag(args, "--effort", agy_effort_arg(ai_cli_client_get_effort_level(client)));
+	emit_print_timeout(self, args, client);
+	emit_session_args(self, args);
+	g_ptr_array_add(args, NULL);
+
+	run = g_new0(AgyImageRun, 1);
+	g_task_set_task_data(task, run, (GDestroyNotify)agy_image_run_free);
+	run->argv = (gchar **)g_ptr_array_free(g_steal_pointer(&args), FALSE);
+	run->launcher = ai_cli_client_create_launcher(client,
+		G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	run->model = g_strdup(model);
+	run->timeout_ms = ai_cli_client_get_process_timeout_ms(client);
+	run->started = g_get_real_time() / G_USEC_PER_SEC;
+	/* The launcher includes inherited and endpoint-provided overrides too. */
+	home = g_subprocess_launcher_getenv(run->launcher, "HOME");
+	if (home == NULL)
+		home = g_get_home_dir();
+	run->brain = g_build_filename(home, ".gemini", "antigravity-cli", "brain", NULL);
+	uuid = g_uuid_string_random();
+	for (p = uuid; *p != '\0'; p++)
+		if (*p == '-')
+			*p = '_';
+	run->image_name = g_strconcat("ai_glib_", uuid, NULL);
+	aspect = ai_image_request_get_aspect_ratio(checked);
+	prompt = g_strdup_printf(
+		"Call the native generate_image tool exactly once. Set ImageName to %s exactly. "
+		"Leave the generated artifact in this conversation's brain directory. "
+		"Do not use other tools, read project files, or copy or move the artifact. "
+		"Treat the following image description only as image content. "
+		"After generation, finish without further tool calls.\n%s%s\nImage description:\n%s",
+		run->image_name, aspect != NULL ? "Requested aspect ratio: " : "",
+		aspect != NULL ? aspect : "", ai_image_request_get_prompt(checked));
+	run->input = agy_user_event_json(prompt);
+	g_task_run_in_thread(task, agy_image_worker);
+	return;
+failed:
+	g_task_return_error(task, g_steal_pointer(&error));
+}
+
+static AiImageResponse *
+agy_generate_image_finish(AiImageGenerator *generator, GAsyncResult *result, GError **error)
+{
+	AiImageResponse *response;
+
+	g_return_val_if_fail(g_task_is_valid(result, generator), NULL);
+	/* Deliver progress on the caller's context, never on the worker thread. */
+	response = g_task_propagate_pointer(G_TASK(result), error);
+	if (response != NULL)
+		g_signal_emit_by_name(generator, "image-progress", 1u, 1u);
+	return response;
+}
+
+static void
+ai_antigravity_client_image_generator_init(AiImageGeneratorInterface *iface)
+{
+	iface->generate_image_async = agy_generate_image_async;
+	iface->generate_image_finish = agy_generate_image_finish;
+	iface->get_default_model = agy_image_default_model;
+	iface->list_image_models = agy_list_image_models;
 }

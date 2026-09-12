@@ -1112,7 +1112,8 @@ static int
 list_image_models(AiConfig *config, const gchar *provider_name)
 {
 	static const AiProviderType all[] = {
-		AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI, AI_PROVIDER_GROK
+		AI_PROVIDER_OPENAI, AI_PROVIDER_GEMINI, AI_PROVIDER_GROK,
+		AI_PROVIDER_ANTIGRAVITY
 	};
 	gsize i;
 	gboolean any = FALSE;
@@ -1185,7 +1186,7 @@ generate_images(GObject *provider, const gchar *prompt)
 	if (!AI_IS_IMAGE_GENERATOR(provider))
 	{
 		g_printerr("ai: provider does not support image generation "
-		           "(try -p openai, -p gemini or -p grok)\n");
+		           "(try -p openai, -p gemini, -p grok or -p agy)\n");
 		return 2;
 	}
 
