@@ -13,6 +13,7 @@
 
 #include "core/ai-error.h"
 #include "harness/ai-command.h"
+#include "harness/ai-command-match.h"
 
 /* How long a `` !`cmd` `` substitution may run before it is killed. A
  * command body that hangs must not hang the frontend that invoked it. */
@@ -1231,25 +1232,67 @@ ai_command_set_is_command_line(const gchar *line)
     return TRUE;
 }
 
+typedef struct
+{
+    const gchar *name;
+    gint         score;
+} RankedName;
+
+static gint
+compare_ranked_names(gconstpointer a, gconstpointer b)
+{
+    const RankedName *ra = a;
+    const RankedName *rb = b;
+
+    if (ra->score != rb->score)
+    {
+        return ra->score - rb->score;
+    }
+
+    return g_strcmp0(ra->name, rb->name);
+}
+
 /* The closest known names to @name, for an error message worth reading. */
 static gchar *
 suggest_names(AiCommandSet *self, const gchar *name)
 {
+    g_autoptr(GArray)    ranked = g_array_new(FALSE, FALSE, sizeof(RankedName));
     g_autoptr(GPtrArray) near = g_ptr_array_new_with_free_func(g_free);
     GList               *commands = ai_command_set_list(self);
     GList               *iter;
     gchar               *joined;
+    guint                i;
 
     for (iter = commands; iter != NULL; iter = iter->next)
     {
         const gchar *candidate = ai_command_get_name(iter->data);
+        RankedName   entry;
+        gint         score;
 
-        if (candidate != NULL && near->len < 5 &&
-            (g_str_has_prefix(candidate, name) ||
-             strstr(candidate, name) != NULL))
+        if (candidate == NULL)
         {
-            g_ptr_array_add(near, g_strdup(candidate));
+            continue;
         }
+
+        score = ai_command_fuzzy_score(candidate, name);
+
+        if (score < 0)
+        {
+            continue;
+        }
+
+        entry.name = candidate;
+        entry.score = score;
+        g_array_append_val(ranked, entry);
+    }
+
+    g_array_sort(ranked, compare_ranked_names);
+
+    for (i = 0; i < ranked->len && near->len < 5; i++)
+    {
+        RankedName *entry = &g_array_index(ranked, RankedName, i);
+
+        g_ptr_array_add(near, g_strdup(entry->name));
     }
 
     g_list_free_full(commands, g_object_unref);

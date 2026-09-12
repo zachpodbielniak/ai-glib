@@ -404,7 +404,13 @@ token began, which is the part that is easy to get wrong and impossible
 to notice until a multibyte character is involved.
 
 - =/= completes commands, skills and agents, but only at offset 0 ---
-  a slash mid-line is a path separator or prose.
+  a slash mid-line is a path separator or prose. Matching is fuzzy, not
+  a prefix of the name: =/git= offers =skill-git-worktree=. Exact and
+  prefix hits rank first, then a hit at a hyphen/underscore/colon, then
+  any substring, then a subsequence. Resolve still requires the real
+  name --- completion is how you find it; sending an unknown =/git= is
+  still an error (and a passthrough for a wrapped CLI), with the same
+  fuzzy list in the suggestion.
 - =@= completes paths from the working directory, directories first and
   marked with a trailing slash so one Tab walks into them. Hidden
   entries appear only once the user types the dot; =.git=, =build= and

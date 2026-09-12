@@ -116,6 +116,12 @@ A written procedure for a kind of work. Invoked the same way a command
 is, and --- unlike a command --- the *model* can load one for itself
 through the =skill= tool.
 
+Typing =/= completes against those names fuzzily. =/git= offers
+=skill-git-worktree=; Tab (or the completion menu) inserts the real
+name. Sending =/git= still has to be the real name --- an unknown slash
+word is an error here and a passthrough for a wrapped CLI, so a
+near-miss is a suggestion, not a silent rewrite.
+
 Both =/skill-name= expansion and the =skill= tool prepend file-backed skills
 with =Base directory for this skill: <directory>= followed by a blank line.
 Relative references such as =references/guide.md= can be read relative to

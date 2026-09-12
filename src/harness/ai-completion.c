@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "harness/ai-completion.h"
+#include "harness/ai-command-match.h"
 #include "harness/ai-mention.h"
 
 /* Directories never worth offering. A completion list is a menu, and
@@ -628,43 +629,93 @@ compare_items(gconstpointer a, gconstpointer b)
     return g_strcmp0(ia->text, ib->text);
 }
 
-/* Complete a `/name` against the command set. */
+typedef struct
+{
+    AiCommand *command;
+    gint       score;
+} RankedCommand;
+
+static gint
+compare_ranked_commands(gconstpointer a, gconstpointer b)
+{
+    const RankedCommand *ra = a;
+    const RankedCommand *rb = b;
+
+    if (ra->score != rb->score)
+    {
+        return ra->score - rb->score;
+    }
+
+    return g_strcmp0(ai_command_get_name(ra->command),
+                     ai_command_get_name(rb->command));
+}
+
+/* Complete a `/name` against the command set.
+ *
+ * Matching is fuzzy rather than a prefix of the name: `/git` has to
+ * find `skill-git-worktree`, because that is how those files are named.
+ * Candidates are ranked (exact, prefix, a hit at a `-`/`_`/`:` break,
+ * any substring, then subsequence) and only then truncated to
+ * max-items, so a cap cannot hide the best match behind an alphabetical
+ * neighbour. */
 static void
 complete_commands(
     AiCompletionContext *self,
     AiCompletionResult  *result,
     const gchar         *fragment
 ){
-    GList *commands;
-    GList *iter;
+    g_autoptr(GArray) ranked = NULL;
+    GList            *commands;
+    GList            *iter;
+    guint             i;
 
     if (self->commands == NULL)
     {
         return;
     }
 
+    ranked = g_array_new(FALSE, FALSE, sizeof(RankedCommand));
     commands = ai_command_set_list(self->commands);
 
     for (iter = commands; iter != NULL; iter = iter->next)
     {
-        AiCommand   *command = iter->data;
-        const gchar *name = ai_command_get_name(command);
+        AiCommand     *command = iter->data;
+        const gchar   *name = ai_command_get_name(command);
+        RankedCommand  entry;
+        gint           score;
 
-        if (name == NULL || !g_str_has_prefix(name, fragment))
+        if (name == NULL)
         {
             continue;
         }
 
-        if (result->items->len >= self->max_items)
+        score = ai_command_fuzzy_score(name, fragment);
+
+        if (score < 0)
         {
-            break;
+            continue;
         }
+
+        entry.command = command;
+        entry.score = score;
+        g_array_append_val(ranked, entry);
+    }
+
+    g_array_sort(ranked, compare_ranked_commands);
+
+    for (i = 0; i < ranked->len && result->items->len < self->max_items; i++)
+    {
+        RankedCommand *entry;
+        const gchar   *name;
+
+        entry = &g_array_index(ranked, RankedCommand, i);
+        name = ai_command_get_name(entry->command);
 
         g_ptr_array_add(
             result->items,
             completion_item_new(name, name,
-                                ai_command_get_description(command),
-                                ai_command_get_origin(command),
+                                ai_command_get_description(entry->command),
+                                ai_command_get_origin(entry->command),
                                 AI_COMPLETION_COMMAND, FALSE));
     }
 
@@ -777,7 +828,9 @@ complete_paths(
  * the middle of a line behave.
  *
  * A `/name` only completes at the very start of the buffer, because that
- * is the only place a slash means a command.
+ * is the only place a slash means a command. The fragment is matched
+ * fuzzily against each name --- prefix, a hyphenated segment, substring,
+ * then subsequence --- so `/git` offers `skill-git-worktree`.
  *
  * Returns: (transfer full): the result, never %NULL. A result with no
  *   items and kind %AI_COMPLETION_NONE means "nothing to do here".

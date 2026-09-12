@@ -61,7 +61,10 @@ layer]].
 
 ** Rules
 - =/= completes only at offset 0, and only while the cursor is inside the
-  name. A slash mid-line is a path separator or prose.
+  name. A slash mid-line is a path separator or prose. The fragment is
+  matched fuzzily against command, skill and agent names, so =/git=
+  offers =skill-git-worktree=. Candidates are ranked (exact, prefix, a
+  hyphenated segment, substring, subsequence) before =max-items= truncates.
 - =@= completes at a word boundary, using the same rule the mention
   scanner does.
 - For =@src/co= the range covers everything after the =@= and each

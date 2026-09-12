@@ -240,6 +240,25 @@ test_unknown_command_with_no_near_misses(void)
 }
 
 static void
+test_unknown_command_suggests_a_hyphenated_skill(void)
+{
+	g_autoptr(AiCommandSet) set =
+		command_set_with("skill-git-worktree", AI_RESOURCE_SKILL,
+		                 "---\ndescription: Worktrees\n---\nbody\n");
+	AiCommandResult        *result;
+	GError                 *error = NULL;
+
+	/* Resolve stays exact: /git is not a command, so a wrapped CLI can
+	 * still pass it through. The error is how a person finds the skill. */
+	result = ai_command_set_resolve(set, "/git", NULL, NULL, &error);
+
+	g_assert_null(result);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_assert_nonnull(strstr(error->message, "skill-git-worktree"));
+	g_clear_error(&error);
+}
+
+static void
 test_command_names_are_case_sensitive(void)
 {
 	g_autoptr(AiCommandSet) set = command_set_with(NULL, 0, NULL);
@@ -905,6 +924,8 @@ main(int argc, char *argv[])
 	                test_unknown_command_errors_with_suggestions);
 	g_test_add_func("/ai-glib/command/unknown-no-suggestions",
 	                test_unknown_command_with_no_near_misses);
+	g_test_add_func("/ai-glib/command/unknown-suggests-hyphenated",
+	                test_unknown_command_suggests_a_hyphenated_skill);
 	g_test_add_func("/ai-glib/command/case-sensitive",
 	                test_command_names_are_case_sensitive);
 

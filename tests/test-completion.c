@@ -62,7 +62,8 @@ context_with_commands(void)
 	g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new();
 	g_autoptr(AiCommandSet)       set = NULL;
 	static const gchar           *names[] = {
-		"skill-gtest-scaffold", "skill-gobject-type", "deploy", NULL
+		"skill-gtest-scaffold", "skill-gobject-type",
+		"skill-git-worktree", "deploy", "git", NULL
 	};
 	gsize                         i;
 
@@ -266,7 +267,7 @@ test_common_prefix(void)
 	g_autoptr(AiCompletionResult)  r = ai_completion_context_query(ctx, "/skill-g", 8);
 	g_autofree gchar              *prefix = NULL;
 
-	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 2);
+	g_assert_cmpuint(ai_completion_result_get_n_items(r), ==, 3);
 
 	/* One Tab inserts as much as is certain and shows the menu, instead
 	 * of making the user choose between two things that agree so far. */
@@ -283,6 +284,62 @@ test_common_prefix_of_one(void)
 		ai_completion_result_get_common_prefix(r);
 
 	g_assert_cmpstr(prefix, ==, "deploy");
+}
+
+/**
+ * test_command_fuzzy_finds_a_hyphenated_skill:
+ *
+ * A skill named skill-git-worktree has to be findable as /git. Prefix
+ * matching never would, because the name does not start with git.
+ */
+static void
+test_command_fuzzy_finds_a_hyphenated_skill(void)
+{
+	g_autoptr(AiCompletionContext) ctx = context_with_commands();
+	g_autoptr(AiCompletionResult)  r =
+		ai_completion_context_query(ctx, "/git", 4);
+
+	g_assert_cmpint(ai_completion_result_get_kind(r), ==,
+	                AI_COMPLETION_COMMAND);
+	g_assert_true(has_item(r, "skill-git-worktree"));
+	g_assert_true(has_item(r, "git"));
+}
+
+/**
+ * test_command_fuzzy_ranks_exact_first:
+ *
+ * /git matches both git and skill-git-worktree. The exact name has to
+ * win, otherwise Tab and Enter would skip the command the user typed.
+ */
+static void
+test_command_fuzzy_ranks_exact_first(void)
+{
+	g_autoptr(AiCompletionContext) ctx = context_with_commands();
+	g_autoptr(AiCompletionResult)  r =
+		ai_completion_context_query(ctx, "/git", 4);
+	const AiCompletionItem        *item;
+
+	g_assert_cmpuint(ai_completion_result_get_n_items(r), >=, 2);
+	item = ai_completion_result_get_item(r, 0);
+	g_assert_cmpstr(item->text, ==, "git");
+}
+
+/**
+ * test_command_fuzzy_subsequence:
+ *
+ * Characters in order, not necessarily adjacent. /gwt is how a person
+ * hunts for skill-git-worktree when they remember the distinctive bits.
+ */
+static void
+test_command_fuzzy_subsequence(void)
+{
+	g_autoptr(AiCompletionContext) ctx = context_with_commands();
+	g_autoptr(AiCompletionResult)  r =
+		ai_completion_context_query(ctx, "/gwt", 4);
+
+	g_assert_true(has_item(r, "skill-git-worktree"));
+	g_assert_false(has_item(r, "git"));
+	g_assert_false(has_item(r, "deploy"));
 }
 
 static void
@@ -689,6 +746,12 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/completion/common-prefix", test_common_prefix);
 	g_test_add_func("/ai-glib/completion/common-prefix-one",
 	                test_common_prefix_of_one);
+	g_test_add_func("/ai-glib/completion/fuzzy-hyphenated-skill",
+	                test_command_fuzzy_finds_a_hyphenated_skill);
+	g_test_add_func("/ai-glib/completion/fuzzy-ranks-exact",
+	                test_command_fuzzy_ranks_exact_first);
+	g_test_add_func("/ai-glib/completion/fuzzy-subsequence",
+	                test_command_fuzzy_subsequence);
 	g_test_add_func("/ai-glib/completion/no-command-set",
 	                test_context_without_commands);
 
