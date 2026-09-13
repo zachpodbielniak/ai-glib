@@ -413,6 +413,14 @@ typedef struct
     gint            scroll;        /* first visible rendered row */
     gboolean        follow;        /* stick to the bottom */
     gint            selected;      /* block index, or -1 */
+	/* Transcript drag selection, in flattened row + display-column cells.
+	 * Mouse reporting for the wheel steals the terminal's own highlight,
+	 * so the application has to paint and copy the region itself. */
+	gboolean        mouse_selecting;
+	gint            sel_anchor_row; /* -1 when there is no region */
+	gint            sel_anchor_col;
+	gint            sel_row;
+	gint            sel_col;
 
     guint           redraw_id;     /* pending idle redraw */
     gboolean        running;
@@ -502,6 +510,9 @@ typedef struct
 } Row;
 
 static void app_schedule_redraw(App *app);
+static void selection_clear(App *app);
+static void tui_mouse_enable(void);
+static GPtrArray *build_rows(App *app, gint width);
 static void draw_completion(App *app);
 static void completion_advance(App *app);
 static void completion_refresh(App *app);
@@ -527,6 +538,238 @@ row_free(gpointer data)
 
     ai_rendered_text_unref(row->rendered);
     g_free(row);
+}
+
+static gint
+char_columns(gunichar ch)
+{
+	if (g_unichar_iszerowidth(ch))
+		return 0;
+	return g_unichar_iswide(ch) ? 2 : 1;
+}
+
+static gchar *
+row_visible_text(Row *row)
+{
+	if (row->label != NULL)
+		return g_strdup_printf(" %s ", row->label);
+	return g_strndup(ai_rendered_text_get_text(row->rendered) + row->line_start,
+	                 row->line_len);
+}
+
+/* Half-open display-column slice. A start that lands inside a wide
+ * character still takes that character, matching terminal selection. */
+static gchar *
+utf8_slice_columns(
+	const gchar *text,
+	gint         start_col,
+	gint         end_col
+){
+	const gchar *p;
+	g_autoptr(GString) out = g_string_new(NULL);
+	gint col = 0;
+
+	if (text == NULL || end_col <= start_col)
+		return g_strdup("");
+	for (p = text; *p != '\0' && col < end_col; p = g_utf8_next_char(p))
+	{
+		gunichar ch = g_utf8_get_char(p);
+		const gchar *next = g_utf8_next_char(p);
+		gint width = char_columns(ch);
+
+		if (col + width > start_col)
+			g_string_append_len(out, p, next - p);
+		col += width;
+	}
+	return g_string_free(g_steal_pointer(&out), FALSE);
+}
+
+static void
+selection_clear(App *app)
+{
+	app->mouse_selecting = FALSE;
+	app->sel_anchor_row = -1;
+	app->sel_anchor_col = 0;
+	app->sel_row = -1;
+	app->sel_col = 0;
+}
+
+static gboolean
+selection_empty(const App *app)
+{
+	return app->sel_anchor_row < 0 ||
+		(app->sel_anchor_row == app->sel_row &&
+		 app->sel_anchor_col == app->sel_col);
+}
+
+/* Inclusive pointer cells become a half-open [start, end) so a click
+ * with no motion copies nothing, and a drag includes the cell under the
+ * pointer. */
+static void
+selection_bounds(
+	const App *app,
+	gint      *r0,
+	gint      *c0,
+	gint      *r1,
+	gint      *c1
+){
+	gboolean forward;
+
+	forward = app->sel_anchor_row < app->sel_row ||
+		(app->sel_anchor_row == app->sel_row &&
+		 app->sel_anchor_col <= app->sel_col);
+	if (forward)
+	{
+		*r0 = app->sel_anchor_row;
+		*c0 = app->sel_anchor_col;
+		*r1 = app->sel_row;
+		*c1 = app->sel_col + 1;
+	}
+	else
+	{
+		*r0 = app->sel_row;
+		*c0 = app->sel_col;
+		*r1 = app->sel_anchor_row;
+		*c1 = app->sel_anchor_col + 1;
+	}
+}
+
+static gboolean
+cell_in_selection(
+	const App *app,
+	gint       row_index,
+	gint       col
+){
+	gint r0, c0, r1, c1;
+
+	if (selection_empty(app))
+		return FALSE;
+	selection_bounds(app, &r0, &c0, &r1, &c1);
+	if (row_index < r0 || row_index > r1)
+		return FALSE;
+	if (row_index == r0 && row_index == r1)
+		return col >= c0 && col < c1;
+	if (row_index == r0)
+		return col >= c0;
+	if (row_index == r1)
+		return col < c1;
+	return TRUE;
+}
+
+static gchar *
+selection_text(App *app)
+{
+	g_autoptr(GPtrArray) rows = NULL;
+	g_autoptr(GString) out = NULL;
+	gint r0, c0, r1, c1, i, width;
+
+	if (selection_empty(app) || app->transcript_win == NULL)
+		return NULL;
+	width = MAX(1, getmaxx(app->transcript_win) - 3);
+	rows = build_rows(app, width);
+	selection_bounds(app, &r0, &c0, &r1, &c1);
+	r0 = CLAMP(r0, 0, MAX(0, (gint)rows->len - 1));
+	r1 = CLAMP(r1, 0, MAX(0, (gint)rows->len - 1));
+	out = g_string_new(NULL);
+	for (i = r0; i <= r1; i++)
+	{
+		Row *row = g_ptr_array_index(rows, i);
+		g_autofree gchar *visible = row_visible_text(row);
+		gint from = (i == r0) ? c0 : 0;
+		gint to = (i == r1) ? c1 : G_MAXINT;
+		g_autofree gchar *slice = utf8_slice_columns(visible, from, to);
+
+		if (i > r0)
+			g_string_append_c(out, '\n');
+		g_string_append(out, slice);
+	}
+	return g_string_free(g_steal_pointer(&out), FALSE);
+}
+
+/* Missing helpers are silent: OSC 52 still reaches tmux and SSH. */
+static void
+clipboard_write_done(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      data
+){
+	(void)data;
+	g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
+	                                     NULL, NULL, NULL);
+}
+
+static void
+clipboard_write(
+	const gchar *text,
+	gboolean     primary
+){
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *exe = NULL;
+	GSubprocess *process;
+	gboolean wayland = g_getenv("WAYLAND_DISPLAY") != NULL;
+
+	exe = g_find_program_in_path(wayland ? "wl-copy" : "xclip");
+	if (exe == NULL)
+	{
+		g_debug("clipboard helper unavailable");
+		return;
+	}
+	if (wayland)
+		process = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+			G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+			&error, exe, primary ? "--primary" : NULL, NULL);
+	else
+		process = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+			G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+			&error, exe, "-selection", primary ? "primary" : "clipboard", NULL);
+	if (process == NULL)
+	{
+		g_debug("clipboard helper unavailable: %s", error->message);
+		return;
+	}
+	g_subprocess_communicate_utf8_async(process, text, NULL,
+	                                    clipboard_write_done, NULL);
+	g_object_unref(process);
+}
+
+static void
+selection_copy(App *app)
+{
+	g_autofree gchar *text = selection_text(app);
+	g_autofree gchar *b64 = NULL;
+
+	if (text == NULL || text[0] == '\0')
+		return;
+	g_free(app->kill_buffer);
+	app->kill_buffer = g_strdup(text);
+	b64 = g_base64_encode((const guchar *)text, strlen(text));
+	/* ncurses does not track OSC 52; stdout is the tty. */
+	fputs("\033]52;c;", stdout);
+	fputs(b64, stdout);
+	fputs("\a", stdout);
+	fflush(stdout);
+	clipboard_write(text, FALSE);
+	clipboard_write(text, TRUE);
+}
+
+/* 1002 reports motion while a button is held. terminfo XM only raises
+ * 1000 (press/release), which would paint the region on mouse-up. */
+static void
+tui_mouse_enable(void)
+{
+	mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION |
+	          BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+	mouseinterval(0);
+	fputs("\033[?1002h", stdout);
+	fflush(stdout);
+}
+
+static void
+tui_mouse_disable(void)
+{
+	fputs("\033[?1002l", stdout);
+	fflush(stdout);
+	mousemask(0, NULL);
 }
 
 /*
@@ -618,6 +861,10 @@ static void
 on_transcript_changed(App *app)
 {
 	g_clear_pointer(&app->row_cache, g_ptr_array_unref);
+	/* Flattened row indices are now a different document. A live drag
+	 * keeps its cells; the next button-up copies whatever they cover. */
+	if (!app->mouse_selecting)
+		selection_clear(app);
 	app_schedule_redraw(app);
 }
 
@@ -640,7 +887,7 @@ on_transcript_items_changed(AiTranscript *transcript, guint position,
 
 /* Draw one row, switching attributes as the spans say. */
 static void
-draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
+draw_row(App *app, WINDOW *win, gint y, Row *row, gint row_index, gboolean selected)
 {
     const gchar *text = ai_rendered_text_get_text(row->rendered);
     guint offset = row->line_start;
@@ -649,9 +896,28 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
 
 	if (row->label != NULL)
 	{
-		wattrset(win, theme_attr(ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN
-			? PAIR_SELECTION : PAIR_SURFACE) | A_BOLD);
-		mvwprintw(win, y, 2, " %s ", row->label);
+		g_autofree gchar *label = g_strdup_printf(" %s ", row->label);
+		const gchar *p = label;
+		attr_t base = theme_attr(ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN
+			? PAIR_SELECTION : PAIR_SURFACE) | A_BOLD;
+
+		while (*p != '\0')
+		{
+			const gchar *next = g_utf8_next_char(p);
+			gchar buf[8];
+			gint col = x - 2;
+			gsize len = (gsize)(next - p);
+
+			if (len >= sizeof buf)
+				break;
+			memcpy(buf, p, len);
+			buf[len] = '\0';
+			wattrset(win, cell_in_selection(app, row_index, col)
+				? theme_attr(PAIR_SELECTION) | A_BOLD : base);
+			mvwaddstr(win, y, x, buf);
+			x += char_columns(g_utf8_get_char(p));
+			p = next;
+		}
 		return;
 	}
 	if (row->line_len > 0 && (ai_view_block_get_kind(row->block) == AI_VIEW_BLOCK_TURN ||
@@ -675,11 +941,14 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
         AiStyleTag tag = ai_rendered_text_get_tag_at(row->rendered, offset);
         attr_t attr = attr_for_tag(tag);
         gchar buf[8];
+		gint col = x - 2;
 
         if (selected)
         {
             attr = theme_attr(PAIR_SELECTION) | A_BOLD;
         }
+		if (cell_in_selection(app, row_index, col))
+			attr = theme_attr(PAIR_SELECTION) | A_BOLD;
 
         if (len >= sizeof buf)
         {
@@ -696,7 +965,7 @@ draw_row(App *app, WINDOW *win, gint y, Row *row, gboolean selected)
 		else
 			mvwaddstr(win, y, x, buf);
 
-		x += g_unichar_iszerowidth(g_utf8_get_char(p)) ? 0 : (g_unichar_iswide(g_utf8_get_char(p)) ? 2 : 1);
+		x += char_columns(g_utf8_get_char(p));
         offset += (guint)len;
     }
 
@@ -1523,7 +1792,7 @@ app_redraw(App *app)
         }
 
         row = g_ptr_array_index(rows, index);
-        draw_row(app, app->transcript_win, i, row,
+        draw_row(app, app->transcript_win, i, row, index,
                  app->selected >= 0 && (gint)row->block_index == app->selected);
     }
 
@@ -1753,6 +2022,49 @@ input_recall(App *app, gint direction)
     app->cursor = (guint)app->input->len;
 }
 
+/* Keep ^N's highlight on screen after the transcript grew a scroll offset. */
+static void
+scroll_block_into_view(
+	App  *app,
+	guint block_index
+){
+	g_autoptr(GPtrArray) rows = NULL;
+	gint height;
+	gint first = -1;
+	gint last = -1;
+	gint i;
+
+	if (app->transcript_win == NULL || app->tiny)
+		return;
+	height = getmaxy(app->transcript_win);
+	if (height <= 0)
+		return;
+	rows = build_rows(app, MAX(1, getmaxx(app->transcript_win) - 3));
+	for (i = 0; i < (gint)rows->len; i++)
+	{
+		Row *row = g_ptr_array_index(rows, i);
+
+		if (row->block_index == block_index)
+		{
+			if (first < 0)
+				first = i;
+			last = i;
+		}
+	}
+	if (first < 0)
+		return;
+	if (first < app->scroll)
+	{
+		app->scroll = first;
+		app->follow = FALSE;
+	}
+	else if (last >= app->scroll + height)
+	{
+		app->scroll = last - height + 1;
+		app->follow = FALSE;
+	}
+}
+
 /* Move the selection to the next tool block, wrapping at the end. */
 static void
 select_next_tool_block(App *app)
@@ -1778,6 +2090,7 @@ select_next_tool_block(App *app)
         if (kind == AI_VIEW_BLOCK_TOOL || kind == AI_VIEW_BLOCK_THINKING)
         {
             app->selected = (gint)index;
+			scroll_block_into_view(app, index);
             return;
         }
     }
@@ -2078,6 +2391,7 @@ show_help(App *app)
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
 					"  Mouse wheel  scroll transcript three rows\n"
+					"  Drag         highlight transcript text (copied; ^Y yank)\n"
                     "  Enter        send (queues while a turn is running)\n"
                     "  Alt-Enter    a new line (Shift-Enter too, where the\n"
                     "               terminal encodes it distinctly)\n"
@@ -2499,6 +2813,7 @@ handle_builtin(App *app, AiCommandResult *result)
         ai_conversation_clear(app->conversation);
         app->selected = -1;
         app->follow = TRUE;
+		selection_clear(app);
     }
     else if (g_strcmp0(name, "reset") == 0)
     {
@@ -2895,6 +3210,7 @@ edit_in_editor(App *app)
     def_prog_mode();
 	fputs("\033[?2004l", stdout);
     fflush(stdout);
+	tui_mouse_disable();
     endwin();
 
     if (!g_spawn_sync(NULL, (gchar **)argv->pdata, NULL,
@@ -2904,6 +3220,7 @@ edit_in_editor(App *app)
         reset_prog_mode();
 		fputs("\033[?2004h", stdout);
 		fflush(stdout);
+		tui_mouse_enable();
 		on_resize(app);
         clearok(curscr, TRUE);
         app_schedule_redraw(app);
@@ -2916,6 +3233,7 @@ edit_in_editor(App *app)
     reset_prog_mode();
 	fputs("\033[?2004h", stdout);
 	fflush(stdout);
+	tui_mouse_enable();
 	on_resize(app);
 
     /* The editor painted over everything; nothing ncurses believes about
@@ -3206,6 +3524,110 @@ scroll_transcript(
 	app->follow = app->scroll == bottom;
 }
 
+/* Screen coordinates to a flattened transcript cell. The gutter is column 0.
+ * A drag that leaves the window clamps to the nearest edge so the region
+ * can grow to the first or last visible row. */
+static gboolean
+mouse_to_cell(
+	App          *app,
+	const MEVENT *event,
+	gint         *row_index,
+	gint         *col
+){
+	gint y = event->y;
+	gint x = event->x;
+	gint height;
+	gint width;
+
+	if (app->transcript_win == NULL || app->tiny)
+		return FALSE;
+	height = getmaxy(app->transcript_win);
+	width = getmaxx(app->transcript_win);
+	if (height <= 0 || width <= 0)
+		return FALSE;
+	if (wenclose(app->transcript_win, y, x))
+	{
+		if (!wmouse_trafo(app->transcript_win, &y, &x, FALSE))
+			return FALSE;
+	}
+	else if (app->mouse_selecting)
+	{
+		gint beg_y;
+		gint beg_x;
+
+		getbegyx(app->transcript_win, beg_y, beg_x);
+		y = CLAMP(y - beg_y, 0, height - 1);
+		x = CLAMP(x - beg_x, 0, width - 1);
+	}
+	else
+		return FALSE;
+	*row_index = app->scroll + y;
+	if (app->row_count > 0)
+		*row_index = CLAMP(*row_index, 0, app->row_count - 1);
+	*col = MAX(0, x - 2);
+	return TRUE;
+}
+
+static void
+handle_mouse(
+	App          *app,
+	const MEVENT *event
+){
+	gint row = 0;
+	gint col = 0;
+	gboolean over;
+
+	if (app->tiny || app->pasting || app->transcript_win == NULL)
+		return;
+	if ((event->bstate & BUTTON4_PRESSED) &&
+		wenclose(app->transcript_win, event->y, event->x))
+	{
+		scroll_transcript(app, -3);
+		return;
+	}
+	if ((event->bstate & BUTTON5_PRESSED) &&
+		wenclose(app->transcript_win, event->y, event->x))
+	{
+		scroll_transcript(app, 3);
+		return;
+	}
+	over = mouse_to_cell(app, event, &row, &col);
+	/* Some encodings set PRESSED on every drag packet. Start a region
+	 * only on a real button-down, never on a motion report. */
+	if ((event->bstate & BUTTON1_PRESSED) &&
+		!(event->bstate & REPORT_MOUSE_POSITION))
+	{
+		if (!over)
+		{
+			selection_clear(app);
+			return;
+		}
+		app->mouse_selecting = TRUE;
+		app->sel_anchor_row = row;
+		app->sel_anchor_col = col;
+		app->sel_row = row;
+		app->sel_col = col;
+		return;
+	}
+	if (!app->mouse_selecting && selection_empty(app))
+		return;
+	if (!over)
+		return;
+	if (event->bstate & (REPORT_MOUSE_POSITION | BUTTON1_RELEASED))
+	{
+		app->sel_row = row;
+		app->sel_col = col;
+	}
+	if (event->bstate & BUTTON1_RELEASED)
+	{
+		app->mouse_selecting = FALSE;
+		if (selection_empty(app))
+			selection_clear(app);
+		else
+			selection_copy(app);
+	}
+}
+
 static gboolean
 drain_keys(App *app)
 {
@@ -3220,17 +3642,13 @@ drain_keys(App *app)
 		/* Consume mouse packets before approval/search/paste handling so
 		 * they never become draft text or approval answers. ncurses decodes
 		 * the negotiated mouse protocol, including tmux's forwarded input.
-		 * Only the transcript owns wheel events; other panels keep focus. */
+		 * The transcript owns wheel and drag-select; other panels keep focus. */
 		if (kind == KEY_CODE_YES && ch == KEY_MOUSE)
 		{
 			MEVENT event;
 
-			if (getmouse(&event) == OK && !app->tiny && !app->pasting &&
-				wenclose(app->transcript_win, event.y, event.x))
-			{
-				if (event.bstate & BUTTON4_PRESSED) scroll_transcript(app, -3);
-				else if (event.bstate & BUTTON5_PRESSED) scroll_transcript(app, 3);
-			}
+			if (getmouse(&event) == OK)
+				handle_mouse(app, &event);
 			app_schedule_redraw(app);
 			continue;
 		}
@@ -3660,6 +4078,7 @@ on_resize(gpointer user_data)
 	if (ioctl(STDIN_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_row > 0 && size.ws_col > 0)
 		resizeterm((gint)size.ws_row, (gint)size.ws_col);
 	clearok(curscr, TRUE);
+	selection_clear(app);
 
     app_layout(app);
 
@@ -4539,6 +4958,7 @@ app_reset(App *app)
 	app->scroll = 0;
 	app->row_count = 0;
 	app->selected = -1;
+	selection_clear(app);
 	app->follow = TRUE;
 	app->awaiting_since = 0;
 	app->feedback_until = 0;
@@ -5016,6 +5436,7 @@ main(int argc, char *argv[])
     app.history = g_ptr_array_new_with_free_func(g_free);
     app.history_pos = -1;
     app.selected = -1;
+	selection_clear(&app);
     app.follow = TRUE;
     app.approve_all = opt_yes;
 
@@ -5264,9 +5685,10 @@ main(int argc, char *argv[])
     nonl();
     curs_set(1);
 	/* Advertise application mouse handling to terminals and tmux. Let
-	 * ncurses own protocol selection and restoration across endwin(). */
-	mousemask(BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
-	mouseinterval(0);
+	 * ncurses own protocol selection and restoration across endwin().
+	 * Button 1 is claimed too: once 1000 is on, the terminal will not
+	 * highlight a drag, so the transcript paints the region itself. */
+	tui_mouse_enable();
 
     {
         gint height;
@@ -5390,6 +5812,7 @@ main(int argc, char *argv[])
 
 	fputs("\033[?2004l", stdout);
 	fflush(stdout);
+	tui_mouse_disable();
     endwin();
 
     if (app.settle_id != 0)

@@ -312,6 +312,88 @@ tmux_send(const gchar *session, const gchar *keys)
 	g_autofree gchar *out = tmux_run(args);
 }
 
+/* Mouse packets include spaces and CSI; named-key parsing would eat them. */
+static void
+tmux_send_literal(const gchar *session, const gchar *keys)
+{
+	const gchar *args[] = { "send-keys", "-l", "-t", session, keys, NULL };
+	g_autofree gchar *out = tmux_run(args);
+}
+
+static guint
+count_needle(const gchar *haystack, const gchar *needle)
+{
+	guint n = 0;
+	const gchar *p = haystack;
+
+	if (haystack == NULL || needle == NULL || needle[0] == '\0')
+		return 0;
+	while ((p = strstr(p, needle)) != NULL)
+	{
+		n++;
+		p += strlen(needle);
+	}
+	return n;
+}
+
+/* 1-based pane cell of @needle, matching SGR mouse coordinates. */
+static gboolean
+pane_locate(const gchar *pane, const gchar *needle, gint *row, gint *col)
+{
+	const gchar *line = pane;
+	gint r = 1;
+
+	if (pane == NULL || needle == NULL)
+		return FALSE;
+	while (*line != '\0')
+	{
+		const gchar *nl = strchr(line, '\n');
+		gsize n = nl != NULL ? (gsize)(nl - line) : strlen(line);
+		const gchar *found = g_strstr_len(line, (gssize)n, needle);
+
+		if (found != NULL)
+		{
+			*row = r;
+			*col = (gint)g_utf8_strlen(line, found - line) + 1;
+			return TRUE;
+		}
+		if (nl == NULL)
+			break;
+		line = nl + 1;
+		r++;
+	}
+	return FALSE;
+}
+
+static gchar *
+mouse_packet(gboolean sgr, const gchar *kind, gint col, gint row)
+{
+	gint button;
+
+	if (sgr)
+	{
+		if (g_str_equal(kind, "press"))
+			return g_strdup_printf("\033[<0;%d;%dM", col, row);
+		if (g_str_equal(kind, "drag"))
+			return g_strdup_printf("\033[<32;%d;%dM", col, row);
+		return g_strdup_printf("\033[<0;%d;%dm", col, row);
+	}
+	button = g_str_equal(kind, "release") ? 3 :
+		(g_str_equal(kind, "drag") ? 32 : 0);
+	{
+		gchar *out = g_malloc(7);
+
+		out[0] = '\033';
+		out[1] = '[';
+		out[2] = 'M';
+		out[3] = (gchar)(32 + button);
+		out[4] = (gchar)(32 + col);
+		out[5] = (gchar)(32 + row);
+		out[6] = '\0';
+		return out;
+	}
+}
+
 static gchar *
 tmux_capture(const gchar *session)
 {
@@ -2091,6 +2173,77 @@ test_transcript_scroll(void)
 	stub_free(stub);
 }
 
+/* Mouse reporting for the wheel steals the terminal's drag highlight.
+ * A press-drag-release over a unique token must copy it into the yank
+ * buffer; a click with no motion must not. Protocol bytes stay out of
+ * the draft. */
+static void
+test_transcript_drag_select(void)
+{
+	const gchar *ndjson =
+		"{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"SELHIGHLIGHT unique-token\"}}}\n"
+		"{\"type\":\"result\",\"result\":\"SELHIGHLIGHT unique-token\",\"session_id\":\"sel\"}\n";
+	const gchar *token = "SELHIGHLIGHT";
+	const gchar *terms[] = { "TERM=xterm-256color", "TERM=tmux-256color" };
+	Stub *stub;
+	guint term;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(ndjson);
+	for (term = 0; term < G_N_ELEMENTS(terms); term++)
+	{
+		const gchar *flags[] = { "display-message", "-p", "-t", TUI_SESSION,
+			"#{mouse_sgr_flag}", NULL };
+		g_autofree gchar *sgr = NULL;
+		g_autofree gchar *pane = NULL;
+		g_autofree gchar *press = NULL;
+		g_autofree gchar *drag = NULL;
+		g_autofree gchar *release = NULL;
+		g_autofree gchar *click = NULL;
+		g_autofree gchar *click_release = NULL;
+		gint row = 0, col = 0;
+		gboolean use_sgr;
+
+		tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, terms[term], "--no-animation");
+		sgr = tmux_run(flags);
+		use_sgr = g_strcmp0(sgr, "1\n") == 0;
+		tmux_send(TUI_SESSION, "select probe");
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, token));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "Turn complete"));
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_cmpuint(count_needle(pane, token), ==, 1);
+		g_assert_true(pane_locate(pane, token, &row, &col));
+		/* A click with no motion is not a copy. */
+		click = mouse_packet(use_sgr, "press", col, row);
+		click_release = mouse_packet(use_sgr, "release", col, row);
+		tmux_send_literal(TUI_SESSION, click);
+		tmux_send_literal(TUI_SESSION, click_release);
+		tmux_send(TUI_SESSION, "C-y");
+		g_usleep(150 * 1000);
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_cmpuint(count_needle(pane, token), ==, 1);
+		g_assert_null(strstr(pane, "[<"));
+		/* Drag across the token, then yank it into the empty composer. */
+		press = mouse_packet(use_sgr, "press", col, row);
+		drag = mouse_packet(use_sgr, "drag", col + (gint)strlen(token) - 1, row);
+		release = mouse_packet(use_sgr, "release", col + (gint)strlen(token) - 1, row);
+		tmux_send_literal(TUI_SESSION, press);
+		tmux_send_literal(TUI_SESSION, drag);
+		tmux_send_literal(TUI_SESSION, release);
+		tmux_send(TUI_SESSION, "C-y");
+		g_assert_true(tmux_wait_for(TUI_SESSION, token));
+		g_clear_pointer(&pane, g_free);
+		pane = tmux_capture(TUI_SESSION);
+		g_assert_cmpuint(count_needle(pane, token), >=, 2);
+		g_assert_null(strstr(pane, "[<"));
+		tmux_kill(TUI_SESSION);
+	}
+	stub_free(stub);
+}
+
 static void
 test_enter_sends_the_prompt(void)
 {
@@ -3501,6 +3654,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/enter-sends",
 	                test_enter_sends_the_prompt);
 	g_test_add_func("/ai-glib/ai-tui/transcript-scroll", test_transcript_scroll);
+	g_test_add_func("/ai-glib/ai-tui/transcript-drag-select", test_transcript_drag_select);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",
