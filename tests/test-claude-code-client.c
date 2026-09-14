@@ -1344,6 +1344,35 @@ test_result_without_cost_is_unknown(void)
 	g_object_unref(client);
 }
 
+/*
+ * With --json-schema the CLI puts the constrained JSON in
+ * "structured_output" and leaves "result" empty. A caller who asked
+ * for a schema reads the response text and must get that JSON back,
+ * not nothing.
+ */
+static void
+test_result_structured_output_is_the_text(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiResponse *response = ai_response_new("id", "sonnet");
+	const gchar *line =
+		"{\"type\":\"result\",\"result\":\"\","
+		"\"structured_output\":{\"hawkseer\":1,\"findings\":[{\"id\":1}]},"
+		"\"session_id\":\"s1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}";
+	const gchar *text;
+
+	parse_one_line(client, line, response);
+
+	text = ai_response_get_text(response);
+	g_assert_nonnull(text);
+	g_assert_true(g_str_has_prefix(text, "{"));
+	g_assert_nonnull(strstr(text, "\"hawkseer\""));
+	g_assert_nonnull(strstr(text, "\"findings\""));
+
+	g_object_unref(response);
+	g_object_unref(client);
+}
+
 
 int
 main(
@@ -1433,6 +1462,8 @@ main(
 	                test_result_cost_is_the_cli_figure);
 	g_test_add_func("/ai-glib/claude-code-client/result-without-cost-is-unknown",
 	                test_result_without_cost_is_unknown);
+	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-is-the-text",
+	                test_result_structured_output_is_the_text);
 
 	return g_test_run();
 }

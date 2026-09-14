@@ -1189,9 +1189,21 @@ ai_claude_code_client_parse_json_output(
         ai_cli_client_set_session_id(client, session_id);
     }
 
-    /* Parse result text */
+    /*
+     * Parse result text. With --json-schema the CLI puts the constrained
+     * JSON in "structured_output" and leaves "result" empty; that JSON is
+     * the text the caller asked for, so it wins when present.
+     */
     result_text = ai_json_get_string(obj, "result", "");
-    if (result_text[0] != '\0')
+    if (json_object_has_member(obj, "structured_output") &&
+        JSON_NODE_HOLDS_OBJECT(json_object_get_member(obj, "structured_output")))
+    {
+        g_autofree gchar *structured = json_to_string(
+            json_object_get_member(obj, "structured_output"), FALSE);
+        g_autoptr(AiTextContent) content = ai_text_content_new(structured);
+        ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
+    }
+    else if (result_text[0] != '\0')
     {
         g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
         ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
@@ -1748,8 +1760,23 @@ ai_claude_code_client_parse_stream_events(
             ai_cli_client_set_session_id(client, session_id);
         }
 
+        /*
+         * With --json-schema the CLI puts the constrained JSON in
+         * "structured_output" and leaves "result" empty; that JSON is the
+         * text the caller asked for and replaces whatever prose arrived
+         * in deltas.
+         */
+        if (json_object_has_member(obj, "structured_output") &&
+            JSON_NODE_HOLDS_OBJECT(json_object_get_member(obj, "structured_output")))
+        {
+            g_autofree gchar *structured = json_to_string(
+                json_object_get_member(obj, "structured_output"), FALSE);
+            g_autoptr(AiTextContent) content = ai_text_content_new(structured);
+            ai_response_add_content_block(response,
+                (AiContentBlock *)g_steal_pointer(&content));
+        }
         /* Add final text content to response if not already added via deltas */
-        if (result_text != NULL && result_text[0] != '\0' &&
+        else if (result_text != NULL && result_text[0] != '\0' &&
             ai_response_get_content_blocks(response) == NULL)
         {
             g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
