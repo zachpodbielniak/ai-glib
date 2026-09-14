@@ -83,6 +83,8 @@ static const gchar *malformed_documents[] = {
 		"\"total_cost_usd\":\"free\"}",
 	"{\"type\":\"result\",\"total_cost_usd\":{}}",
 	"{\"type\":\"result\",\"subtype\":9,\"is_error\":\"yes\"}",
+	"{\"type\":\"result\",\"structured_output\":null}",
+	"{\"type\":\"result\",\"structured_output\":7}",
 
 	/* claude-code: assistant and user lines carry an Anthropic message. */
 	"{\"type\":\"assistant\",\"message\":5}",

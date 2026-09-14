@@ -404,7 +404,7 @@ without a flag per knob.
 | =agent=                  | =--agent=                 | Agent for this session                                    |
 | =agents-json=            | =--agents=                | JSON object defining custom subagents                     |
 | =append-system-prompt=   | =--append-system-prompt-file= | *Adds to* the default prompt, where =system-prompt= replaces it; sent every turn, not only on session creation. Spilled to a file for the reason above |
-| =json-schema=            | =--json-schema=           | Constrains the reply to a JSON Schema                     |
+| =json-schema=            | =--json-schema=           | Constrains the reply to a JSON Schema. The CLI stores the value in =structured_output= and leaves =result= empty; both parsers serialise that member into the response text |
 | =autocompact=            | =--autocompact=           | =auto=, or 100k–1M tokens. Governs when the compaction that #AiClaudeCodeClient::context-compacted reports happens |
 
 *** Models and budget
