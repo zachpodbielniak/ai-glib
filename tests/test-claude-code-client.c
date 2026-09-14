@@ -1344,6 +1344,114 @@ test_result_without_cost_is_unknown(void)
 	g_object_unref(client);
 }
 
+/*
+ * Drive both parsers against one result envelope and assert the
+ * response text contains @needle. The json-schema path is the
+ * whole-stdout parser as often as the stream one.
+ */
+static void
+assert_structured_output_text(const gchar *line, const gchar *needle)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	AiResponse *stream_response = ai_response_new("id", "sonnet");
+	AiResponse *json_response;
+	GError *error = NULL;
+	g_autofree gchar *stream_text = NULL;
+	g_autofree gchar *json_text = NULL;
+
+	parse_one_line(client, line, stream_response);
+	stream_text = ai_response_get_text(stream_response);
+	g_assert_nonnull(stream_text);
+	g_assert_nonnull(strstr(stream_text, needle));
+
+	g_assert_nonnull(klass->parse_json_output);
+	json_response = klass->parse_json_output(AI_CLI_CLIENT(client),
+	                                         line, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(json_response);
+	json_text = ai_response_get_text(json_response);
+	g_assert_nonnull(json_text);
+	g_assert_nonnull(strstr(json_text, needle));
+
+	g_object_unref(json_response);
+	g_object_unref(stream_response);
+	g_object_unref(client);
+}
+
+/*
+ * With --json-schema the CLI puts the constrained JSON in
+ * "structured_output" and leaves "result" empty. A caller who asked
+ * for a schema reads the response text and must get that JSON back,
+ * not nothing.
+ */
+static void
+test_result_structured_output_is_the_text(void)
+{
+	assert_structured_output_text(
+		"{\"type\":\"result\",\"result\":\"\","
+		"\"structured_output\":{\"hawkseer\":1,\"findings\":[{\"id\":1}]},"
+		"\"session_id\":\"s1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}",
+		"\"hawkseer\"");
+}
+
+/*
+ * A schema may root an array. Restricting the read to JSON objects
+ * would drop that value the same way an empty result does.
+ */
+static void
+test_result_structured_output_array_is_the_text(void)
+{
+	assert_structured_output_text(
+		"{\"type\":\"result\",\"result\":\"\","
+		"\"structured_output\":[\"alpha\",\"beta\"]}",
+		"\"alpha\"");
+}
+
+/*
+ * structured_output is the constrained answer even when result also
+ * carries prose. Taking result instead would ignore the schema.
+ */
+static void
+test_result_structured_output_wins_over_result(void)
+{
+	assert_structured_output_text(
+		"{\"type\":\"result\",\"result\":\"prose\","
+		"\"structured_output\":{\"hawkseer\":1}}",
+		"\"hawkseer\"");
+}
+
+/*
+ * A wrong-typed structured_output must not abort. JSON null is
+ * absent; a number is still a node and becomes the text.
+ */
+static void
+test_result_structured_output_wrong_type_does_not_abort(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiResponse *response = ai_response_new("id", "sonnet");
+	g_autofree gchar *text = NULL;
+
+	parse_one_line(client,
+		"{\"type\":\"result\",\"result\":\"\","
+		"\"structured_output\":null}",
+		response);
+	g_assert_null(ai_response_get_text(response));
+
+	g_object_unref(response);
+	response = ai_response_new("id", "sonnet");
+	parse_one_line(client,
+		"{\"type\":\"result\",\"result\":\"\","
+		"\"structured_output\":7}",
+		response);
+	text = ai_response_get_text(response);
+	g_assert_nonnull(text);
+	g_assert_nonnull(strstr(text, "7"));
+
+	g_object_unref(response);
+	g_object_unref(client);
+}
+
 
 int
 main(
@@ -1433,6 +1541,14 @@ main(
 	                test_result_cost_is_the_cli_figure);
 	g_test_add_func("/ai-glib/claude-code-client/result-without-cost-is-unknown",
 	                test_result_without_cost_is_unknown);
+	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-is-the-text",
+	                test_result_structured_output_is_the_text);
+	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-array-is-the-text",
+	                test_result_structured_output_array_is_the_text);
+	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-wins-over-result",
+	                test_result_structured_output_wins_over_result);
+	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-wrong-type-does-not-abort",
+	                test_result_structured_output_wrong_type_does_not_abort);
 
 	return g_test_run();
 }

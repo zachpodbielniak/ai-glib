@@ -1088,16 +1088,52 @@ check_and_emit_compaction(
 }
 
 /*
+ * With --json-schema the CLI puts the constrained JSON in
+ * "structured_output" and leaves "result" empty. That JSON is the
+ * text the caller asked for. A schema may root an object, an array,
+ * or a scalar, so this takes whatever node is present rather than
+ * requiring an object.
+ *
+ * Returns TRUE when a text block was added.
+ */
+static gboolean
+cc_add_structured_output(
+    AiResponse *response,
+    JsonObject *obj
+){
+    JsonNode *node;
+    g_autofree gchar *structured = NULL;
+    g_autoptr(AiTextContent) content = NULL;
+
+    node = ai_json_get_node(obj, "structured_output");
+    if (node == NULL)
+        return FALSE;
+
+    structured = json_to_string(node, FALSE);
+    if (structured == NULL || structured[0] == '\0')
+        return FALSE;
+
+    content = ai_text_content_new(structured);
+    ai_response_add_content_block(response,
+        (AiContentBlock *)g_steal_pointer(&content));
+    return TRUE;
+}
+
+/*
  * Parse JSON output from the claude CLI.
  *
  * Expected format:
  * {
  *     "type": "result",
  *     "result": "response text",
+ *     "structured_output": { ... },
  *     "session_id": "uuid",
  *     "usage": {"input_tokens": N, "output_tokens": N},
  *     "total_cost_usd": 0.001
  * }
+ *
+ * structured_output is present when the caller set --json-schema;
+ * it wins over result.
  */
 static AiResponse *
 ai_claude_code_client_parse_json_output(
@@ -1189,24 +1225,30 @@ ai_claude_code_client_parse_json_output(
         ai_cli_client_set_session_id(client, session_id);
     }
 
-    /* Parse result text */
+    /*
+     * Parse result text. structured_output wins when present; see
+     * cc_add_structured_output().
+     */
     result_text = ai_json_get_string(obj, "result", "");
-    if (result_text[0] != '\0')
+    if (!cc_add_structured_output(response, obj))
     {
-        g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
-        ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
-    }
-    else
-    {
-        /*
-         * Empty result — Claude finished with tool calls but produced no
-         * text summary. Store a flag so the completion callback can attempt
-         * a re-prompt for synthesized text. If that also fails we return
-         * this generic message as a last resort.
-         */
-        g_free(self->last_tool_summary);
-        self->last_tool_summary = g_strdup(
-            "(completed tool operations — no text summary was provided)");
+        if (result_text[0] != '\0')
+        {
+            g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
+            ai_response_add_content_block(response, (AiContentBlock *)g_steal_pointer(&content));
+        }
+        else
+        {
+            /*
+             * Empty result — Claude finished with tool calls but produced no
+             * text summary. Store a flag so the completion callback can attempt
+             * a re-prompt for synthesized text. If that also fails we return
+             * this generic message as a last resort.
+             */
+            g_free(self->last_tool_summary);
+            self->last_tool_summary = g_strdup(
+                "(completed tool operations — no text summary was provided)");
+        }
     }
 
     /* Parse usage and check for context compaction */
@@ -1748,8 +1790,13 @@ ai_claude_code_client_parse_stream_events(
             ai_cli_client_set_session_id(client, session_id);
         }
 
-        /* Add final text content to response if not already added via deltas */
-        if (result_text != NULL && result_text[0] != '\0' &&
+        /*
+         * structured_output wins when present. Adding a content block
+         * here also stops stream_run_complete() from flushing the
+         * accumulated deltas as a second copy of the same JSON.
+         */
+        if (!cc_add_structured_output(response, obj) &&
+            result_text != NULL && result_text[0] != '\0' &&
             ai_response_get_content_blocks(response) == NULL)
         {
             g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
@@ -2088,8 +2135,9 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
      * AiClaudeCodeClient:json-schema:
      *
      * A JSON Schema the reply must validate against, passed as
-     * `--json-schema`. The schema constrains the model's output; the
-     * result still arrives through the usual response text.
+     * `--json-schema`. The CLI stores the constrained value in
+     * `structured_output` and leaves `result` empty; both parsers
+     * serialise that member into the response text.
      */
     properties[PROP_JSON_SCHEMA] =
         g_param_spec_string("json-schema", "JSON Schema",
