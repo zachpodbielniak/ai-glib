@@ -5,6 +5,41 @@
 #include <gst/app/gstappsink.h>
 #include <gio/gio.h>
 
+/* Observe the real transport appsrc without a test-only library API. */
+typedef struct {
+	GstClockTime next;
+	gboolean started;
+} Timeline;
+static gint timestamp_gaps;
+static gint timestamp_buffers;
+static GstPadProbeReturn
+check_timeline(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+{
+	Timeline *timeline = data;
+	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+	if (!GST_CLOCK_TIME_IS_VALID(GST_BUFFER_PTS(buffer)) ||
+		(timeline->started && GST_BUFFER_PTS(buffer) != timeline->next))
+		g_atomic_int_inc(&timestamp_gaps);
+	timeline->next = GST_BUFFER_PTS(buffer) + GST_BUFFER_DURATION(buffer);
+	timeline->started = TRUE;
+	g_atomic_int_inc(&timestamp_buffers);
+	return GST_PAD_PROBE_OK;
+}
+static gboolean
+element_added(GSignalInvocationHint *hint, guint n, const GValue *values, gpointer data)
+{
+	GstElement *element = g_value_get_object(&values[1]);
+	GstElementFactory *factory = gst_element_get_factory(element);
+	if (factory != NULL &&
+		g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "appsrc") ==
+			0) {
+		GstPad *pad = gst_element_get_static_pad(element, "src");
+		gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, check_timeline,
+						  g_new0(Timeline, 1), g_free);
+		gst_object_unref(pad);
+	}
+	return TRUE;
+}
 typedef struct {
 	GMainLoop *loop;
 	gboolean ok;
@@ -104,15 +139,19 @@ synthesis_request(SoupServer *server, SoupServerMessage *message, const gchar *p
 				  GHashTable *query, gpointer data)
 {
 	g_autoptr(GByteArray) body = g_byte_array_new();
-	const guint8 size[] = {0, 0, 0x7d, 0};
 	const guint8 end[] = {0, 0, 0, 0};
-	guint i;
-	g_byte_array_append(body, (const guint8 *)"SR=16000\n", 9);
-	g_byte_array_append(body, size, sizeof(size));
-	for (i = 0; i < 16000; i++) {
-		gint16 value = i % 40 < 20 ? 8000 : -8000;
-		guint8 sample[] = {(guint16)value & 255, (guint16)value >> 8};
-		g_byte_array_append(body, sample, 2);
+	guint i, offset;
+	g_byte_array_append(body, (const guint8 *)"SR=24000\n", 9);
+	/* Non-10ms synthesis frames exercise partial transport buffers. */
+	for (offset = 0; offset < 24000; offset += 333) {
+		guint count = MIN(333, 24000 - offset);
+		guint32 size = GUINT32_TO_BE(count * 2);
+		g_byte_array_append(body, (const guint8 *)&size, 4);
+		for (i = offset; i < offset + count; i++) {
+			gint16 value = i % 60 < 30 ? 8000 : -8000;
+			guint8 sample[] = {(guint16)value & 255, (guint16)value >> 8};
+			g_byte_array_append(body, sample, 2);
+		}
 	}
 	g_byte_array_append(body, end, sizeof(end));
 	soup_server_message_set_status(message, 200, NULL);
@@ -127,16 +166,19 @@ observer_sample(GstAppSink *sink, gpointer data)
 	GstMapInfo map;
 	GstBuffer *buffer;
 	guint i;
+	guint64 energy = 0;
 	if (sample == NULL)
 		return GST_FLOW_EOS;
 	buffer = gst_sample_get_buffer(sample);
 	if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-		for (i = 0; i + 1 < map.size; i += 2)
-			if (ABS((gint16)((guint16)map.data[i] | ((guint16)map.data[i + 1] << 8))) >
-				1000) {
-				g_atomic_int_set((gint *)data, 1);
-				break;
-			}
+		for (i = 0; i + 1 < map.size; i += 2) {
+			gint32 value =
+				(gint16)((guint16)map.data[i] | ((guint16)map.data[i + 1] << 8));
+			energy += (gint64)value * value;
+		}
+		/* At least half a second of packets with RMS above 1000, not decoder noise. */
+		if (map.size > 0 && energy / (map.size / 2) > 1000000)
+			g_atomic_int_add((gint *)data, map.size / 2);
 		gst_buffer_unmap(buffer, &map);
 	}
 	gst_sample_unref(sample);
@@ -180,6 +222,8 @@ test_livekit(void)
 	g_autoptr(GSubprocessLauncher) launcher = NULL;
 	Result result = {0}, inbound = {0};
 	guint timeout;
+	guint added_signal;
+	gulong hook;
 	GstElement *observer, *observer_source;
 	g_autoptr(GObject) signaller = NULL;
 	g_autoptr(SoupServer) speech_server = NULL;
@@ -199,6 +243,8 @@ test_livekit(void)
 		g_test_skip("Set AI_VOICE_LIVEKIT_TEST=1 for the local media integration test");
 		return;
 	}
+	added_signal = g_signal_lookup("element-added", GST_TYPE_BIN);
+	hook = g_signal_add_emission_hook(added_signal, 0, element_added, NULL, NULL);
 	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_NONE);
 	g_subprocess_launcher_set_stdout_file_path(launcher,
 											   "/tmp/ai-voice-livekit-test-server.log");
@@ -262,13 +308,20 @@ test_livekit(void)
 		AI_AUDIO_TRANSPORT(transport), AI_SPEECH_RECOGNIZER(stt),
 		AI_SPEECH_SYNTHESIZER(synth), AI_VOICE_ACTIVITY(vad), conversation);
 	ai_voice_session_say(session, "A generic test greeting.");
+	/* Deliberately delay dispatch; media timestamps must remain contiguous. */
+	g_usleep(60000);
 	limit = g_get_monotonic_time() + 5000000;
-	while (!g_atomic_int_get(&heard) && g_get_monotonic_time() < limit) {
+	while (g_atomic_int_get(&heard) < 8000 && g_get_monotonic_time() < limit) {
 		while (g_main_context_iteration(NULL, FALSE))
 			;
 		g_usleep(1000);
 	}
-	g_assert_cmpint(g_atomic_int_get(&heard), ==, 1);
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 8000);
+	g_assert_cmpint(g_atomic_int_get(&timestamp_buffers), >, 50);
+	g_assert_cmpint(g_atomic_int_get(&timestamp_gaps), ==, 0);
+	g_test_message("Greeting: %d samples in packets with RMS > 1000; %d appsrc buffers, "
+				   "zero timestamp gaps",
+				   g_atomic_int_get(&heard), g_atomic_int_get(&timestamp_buffers));
 	ai_voice_session_stop(session);
 	g_assert_cmpuint(inbound.participants, ==, 0);
 	g_assert_false(inbound.audio);
@@ -312,6 +365,8 @@ test_livekit(void)
 	gst_element_set_state(observer, GST_STATE_NULL);
 	gst_object_unref(observer);
 	soup_server_disconnect(speech_server);
+	g_signal_remove_emission_hook(added_signal, hook);
+	g_assert_cmpint(g_atomic_int_get(&timestamp_gaps), ==, 0);
 	g_subprocess_send_signal(server, 15);
 	g_subprocess_wait(server, NULL, NULL);
 }

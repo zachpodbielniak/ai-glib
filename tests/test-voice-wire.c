@@ -14,6 +14,7 @@ typedef struct {
 	gboolean done;
 	GBytes *body;
 	GError *error;
+	const gchar *response;
 } Wire;
 
 static gboolean
@@ -32,13 +33,16 @@ server_message(SoupWebsocketConnection *ws, gint type, GBytes *bytes, gpointer d
 	if (type == SOUP_WEBSOCKET_DATA_BINARY) {
 		g_assert_cmpuint(len, ==, 320);
 		w->binary_frames++;
-		soup_websocket_connection_send_text(ws,
-											"{\"type\":\"partial\",\"text\":\"hello\"}");
+		soup_websocket_connection_send_text(
+			ws, "{\"type\":\"partial\",\"text\":\"hello\",\"stable_ms\":120}");
 	} else {
 		g_assert_cmpmem(s, len, "EOS", 3);
 		g_assert_cmpuint(w->binary_frames, ==, 1);
 		soup_websocket_connection_send_text(
-			ws, "{\"type\":\"final\",\"text\":\"hello world\"}");
+			ws, w->response != NULL
+					? w->response
+					: "{\"type\":\"final\",\"text\":\"hello "
+					  "world\",\"start\":0.25,\"end\":1.5,\"transcribe_ms\":12}");
 	}
 }
 
@@ -48,7 +52,7 @@ connected(SoupServer *server, SoupServerMessage *msg, const gchar *path,
 {
 	((Wire *)data)->ws = g_object_ref(ws);
 	g_signal_connect(ws, "message", G_CALLBACK(server_message), data);
-	soup_websocket_connection_send_text(ws, "{\"type\":\"ready\"}");
+	soup_websocket_connection_send_text(ws, "{\"type\":\"ready\",\"sample_rate\":16000}");
 }
 
 static void
@@ -57,7 +61,8 @@ transcript(AiSpeechRecognizer *stt, const gchar *id, const gchar *text, gboolean
 {
 	Wire *w = data;
 	g_assert_cmpstr(id, ==, "caller");
-	g_assert_cmpstr(text, ==, final ? "hello world" : "hello");
+	g_assert_cmpstr(text, ==,
+					final ? (w->response != NULL ? "" : "hello world") : "hello");
 	if (final) {
 		w->finals++;
 		g_main_loop_quit(w->loop);
@@ -133,7 +138,8 @@ test_stt(void)
 	stt = ai_websocket_recognizer_new(url);
 	g_signal_connect(stt, "transcript", G_CALLBACK(transcript), &w);
 	pcm = g_bytes_new(silence, sizeof(silence));
-	g_assert_true(ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", &w.error));
+	g_assert_true(
+		ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", &w.error));
 	g_assert_true(
 		ai_speech_recognizer_feed(AI_SPEECH_RECOGNIZER(stt), "caller", pcm, &w.error));
 	ai_speech_recognizer_end(AI_SPEECH_RECOGNIZER(stt), "caller");
@@ -161,6 +167,46 @@ stt_failed(AiSpeechRecognizer *stt, const gchar *speaker, GError *error, gpointe
 	w->error = g_error_copy(error);
 	g_main_loop_quit(w->loop);
 }
+static void
+test_stt_response(gconstpointer data)
+{
+	Wire w = {0};
+	g_autoptr(AiWebsocketRecognizer) stt = NULL;
+	g_autofree gchar *url = NULL;
+	g_autoptr(GBytes) pcm = NULL;
+	guint8 silence[320] = {0};
+	guint timeout;
+	setup(&w);
+	w.response = data;
+	soup_server_add_websocket_handler(w.server, "/stt/stream", NULL, NULL, connected, &w,
+									  NULL);
+	url = g_strconcat("ws", w.url + 4, "stt/stream", NULL);
+	stt = ai_websocket_recognizer_new(url);
+	g_signal_connect(stt, "error", G_CALLBACK(stt_failed), &w);
+	g_signal_connect(stt, "transcript", G_CALLBACK(transcript), &w);
+	g_assert_true(ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", NULL));
+	pcm = g_bytes_new(silence, sizeof(silence));
+	g_assert_true(
+		ai_speech_recognizer_feed(AI_SPEECH_RECOGNIZER(stt), "caller", pcm, NULL));
+	ai_speech_recognizer_end(AI_SPEECH_RECOGNIZER(stt), "caller");
+	timeout = g_timeout_add_seconds(3, expired, NULL);
+	g_main_loop_run(w.loop);
+	g_source_remove(timeout);
+	if (strstr(w.response, "detail") != NULL) {
+		g_assert_error(w.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+		g_assert_cmpstr(w.error->message, ==, "Recognition unavailable");
+		g_assert_cmpuint(w.finals, ==, 0);
+	} else {
+		g_assert_no_error(w.error);
+		g_assert_cmpuint(w.finals, ==, 1);
+	}
+	/* Completion, including silence or failure, releases just this stream. */
+	g_assert_true(ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", NULL));
+	ai_speech_recognizer_cancel(AI_SPEECH_RECOGNIZER(stt), "caller");
+	g_clear_object(&stt);
+	teardown(&w);
+}
+
 static void
 test_stt_timeout(void)
 {
@@ -293,6 +339,13 @@ main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/voice/wire/stt-ready-pcm-eos", test_stt);
+	g_test_add_data_func("/voice/wire/stt-server-error",
+						 "{\"type\":\"error\",\"detail\":\"Recognition unavailable\"}",
+						 test_stt_response);
+	g_test_add_data_func("/voice/wire/stt-empty-final",
+						 "{\"type\":\"final\",\"text\":\"\",\"start\":0.0,\"end\":0.25,"
+						 "\"transcribe_ms\":1}",
+						 test_stt_response);
 	g_test_add_func("/voice/wire/stt-ready-timeout", test_stt_timeout);
 	g_test_add_func("/voice/wire/tts-framing", test_tts);
 	g_test_add_data_func("/voice/wire/tts-invalid-rate", "SR=nope\n", test_tts_bad);

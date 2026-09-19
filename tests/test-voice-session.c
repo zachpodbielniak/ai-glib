@@ -284,10 +284,36 @@ say_non_silent(Fixture *f, gconstpointer data)
 	wait_replies(f, 1);
 	g_assert_cmpuint(f->transport->non_silent_samples, ==, 1600);
 }
+static void
+recognition_error_spoken(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GError) error =
+		g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, "Recognition unavailable");
+	g_object_set(f->session, "transcription-error-message", "Please repeat that.", NULL);
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "error", "caller", error);
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Please repeat that.");
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+}
+static void
+silence_final(Fixture *f, gconstpointer data)
+{
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "", TRUE);
+	drain();
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/voice/session/stt-error-spoken", Fixture, NULL, setup,
+			   recognition_error_spoken, teardown);
+	g_test_add("/voice/session/silence-final", Fixture, NULL, setup, silence_final,
+			   teardown);
 	g_test_add("/voice/session/say-non-silent-pcm", Fixture, NULL, setup, say_non_silent,
 			   teardown);
 	g_test_add("/voice/session/barge-in-pending-provider", Fixture, NULL, setup,
