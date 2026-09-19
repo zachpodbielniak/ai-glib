@@ -118,6 +118,25 @@ test_formats(void)
 /* Use actual Ctrl+V/Enter dispatch, then inspect the message retained by the
  * conversation. A second send while busy must leave the next draft intact. */
 static void
+test_queue_clipboard_pending(void)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GString) input = g_string_new("unfinished draft");
+	App app = { .conversation = conversation, .send_queue = queue,
+	            .input = input, .clipboard_pending = TRUE };
+	g_autofree gchar *queued = NULL;
+
+	g_assert_true(ai_prompt_queue_push(queue, "follow-up", NULL, FALSE, NULL));
+	g_assert_false(app_flush_send_queue(&app));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
+	g_assert_cmpstr(input->str, ==, "unfinished draft");
+	queued = ai_prompt_queue_pop(queue, NULL);
+	g_assert_cmpstr(queued, ==, "follow-up");
+}
+
+static void
 test_composer(void)
 {
 	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
@@ -277,6 +296,14 @@ test_draft_rejection(void)
 	app.commands = commands;
 	app.history = g_ptr_array_new_with_free_func(g_free);
 	app.dump_loop = loop;
+
+	/* A provider switch can reject an attachment that was queued earlier. */
+	g_assert_true(ai_prompt_queue_push(queue, "queued image", app.images, FALSE, NULL));
+	g_assert_false(app_flush_send_queue(&app));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
+	g_assert_cmpstr(app.input->str, ==, "describe");
+	g_assert_cmpuint(g_list_length(app.images), ==, 1);
+	ai_prompt_queue_clear(queue);
 	ai_conversation_set_command_set(conversation, commands);
 	app_send(&app);
 	g_assert_false(app.sending);
@@ -564,6 +591,7 @@ main(int argc, char **argv)
 	g_test_add_func("/tui-images/missing-helper", test_missing_helper);
 	g_test_add_func("/tui-images/formats", test_formats);
 	g_test_add_func("/tui-images/composer", test_composer);
+	g_test_add_func("/tui-images/queue-clipboard-pending", test_queue_clipboard_pending);
 	g_test_add_func("/tui-images/idle-double-interrupt-quits",
 		test_idle_double_interrupt_quits);
 	g_test_add_func("/tui-images/csi-u-ctrl-c-quits",

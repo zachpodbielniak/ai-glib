@@ -20,10 +20,13 @@ batch(void)
 	g_assert_true(ai_prompt_queue_push(queue, "two", NULL, FALSE, &error));
 	g_assert_true(ai_prompt_queue_push(queue, "three", NULL, FALSE, &error));
 	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 3);
+	g_assert_cmpstr(ai_prompt_queue_peek(queue, NULL), ==, "one");
+	g_assert_cmpuint(notifications, ==, 3);
 	text = ai_prompt_queue_pop(queue, NULL);
 	g_assert_cmpstr(text, ==, "one\n\ntwo\n\nthree");
 	g_assert_cmpuint(notifications, ==, 4);
 	g_assert_null(ai_prompt_queue_pop(queue, NULL));
+	g_assert_null(ai_prompt_queue_peek(queue, NULL));
 	g_assert_no_error(error);
 }
 
@@ -81,6 +84,9 @@ images(void)
 	g_assert_cmpstr(text, ==, "before");
 	g_assert_null(output);
 	g_clear_pointer(&text, g_free);
+	g_assert_cmpstr(ai_prompt_queue_peek(queue, &output), ==, "picture");
+	g_assert_cmpuint(g_list_length(output), ==, 1);
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 2);
 	text = ai_prompt_queue_pop(queue, &output);
 	g_assert_cmpstr(text, ==, "picture");
 	g_assert_cmpuint(g_list_length(output), ==, 1);

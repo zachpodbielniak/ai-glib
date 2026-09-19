@@ -165,6 +165,27 @@ ai_prompt_queue_push(AiPromptQueue *self, const gchar *text, GList *images,
 }
 
 /**
+ * ai_prompt_queue_peek:
+ * @self: a queue
+ * @images: (out) (optional) (element-type AiImageContent) (transfer none): attachments
+ *
+ * Inspects the oldest submission without removing or coalescing it. Use this
+ * to validate attachments before taking a batch. Borrowed values remain valid
+ * until the queue is popped, cleared or destroyed; do not modify the list.
+ *
+ * Returns: (transfer none) (nullable): oldest text, or NULL if empty
+ */
+const gchar *
+ai_prompt_queue_peek(AiPromptQueue *self, GList **images)
+{
+	Prompt *prompt;
+	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), NULL);
+	prompt = g_queue_peek_head(&self->pending);
+	if (images != NULL) *images = prompt != NULL ? prompt->images : NULL;
+	return prompt != NULL ? prompt->text : NULL;
+}
+
+/**
  * ai_prompt_queue_pop:
  * @self: a queue
  * @images: (out) (optional) (element-type AiImageContent) (transfer full): batch attachments

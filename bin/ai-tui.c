@@ -4886,10 +4886,13 @@ app_flush_send_queue(App *app)
 	g_autofree gchar *text = NULL;
 	g_autofree gchar *draft = NULL;
 	GList *draft_images;
+	g_autoptr(GString) pending_input = NULL;
+	GString *draft_input;
+	gboolean rejected;
 	guint cursor;
 	gint history_pos;
 
-	if (app->sending || ai_conversation_get_busy(app->conversation) ||
+	if (app->clipboard_pending || app->sending || ai_conversation_get_busy(app->conversation) ||
 		ai_prompt_queue_get_length(app->send_queue) == 0)
 		return FALSE;
 
@@ -4898,6 +4901,14 @@ app_flush_send_queue(App *app)
 	draft_images = app->images;
 	cursor = app->cursor;
 	history_pos = app->history_pos;
+	/* Validate without consuming an entry rejected after a provider switch. */
+	pending_input = g_string_new(ai_prompt_queue_peek(app->send_queue, &app->images));
+	draft_input = app->input;
+	app->input = pending_input;
+	rejected = image_draft_is_rejected(app);
+	app->input = draft_input;
+	app->images = draft_images;
+	if (rejected) return FALSE;
 	app->images = NULL;
 	text = ai_prompt_queue_pop(app->send_queue, &app->images);
 	g_string_assign(app->input, text);

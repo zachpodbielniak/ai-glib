@@ -12,6 +12,7 @@ AiPromptQueue *ai_prompt_queue_new(void);
 guint ai_prompt_queue_get_length(AiPromptQueue *self);
 gboolean ai_prompt_queue_push(AiPromptQueue *self, const gchar *text,
                               GList *images, gboolean separate, GError **error);
+const gchar *ai_prompt_queue_peek(AiPromptQueue *self, GList **images);
 gchar *ai_prompt_queue_pop(AiPromptQueue *self, GList **images);
 void ai_prompt_queue_clear(AiPromptQueue *self);
 G_END_DECLS

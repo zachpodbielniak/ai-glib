@@ -117,3 +117,17 @@ preservation and a side answer arriving before the main request completes.
 =test-tui-images= covers queued attachment integration. These tests use scripted
 providers and require no network credentials. Terminal tests skip explicitly
 when tmux is unavailable. =make test-gir-clean= verifies public annotations.
+
+** Clipboard reads while a turn finishes
+
+If a clipboard image read is pending when a turn finishes, queue draining
+pauses before removing any submissions. Once the clipboard operation finishes,
+Enter resumes the queue (and queues any current draft after existing entries).
+The queued text and the unsent draft remain separate.
+
+Queue hosts can use =ai_prompt_queue_peek()= to inspect the oldest submission
+without removing it. Its text and attachment list are borrowed until removal
+or clearing. The TUI uses this to retain queued images rejected after switching
+to a provider without image support. Draining pauses with an error. To recover
+in the TUI, clear pending entries with Ctrl+C, switch provider, then recall the
+text from input history and reattach the image before sending.
