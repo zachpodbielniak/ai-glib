@@ -1,0 +1,6 @@
+WebRTC VAD via libfvad, https://github.com/dpirch/libfvad
+Pinned revision: 532ab666c20d3cfda38bca63abbb0f152706c369
+C sources and headers copied with two loop declarations hoisted for gnu89 and an unused-value cast for NDEBUG; see LICENSE, PATENTS, AUTHORS.
+Built by the parent GNU Make build; no Python or Rust runtime.
+The C11 static_assert spelling is changed to GCC _Static_assert for gnu89.
+Unused upstream automake files are omitted; trailing blank lines normalized.

@@ -25,7 +25,7 @@ WARNINGS = -Wall -Wextra -Wno-unused-parameter -Wformat=2 -Wshadow
 CFLAGS_BASE = $(CSTD) $(WARNINGS) -fPIC
 
 # pkg-config dependencies
-PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0 gio-unix-2.0 libdex-1
+PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0 gio-unix-2.0 libdex-1 gstreamer-1.0 gstreamer-app-1.0
 
 # Get flags from pkg-config
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKG_DEPS))
@@ -115,7 +115,7 @@ CFLAGS = $(CFLAGS_BASE) $(CFLAGS_OPT) $(CFLAGS_SAN) $(PKG_CFLAGS) \
          -DAI_VERSION_MAJOR=$(VERSION_MAJOR) \
          -DAI_VERSION_MINOR=$(VERSION_MINOR) \
          -DAI_VERSION_MICRO=$(VERSION_MICRO) \
-         -I$(SRCDIR) -I$(OUTDIR)
+         -I$(SRCDIR) -I$(OUTDIR) -Ideps/webrtc-vad/include
 
 LDFLAGS = $(LDFLAGS_SAN) $(MCP_GLIB_STATIC) $(YAML_GLIB_LIBS) $(PKG_LIBS)
 

@@ -163,7 +163,7 @@ config_yaml_acyclic(yaml_document_t *document, gint id, guint8 *state, guint dep
 static gboolean
 config_yaml_validate(yaml_document_t *document)
 {
-	const gchar *apps[] = {NULL, "ai", "ai-tui"};
+	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-call"};
 	yaml_node_t *node;
 	gint apps_id;
 	guint i;
@@ -191,6 +191,16 @@ config_yaml_validate(yaml_document_t *document)
 				return FALSE;
 		}
 	}
+    {
+        gint voice_id = config_yaml_member(document, 1, "voice");
+        if (voice_id != 0) {
+            yaml_node_pair_t *pair;
+            yaml_node_t *voice = yaml_document_get_node(document, voice_id);
+            if (voice->type != YAML_MAPPING_NODE) return FALSE;
+            for (pair = voice->data.mapping.pairs.start; pair < voice->data.mapping.pairs.top; pair++)
+                if (yaml_document_get_node(document, pair->value)->type != YAML_SCALAR_NODE) return FALSE;
+        }
+    }
 	apps_id = config_yaml_member(document, 1, "apps");
 	if (apps_id != 0 && yaml_document_get_node(document, apps_id)->type != YAML_MAPPING_NODE)
 		return FALSE;
@@ -292,8 +302,10 @@ struct _AiConfig
     gboolean       default_provider_programmatic; /* TRUE if set via set_default_provider() */
     gchar         *default_model;
     gboolean       default_model_programmatic;  /* TRUE if set via set_default_model() */
-	AiProviderType app_providers[2];
-	gchar *app_models[2];
+	AiProviderType app_providers[3];
+	gchar *app_models[3];
+	gchar *voice_values[4];
+	gboolean voice_explicit[4];
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -306,10 +318,18 @@ enum
     PROP_0,
     PROP_TIMEOUT,
     PROP_MAX_RETRIES,
+    PROP_VOICE_STT_URL,
+    PROP_VOICE_TTS_URL,
+    PROP_VOICE_LIVEKIT_URL,
+    PROP_VOICE_IDENTITY_FILE,
     N_PROPS
 };
 
 static GParamSpec *properties[N_PROPS];
+static const gchar *voice_keys[] = {"stt_url", "tts_url", "livekit_url", "identity_file"};
+static const gchar *voice_env[] = {"AI_VOICE_STT_URL", "AI_VOICE_TTS_URL", "AI_VOICE_LIVEKIT_URL", "AI_VOICE_IDENTITY_FILE"};
+static const gchar *voice_props[] = {"voice-stt-url", "voice-tts-url", "voice-livekit-url", "voice-identity-file"};
+static const gchar *voice_defaults[] = {"ws://localhost:8001/stt/stream", "http://localhost:8089/synthesize/stream", "ws://localhost:7880", NULL};
 
 /* Singleton instance for get_default() */
 static AiConfig *default_config = NULL;
@@ -340,6 +360,8 @@ ai_config_finalize(GObject *object)
 	g_clear_pointer(&self->app_models[0], g_free);
 	g_clear_pointer(&self->app_models[1], g_free);
 
+	g_free(self->app_models[2]);
+	{ guint i; for (i = 0; i < 4; i++) g_free(self->voice_values[i]); }
     G_OBJECT_CLASS(ai_config_parent_class)->finalize(object);
 }
 
@@ -352,6 +374,14 @@ ai_config_get_property(
 ){
     AiConfig *self = AI_CONFIG(object);
 
+    if (prop_id >= PROP_VOICE_STT_URL && prop_id <= PROP_VOICE_IDENTITY_FILE) {
+        guint i = prop_id - PROP_VOICE_STT_URL;
+        const gchar *env = g_getenv(voice_env[i]);
+        g_value_set_string(value, self->voice_explicit[i] ? self->voice_values[i] :
+                           env != NULL && *env != '\0' ? env :
+                           self->voice_values[i] != NULL ? self->voice_values[i] : voice_defaults[i]);
+        return;
+    }
     switch (prop_id)
     {
         case PROP_TIMEOUT:
@@ -375,6 +405,13 @@ ai_config_set_property(
 ){
     AiConfig *self = AI_CONFIG(object);
 
+    if (prop_id >= PROP_VOICE_STT_URL && prop_id <= PROP_VOICE_IDENTITY_FILE) {
+        guint i = prop_id - PROP_VOICE_STT_URL;
+        g_free(self->voice_values[i]);
+        self->voice_values[i] = g_value_dup_string(value);
+        self->voice_explicit[i] = TRUE;
+        return;
+    }
     switch (prop_id)
     {
         case PROP_TIMEOUT:
@@ -422,6 +459,12 @@ ai_config_class_init(AiConfigClass *klass)
                           0, G_MAXUINT, AI_CONFIG_DEFAULT_MAX_RETRIES,
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    {
+        guint i;
+        for (i = 0; i < 4; i++)
+            properties[PROP_VOICE_STT_URL + i] = g_param_spec_string(voice_props[i], voice_props[i],
+                "Voice setting; environment overrides YAML", voice_defaults[i], G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+    }
     g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -432,6 +475,7 @@ ai_config_init(AiConfig *self)
     self->max_retries = AI_CONFIG_DEFAULT_MAX_RETRIES;
 	self->app_providers[0] = AI_PROVIDER_CLAUDE;
 	self->app_providers[1] = AI_PROVIDER_CLAUDE;
+	self->app_providers[2] = AI_PROVIDER_CLAUDE;
 }
 
 /* Forward declaration for use in ai_config_new */
@@ -1053,7 +1097,7 @@ ai_config_load_from_file(
 	for (i = 0; i < G_N_ELEMENTS(self->app_providers); i++)
 	{
 		gint apps_id = config_yaml_member(document, 1, "apps");
-		gint app_id = config_yaml_member(document, apps_id, i == 0 ? "ai" : "ai-tui");
+		gint app_id = config_yaml_member(document, apps_id, i == 0 ? "ai" : i == 1 ? "ai-tui" : "ai-call");
 		gint value_id = config_yaml_member(document, app_id, "default_provider");
 		yaml_node_t *value;
 
@@ -1072,6 +1116,22 @@ ai_config_load_from_file(
 				self->app_models[i] = g_strdup(str_val);
 		}
 	}
+
+    {
+        gint voice = config_yaml_member(document, 1, "voice");
+        for (i = 0; i < 4; i++) {
+            gint entry = config_yaml_member(document, voice, voice_keys[i]);
+            if (entry != 0 && !self->voice_explicit[i]) {
+                yaml_node_t *node = yaml_document_get_node(document, entry);
+                if (node->type != YAML_SCALAR_NODE) {
+                    g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "voice.%s must be a string", voice_keys[i]);
+                    return FALSE;
+                }
+                g_free(self->voice_values[i]);
+                self->voice_values[i] = g_strdup((const gchar *)node->data.scalar.value);
+            }
+        }
+    }
 
     /* default_provider */
     if (has_provider)
@@ -1302,7 +1362,7 @@ ai_config_set_default_model(
 /**
  * ai_config_get_app_provider:
  * @self: an #AiConfig
- * @app: application name, `ai` or `ai-tui`
+ * @app: application name, `ai`, `ai-tui` or `ai-call`
  *
  * Reads only apps.@app.default_provider, never library or environment defaults.
  *
@@ -1312,14 +1372,14 @@ AiProviderType
 ai_config_get_app_provider(AiConfig *self, const gchar *app)
 {
 	g_return_val_if_fail(AI_IS_CONFIG(self), AI_PROVIDER_CLAUDE);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0, AI_PROVIDER_CLAUDE);
-	return self->app_providers[g_str_equal(app, "ai") ? 0 : 1];
+	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0 || g_strcmp0(app, "ai-call") == 0, AI_PROVIDER_CLAUDE);
+	return self->app_providers[g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2];
 }
 
 /**
  * ai_config_get_app_model:
  * @self: an #AiConfig
- * @app: application name, `ai` or `ai-tui`
+ * @app: application name, `ai`, `ai-tui` or `ai-call`
  *
  * Reads only apps.@app.default_model, never library or environment defaults.
  *
@@ -1329,8 +1389,8 @@ const gchar *
 ai_config_get_app_model(AiConfig *self, const gchar *app)
 {
 	g_return_val_if_fail(AI_IS_CONFIG(self), NULL);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0, NULL);
-	return self->app_models[g_str_equal(app, "ai") ? 0 : 1];
+	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0 || g_strcmp0(app, "ai-call") == 0, NULL);
+	return self->app_models[g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2];
 }
 
 /* Copy each mapping on the edited path so YAML aliases outside it stay unchanged. */
@@ -1368,7 +1428,7 @@ config_yaml_copy_mapping(yaml_document_t *document, gint parent, const gchar *na
 /**
  * ai_config_save_defaults:
  * @self: an #AiConfig
- * @app: (nullable): `ai` or `ai-tui`, or %NULL for library defaults
+ * @app: (nullable): `ai`, `ai-tui` or `ai-call`, or %NULL for library defaults
  * @provider: the provider to save
  * @model: (nullable): model name, or %NULL for the provider's native default
  * @error: (out) (optional): return location for a #GError
@@ -1423,7 +1483,7 @@ ai_config_save_defaults(
 		                    "Model must be valid UTF-8");
 		return FALSE;
 	}
-	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui"))
+	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui") && !g_str_equal(app, "ai-call"))
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Unknown app '%s'", app);
 		return FALSE;
@@ -1523,7 +1583,7 @@ ai_config_save_defaults(
 	}
 	else
 	{
-		i = g_str_equal(app, "ai") ? 0 : 1;
+		i = g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2;
 		self->app_providers[i] = provider;
 		g_free(self->app_models[i]);
 		self->app_models[i] = saved_model[0] != '\0' ? g_strdup(saved_model) : NULL;

@@ -227,8 +227,18 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-command.c \
 	$(SRCDIR)/harness/ai-completion.c
 
+PUBLIC_HEADERS += $(filter-out %-private.h,$(wildcard $(SRCDIR)/voice/*.h))
+LIB_SOURCES += $(wildcard $(SRCDIR)/voice/*.c)
+
+VAD_SOURCES = $(wildcard deps/webrtc-vad/src/*.c deps/webrtc-vad/src/vad/*.c deps/webrtc-vad/src/signal_processing/*.c)
+VAD_OBJECTS = $(patsubst deps/webrtc-vad/%.c,$(OBJDIR)/webrtc-vad/%.o,$(VAD_SOURCES))
+
+$(OBJDIR)/webrtc-vad/%.o: deps/webrtc-vad/%.c $(BUILD_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Ideps/webrtc-vad/src -c $< -o $@
+
 # Object files
-LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
+LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES)) $(VAD_OBJECTS)
 
 # Test files
 TEST_SOURCES = $(wildcard $(TESTDIR)/test-*.c)
@@ -585,3 +595,12 @@ vars:
 	@echo "LIB_OBJECTS   = $(LIB_OBJECTS)"
 
 endif # ifndef __MIXED
+
+# Matrix-only configuration stays outside the library and its GIR.
+CALL_CONFIG_OBJECT = $(OBJDIR)/bin/ai-call-config.o
+$(CALL_CONFIG_OBJECT): bin/call/ai-call-config.c bin/call/ai-call-config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: EXTRA_LINK_OBJECTS = $(CALL_CONFIG_OBJECT)
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: $(CALL_CONFIG_OBJECT)
+-include $(CALL_CONFIG_OBJECT:.o=.d)

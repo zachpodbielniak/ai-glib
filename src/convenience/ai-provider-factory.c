@@ -28,7 +28,7 @@
 /**
  * ai_provider_factory_resolve_defaults:
  * @config: an #AiConfig
- * @app: (nullable): `ai` or `ai-tui`, or %NULL for library defaults
+ * @app: (nullable): `ai`, `ai-tui` or `ai-call`, or %NULL for library defaults
  * @provider_name: (nullable): provider name, or %NULL to consult defaults
  * @model: (nullable): explicit model, or %NULL or `default` to consult defaults
  * @out_provider: (out): resolved provider
@@ -69,7 +69,7 @@ ai_provider_factory_resolve_defaults(
 	g_return_val_if_fail(out_model != NULL, FALSE);
 	*out_provider = (AiProviderType)-1;
 	*out_model = NULL;
-	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui"))
+	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui") && !g_str_equal(app, "ai-call"))
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Unknown app '%s'", app);
 		return FALSE;
