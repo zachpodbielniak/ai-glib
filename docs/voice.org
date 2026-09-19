@@ -14,11 +14,18 @@ tools, tool history and background agents. The library has no Matrix dependency.
 | =AiSpeechSynthesizer= | Text request, streamed PCM, cancellable completion | =AiHttpSynthesizer= |
 | =AiVoiceActivity= | Per-participant speech and utterance-end decisions | =AiWebrtcVoiceActivity=, vendored WebRTC VAD through libfvad |
 
-All interface PCM is signed 16-bit *little-endian*, mono, 16 kHz. Sample counts,
-resampling phase and monotonic timestamps use integers. No audio is written to
-disk. The transport converts incoming tracks and the HTTP synthesizer resamples
-its response to that common format. The VAD accepts 10, 20 or 30 ms frames;
-the session splits transport buffers into 10 ms frames.
+All PCM is signed 16-bit *little-endian*, mono. Transport input, VAD and STT
+use 16 kHz. Synthesizer output retains its native sample rate: the =audio=
+signal carries =(pcm, sample_rate)=. The session forwards both through
+=ai_audio_transport_write_pcm_async()=. The legacy =write_async()= accepts
+16 kHz output. Backends without native-rate support reject other rates.
+
+LiveKit appsrc caps follow each queued buffer's rate. GStreamer's
+=audioresample quality=10= converts to a fixed 48 kHz encoder input, preserving
+high-frequency speech content without the former hand-written interpolator.
+Sample counts and media timestamps use integers, including rate changes.
+No audio is written to disk. The VAD accepts 10, 20 or 30 ms frames; the
+session splits incoming transport buffers into 10 ms frames.
 
 The VAD's =trailing-silence-ms= property defaults to 600. Its =mode= property is
 WebRTC's aggressiveness, from 0 to 3, default 2. State is independent for each
@@ -156,8 +163,8 @@ SR=<decimal sample rate>\n
 
 HTTP chunk boundaries are unrelated to protocol frames. Parsing spans reads,
 validates sample rate and even PCM byte lengths, bounds frame allocation, and
-requires the zero sentinel. EOF without it is an error. Resampling preserves
-integer phase across frames. Every HTTP operation and body read is cancellable.
+requires the zero sentinel. EOF without it is an error. Native PCM bytes are emitted unchanged, with the validated header rate on
+every audio signal. Every HTTP operation and body read is cancellable.
 
 * LiveKit
 
@@ -313,7 +320,7 @@ context. Call setup and cleanup support more than one room.
 
 Offline GTests: =test-voice-session= (turns, barge-in, speakers, deadline,
 read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
-ready timeout, framing, malformed responses, resampling), =test-voice-config=,
+ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
 =test-voice-activity= and
 =test-voice-matrix= (answer, cleanup retry, stale state).
 
@@ -328,9 +335,9 @@ AI_VOICE_LIVEKIT_TEST=1 build/release/tests/test-voice-livekit
 
 It starts its own dev server and a receive-only observer before the transport
 joins. =ai_voice_session_say()= uses an in-process HTTP synthesis server; the
-observer must receive at least 8000 decoded samples in packets with RMS above
-1000 before any remote microphone is published. The fake TTS emits 24 kHz
-audio in non-10-ms frames. A pad probe checks contiguous timestamps on the
+observer must receive at least 24000 decoded 48 kHz samples with 10 kHz tone
+amplitude above 1000 before any remote microphone is published. The fake TTS emits 24 kHz
+10 kHz sine audio in non-10-ms frames. Spectral detection rejects a 6 kHz alias. A pad probe checks contiguous timestamps on the
 real appsrc, including silence and a deliberately delayed main-loop dispatch. A second transport then publishes late; audio must
 flow in both directions. Self-audio must never appear as a remote participant.
 The test leaves all connections when finished. The offline
@@ -372,3 +379,7 @@ transcript, provider turn or spoken reply.
 The binary maps =ai_call.barge-in-ms=, =AI_VOICE_BARGE_IN_MS= and
 =--call-set barge-in-ms=250= to the session property. Whitespace-only final
 transcripts are discarded; valid phrases are never filtered by a blacklist.
+
+The native-rate output change adds =sample_rate= to =AiSpeechSynthesizer::audio=;
+consumers of this unreleased voice API must update their callback signature.
+Input =AiAudioTransport::audio= retains its existing speaker/16-kHz-PCM shape.
