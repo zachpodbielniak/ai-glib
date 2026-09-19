@@ -465,7 +465,8 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 		labelled = g_strdup_printf("[%s]: %s", p->name, text);
 		g_queue_push_tail(&self->turns, g_steal_pointer(&labelled));
 	}
-	g_signal_emit_by_name(self, "transcript", p->name, text, TRUE);
+	if (text != NULL && *text != '\0')
+		g_signal_emit_by_name(self, "transcript", p->name, text, TRUE);
 	pump(self);
 }
 static void

@@ -10,6 +10,7 @@ typedef struct {
 	GTask *task;
 	GBytes *pcm;
 	gsize offset;
+	GstClockTime end_time;
 } Output;
 typedef struct {
 	GWeakRef owner;
@@ -32,6 +33,8 @@ struct _AiLivekitTransport {
 	GTask *joining;
 	gint64 join_deadline;
 	gsize queued_bytes;
+	guint64 output_samples;
+	GstClockTime output_origin;
 	gboolean leaving, sent_pcm;
 };
 static void
@@ -261,11 +264,29 @@ bus_message(GstBus *bus, GstMessage *message, gpointer data)
 	}
 	return G_SOURCE_CONTINUE;
 }
+/* Silence and speech share one sample clock. Wall-clock timestamping makes
+ * scheduling jitter look like missing samples to downstream resamplers. */
+static GstFlowReturn
+push_pcm(AiLivekitTransport *self, GstBuffer *buffer, guint samples)
+{
+	GST_BUFFER_PTS(buffer) =
+		self->output_origin +
+		gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000);
+	GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
+	GST_BUFFER_OFFSET(buffer) = self->output_samples;
+	self->output_samples += samples;
+	GST_BUFFER_OFFSET_END(buffer) = self->output_samples;
+	GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(samples, GST_SECOND, 16000);
+	return gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
+}
 static gboolean
 tick(gpointer data)
 {
 	AiLivekitTransport *self = data;
 	Output *o;
+	GstClock *media_clock;
+	GstClockTime now, base;
+	guint packets;
 	if (self->joining != NULL) {
 		GObject *rx = NULL, *tx = NULL;
 		gint rx_state = 0, tx_state = 0;
@@ -288,51 +309,75 @@ tick(gpointer data)
 			g_clear_object(&self->joining);
 		}
 	}
-	/* Retire completed writes without inserting a silent tick between frames. */
-	while ((o = g_queue_peek_head(&self->playback)) != NULL) {
-		gsize size = g_bytes_get_size(o->pcm);
-		if (!g_cancellable_is_cancelled(g_task_get_cancellable(o->task)) &&
-			o->offset < size)
+	media_clock = gst_element_get_clock(self->pipeline);
+	if (media_clock == NULL)
+		return G_SOURCE_CONTINUE;
+	now = gst_clock_get_time(media_clock);
+	gst_object_unref(media_clock);
+	base = gst_element_get_base_time(self->pipeline);
+	if (!GST_CLOCK_TIME_IS_VALID(base) || now < base)
+		return G_SOURCE_CONTINUE;
+	now -= base;
+	if (!GST_CLOCK_TIME_IS_VALID(self->output_origin))
+		self->output_origin = now;
+	/* Catch up after a delayed main-loop dispatch, with bounded work per tick.
+	 * Keep no more than 10 ms queued ahead of the media clock for barge-in. */
+	for (packets = 0; packets < 20; packets++) {
+		if (self->output_origin +
+				gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000) >
+			now)
 			break;
-		g_queue_pop_head(&self->playback);
-		self->queued_bytes -= size;
-		g_task_return_boolean(o->task, TRUE);
-		output_free(o);
-	}
-	if (o != NULL) {
-		gsize size;
-		const guint8 *raw = g_bytes_get_data(o->pcm, &size);
-		gsize count = MIN((gsize)320, size - o->offset);
-		GstBuffer *buffer = gst_buffer_new_allocate(NULL, count, NULL);
-		GstFlowReturn flow;
-		gst_buffer_fill(buffer, 0, raw + o->offset, count);
-		GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(count / 2, GST_SECOND, 16000);
-		flow = gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
-		if (flow == GST_FLOW_OK && !self->sent_pcm) {
-			guint i;
-			for (i = 0; i < count; i++)
-				if (raw[o->offset + i] != 0) {
-					self->sent_pcm = TRUE;
-					g_log("ai-glib", G_LOG_LEVEL_INFO,
-						  "LiveKit first non-silent appsrc PCM accepted: "
-						  "samples=%" G_GSIZE_FORMAT,
-						  count / 2);
-					break;
-				}
-		}
-		o->offset += count;
-		if (flow != GST_FLOW_OK) {
+		/* Retire completed writes without inserting a silent tick between frames. */
+		while ((o = g_queue_peek_head(&self->playback)) != NULL) {
+			gsize size = g_bytes_get_size(o->pcm);
+			if (!g_cancellable_is_cancelled(g_task_get_cancellable(o->task)) &&
+				o->offset < size)
+				break;
+			if (o->offset == size && o->end_time > now)
+				return G_SOURCE_CONTINUE;
 			g_queue_pop_head(&self->playback);
 			self->queued_bytes -= size;
-			g_task_return_new_error(o->task, G_IO_ERROR, G_IO_ERROR_FAILED,
-									"LiveKit PCM push failed");
+			g_task_return_boolean(o->task, TRUE);
 			output_free(o);
 		}
-	} else if (self->appsrc != NULL) {
-		GstBuffer *silence = gst_buffer_new_allocate(NULL, 320, NULL);
-		gst_buffer_memset(silence, 0, 0, 320);
-		GST_BUFFER_DURATION(silence) = 10 * GST_MSECOND;
-		gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), silence);
+		if (o != NULL) {
+			gsize size;
+			const guint8 *raw = g_bytes_get_data(o->pcm, &size);
+			gsize count = MIN((gsize)320, size - o->offset);
+			GstBuffer *buffer = gst_buffer_new_allocate(NULL, count, NULL);
+			GstFlowReturn flow;
+			gst_buffer_fill(buffer, 0, raw + o->offset, count);
+			GST_BUFFER_DURATION(buffer) =
+				gst_util_uint64_scale(count / 2, GST_SECOND, 16000);
+			flow = push_pcm(self, buffer, count / 2);
+			o->end_time = self->output_origin +
+						  gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000);
+			if (flow == GST_FLOW_OK && !self->sent_pcm) {
+				guint i;
+				for (i = 0; i < count; i++)
+					if (raw[o->offset + i] != 0) {
+						self->sent_pcm = TRUE;
+						g_log("ai-glib", G_LOG_LEVEL_INFO,
+							  "LiveKit first non-silent appsrc PCM accepted: "
+							  "samples=%" G_GSIZE_FORMAT,
+							  count / 2);
+						break;
+					}
+			}
+			o->offset += count;
+			if (flow != GST_FLOW_OK) {
+				g_queue_pop_head(&self->playback);
+				self->queued_bytes -= size;
+				g_task_return_new_error(o->task, G_IO_ERROR, G_IO_ERROR_FAILED,
+										"LiveKit PCM push failed");
+				output_free(o);
+			}
+		} else if (self->appsrc != NULL) {
+			GstBuffer *silence = gst_buffer_new_allocate(NULL, 320, NULL);
+			gst_buffer_memset(silence, 0, 0, 320);
+			GST_BUFFER_DURATION(silence) = 10 * GST_MSECOND;
+			push_pcm(self, silence, 160);
+		}
 	}
 	return G_SOURCE_CONTINUE;
 }
@@ -442,7 +487,8 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	caps = gst_caps_from_string(
 		"audio/x-raw,format=S16LE,rate=16000,channels=1,layout=interleaved");
 	g_object_set(self->appsrc, "caps", caps, "is-live", TRUE, "format", GST_FORMAT_TIME,
-				 "do-timestamp", TRUE, "block", FALSE, NULL);
+				 "do-timestamp", FALSE, "min-latency", (gint64)(10 * GST_MSECOND),
+				 "block", FALSE, NULL);
 	gst_caps_unref(caps);
 	gst_element_link_pads(self->appsrc, "src", self->output, "audio_%u");
 	g_object_get(self->input, "signaller", &rx, NULL);
@@ -462,6 +508,8 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	g_source_attach(self->bus_source, self->context);
 	self->joining = g_steal_pointer(&task);
 	self->join_deadline = g_get_monotonic_time() + 15000000;
+	self->output_samples = 0;
+	self->output_origin = GST_CLOCK_TIME_NONE;
 	self->clock = g_timeout_source_new(10);
 	g_source_set_callback(self->clock, tick, self, NULL);
 	g_source_attach(self->clock, self->context);

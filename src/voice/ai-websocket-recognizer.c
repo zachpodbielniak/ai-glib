@@ -144,6 +144,13 @@ on_message(SoupWebsocketConnection *ws, gint kind, GBytes *bytes, gpointer data)
 			soup_websocket_connection_send_text(ws, "EOS");
 		return;
 	}
+	if (g_strcmp0(type, "error") == 0) {
+		const gchar *detail =
+			ai_json_get_string(obj, "detail", "Speech recognition failed");
+		error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, detail);
+		recognition_error(r, error);
+		return;
+	}
 	text = ai_json_get_string(obj, "text", NULL);
 	if (text == NULL || !r->ready || !g_utf8_validate(text, -1, NULL))
 		goto malformed;
