@@ -193,10 +193,18 @@ plugins produce a clear join error; they do not make offline mocks unusable.
 The shipping host was tested with gst-plugins-rs 0.14.5, revision
 =18a88c8=, and libnice 0.1.22. This plugin revision has an early return in
 =on_participant()= that prevents subscription updates and participant metadata
-registration. Apply =deps/gst-plugins-rs-livekit-participants.patch= to that
+registration. It also ignores subscriber offers in producer mode: full-grant
+tokens can make that subscriber connection primary, causing a server join
+timeout even while publisher audio flows. The patch completes the producer's
+primary subscriber handshake using a separate data-channel peer connection,
+routes subscriber ICE (including server-provided STUN/TURN settings), and tears
+it down with the signalling connection. Media auto-subscription stays disabled
+on the producer; input continues through the receive transport.
+Apply =deps/gst-plugins-rs-livekit-participants.patch= to that
 upstream checkout before building. This is an upstream dependency fix, not an
-FFI shim. Newer plugin revisions that already remove the early return do not
-need the patch. Build upstream plugins outside this repository:
+FFI shim. Newer plugin revisions need only the portions of the patch not already fixed
+upstream. A checkout with the older subscription-only patch must reverse that
+patch before applying this combined version. Build upstream plugins outside this repository:
 
 #+begin_src sh
 git apply /path/to/ai-glib/deps/gst-plugins-rs-livekit-participants.patch
@@ -416,3 +424,8 @@ after rejoining, and checks that leaving during recovery creates no new media
 connection. A decoded 100 Hz + 200 Hz test requires each component to lose
 less than 3 dB. The observed production failure was not reproduced by the
 long-playback test; retained debug details are needed to diagnose a recurrence.
+
+The primary-connection regression uses full publish/subscribe grants, plays
+80 seconds of audio across the server's 60-second join timeout, then checks
+fresh decoded speech after more than 90 seconds without any reconnect event.
+This test failed with =JOIN_TIMEOUT= before the signaller handshake fix.
