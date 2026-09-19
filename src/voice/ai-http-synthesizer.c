@@ -8,6 +8,7 @@ struct _AiHttpSynthesizer {
 	gchar *url;
 	SoupSession *http;
 	gboolean busy;
+	guint timeout_ms;
 };
 
 typedef struct {
@@ -17,6 +18,10 @@ typedef struct {
 	guint rate;
 	guint32 frame_size;
 	gboolean header, length;
+	GCancellable *io_cancel, *caller_cancel;
+	gulong cancel_handler;
+	GSource *deadline;
+	gboolean timed_out;
 } Synthesis;
 
 static void
@@ -28,6 +33,14 @@ static void
 synthesis_free(gpointer data)
 {
 	Synthesis *s = data;
+	if (s->deadline) {
+		g_source_destroy(s->deadline);
+		g_clear_pointer(&s->deadline, g_source_unref);
+	}
+	if (s->cancel_handler)
+		g_cancellable_disconnect(s->caller_cancel, s->cancel_handler);
+	g_clear_object(&s->caller_cancel);
+	g_clear_object(&s->io_cancel);
 	g_clear_object(&s->input);
 	g_clear_object(&s->message);
 	g_byte_array_unref(s->pending);
@@ -37,12 +50,47 @@ synthesis_free(gpointer data)
 static void
 complete(GTask *task, GError *error)
 {
+	Synthesis *s = g_task_get_task_data(task);
 	AI_HTTP_SYNTHESIZER(g_task_get_source_object(task))->busy = FALSE;
+	if (s->deadline) {
+		g_source_destroy(s->deadline);
+		g_clear_pointer(&s->deadline, g_source_unref);
+	}
+	if (s->timed_out) {
+		g_clear_error(&error);
+		error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+									"TTS stream inactivity timeout");
+	}
 	if (error != NULL)
 		g_task_return_error(task, error);
 	else
 		g_task_return_boolean(task, TRUE);
 	g_object_unref(task);
+}
+
+static void
+cancel_io(GCancellable *caller, gpointer data)
+{
+	g_cancellable_cancel(G_CANCELLABLE(data));
+}
+static gboolean
+inactivity(gpointer data)
+{
+	GTask *task = data;
+	Synthesis *s = g_task_get_task_data(task);
+	g_clear_pointer(&s->deadline, g_source_unref);
+	s->timed_out = TRUE;
+	g_cancellable_cancel(s->io_cancel);
+	return G_SOURCE_REMOVE;
+}
+static void
+progress(GTask *task)
+{
+	Synthesis *s = g_task_get_task_data(task);
+	AiHttpSynthesizer *self = g_task_get_source_object(task);
+	if (s->deadline)
+		g_source_set_ready_time(s->deadline,
+								g_get_monotonic_time() + (gint64)self->timeout_ms * 1000);
 }
 
 /* Preserve native PCM; transport backends own filtered output conversion. */
@@ -51,7 +99,7 @@ emit_pcm(GTask *task, const guint8 *data, guint len)
 {
 	Synthesis *s = g_task_get_task_data(task);
 	g_autoptr(GBytes) pcm = g_bytes_new(data, len);
-	if (!g_cancellable_is_cancelled(g_task_get_cancellable(task)))
+	if (!g_cancellable_is_cancelled(s->io_cancel))
 		g_signal_emit_by_name(g_task_get_source_object(task), "audio", pcm, s->rate);
 }
 
@@ -131,6 +179,7 @@ read_done(GObject *source, GAsyncResult *result, gpointer data)
 										   "TTS ended without a zero sentinel"));
 		return;
 	}
+	progress(task);
 	g_byte_array_append(s->pending, p, n);
 	status = parse(task);
 	if (status != 0) {
@@ -147,8 +196,8 @@ static void
 read_next(GTask *task)
 {
 	Synthesis *s = g_task_get_task_data(task);
-	g_input_stream_read_bytes_async(s->input, 4096, G_PRIORITY_DEFAULT,
-									g_task_get_cancellable(task), read_done, task);
+	g_input_stream_read_bytes_async(s->input, 4096, G_PRIORITY_DEFAULT, s->io_cancel,
+									read_done, task);
 }
 
 static void
@@ -167,6 +216,7 @@ sent(GObject *source, GAsyncResult *result, gpointer data)
 								   soup_message_get_status(s->message)));
 		return;
 	}
+	progress(task);
 	read_next(task);
 }
 
@@ -190,6 +240,12 @@ synthesize(AiSpeechSynthesizer *synth, const gchar *text, GCancellable *cancel,
 	self->busy = TRUE;
 	s = g_new0(Synthesis, 1);
 	s->pending = g_byte_array_new();
+	s->io_cancel = g_cancellable_new();
+	if (cancel) {
+		s->caller_cancel = g_object_ref(cancel);
+		s->cancel_handler = g_cancellable_connect(
+			cancel, G_CALLBACK(cancel_io), g_object_ref(s->io_cancel), g_object_unref);
+	}
 	s->message = soup_message_new("POST", self->url);
 	g_task_set_task_data(task, s, synthesis_free);
 	if (s->message == NULL) {
@@ -205,8 +261,11 @@ synthesize(AiSpeechSynthesizer *synth, const gchar *text, GCancellable *cancel,
 	json = json_to_string(root, FALSE);
 	body = g_bytes_new(json, strlen(json));
 	soup_message_set_request_body_from_bytes(s->message, "application/json", body);
-	soup_session_send_async(self->http, s->message, G_PRIORITY_DEFAULT, cancel, sent,
-							task);
+	s->deadline = g_timeout_source_new(self->timeout_ms);
+	g_source_set_callback(s->deadline, inactivity, task, NULL);
+	g_source_attach(s->deadline, g_task_get_context(task));
+	soup_session_send_async(self->http, s->message, G_PRIORITY_DEFAULT, s->io_cancel,
+							sent, task);
 }
 
 static gboolean
@@ -228,6 +287,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 {
 	if (id == 1)
 		g_value_set_string(value, AI_HTTP_SYNTHESIZER(object)->url);
+	else if (id == 2)
+		g_value_set_uint(value, AI_HTTP_SYNTHESIZER(object)->timeout_ms);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -237,6 +298,8 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 {
 	if (id == 1)
 		AI_HTTP_SYNTHESIZER(object)->url = g_value_dup_string(value);
+	else if (id == 2)
+		AI_HTTP_SYNTHESIZER(object)->timeout_ms = g_value_get_uint(value);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -258,6 +321,12 @@ ai_http_synthesizer_class_init(AiHttpSynthesizerClass *klass)
 	oc->get_property = get_property;
 	oc->set_property = set_property;
 	g_object_class_install_property(
+		oc, 2,
+		g_param_spec_uint(
+			"timeout-ms", "Timeout", "Streaming inactivity timeout in milliseconds", 1,
+			600000, 10000,
+			G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
 		oc, 1,
 		g_param_spec_string("url", "URL", "Streaming TTS endpoint", NULL,
 							G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
@@ -267,7 +336,8 @@ ai_http_synthesizer_class_init(AiHttpSynthesizerClass *klass)
 static void
 ai_http_synthesizer_init(AiHttpSynthesizer *self)
 {
-	self->http = soup_session_new_with_options("timeout", 30, NULL);
+	/* The request-owned inactivity source is the single timeout authority. */
+	self->http = soup_session_new();
 }
 
 /**

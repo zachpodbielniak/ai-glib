@@ -12,6 +12,7 @@ typedef struct {
 	gsize offset;
 	guint rate;
 	GstClockTime end_time;
+	gint64 completed_at;
 } Output;
 typedef struct {
 	GWeakRef owner;
@@ -36,11 +37,14 @@ struct _AiLivekitTransport {
 	gchar *room, *token;
 	guint retry_count, reconnect_attempts, reconnect_delay_ms, opus_bitrate;
 	gboolean recovering;
-	GQueue playback;
+	GQueue playback, recent;
+	guint64 recent_ns;
 	GTask *joining;
 	gint64 join_deadline;
 	gsize queued_bytes;
 	guint64 output_samples, generation;
+	guint64 reconnect_count, dropped_buffers, late_buffers;
+	gint64 call_started, last_late_log;
 	guint output_rate;
 	GstClockTime output_origin;
 	gboolean leaving, sent_pcm;
@@ -71,16 +75,47 @@ clear_source(GSource **source)
 static void
 output_free(Output *o)
 {
-	g_object_unref(o->task);
+	g_clear_object(&o->task);
 	g_bytes_unref(o->pcm);
 	g_free(o);
+}
+/* Retain a short replay window after local delivery. GStreamer completion is
+ * not a remote playback acknowledgement: a media failure can discard the
+ * encoder/jitter-buffer tail. Repeating that tail is preferable to losing words. */
+static void
+clear_recent(AiLivekitTransport *self)
+{
+	Output *o;
+	while ((o = g_queue_pop_head(&self->recent)) != NULL)
+		output_free(o);
+	self->recent_ns = 0;
+}
+static void
+remember_output(AiLivekitTransport *self, Output *o)
+{
+	gsize size = g_bytes_get_size(o->pcm);
+	gsize tail = MIN(size, (gsize)(o->rate / 4 * 2));
+	Output *copy = g_new0(Output, 1);
+	copy->pcm = g_bytes_new_from_bytes(o->pcm, size - tail, tail);
+	copy->rate = o->rate;
+	copy->completed_at = g_get_monotonic_time();
+	g_queue_push_tail(&self->recent, copy);
+	self->recent_ns += gst_util_uint64_scale(tail / 2, GST_SECOND, o->rate);
+	while (self->recent_ns > 250 * GST_MSECOND && self->recent.length > 1) {
+		Output *old = g_queue_pop_head(&self->recent);
+		self->recent_ns -=
+			gst_util_uint64_scale(g_bytes_get_size(old->pcm) / 2, GST_SECOND, old->rate);
+		output_free(old);
+	}
 }
 static void
 flush(AiAudioTransport *transport)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(transport);
 	Output *o;
+	clear_recent(self);
 	while ((o = g_queue_pop_head(&self->playback)) != NULL) {
+		self->dropped_buffers++;
 		g_task_return_new_error(o->task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
 								"Audio flushed");
 		output_free(o);
@@ -184,8 +219,7 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 	g_object_get(pad, "participant-info", &info, NULL);
 	if (info == NULL) {
 		g_log("ai-glib", G_LOG_LEVEL_INFO,
-			  "LiveKit audio pad has no participant metadata; check plugin "
-			  "participant-update patch");
+			  "LiveKit audio pad has no participant metadata; check plugin patches");
 		return;
 	}
 	/* Keep server auto-subscription enabled for tracks published after join.
@@ -211,9 +245,9 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 		return;
 	}
 	track = g_new0(Track, 1);
-	track->generation = self->generation;
+	track->generation = *(guint64 *)g_object_get_data(G_OBJECT(input), "voice-generation");
 	g_weak_ref_init(&track->owner, self);
-	track->speaker = g_strdup(gst_structure_get_string(info, "sid"));
+	track->speaker = g_strdup(gst_structure_get_string(info, "identity"));
 	track->name = g_strdup(gst_structure_get_string(info, "name"));
 	if (track->name == NULL || *track->name == '\0') {
 		g_free(track->name);
@@ -266,7 +300,7 @@ pad_removed(GstElement *input, GstPad *pad, gpointer data)
 		return;
 	g_weak_ref_init(&track.owner, data);
 	track.speaker = (gchar *)speaker;
-	track.generation = AI_LIVEKIT_TRANSPORT(data)->generation;
+	track.generation = *(guint64 *)g_object_get_data(G_OBJECT(input), "voice-generation");
 	post(&track, 2, NULL);
 	g_weak_ref_clear(&track.owner);
 }
@@ -284,8 +318,8 @@ bus_message(GstBus *bus, GstMessage *message, gpointer data)
 									   : "unknown",
 			  error->message, debug != NULL ? debug : "(none)");
 		if (self->joining != NULL) {
-			g_task_return_error(self->joining, g_error_copy(error));
-			g_clear_object(&self->joining);
+			g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
+			g_task_return_error(joining, g_error_copy(error));
 			return G_SOURCE_CONTINUE;
 		}
 		if (!self->leaving && self->reconnect_attempts > 0 && !self->recovering)
@@ -330,19 +364,22 @@ tick(gpointer data)
 		g_object_get(tx, "connection-state", &tx_state, NULL);
 		g_object_unref(rx);
 		g_object_unref(tx);
-		if (g_task_return_error_if_cancelled(self->joining))
-			g_clear_object(&self->joining);
-		else if (rx_state != 0 && tx_state >= 3) {
+		if (g_cancellable_is_cancelled(g_task_get_cancellable(self->joining))) {
+			g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
+			g_task_return_error_if_cancelled(joining);
+		} else if (rx_state != 0 && tx_state >= 3) {
+			g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
 			g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit joined: receiver=%d publisher=%d",
 				  rx_state, tx_state);
-			g_task_return_boolean(self->joining, TRUE);
-			g_clear_object(&self->joining);
+			g_task_return_boolean(joining, TRUE);
 		} else if (g_get_monotonic_time() >= self->join_deadline) {
-			g_task_return_new_error(self->joining, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+			g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
+			g_task_return_new_error(joining, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
 									"LiveKit join timed out");
-			g_clear_object(&self->joining);
 		}
 	}
+	if (self->pipeline == NULL)
+		return G_SOURCE_REMOVE;
 	media_clock = gst_element_get_clock(self->pipeline);
 	if (media_clock == NULL)
 		return G_SOURCE_CONTINUE;
@@ -361,6 +398,27 @@ tick(gpointer data)
 														self->output_rate) >
 			now)
 			break;
+		if (packets == 0 &&
+			now > self->output_origin +
+					  gst_util_uint64_scale(self->output_samples, GST_SECOND,
+											self->output_rate) +
+					  100 * GST_MSECOND) {
+			self->late_buffers++;
+			if (g_get_monotonic_time() - self->last_late_log >= G_USEC_PER_SEC) {
+				self->last_late_log = g_get_monotonic_time();
+				g_log("ai-glib", G_LOG_LEVEL_INFO,
+					  "LiveKit delayed audio dispatch: late-buffers=%" G_GUINT64_FORMAT,
+					  self->late_buffers);
+			}
+		}
+		/* Negotiate with silence, retaining all speech until media is ready. */
+		if (self->joining != NULL || self->recovering) {
+			GstBuffer *silence =
+				gst_buffer_new_allocate(NULL, 2 * (self->output_rate / 100), NULL);
+			gst_buffer_memset(silence, 0, 0, 2 * (self->output_rate / 100));
+			push_pcm(self, silence, self->output_rate / 100);
+			continue;
+		}
 		/* Retire completed writes without inserting a silent tick between frames. */
 		while ((o = g_queue_peek_head(&self->playback)) != NULL) {
 			gsize size = g_bytes_get_size(o->pcm);
@@ -371,6 +429,8 @@ tick(gpointer data)
 				return G_SOURCE_CONTINUE;
 			g_queue_pop_head(&self->playback);
 			self->queued_bytes -= size;
+			if (!g_cancellable_is_cancelled(g_task_get_cancellable(o->task)))
+				remember_output(self, o);
 			g_task_return_boolean(o->task, TRUE);
 			output_free(o);
 		}
@@ -410,18 +470,20 @@ tick(gpointer data)
 														  "voice-speaking");
 						g_log("ai-glib", G_LOG_LEVEL_INFO,
 							  "LiveKit first non-silent appsrc PCM accepted: "
-							  "samples=%" G_GSIZE_FORMAT,
-							  count / 2);
+							  "samples=%" G_GSIZE_FORMAT
+							  " join-to-pcm-ms=%" G_GINT64_FORMAT,
+							  count / 2,
+							  (g_get_monotonic_time() - self->call_started) / 1000);
 						break;
 					}
 			}
-			o->offset += count;
-			if (flow != GST_FLOW_OK) {
-				g_queue_pop_head(&self->playback);
-				self->queued_bytes -= size;
-				g_task_return_new_error(o->task, G_IO_ERROR, G_IO_ERROR_FAILED,
-										"LiveKit PCM push failed");
-				output_free(o);
+			if (flow == GST_FLOW_OK)
+				o->offset += count;
+			else {
+				g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit PCM push failed: %s",
+					  gst_flow_get_name(flow));
+				begin_recovery(self);
+				return G_SOURCE_REMOVE;
 			}
 		} else if (self->appsrc != NULL) {
 			GstBuffer *silence =
@@ -450,8 +512,8 @@ started(GObject *source, GAsyncResult *result, gpointer data)
 	g_autoptr(GError) error = NULL;
 	if (!g_task_propagate_boolean(G_TASK(result), &error) && self->joining != NULL &&
 		g_task_get_task_data(G_TASK(result)) == self->pipeline) {
-		g_task_return_error(self->joining, g_steal_pointer(&error));
-		g_clear_object(&self->joining);
+		g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
+		g_task_return_error(joining, g_steal_pointer(&error));
 	}
 }
 /* JWT payload is used only to exclude our own publisher, never to authenticate. */
@@ -536,6 +598,8 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 		return;
 	}
 	if (!self->recovering) {
+		self->call_started = g_get_monotonic_time();
+		self->reconnect_count = self->dropped_buffers = self->late_buffers = 0;
 		g_free(self->room);
 		g_free(self->token);
 		self->room = g_strdup(room);
@@ -557,6 +621,11 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	g_signal_connect(self->pipeline, "deep-element-added", G_CALLBACK(configure_ice),
 					 NULL);
 	self->input = gst_element_factory_make("livekitwebrtcsrc", NULL);
+	{
+		guint64 *generation = g_new(guint64, 1);
+		*generation = self->generation;
+		g_object_set_data_full(G_OBJECT(self->input), "voice-generation", generation, g_free);
+	}
 	self->output = gst_element_factory_make("livekitwebrtcsink", NULL);
 	self->appsrc = gst_element_factory_make("appsrc", "voice-output");
 	converter = gst_parse_bin_from_description(
@@ -627,11 +696,12 @@ detach(AiLivekitTransport *self)
 	GstElement *pipeline = g_steal_pointer(&self->pipeline);
 	clear_source(&self->clock);
 	clear_source(&self->bus_source);
-	flush(AI_AUDIO_TRANSPORT(self));
+	if (!self->recovering)
+		flush(AI_AUDIO_TRANSPORT(self));
 	if (self->joining != NULL) {
-		g_task_return_new_error(self->joining, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+		g_autoptr(GTask) joining = g_steal_pointer(&self->joining);
+		g_task_return_new_error(joining, G_IO_ERROR, G_IO_ERROR_CANCELLED,
 								"Left while joining");
-		g_clear_object(&self->joining);
 	}
 	if (self->input != NULL)
 		g_signal_handlers_disconnect_by_data(self->input, self);
@@ -670,7 +740,8 @@ recovery_joined(GObject *source, GAsyncResult *result, gpointer data)
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(source);
 	g_autoptr(GError) error = NULL;
 	gboolean ok = g_task_propagate_boolean(G_TASK(result), &error);
-	if (!self->recovering || self->leaving)
+	if (!self->recovering || self->leaving ||
+		g_task_get_cancellable(G_TASK(result)) != self->retry_cancel)
 		return;
 	if (ok) {
 		self->recovering = FALSE;
@@ -688,6 +759,7 @@ retry_join(gpointer data)
 	if (!self->recovering || self->leaving)
 		return G_SOURCE_REMOVE;
 	self->retry_count++;
+	self->reconnect_count++;
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit reconnect attempt %u", self->retry_count);
 	join_async(AI_AUDIO_TRANSPORT(self), self->room, self->token, self->retry_cancel,
 			   recovery_joined, NULL);
@@ -698,16 +770,28 @@ recovery_stopped(GObject *source, GAsyncResult *result, gpointer data)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(source);
 	g_task_propagate_boolean(G_TASK(result), NULL);
-	if (!self->recovering || self->leaving)
+	if (!self->recovering || self->leaving ||
+		g_task_get_cancellable(G_TASK(result)) != self->retry_cancel)
 		return;
 	if (self->retry_count >= self->reconnect_attempts) {
 		g_autoptr(GError) error = g_error_new_literal(
 			G_IO_ERROR, G_IO_ERROR_FAILED, "LiveKit reconnect attempts exhausted");
 		self->recovering = FALSE;
+		flush(AI_AUDIO_TRANSPORT(self));
 		g_signal_emit_by_name(self, "error", error);
 		return;
 	}
-	self->retry_source = g_timeout_source_new(self->reconnect_delay_ms);
+	{
+		guint delay = MIN(10000, self->reconnect_delay_ms);
+		guint i;
+		for (i = 0; i < self->retry_count && delay < 10000; i++)
+			delay = MIN(10000, delay * 2);
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "LiveKit recovery waiting: attempt=%u delay-ms=%u "
+			  "queued-bytes=%" G_GSIZE_FORMAT,
+			  self->retry_count + 1, delay, self->queued_bytes);
+		self->retry_source = g_timeout_source_new(delay);
+	}
 	g_source_set_callback(self->retry_source, retry_join, g_object_ref(self),
 						  g_object_unref);
 	g_source_attach(self->retry_source, self->context);
@@ -715,7 +799,7 @@ recovery_stopped(GObject *source, GAsyncResult *result, gpointer data)
 static void
 schedule_recovery(AiLivekitTransport *self)
 {
-	g_autoptr(GTask) task = g_task_new(self, NULL, recovery_stopped, NULL);
+	g_autoptr(GTask) task = g_task_new(self, self->retry_cancel, recovery_stopped, NULL);
 	GstElement *pipeline = detach(self);
 	if (pipeline == NULL)
 		g_task_return_boolean(task, TRUE);
@@ -729,6 +813,29 @@ begin_recovery(AiLivekitTransport *self)
 {
 	self->recovering = TRUE;
 	self->retry_count = 0;
+	/* Include locally-completed PCM that may still have been in the old
+	 * encoder or remote jitter buffer. This is intentionally at-least-once
+	 * at the interruption boundary, not an impossible remote exactly-once claim. */
+	if (!g_queue_is_empty(&self->playback)) {
+		Output *head = g_queue_peek_head(&self->playback);
+		head->offset -= MIN(head->offset, (gsize)(head->rate / 50 * 2));
+		head->end_time = 0;
+	}
+	while (!g_queue_is_empty(&self->recent)) {
+		Output *tail = g_queue_pop_tail(&self->recent);
+		if (g_get_monotonic_time() - tail->completed_at > 250000) {
+			output_free(tail);
+			continue;
+		}
+		tail->task = g_task_new(self, NULL, NULL, NULL);
+		self->queued_bytes += g_bytes_get_size(tail->pcm);
+		g_queue_push_head(&self->playback, tail);
+	}
+	g_log("ai-glib", G_LOG_LEVEL_INFO,
+		  "LiveKit preserving queued speech: replay-ms=%" G_GUINT64_FORMAT
+		  " queued-bytes=%" G_GSIZE_FORMAT,
+		  self->recent_ns / GST_MSECOND, self->queued_bytes);
+	self->recent_ns = 0;
 	g_clear_object(&self->retry_cancel);
 	self->retry_cancel = g_cancellable_new();
 	g_signal_emit_by_name(self, "reconnecting");
@@ -751,7 +858,7 @@ write_pcm_async(AiAudioTransport *transport, GBytes *pcm, guint sample_rate,
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
 	gsize size = g_bytes_get_size(pcm);
 	Output *o;
-	if (self->pipeline == NULL || size % 2 != 0 ||
+	if ((self->pipeline == NULL && !self->recovering) || size % 2 != 0 ||
 		size + self->queued_bytes > 4 * 1024 * 1024) {
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 								"Transport not joined or invalid/oversized PCM");
@@ -797,6 +904,12 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->reconnect_delay_ms);
 	else if (id == 5)
 		g_value_set_uint(value, self->opus_bitrate);
+	else if (id == 6)
+		g_value_set_uint64(value, self->reconnect_count);
+	else if (id == 7)
+		g_value_set_uint64(value, self->dropped_buffers);
+	else if (id == 8)
+		g_value_set_uint64(value, self->late_buffers);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -853,6 +966,22 @@ ai_livekit_transport_class_init(AiLivekitTransportClass *klass)
 	oc->dispose = dispose;
 	oc->finalize = finalize;
 	g_object_class_install_property(
+		oc, 6,
+		g_param_spec_uint64("reconnect-count", "Reconnect count",
+							"Recovery attempts in the current call", 0, G_MAXUINT64, 0,
+							G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, 7,
+		g_param_spec_uint64("dropped-buffers", "Dropped buffers",
+							"Queued writes discarded by explicit cancellation or leave",
+							0, G_MAXUINT64, 0,
+							G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, 8,
+		g_param_spec_uint64("late-buffers", "Late buffers",
+							"Dispatches over 100 milliseconds behind the media clock", 0,
+							G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
 		oc, 3,
 		g_param_spec_uint(
 			"reconnect-attempts", "Reconnect attempts",
@@ -860,10 +989,10 @@ ai_livekit_transport_class_init(AiLivekitTransportClass *klass)
 			G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, 4,
-		g_param_spec_uint("reconnect-delay-ms", "Reconnect delay",
-						  "Delay between media recovery attempts", 1, 60000, 500,
-						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
-							  G_PARAM_STATIC_STRINGS));
+		g_param_spec_uint(
+			"reconnect-delay-ms", "Reconnect delay",
+			"Initial recovery delay; doubles after failures up to 10000 ms", 1, 60000,
+			500, G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, 5,
 		g_param_spec_uint("opus-bitrate", "Opus bitrate",

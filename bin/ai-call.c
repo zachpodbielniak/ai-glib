@@ -4,6 +4,7 @@
 #include <libsoup/soup.h>
 #include "core/ai-json-util.h"
 #include "call/ai-call-config.h"
+#include "call/ai-call-speech-cache.h"
 
 #define MEMBER "org.matrix.msc3401.call.member"
 #define RING "org.matrix.msc4075.rtc.notification"
@@ -17,6 +18,7 @@ struct _App {
 	SoupSession *http;
 	AiConfig *config;
 	AiCallConfig *call_config;
+	AiCallSpeechCache *speech_cache;
 	GHashTable *calls;
 	GCancellable *sync_cancel;
 	gchar *homeserver, *mxid, *access, *device, *jwt_url, *foci;
@@ -37,6 +39,12 @@ struct _Call {
 	AiSpeechSynthesizer *synthesizer;
 	gboolean outbound, closing, history_ready, greeted, clearing, left;
 	guint retry_source, answer_source;
+	GSource *goodbye_source, *goodbye_retry;
+	gchar *goodbye_text;
+	GCancellable *goodbye_cancel;
+	guint goodbye_writes, transcripts, errors;
+	gboolean goodbye_pending, goodbye_done, media_joined;
+	gint64 started_at;
 	gint64 answer_deadline, answered_at, transcript_at;
 };
 typedef struct {
@@ -58,6 +66,21 @@ maybe_exit(App *app)
 	if (app->stopping && app->pending == 0 && g_hash_table_size(app->calls) == 0)
 		g_main_loop_quit(app->loop);
 }
+static void
+fallback_ready(AiCallSpeechCache *cache, AiVoiceSession *session)
+{
+	GBytes *pcm = ai_call_speech_cache_get_pcm(cache);
+	if (pcm != NULL)
+		g_object_set(session, "fallback-pcm", pcm, "fallback-sample-rate",
+					 ai_call_speech_cache_get_sample_rate(cache), NULL);
+}
+static void
+fallback_completed(AiCallSpeechCache *cache, gboolean available, gpointer data)
+{
+	App *app = data;
+	app->pending--;
+	maybe_exit(app);
+}
 static Call *
 call_ref(Call *call)
 {
@@ -76,6 +99,7 @@ call_unref(gpointer data)
 		g_source_remove(call->answer_source);
 	if (call->voice != NULL)
 		ai_voice_session_stop(call->voice);
+	g_clear_object(&call->goodbye_cancel);
 	g_clear_object(&call->voice);
 	g_clear_object(&call->transport);
 	g_clear_object(&call->synthesizer);
@@ -84,6 +108,7 @@ call_unref(gpointer data)
 	g_free(call->tx_token);
 	g_free(call->rx_token);
 	g_free(call->opening);
+	g_free(call->goodbye_text);
 	g_free(call->target);
 	g_string_free(call->context, TRUE);
 	g_free(call);
@@ -227,6 +252,15 @@ left_room(GObject *source, GAsyncResult *result, gpointer data)
 	removed_if_done(call);
 	call_unref(call);
 }
+static guint64
+transport_counter(Call *call, const gchar *name)
+{
+	guint64 value = 0;
+	if (call->transport != NULL &&
+		g_object_class_find_property(G_OBJECT_GET_CLASS(call->transport), name) != NULL)
+		g_object_get(call->transport, name, &value, NULL);
+	return value;
+}
 static void
 close_call(Call *call)
 {
@@ -234,6 +268,24 @@ close_call(Call *call)
 	if (call->closing)
 		return;
 	call->closing = TRUE;
+	if (call->goodbye_source != NULL) {
+		g_source_destroy(call->goodbye_source);
+		g_clear_pointer(&call->goodbye_source, g_source_unref);
+	}
+	if (call->goodbye_retry != NULL) {
+		g_source_destroy(call->goodbye_retry);
+		g_clear_pointer(&call->goodbye_retry, g_source_unref);
+	}
+	if (call->goodbye_cancel != NULL)
+		g_cancellable_cancel(call->goodbye_cancel);
+	g_log("ai-call", G_LOG_LEVEL_INFO,
+		  "Call summary: room=%s duration-ms=%" G_GINT64_FORMAT
+		  " transcripts=%u errors=%u reconnects=%" G_GUINT64_FORMAT
+		  " dropped-buffers=%" G_GUINT64_FORMAT " late-buffers=%" G_GUINT64_FORMAT,
+		  call->room, (g_get_monotonic_time() - call->started_at) / 1000,
+		  call->transcripts, call->errors, transport_counter(call, "reconnect-count"),
+		  transport_counter(call, "dropped-buffers"),
+		  transport_counter(call, "late-buffers"));
 	call->clearing = TRUE;
 	if (call->answer_source != 0) {
 		g_source_remove(call->answer_source);
@@ -245,6 +297,8 @@ close_call(Call *call)
 	}
 	if (call->synthesizer != NULL)
 		g_signal_handlers_disconnect_by_data(call->synthesizer, call);
+	if (call->transport != NULL)
+		g_signal_handlers_disconnect_by_data(call->transport, call);
 	/* Membership removal runs independently of media teardown and uses a fresh
 	 * cancellable: SIGTERM must not cancel its own cleanup request. */
 	put_member(call, body, cleared);
@@ -263,7 +317,23 @@ failed(Call *call, const GError *error)
 static void
 voice_error(AiVoiceSession *voice, GError *error, gpointer data)
 {
-	g_printerr("Voice: %s\n", error->message);
+	Call *call = data;
+	call->errors++;
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Voice error: room=%s error=%s", call->room,
+		  error->message);
+}
+static void
+terminal_media_error(AiAudioTransport *transport, GError *error, gpointer data)
+{
+	Call *call = data;
+	if (call->closing)
+		return;
+	/* Transient recovery uses reconnecting/reconnected. The error signal
+	 * means this transport cannot recover; release the room membership. */
+	g_log("ai-call", G_LOG_LEVEL_INFO,
+		  "Call media unavailable; ending call: room=%s error=%s", call->room,
+		  error != NULL ? error->message : "unknown media error");
+	close_call(call);
 }
 static void
 voice_state(AiVoiceSession *voice, AiVoiceState state, gpointer data)
@@ -287,6 +357,7 @@ voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 {
 	Call *call = data;
 	if (final) {
+		call->transcripts++;
 		call->transcript_at = g_get_monotonic_time();
 		g_print("Transcript [%s]: %s\n", speaker, text);
 	}
@@ -375,6 +446,7 @@ joined_room(GObject *source, GAsyncResult *result, gpointer data)
 	if (!ai_audio_transport_join_finish(AI_AUDIO_TRANSPORT(source), result, &error))
 		failed(call, error);
 	else if (!call->closing) {
+		call->media_joined = TRUE;
 		g_log("ai-call", G_LOG_LEVEL_INFO, "Call media joined: room=%s", call->room);
 		if (call->outbound) {
 			call->answer_deadline = g_get_monotonic_time() + 30000000;
@@ -437,19 +509,30 @@ maybe_connect(Call *call)
 									   AI_SPEECH_SYNTHESIZER(tts), AI_VOICE_ACTIVITY(vad),
 									   conversation);
 	if (app->call_config != NULL) {
-		guint timeout, silence, mode, deadline, barge_in;
-		g_autofree gchar *fallback = NULL, *transcription_error = NULL;
-		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "trailing-silence-ms",
-					 &silence, "vad-mode", &mode, "turn-deadline-ms", &deadline,
-					 "barge-in-ms", &barge_in, "deadline-message", &fallback,
-					 "transcription-error-message", &transcription_error, NULL);
+		guint timeout, tts_timeout, silence, mode, deadline, barge_in;
+		g_autofree gchar *fallback = NULL, *transcription_error = NULL,
+						 *synthesis_error = NULL;
+		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "tts-timeout-ms",
+					 &tts_timeout, "trailing-silence-ms", &silence, "vad-mode", &mode,
+					 "turn-deadline-ms", &deadline, "barge-in-ms", &barge_in,
+					 "deadline-message", &fallback, "transcription-error-message",
+					 &transcription_error, "synthesis-error-message", &synthesis_error,
+					 NULL);
 		g_object_set(stt, "timeout-ms", timeout, NULL);
+		g_object_set(tts, "timeout-ms", tts_timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
 		g_object_set(call->voice, "turn-deadline-ms", deadline, "deadline-message",
 					 fallback, "transcription-error-message", transcription_error,
-					 "barge-in-ms", barge_in, NULL);
+					 "barge-in-ms", barge_in, "synthesis-error-message", synthesis_error,
+					 NULL);
+	}
+	if (app->speech_cache != NULL) {
+		fallback_ready(app->speech_cache, call->voice);
+		g_signal_connect_object(app->speech_cache, "ready", G_CALLBACK(fallback_ready),
+								call->voice, 0);
 	}
 	g_signal_connect(call->voice, "error", G_CALLBACK(voice_error), call);
+	g_signal_connect(call->transport, "error", G_CALLBACK(terminal_media_error), call);
 	g_signal_connect(call->voice, "state-changed", G_CALLBACK(voice_state), call);
 	g_signal_connect(call->voice, "transcript", G_CALLBACK(voice_transcript), call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
@@ -619,6 +702,7 @@ start_call(App *app, const gchar *room, const gchar *opening, const gchar *targe
 	call = g_new0(Call, 1);
 	g_ref_count_init(&call->refs);
 	call->app = app;
+	call->started_at = g_get_monotonic_time();
 	call->room = g_strdup(room);
 	call->key = g_strdup_printf("_%s_%s_m.call", app->mxid, app->device);
 	call->opening = g_strdup(opening);
@@ -808,6 +892,8 @@ primed(App *app, JsonNode *root, const GError *error, gpointer data)
 		g_printerr("Initial Matrix sync failed\n");
 		app->exit_status = 1;
 		app->stopping = TRUE;
+		if (app->speech_cache != NULL)
+			ai_call_speech_cache_cancel(app->speech_cache);
 		return;
 	}
 	app->since = g_strdup(since);
@@ -832,6 +918,113 @@ primed(App *app, JsonNode *root, const GError *error, gpointer data)
 		sync_next(app);
 	}
 }
+/* Shutdown speech has its own deadline and cancellable: it must never delay
+ * membership cleanup while a speech service or media connection is stalled. */
+static void
+goodbye_write_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Call *call = data;
+	g_autoptr(GError) error = NULL;
+	ai_audio_transport_write_pcm_finish(AI_AUDIO_TRANSPORT(source), result, &error);
+	call->goodbye_writes--;
+	if (!call->closing &&
+		(error != NULL || (call->goodbye_done && call->goodbye_writes == 0)))
+		close_call(call);
+	call_unref(call);
+}
+static void
+goodbye_audio(AiSpeechSynthesizer *synth, GBytes *pcm, guint rate, gpointer data)
+{
+	Call *call = data;
+	if (call->closing || !call->goodbye_pending)
+		return;
+	call->goodbye_writes++;
+	ai_audio_transport_write_pcm_async(call->transport, pcm, rate, call->goodbye_cancel,
+									   goodbye_write_done, call_ref(call));
+}
+static gboolean
+goodbye_retry(gpointer data);
+static void
+goodbye_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Call *call = data;
+	g_autoptr(GError) error = NULL;
+	ai_speech_synthesizer_synthesize_finish(AI_SPEECH_SYNTHESIZER(source), result,
+											&error);
+	if (!call->closing && g_error_matches(error, G_IO_ERROR, G_IO_ERROR_PENDING)) {
+		/* Cancellation is asynchronous. Wait for the previous synthesis to
+		 * release the service without extending the original shutdown budget. */
+		call->goodbye_retry = g_timeout_source_new(25);
+		g_source_set_callback(call->goodbye_retry, goodbye_retry, call_ref(call),
+							  call_unref);
+		g_source_attach(call->goodbye_retry, g_main_context_get_thread_default());
+		call_unref(call);
+		return;
+	}
+	call->goodbye_done = TRUE;
+	if (!call->closing) {
+		if (error != NULL)
+			g_log("ai-call", G_LOG_LEVEL_INFO, "Shutdown speech failed: %s",
+				  error->message);
+		if (error != NULL || call->goodbye_writes == 0)
+			close_call(call);
+	}
+	call_unref(call);
+}
+static gboolean
+goodbye_retry(gpointer data)
+{
+	Call *call = data;
+	g_clear_pointer(&call->goodbye_retry, g_source_unref);
+	if (!call->closing)
+		ai_speech_synthesizer_synthesize_async(call->synthesizer, call->goodbye_text,
+											   call->goodbye_cancel, goodbye_done,
+											   call_ref(call));
+	return G_SOURCE_REMOVE;
+}
+static gboolean
+goodbye_timeout(gpointer data)
+{
+	Call *call = data;
+	g_clear_pointer(&call->goodbye_source, g_source_unref);
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Shutdown speech deadline: room=%s", call->room);
+	close_call(call);
+	return G_SOURCE_REMOVE;
+}
+static void
+shutdown_call(Call *call)
+{
+	g_autofree gchar *goodbye = NULL;
+	if (call->closing || call->goodbye_pending)
+		return;
+	if (call->app->call_config != NULL)
+		g_object_get(call->app->call_config, "goodbye-message", &goodbye, NULL);
+	else
+		goodbye = g_strdup("Goodbye.");
+	if (!call->media_joined || call->synthesizer == NULL || goodbye == NULL ||
+		*goodbye == '\0') {
+		close_call(call);
+		return;
+	}
+	call->goodbye_pending = TRUE;
+	call->goodbye_text = g_steal_pointer(&goodbye);
+	if (call->voice != NULL) {
+		g_signal_handlers_disconnect_by_data(call->voice, call);
+		ai_voice_session_stop(call->voice);
+	}
+	g_signal_handlers_disconnect_by_data(call->synthesizer, call);
+	call->goodbye_cancel = g_cancellable_new();
+	call->goodbye_source = g_timeout_source_new(2000);
+	g_source_set_callback(call->goodbye_source, goodbye_timeout, call_ref(call),
+						  call_unref);
+	g_source_attach(call->goodbye_source, g_main_context_get_thread_default());
+	g_signal_connect(call->synthesizer, "audio", G_CALLBACK(goodbye_audio), call);
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Shutdown speech queued: room=%s budget-ms=2000",
+		  call->room);
+	ai_speech_synthesizer_synthesize_async(call->synthesizer, call->goodbye_text,
+										   call->goodbye_cancel, goodbye_done,
+										   call_ref(call));
+}
 static gboolean
 shutdown_app(gpointer data)
 {
@@ -841,10 +1034,12 @@ shutdown_app(gpointer data)
 	if (app->stopping)
 		return G_SOURCE_CONTINUE;
 	app->stopping = TRUE;
+	if (app->speech_cache != NULL)
+		ai_call_speech_cache_cancel(app->speech_cache);
 	g_cancellable_cancel(app->sync_cancel);
 	g_hash_table_iter_init(&iter, app->calls);
 	while (g_hash_table_iter_next(&iter, NULL, &value))
-		close_call(value);
+		shutdown_call(value);
 	maybe_exit(app);
 	return G_SOURCE_CONTINUE;
 }
@@ -1065,11 +1260,21 @@ main(int argc, char **argv)
 	g_unix_signal_add(SIGTERM, shutdown_app, &app);
 	g_unix_signal_add(SIGINT, shutdown_app, &app);
 	g_timeout_add_seconds(1, watch_drop, &app);
+	{
+		g_autofree gchar *message = NULL;
+		g_object_get(app.call_config, "synthesis-error-message", &message, NULL);
+		app.speech_cache = ai_call_speech_cache_new(app.tts_url, message);
+		g_signal_connect(app.speech_cache, "completed", G_CALLBACK(fallback_completed),
+						 &app);
+		app.pending++;
+		ai_call_speech_cache_start(app.speech_cache);
+	}
 	url = g_strconcat(app.homeserver, "/_matrix/client/v3/sync?timeout=0", NULL);
 	request(&app, "GET", url, TRUE, NULL, app.sync_cancel, primed, NULL, NULL);
 	g_print("ai-call watching as %s (%s)\n", app.mxid, app.device);
 	g_main_loop_run(app.loop);
 cleanup:
+	g_clear_object(&app.speech_cache);
 	g_clear_pointer(&app.calls, g_hash_table_unref);
 	g_clear_object(&app.http);
 	g_clear_object(&app.sync_cancel);

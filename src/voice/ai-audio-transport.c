@@ -8,7 +8,9 @@ ai_audio_transport_default_init(AiAudioTransportInterface *iface)
 	 * AiAudioTransport::reconnecting:
 	 * @self: the transport
 	 *
-	 * Media recovery began. Discard the interrupted turn; await reconnected.
+	 * Media recovery began. Preserve the active turn and await reconnected.
+	 * Backends that resume queued playback keep write operations pending;
+	 * callers can still cancel them explicitly during recovery.
 	 */
 	g_signal_new("reconnecting", G_TYPE_FROM_INTERFACE(iface), G_SIGNAL_RUN_LAST, 0, NULL,
 				 NULL, NULL, G_TYPE_NONE, 0);

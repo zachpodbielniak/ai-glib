@@ -38,7 +38,7 @@ typedef struct {
 	guint64 generation;
 	guint pending;
 	gsize queued;
-	gboolean synthesized, discarded, remember, notice;
+	gboolean synthesized, discarded, remember, notice, fallback;
 } Speech;
 typedef struct {
 	Speech *speech;
@@ -46,7 +46,7 @@ typedef struct {
 } Playback;
 typedef struct {
 	gchar *text;
-	gboolean remember, notice;
+	gboolean remember, notice, fallback;
 } Line;
 
 struct _AiVoiceSession {
@@ -57,7 +57,9 @@ struct _AiVoiceSession {
 	AiVoiceActivity *activity;
 	AiVoiceWorker *worker;
 	AiConversation *conversation;
-	gchar *deadline_message, *transcription_error_message;
+	gchar *deadline_message, *transcription_error_message, *synthesis_error_message;
+	GBytes *fallback_pcm;
+	guint fallback_sample_rate;
 	GMainContext *context;
 	GHashTable *participants, *notices;
 	GQueue turns, lines, pending_notices;
@@ -66,6 +68,7 @@ struct _AiVoiceSession {
 	GCancellable *turn_cancel;
 	GSource *deadline;
 	guint deadline_ms, barge_in_ms;
+	gint64 paused_deadline_us;
 	guint64 generation, provider_generation;
 	AiVoiceState state;
 	gboolean stopped, provider_pending, media_recovering;
@@ -81,7 +84,10 @@ enum {
 	PROP_ACTIVITY,
 	PROP_CONVERSATION,
 	PROP_DEADLINE_MESSAGE,
-	PROP_TRANSCRIPTION_ERROR_MESSAGE
+	PROP_TRANSCRIPTION_ERROR_MESSAGE,
+	PROP_SYNTHESIS_ERROR_MESSAGE,
+	PROP_FALLBACK_PCM,
+	PROP_FALLBACK_SAMPLE_RATE
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -119,8 +125,10 @@ state(AiVoiceSession *self, AiVoiceState next)
 static void
 report(AiVoiceSession *self, const GError *error)
 {
-	if (error != NULL && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+	if (error != NULL && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "Voice service error: %s", error->message);
 		g_signal_emit_by_name(self, "error", error);
+	}
 }
 static void
 clear_deadline(AiVoiceSession *self)
@@ -232,6 +240,20 @@ synthesized(GObject *source, GAsyncResult *result, gpointer data)
 												 &error)) {
 		s->discarded = TRUE;
 		report(s->session, error);
+		if (!s->fallback && !s->session->stopped &&
+			s->generation == s->session->generation &&
+			!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+			/* A failed notice is not a barge-in: do not retry it indefinitely. */
+			s->notice = FALSE;
+			interrupt_turn(s->session);
+			if (s->session->synthesis_error_message != NULL &&
+			    *s->session->synthesis_error_message != '\0') {
+				Line *fallback = g_new0(Line, 1);
+				fallback->text = g_strdup(s->session->synthesis_error_message);
+				fallback->fallback = TRUE;
+				g_queue_push_head(&s->session->lines, fallback);
+			}
+		}
 	}
 	s->synthesized = TRUE;
 	speech_complete(s);
@@ -288,14 +310,22 @@ pump(AiVoiceSession *self)
 		s->text = g_steal_pointer(&line->text);
 		s->remember = line->remember;
 		s->notice = line->notice;
+		s->fallback = line->fallback;
 		s->cancel = g_cancellable_new();
 		s->generation = self->generation;
 		self->speech = s;
 		line_free(line);
 		state(self, AI_VOICE_SPEAKING);
 		g_signal_emit_by_name(self, "reply", s->text);
-		ai_speech_synthesizer_synthesize_async(self->synthesizer, s->text, s->cancel,
-											   synthesized, s);
+		if (s->fallback && self->fallback_pcm != NULL) {
+			s->synthesized = TRUE;
+			audio_out(self->synthesizer, self->fallback_pcm, self->fallback_sample_rate,
+					  self);
+			speech_complete(s);
+		} else {
+			ai_speech_synthesizer_synthesize_async(self->synthesizer, s->text, s->cancel,
+												   synthesized, s);
+		}
 		return;
 	}
 	if (!self->provider_pending) {
@@ -314,6 +344,7 @@ static void
 interrupt_turn(AiVoiceSession *self)
 {
 	clear_deadline(self);
+	self->paused_deadline_us = 0;
 	if (self->turn_cancel != NULL)
 		g_cancellable_cancel(self->turn_cancel);
 	if (self->speech != NULL) {
@@ -348,8 +379,11 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 			g_queue_push_tail(&self->pending_notices, notice);
 		}
 	} else if (kind == AI_VOICE_MAIL_DONE) {
-		if (generation == self->provider_generation)
+		if (generation == self->provider_generation) {
 			self->provider_pending = FALSE;
+			clear_deadline(self);
+			self->paused_deadline_us = 0;
+		}
 		if (generation == self->generation) {
 			if (error != NULL) {
 				g_autofree gchar *line =
@@ -551,25 +585,27 @@ static void
 transport_reconnecting(AiAudioTransport *transport, gpointer data)
 {
 	AiVoiceSession *self = data;
-	GHashTableIter iter;
-	gpointer key;
-	if (self->stopped)
+	if (self->stopped || self->media_recovering)
 		return;
 	self->media_recovering = TRUE;
-	interrupt_turn(self);
-	g_hash_table_iter_init(&iter, self->participants);
-	while (g_hash_table_iter_next(&iter, &key, NULL)) {
-		ai_speech_recognizer_cancel(self->recognizer, key);
-		ai_voice_activity_reset(self->activity, key);
+	if (self->deadline != NULL) {
+		self->paused_deadline_us = MAX(
+			(gint64)1, g_source_get_ready_time(self->deadline) - g_get_monotonic_time());
+		clear_deadline(self);
 	}
-	g_hash_table_remove_all(self->participants);
-	state(self, AI_VOICE_LISTENING);
 }
 static void
 transport_reconnected(AiAudioTransport *transport, gpointer data)
 {
 	AiVoiceSession *self = data;
 	self->media_recovering = FALSE;
+	if (!self->stopped && self->provider_pending && self->paused_deadline_us > 0) {
+		self->deadline =
+			g_timeout_source_new((guint)((self->paused_deadline_us + 999) / 1000));
+		g_source_set_callback(self->deadline, deadline, self, NULL);
+		g_source_attach(self->deadline, self->context);
+	}
+	self->paused_deadline_us = 0;
 	pump(self);
 }
 static void
@@ -642,6 +678,8 @@ finalize(GObject *object)
 	g_string_free(self->spoken, TRUE);
 	g_free(self->deadline_message);
 	g_free(self->transcription_error_message);
+	g_free(self->synthesis_error_message);
+	g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->finalize(object);
 }
 static void
@@ -660,6 +698,12 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_object(value, self->recognizer);
 	else if (id == PROP_SYNTHESIZER)
 		g_value_set_object(value, self->synthesizer);
+	else if (id == PROP_SYNTHESIS_ERROR_MESSAGE)
+		g_value_set_string(value, self->synthesis_error_message);
+	else if (id == PROP_FALLBACK_PCM)
+		g_value_set_boxed(value, self->fallback_pcm);
+	else if (id == PROP_FALLBACK_SAMPLE_RATE)
+		g_value_set_uint(value, self->fallback_sample_rate);
 	else if (id == PROP_ACTIVITY)
 		g_value_set_object(value, self->activity);
 	else if (id == PROP_CONVERSATION)
@@ -685,7 +729,19 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		g_set_object(&self->recognizer, g_value_get_object(value));
 	else if (id == PROP_SYNTHESIZER)
 		g_set_object(&self->synthesizer, g_value_get_object(value));
-	else if (id == PROP_ACTIVITY)
+	else if (id == PROP_FALLBACK_PCM) {
+		GBytes *pcm = g_value_get_boxed(value);
+		g_return_if_fail(pcm == NULL || (g_bytes_get_size(pcm) > 0 &&
+										 g_bytes_get_size(pcm) <= 4 * 1024 * 1024 &&
+										 g_bytes_get_size(pcm) % 2 == 0));
+		g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
+		self->fallback_pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
+	} else if (id == PROP_FALLBACK_SAMPLE_RATE)
+		self->fallback_sample_rate = g_value_get_uint(value);
+	else if (id == PROP_SYNTHESIS_ERROR_MESSAGE) {
+		g_free(self->synthesis_error_message);
+		self->synthesis_error_message = g_value_dup_string(value);
+	} else if (id == PROP_ACTIVITY)
 		g_set_object(&self->activity, g_value_get_object(value));
 	else if (id == PROP_CONVERSATION)
 		g_set_object(&self->conversation, g_value_get_object(value));
@@ -729,6 +785,25 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	oc->finalize = finalize;
 	oc->get_property = get_property;
 	oc->set_property = set_property;
+	g_object_class_install_property(
+		oc, PROP_FALLBACK_PCM,
+		g_param_spec_boxed(
+			"fallback-pcm", "Fallback PCM",
+			"Optional in-memory S16LE mono spoken synthesis failure message",
+			G_TYPE_BYTES, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_FALLBACK_SAMPLE_RATE,
+		g_param_spec_uint("fallback-sample-rate", "Fallback sample rate",
+						  "Native rate of fallback PCM", 8000, 192000, 16000,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT |
+							  G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_SYNTHESIS_ERROR_MESSAGE,
+		g_param_spec_string("synthesis-error-message", "Synthesis error message",
+							"Spoken fallback after synthesis failure",
+							"Sorry, the speech service is unavailable. Please try again.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT |
+								G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_BARGE_IN,
 		g_param_spec_uint(

@@ -1,5 +1,5 @@
 diff --git a/net/webrtc/src/livekit_signaller/imp.rs b/net/webrtc/src/livekit_signaller/imp.rs
-index 7fe8121..99973bc 100644
+index 7fe8121..7ac0aa9 100644
 --- a/net/webrtc/src/livekit_signaller/imp.rs
 +++ b/net/webrtc/src/livekit_signaller/imp.rs
 @@ -81,7 +81,20 @@ struct Channels {
@@ -23,6 +23,15 @@ index 7fe8121..99973bc 100644
      signal_client: Arc<signal_client::SignalClient>,
      pending_tracks: HashMap<String, oneshot::Sender<proto::TrackInfo>>,
      signal_task: JoinHandle<()>,
+@@ -230,7 +243,7 @@ impl Signaller {
+                         break;
+                     }
+                 },
+-                Ok(None) => {}
++                Ok(None) => break,
+                 Err(err) => match err {
+                     WaitError::FutureAborted => {
+                         gst::debug!(CAT, imp = self, "Closing signal_task");
 @@ -242,6 +255,139 @@ impl Signaller {
          }
      }
@@ -222,3 +231,115 @@ index 7fe8121..99973bc 100644
                  signal_client,
                  signal_task,
                  pending_tracks: Default::default(),
+@@ -938,9 +1101,17 @@ impl SignallableImpl for Signaller {
+ 
+         let connection = self.connection.lock().unwrap().take();
+         if let Some(connection) = connection {
++            // The recv AbortHandle does not cancel an in-flight SDP callback.
++            // Cancel the whole task so it cannot install a new uncancelled recv
++            // while stop waits for it before closing the signalling socket.
++            connection.signal_task.abort();
+             RUNTIME.block_on(async {
+-                connection.signal_task.await.unwrap();
+-                Self::close_signal_client(&connection.signal_client).await;
++                let _ = connection.signal_task.await;
++                let _ = tokio::time::timeout(
++                    Duration::from_secs(2),
++                    Self::close_signal_client(&connection.signal_client),
++                )
++                .await;
+             });
+         }
+         self.obj().notify("connection-state");
+diff --git a/net/webrtc/src/webrtcsink/imp.rs b/net/webrtc/src/webrtcsink/imp.rs
+index bcbc06d..54c346a 100644
+--- a/net/webrtc/src/webrtcsink/imp.rs
++++ b/net/webrtc/src/webrtcsink/imp.rs
+@@ -2526,7 +2526,12 @@ impl BaseWebRTCSink {
+             let session_id = session.id.clone();
+             drop(session);
+ 
+-            self.on_remote_description_set(&session_id)
++            // Promise callbacks run on webrtcbin's PC thread. Building and
++            // synchronizing its parent pipeline here can wait for that same
++            // thread while a concurrent disconnect finalizes the session.
++            self.obj().call_async(move |obj| {
++                obj.imp().on_remote_description_set(&session_id);
++            });
+         }
+     }
+ 
+@@ -4002,7 +4007,11 @@ impl BaseWebRTCSink {
+                 session_id,
+                 move |reply| {
+                     gst::debug!(CAT, imp = this, "received reply {:?}", reply);
+-                    this.on_remote_description_set(&session_id);
++                    // Do not change the parent pipeline's state from the
++                    // webrtcbin PC thread that completed this promise.
++                    this.obj().call_async(move |obj| {
++                        obj.imp().on_remote_description_set(&session_id);
++                    });
+                 }
+             ));
+ 
+diff --git a/net/webrtc/src/webrtcsrc/pad.rs b/net/webrtc/src/webrtcsrc/pad.rs
+index f8d10f2..d62b86f 100644
+--- a/net/webrtc/src/webrtcsrc/pad.rs
++++ b/net/webrtc/src/webrtcsrc/pad.rs
+@@ -57,14 +57,48 @@ impl ObjectImpl for WebRTCSrcPad {
+     }
+     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+         match pspec.name() {
+-            "msid" => self
+-                .webrtcbin_pad
+-                .lock()
+-                .unwrap()
+-                .as_ref()
+-                .and_then(|p| p.upgrade())
+-                .and_then(|p| p.property::<Option<String>>("msid"))
+-                .to_value(),
++            "msid" => {
++                let pad = self
++                    .webrtcbin_pad
++                    .lock()
++                    .unwrap()
++                    .as_ref()
++                    .and_then(|p| p.upgrade());
++                let msid = pad.and_then(|pad| {
++                    pad.property::<Option<String>>("msid").or_else(|| {
++                        // A replacement SSRC after renegotiation can have no cached
++                        // webrtcbin pad MSID. The negotiated media section remains
++                        // authoritative for the stream's participant/track identity.
++                        let transceiver =
++                            pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
++                        let parent = pad.parent()?.downcast::<gst::Element>().ok()?;
++                        let description = parent
++                            .property::<Option<gst_webrtc::WebRTCSessionDescription>>(
++                                "remote-description",
++                            )?;
++                        let media = description.sdp().media(transceiver.mlineindex())?;
++                        media
++                            .attribute_val("msid")
++                            .and_then(|value| value.split_whitespace().next())
++                            .map(String::from)
++                            .or_else(|| {
++                                media.attributes().find_map(|attribute| {
++                                    if attribute.key() != "ssrc" {
++                                        return None;
++                                    }
++                                    attribute
++                                        .value()?
++                                        .split_once(" msid:")?
++                                        .1
++                                        .split_whitespace()
++                                        .next()
++                                        .map(String::from)
++                                })
++                            })
++                    })
++                });
++                msid.to_value()
++            }
+             name => panic!("no readable property {name:?}"),
+         }
+     }
