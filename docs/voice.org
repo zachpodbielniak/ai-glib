@@ -1,0 +1,318 @@
+#+title: Live voice sessions
+#+description: Audio transports, streaming speech, conversations and Matrix calls
+
+* Composition
+
+=AiVoiceSession= connects four replaceable audio interfaces to an existing
+=AiConversation=. The conversation remains responsible for provider selection,
+tools, tool history and background agents. The library has no Matrix dependency.
+
+| Interface | Contract | Shipped implementation |
+|-----------+----------+------------------------|
+| =AiAudioTransport= | Async join/leave; participant identity and audio; cancellable local playout | =AiLivekitTransport=, GStreamer LiveKit source/sink |
+| =AiSpeechRecognizer= | Independent streaming utterances keyed by participant | =AiWebsocketRecognizer= |
+| =AiSpeechSynthesizer= | Text request, streamed PCM, cancellable completion | =AiHttpSynthesizer= |
+| =AiVoiceActivity= | Per-participant speech and utterance-end decisions | =AiWebrtcVoiceActivity=, vendored WebRTC VAD through libfvad |
+
+All interface PCM is signed 16-bit *little-endian*, mono, 16 kHz. Sample counts,
+resampling phase and monotonic timestamps use integers. No audio is written to
+disk. The transport converts incoming tracks and the HTTP synthesizer resamples
+its response to that common format. The VAD accepts 10, 20 or 30 ms frames;
+the session splits transport buffers into 10 ms frames.
+
+The VAD's =trailing-silence-ms= property defaults to 600. Its =mode= property is
+WebRTC's aggressiveness, from 0 to 3, default 2. State is independent for each
+participant, and leaving resets only that participant's VAD and STT connection.
+
+* Session lifecycle
+
+#+begin_example
+listening -> transcribing -> thinking -> speaking -> listening
+                      ^                     |
+                      +------ barge-in -----+
+#+end_example
+
+A session begins listening. VAD speech opens that participant's STT stream;
+trailing silence sends EOS. A final transcript becomes =[Display name]: text=
+in the conversation. Final utterances from multiple participants are queued.
+Leaving a participant cancels only that participant's recognition.
+
+Streaming provider text is split at sentence-ending punctuation/newlines and
+submitted incrementally to TTS. Non-streaming providers submit their final
+reply. Tool execution remains inside the conversation's executor. Tool failure
+events enqueue an explicit spoken error notice. Tool results remain available
+to the model through the existing executor history.
+
+Signals, on the session's constructing thread-default context:
+
+| Signal | Parameters |
+|--------+------------|
+| =transcript= | display name, text, final boolean |
+| =reply= | text segment submitted for synthesis |
+| =state-changed= | =AiVoiceState= (registered GEnum) |
+| =error= | =GError= |
+
+=reply= means synthesis was requested; it does not mean the caller heard it.
+=state= is also a read-only property. =turn-deadline-ms= defaults to 20000. At
+the deadline the provider and TTS cancellables are cancelled, pending playback
+is flushed, and the session says a fallback line instead of going silent.
+Speech-service errors are reported through =error=; unavailable TTS cannot
+itself speak a fallback.
+
+=ai_voice_session_say()= queues greetings and other out-of-band notices.
+=ai_voice_session_stop()= must be called before releasing an active session.
+It cancels recognition, speech and the conversation worker. The embedding host
+owns asynchronous transport leave and any external room-membership cleanup.
+
+** Context and ownership
+
+The session takes references to all five components. It exclusively borrows
+the conversation for its lifetime: configure its provider, working directory,
+executor and brigade before constructing the voice session, and do not drive
+that conversation concurrently from another thread.
+
+Audio and network callbacks use the constructing thread-default context.
+Conversation/provider/brigade work runs on a persistent private context in a
+worker thread. This isolates existing synchronous tool implementations from
+the audio main loop without changing provider or executor behavior. Events
+are copied onto the audio context; generation ids discard late replies from
+cancelled turns. Sources are retained as =GSource *= and destroyed explicitly.
+
+The existing provider factory and =AiConversation= provider-switching APIs are
+reused. The current session API does not expose an in-call provider-switch
+command; select/configure a conversation before lending it to the session.
+
+** Barge-in and history
+
+The first speech frame during thinking or speaking cancels the provider run's
+=GCancellable= and the current synthesis/playback cancellable, then flushes the
+transport queue. An old turn cannot enqueue speech into its successor.
+
+The conversation now implements =AiEventSource= and has an opt-in
+=prepare-messages= signal. Voice uses that signal to preserve tool calls and
+results while projecting assistant prose to the acknowledged spoken prefix.
+Ordinary conversations, with no filter connected, retain their previous
+history behavior.
+
+*Precision limit:* the supplied TTS protocol has no word timestamps, and RTP
+has no acknowledgement that a human heard a word. History therefore retains
+fully played *segments*, using local playout acknowledgements. It omits the
+partially played segment at interruption. It never retains the unsaid ending,
+but cannot promise an exact word boundary within that interrupted segment.
+The transport paces PCM in 10 ms packets; remote jitter buffers may still
+contain audio after local cancellation.
+
+** Background agents
+
+Enable agents on the conversation with
+=ai_conversation_enable_background_agents()=, or install an existing brigade.
+The voice worker receives =AiConversation::agent-finished= and queues one
+short status notice, with a terminal-state distinction for success, failure
+and cancellation. It does *not* reap the result or drain the brigade's finish
+queue. The executor's existing next-turn notification and =agent_result=
+semantics therefore remain intact. A notice waits until the current utterance
+and turn are idle; an interrupted notice is queued again. Duplicate finish
+events do not enqueue another notice. A notice is not a provider turn.
+
+* Wire protocols
+
+** STT
+
+A websocket connects to =ws://HOST:8001/stt/stream= for each utterance.
+
+1. Server sends ={"type":"ready"}=.
+2. Client sends binary 16 kHz mono S16LE PCM frames.
+3. Client sends the text frame =EOS= after trailing silence.
+4. Server sends ={"type":"partial","text":"..."}= and finally
+   ={"type":"final","text":"..."}=.
+
+Audio received before ready is bounded and queued. EOS follows queued audio,
+never precedes ready. JSON members are type checked. Malformed protocol,
+unexpected closure and queue overflow are failures, not empty successful
+transcripts. Each participant connection is independently cancellable. The
+recognizer's =timeout-ms= property bounds waiting for ready and final replies
+(default 30000 ms).
+
+** TTS
+
+POST ={"text":"..."}= to =http://HOST:8089/synthesize/stream=.
+The response is:
+
+#+begin_example
+SR=<decimal sample rate>\n
+[u32 big-endian byte length][S16LE mono PCM]
+[u32 big-endian byte length][S16LE mono PCM]
+[u32 zero]
+#+end_example
+
+HTTP chunk boundaries are unrelated to protocol frames. Parsing spans reads,
+validates sample rate and even PCM byte lengths, bounds frame allocation, and
+requires the zero sentinel. EOF without it is an error. Resampling preserves
+integer phase across frames. Every HTTP operation and body read is cancellable.
+
+* LiveKit
+
+The transport uses =livekitwebrtcsrc= and =livekitwebrtcsink= from
+=gst-plugins-rs=. There is no Rust FFI shim or Python audio runtime in ai-glib.
+These elements create separate consumer and producer connections. They need
+*distinct JWT identities*: the constructor accepts =receive-token=, and
+=join_async()= accepts the publishing token. The publisher identity is excluded
+from the receiving connection to avoid self-transcription.
+
+Incoming source-pad =participant-info= supplies the stable participant id and
+display name. The outgoing appsrc is paced in 10 ms frames and publishes silence
+while listening so its track remains negotiated. Async write completion means
+local playout completion, not just insertion into a queue.
+
+** Build and dependencies
+
+In addition to the project's normal GLib, libsoup, JSON, libdex and YAML
+packages, C builds need =gstreamer1-devel= and
+=gstreamer1-plugins-base-devel= on Fedora. Runtime media needs the LiveKit,
+libnice, Opus, DTLS, SRTP and RTP congestion-control plugins. Missing LiveKit
+plugins produce a clear join error; they do not make offline mocks unusable.
+
+The shipping host was tested with gst-plugins-rs 0.14.5, revision
+=18a88c8=, and libnice 0.1.22. Build upstream plugins outside this repository:
+
+#+begin_src sh
+cargo build --release -p gst-plugin-webrtc --no-default-features --features livekit
+cargo build --release -p gst-plugin-rtp
+install -m755 target/release/libgstrswebrtc.so target/release/libgstrsrtp.so \
+  "$HOME/.local/lib/gstreamer-1.0/"
+#+end_src
+
+Those Rust builds also need GStreamer WebRTC development headers, OpenSSL
+headers and =protoc=. Rust is only a build dependency of the upstream plugins.
+The vendored C VAD revision/license/compatibility changes are recorded in
+=deps/webrtc-vad/README.ai-glib=.
+
+On hosts with addressless VPN interfaces, libnice UPnP discovery may warn.
+If necessary, build libnice with =-Dgupnp=disabled= and install it in a private
+prefix. Point =LD_LIBRARY_PATH= and =GST_PLUGIN_PATH= at that prefix; there
+is no need to replace system libraries or suppress warnings.
+
+* Configuration
+
+The normal layered ai-glib YAML file accepts:
+
+#+begin_src yaml
+apps:
+  ai-call:
+    default_provider: ollama
+    default_model: example-model
+voice:
+  stt_url: ws://speech.example.org:8001/stt/stream
+  tts_url: http://speech.example.org:8089/synthesize/stream
+  livekit_url: ws://127.0.0.1:7880
+  identity_file: /path/to/identity.md
+#+end_src
+
+=AiConfig= exposes =voice-stt-url=, =voice-tts-url=, =voice-livekit-url= and
+=voice-identity-file= properties. Explicit property setters override environment
+and YAML; otherwise environment overrides file values. =AI_VOICE_STT_URL=, =AI_VOICE_TTS_URL=,
+=AI_VOICE_LIVEKIT_URL= and =AI_VOICE_IDENTITY_FILE= override file values.
+Endpoint defaults use localhost. Provider/model selection uses the existing
+factory and scoped defaults, with =-p= and =-m= overrides.
+
+** Extending and configuring components
+
+=AiVoiceSession= has construct-only =transport=, =recognizer=, =synthesizer=,
+=activity= and =conversation= object properties, typed to their interfaces (or
+=AiConversation=). =ai_voice_session_new()= is a convenience wrapper around
+that same construction path. Bindings can use native property construction.
+A custom backend implements the corresponding GInterface and can be injected
+without modifying the session or any provider. The binary composes the shipped
+backends; it does not discover arbitrary backend modules at runtime.
+
+=deadline-message= and =transcription-error-message= are writable session
+properties; NULL or an empty string disables that spoken fallback. VAD exposes
+=mode= and =trailing-silence-ms=; the websocket recognizer exposes =timeout-ms=.
+Backend endpoint properties are construct-only, avoiding endpoint changes
+halfway through an active stream. Select a new backend for a new session.
+
+** Binary deployment settings
+
+Matrix-specific settings live in the binary's private =AiCallConfig= GObject,
+not the library. Its property schema drives validation, defaults and parsing.
+The same layered config files also accept a =ai_call= mapping:
+
+#+begin_src yaml
+ai_call:
+  credentials: /path/to/matrix-credentials.json
+  device: AIVOICE01
+  jwt-url: https://rtc.example.org/sfu/get
+  focus-url: https://rtc.example.org/livekit/jwt
+  outbound-path: /path/to/outbound-call.json
+  greeting: "Hello. How can I help?"
+  outbound-greeting: "Hello. Is now a good time?"
+  turn-deadline-ms: 20000
+  trailing-silence-ms: 600
+  vad-mode: 2
+  stt-timeout-ms: 30000
+  max-agents: 4
+  deadline-message: "Please try again shortly."
+  transcription-error-message: "Please repeat that."
+#+end_src
+
+Precedence: built-in defaults, standard system/admin/user YAML files, explicit
+=--config= file, environment, then =--call-set PROPERTY=VALUE=. The dedicated
+=--credentials= flag also overrides configuration. Unknown names, wrong node
+types and out-of-range integers fail; invalid overlays leave previous values
+unchanged. Settings are loaded at startup; there is no promise of live reload.
+=--list-call-settings= lists property names, types and defaults without loading
+credentials or contacting a service.
+
+Credentials, identity file, JWT URL and public focus URL must be supplied.
+There are no compiled personal paths, Matrix domains, participant names or UID.
+The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables use the =AI_CALL_= prefix. Numeric policy overrides are
+=AI_VOICE_TURN_DEADLINE_MS=, =AI_VOICE_TRAILING_SILENCE_MS=,
+=AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
+fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE= and
+=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE=.
+
+* ai-call and Matrix
+
+See [[file:cli.org::*ai-call][the CLI reference]]. The binary implements Matrix
+sync, OpenID/JWT exchange, state publication and cleanup; none of those
+operations is inside the library.
+
+Startup primes sync, reads joined-room state and clears nonempty memberships
+sent by the configured identity before watching new calls. Memberships from
+other identities trigger an answer. Hangup checks room state rather than assuming the first departure
+means everyone left. Cleanup writes empty membership content and retries
+failed clears, including during SIGTERM/SIGINT. The cleanup HTTP requests use
+an independent cancellation scope. A late membership PUT is cleared again.
+
+Outbound JSON drop files use the Python answerer's =room_id=, =message= and
+=target= fields. The file is consumed before starting the call. Ring events
+use =org.matrix.msc4075.rtc.notification= with an =m.reference= to the member
+event, mentions, audio intent and a 30-second lifetime. Outbound speech waits
+for a human member. Recent text/notice/emote room messages seed a bounded call
+context. Call setup and cleanup support more than one room.
+
+* Verification
+
+Offline GTests: =test-voice-session= (turns, barge-in, speakers, deadline,
+read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
+ready timeout, framing, malformed responses, resampling), =test-voice-config=,
+=test-voice-activity= and
+=test-voice-matrix= (answer, cleanup retry, stale state).
+
+The local media integration is opt-in and skips when LiveKit or the plugins
+are absent:
+
+#+begin_src sh
+LD_LIBRARY_PATH="$HOME/.local/lib/ai-call" \
+GST_PLUGIN_PATH="$HOME/.local/lib/gstreamer-1.0" \
+AI_VOICE_LIVEKIT_TEST=1 build/release/tests/test-voice-livekit
+#+end_src
+
+It starts its own dev server, joins two transports, delivers PCM to the peer,
+and leaves. It does not contact a real Matrix room.
+
+Live acceptance still requires a human call. The binary logs integer timing
+for membership-to-first-PCM and final-transcript-to-first-PCM. These are local
+measurements, not proof of when a caller hears audio. The three-second acceptance
+limits must be measured from answering and the end of the caller's sentence,
+including VAD, STT and remote playout.

@@ -492,3 +492,38 @@ Saved chat model defaults do not become media model defaults. For Grok HTTP, =-m
 Grok Build calls run in an isolated session with only the necessary tools enabled. Results must contain a successful structured media tool result with an artifact path or URL; a prose claim of success is an error. Requests are agent-mediated: exact tool arguments depend on the wrapped CLI agent following the supplied structured instruction. Neither provider is tested by spending real generation credits in the normal test suite.
 
 HTTP video generation submits once, then polls to completion with retry handling for polling requests. The library rejects unknown or malformed status replies, reports expired jobs and moderation errors, and honors cancellation and timeout while waiting or receiving data. The CLI streams the final artifact to disk without buffering the entire video. URLs expire, so save them promptly. See [[file:api-reference/ai-video-generator.org][the public video API]], [[file:providers/grok.org][Imagine HTTP]], [[file:providers/grok-build.org][Grok Build]], and [[file:specs/xai-imagine-provenance.org][the downloaded specification and provenance]].
+
+* ai-call
+
+=ai-call= is the MatrixRTC voice frontend. It embeds =AiVoiceSession= with
+LiveKit transport, WebRTC VAD, streaming STT/TTS and an =AiConversation= with
+local tools and background agents. Built by =make= and installed by
+=make install=.
+
+#+begin_example
+ai-call --config /path/to/config.yaml --identity /path/to/identity.md
+ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
+#+end_example
+
+| Option | Purpose |
+|--------+---------|
+| =--config PATH= | Load an additional ai-glib YAML configuration |
+| =--identity PATH= | Read the identity/system prompt from a file |
+| =--call-set PROPERTY=VALUE= | Override a validated call property (repeatable) |
+| =--list-call-settings= | List call property names, types and defaults |
+| =--credentials PATH= | Matrix JSON containing =userId=, =accessToken=, =homeserver= |
+| =-p=, =--provider NAME= | Existing provider factory selection |
+| =-m=, =--model NAME= | Provider model |
+| =--version=, =--license= | Version or license information |
+
+The =apps.ai-call= provider/model scope and =voice= settings are documented
+in [[file:voice.org][Live voice sessions]]. Matrix deployment variables retain
+the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
+=AI_CALL_JWT_URL=, =AI_CALL_FOCUS_URL=, =AI_CALL_OUTBOUND_PATH=, =AI_CALL_GREETING= and
+=AI_CALL_OUTBOUND_GREETING=. Speech/media endpoints use =AI_VOICE_STT_URL=,
+=AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
+
+SIGINT/SIGTERM stops audio and removes the configured identity's Matrix membership before exit;
+failed removals are retried. Startup sweeps stale memberships for that identity. Run only
+one answerer for a Matrix identity/device. The outbound drop file format is
+={"room_id":"!room:server","message":"Opening line","target":"@caller:server"}=.
