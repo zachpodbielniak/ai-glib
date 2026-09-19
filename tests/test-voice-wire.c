@@ -8,6 +8,7 @@ typedef struct {
 	SoupWebsocketConnection *ws;
 	gchar *url;
 	guint binary_frames;
+	guint sample_rate;
 	guint partials;
 	guint finals;
 	GByteArray *audio;
@@ -231,11 +232,12 @@ test_stt_timeout(void)
 }
 
 static void
-audio_received(AiSpeechSynthesizer *tts, GBytes *pcm, gpointer data)
+audio_received(AiSpeechSynthesizer *tts, GBytes *pcm, guint sample_rate, gpointer data)
 {
 	Wire *w = data;
 	gsize n;
 	const guint8 *p = g_bytes_get_data(pcm, &n);
+	w->sample_rate = sample_rate;
 	g_byte_array_append(w->audio, p, n);
 }
 
@@ -297,7 +299,7 @@ test_tts_bad(gconstpointer data)
 	teardown(&w);
 }
 static void
-test_tts_resample(void)
+test_tts_native(void)
 {
 	Wire w = {0};
 	g_autoptr(AiHttpSynthesizer) tts = NULL;
@@ -326,7 +328,8 @@ test_tts_resample(void)
 	g_source_remove(timeout);
 	g_assert_no_error(w.error);
 	g_assert_true(w.done);
-	g_assert_cmpuint(w.audio->len, ==, 6400);
+	g_assert_cmpuint(w.audio->len, ==, 9600);
+	g_assert_cmpuint(w.sample_rate, ==, 24000);
 	for (i = 0; i < w.audio->len; i += 2) {
 		g_assert_cmpuint(w.audio->data[i], ==, 0x34);
 		g_assert_cmpuint(w.audio->data[i + 1], ==, 0x12);
@@ -350,6 +353,6 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/wire/tts-framing", test_tts);
 	g_test_add_data_func("/voice/wire/tts-invalid-rate", "SR=nope\n", test_tts_bad);
 	g_test_add_data_func("/voice/wire/tts-missing-sentinel", "SR=16000\n", test_tts_bad);
-	g_test_add_func("/voice/wire/tts-resample-fragmented-frame", test_tts_resample);
+	g_test_add_func("/voice/wire/tts-native-fragmented-frame", test_tts_native);
 	return g_test_run();
 }

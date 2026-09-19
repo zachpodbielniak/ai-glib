@@ -4,6 +4,7 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gio/gio.h>
+#include <math.h>
 
 /* Observe the real transport appsrc without a test-only library API. */
 typedef struct {
@@ -18,8 +19,12 @@ check_timeline(GstPad *pad, GstPadProbeInfo *info, gpointer data)
 	Timeline *timeline = data;
 	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
 	if (!GST_CLOCK_TIME_IS_VALID(GST_BUFFER_PTS(buffer)) ||
-		(timeline->started && GST_BUFFER_PTS(buffer) != timeline->next))
+		(timeline->started && GST_BUFFER_PTS(buffer) != timeline->next)) {
+		g_test_message("Timestamp gap: expected %" G_GUINT64_FORMAT
+					   " got %" G_GUINT64_FORMAT,
+					   timeline->next, GST_BUFFER_PTS(buffer));
 		g_atomic_int_inc(&timestamp_gaps);
+	}
 	timeline->next = GST_BUFFER_PTS(buffer) + GST_BUFFER_DURATION(buffer);
 	timeline->started = TRUE;
 	g_atomic_int_inc(&timestamp_buffers);
@@ -30,7 +35,7 @@ element_added(GSignalInvocationHint *hint, guint n, const GValue *values, gpoint
 {
 	GstElement *element = g_value_get_object(&values[1]);
 	GstElementFactory *factory = gst_element_get_factory(element);
-	if (factory != NULL &&
+	if (factory != NULL && g_strcmp0(GST_ELEMENT_NAME(element), "voice-output") == 0 &&
 		g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "appsrc") ==
 			0) {
 		GstPad *pad = gst_element_get_static_pad(element, "src");
@@ -148,7 +153,7 @@ synthesis_request(SoupServer *server, SoupServerMessage *message, const gchar *p
 		guint32 size = GUINT32_TO_BE(count * 2);
 		g_byte_array_append(body, (const guint8 *)&size, 4);
 		for (i = offset; i < offset + count; i++) {
-			gint16 value = i % 60 < 30 ? 8000 : -8000;
+			gint16 value = (gint16)(8000 * sin(2 * G_PI * 5 * (i % 12) / 12));
 			guint8 sample[] = {(guint16)value & 255, (guint16)value >> 8};
 			g_byte_array_append(body, sample, 2);
 		}
@@ -166,7 +171,7 @@ observer_sample(GstAppSink *sink, gpointer data)
 	GstMapInfo map;
 	GstBuffer *buffer;
 	guint i;
-	guint64 energy = 0;
+	gdouble real = 0, imaginary = 0;
 	if (sample == NULL)
 		return GST_FLOW_EOS;
 	buffer = gst_sample_get_buffer(sample);
@@ -174,10 +179,13 @@ observer_sample(GstAppSink *sink, gpointer data)
 		for (i = 0; i + 1 < map.size; i += 2) {
 			gint32 value =
 				(gint16)((guint16)map.data[i] | ((guint16)map.data[i + 1] << 8));
-			energy += (gint64)value * value;
+			real += value * cos(2 * G_PI * 5 * ((i / 2) % 24) / 24);
+			imaginary += value * sin(2 * G_PI * 5 * ((i / 2) % 24) / 24);
 		}
-		/* At least half a second of packets with RMS above 1000, not decoder noise. */
-		if (map.size > 0 && energy / (map.size / 2) > 1000000)
+		/* At least half a second of 10 kHz tone, not a lower-frequency alias. */
+		if (map.size > 0 &&
+			(real * real + imaginary * imaginary) / ((map.size / 2) * (map.size / 2)) >
+				250000)
 			g_atomic_int_add((gint *)data, map.size / 2);
 		gst_buffer_unmap(buffer, &map);
 	}
@@ -194,7 +202,7 @@ observer_pad(GstElement *source, GstPad *pad, gpointer data)
 		return;
 	bin =
 		gst_parse_bin_from_description("queue ! audioconvert ! audioresample ! "
-									   "audio/x-raw,format=S16LE,rate=16000,channels=1 ! "
+									   "audio/x-raw,format=S16LE,rate=48000,channels=1 ! "
 									   "appsink name=pcm sync=false emit-signals=true",
 									   TRUE, NULL);
 	sink = gst_bin_get_by_name(GST_BIN(bin), "pcm");
@@ -311,15 +319,16 @@ test_livekit(void)
 	/* Deliberately delay dispatch; media timestamps must remain contiguous. */
 	g_usleep(60000);
 	limit = g_get_monotonic_time() + 5000000;
-	while (g_atomic_int_get(&heard) < 8000 && g_get_monotonic_time() < limit) {
+	while (g_atomic_int_get(&heard) < 24000 && g_get_monotonic_time() < limit) {
 		while (g_main_context_iteration(NULL, FALSE))
 			;
 		g_usleep(1000);
 	}
-	g_assert_cmpint(g_atomic_int_get(&heard), >=, 8000);
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 24000);
 	g_assert_cmpint(g_atomic_int_get(&timestamp_buffers), >, 50);
 	g_assert_cmpint(g_atomic_int_get(&timestamp_gaps), ==, 0);
-	g_test_message("Greeting: %d samples in packets with RMS > 1000; %d appsrc buffers, "
+	g_test_message("Greeting: %d samples in packets with 10 kHz amplitude > 1000; %d "
+				   "appsrc buffers, "
 				   "zero timestamp gaps",
 				   g_atomic_int_get(&heard), g_atomic_int_get(&timestamp_buffers));
 	ai_voice_session_stop(session);

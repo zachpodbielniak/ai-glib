@@ -156,7 +156,7 @@ synthesize(AiSpeechSynthesizer *self, const gchar *text, GCancellable *cancel,
 		s->pcm != NULL ? g_bytes_ref(s->pcm) : g_bytes_new(samples, sizeof(samples));
 	g_ptr_array_add(s->texts, g_strdup(text));
 	if (!s->delay_audio)
-		g_signal_emit_by_name(self, "audio", pcm);
+		g_signal_emit_by_name(self, "audio", pcm, 16000);
 	if (s->hold_after != 0 && s->texts->len >= s->hold_after)
 		s->held = g_steal_pointer(&task);
 	else
