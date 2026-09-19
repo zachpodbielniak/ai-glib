@@ -27,7 +27,8 @@ ai_voice_state_get_type(void)
 
 typedef struct {
 	gchar *name;
-	GByteArray *frames;
+	GByteArray *frames, *onset;
+	guint speech_ms;
 	gboolean recognizing, ended;
 } Participant;
 typedef struct {
@@ -64,7 +65,7 @@ struct _AiVoiceSession {
 	Speech *speech;
 	GCancellable *turn_cancel;
 	GSource *deadline;
-	guint deadline_ms;
+	guint deadline_ms, barge_in_ms;
 	guint64 generation, provider_generation;
 	AiVoiceState state;
 	gboolean stopped, provider_pending;
@@ -72,6 +73,7 @@ struct _AiVoiceSession {
 enum {
 	PROP_0,
 	PROP_TURN_DEADLINE,
+	PROP_BARGE_IN,
 	PROP_STATE,
 	PROP_TRANSPORT,
 	PROP_RECOGNIZER,
@@ -102,6 +104,7 @@ participant_free(gpointer data)
 	Participant *p = data;
 	g_free(p->name);
 	g_byte_array_unref(p->frames);
+	g_byte_array_unref(p->onset);
 	g_free(p);
 }
 static void
@@ -386,6 +389,7 @@ joined(AiAudioTransport *transport, const gchar *speaker, const gchar *name,
 	p = g_new0(Participant, 1);
 	p->name = g_strdup(name != NULL && *name != '\0' ? name : speaker);
 	p->frames = g_byte_array_new();
+	p->onset = g_byte_array_new();
 	g_hash_table_insert(self->participants, g_strdup(speaker), p);
 }
 static void
@@ -411,27 +415,75 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		g_autoptr(GBytes) frame = g_bytes_new(p->frames->data, 320);
 		g_autoptr(GError) error = NULL;
 		gint activity;
+		gboolean fed_onset = FALSE;
 		g_byte_array_remove_range(p->frames, 0, 320);
 		activity = ai_voice_activity_process(self->activity, speaker, frame, &error);
 		if (activity < 0) {
+			p->speech_ms = 0;
+			g_byte_array_set_size(p->onset, 0);
 			report(self, error);
 			return;
 		}
 		if (activity & AI_VOICE_ACTIVITY_SPEECH) {
-			if (self->state == AI_VOICE_SPEAKING || self->state == AI_VOICE_THINKING)
-				interrupt_turn(self);
-			if (p->ended) {
-				ai_speech_recognizer_cancel(self->recognizer, speaker);
-				p->recognizing = FALSE;
-				p->ended = FALSE;
+			p->speech_ms = MIN(p->speech_ms + 10, 5000);
+			if (!p->recognizing || p->ended) {
+				gsize size;
+				const guint8 *samples = g_bytes_get_data(frame, &size);
+				g_byte_array_append(p->onset, samples, size);
 			}
-			if (!p->recognizing)
-				p->recognizing =
-					ai_speech_recognizer_begin(self->recognizer, speaker, &error);
-			state(self, AI_VOICE_TRANSCRIBING);
+			if (p->speech_ms >= self->barge_in_ms) {
+				if (self->state == AI_VOICE_SPEAKING ||
+					self->state == AI_VOICE_THINKING) {
+					g_log("ai-glib", G_LOG_LEVEL_INFO,
+						  "barge-in by %s after %u ms of speech, cancelling %s", p->name,
+						  p->speech_ms,
+						  self->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
+					interrupt_turn(self);
+				}
+				if (p->ended) {
+					ai_speech_recognizer_cancel(self->recognizer, speaker);
+					p->recognizing = FALSE;
+					p->ended = FALSE;
+				}
+				if (!p->recognizing) {
+					guint offset;
+					gboolean recognizing;
+					g_autoptr(GBytes) onset = g_bytes_new(p->onset->data, p->onset->len);
+					gsize size;
+					const guint8 *samples = g_bytes_get_data(onset, &size);
+					g_byte_array_set_size(p->onset, 0);
+					recognizing =
+						ai_speech_recognizer_begin(self->recognizer, speaker, &error);
+					if (self->stopped ||
+						g_hash_table_lookup(self->participants, speaker) != p)
+						return;
+					p->recognizing = recognizing;
+					/* Preserve the confirmed onset rather than clipping initial words.
+					 * Feed ordinary 10 ms frames, independent of backend size limits. */
+					for (offset = 0; p->recognizing && error == NULL && offset < size;
+						 offset += 320) {
+						g_autoptr(GBytes) buffered = g_bytes_new(samples + offset, 320);
+						ai_speech_recognizer_feed(self->recognizer, speaker, buffered,
+												  &error);
+						if (self->stopped ||
+							g_hash_table_lookup(self->participants, speaker) != p)
+							return;
+					}
+					fed_onset = TRUE;
+				}
+				state(self, AI_VOICE_TRANSCRIBING);
+				if (self->stopped ||
+					g_hash_table_lookup(self->participants, speaker) != p)
+					return;
+			}
+		} else {
+			p->speech_ms = 0;
+			g_byte_array_set_size(p->onset, 0);
 		}
-		if (p->recognizing && !p->ended && error == NULL)
+		if (p->recognizing && !p->ended && error == NULL && !fed_onset)
 			ai_speech_recognizer_feed(self->recognizer, speaker, frame, &error);
+		if (self->stopped || g_hash_table_lookup(self->participants, speaker) != p)
+			return;
 		if (error != NULL) {
 			ai_speech_recognizer_cancel(self->recognizer, speaker);
 			stt_error(self->recognizer, speaker, error, self);
@@ -452,14 +504,19 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	AiVoiceSession *self = data;
 	Participant *p = g_hash_table_lookup(self->participants, speaker);
 	g_autofree gchar *labelled = NULL;
+	g_autofree gchar *trimmed = NULL;
 	if (self->stopped || p == NULL)
 		return;
 	if (!final) {
 		g_signal_emit_by_name(self, "transcript", p->name, text, FALSE);
 		return;
 	}
+	trimmed = g_strdup(text != NULL ? text : "");
+	text = g_strstrip(trimmed);
 	p->recognizing = FALSE;
 	p->ended = FALSE;
+	p->speech_ms = 0;
+	g_byte_array_set_size(p->onset, 0);
 	ai_voice_activity_reset(self->activity, speaker);
 	if (text != NULL && *text != '\0' && g_queue_get_length(&self->turns) < 32) {
 		labelled = g_strdup_printf("[%s]: %s", p->name, text);
@@ -481,6 +538,8 @@ stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
 	if (p != NULL) {
 		p->recognizing = FALSE;
 		p->ended = FALSE;
+		p->speech_ms = 0;
+		g_byte_array_set_size(p->onset, 0);
 	}
 	report(self, error);
 	queue_line(self, self->transcription_error_message, FALSE);
@@ -563,6 +622,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	if (id == PROP_TURN_DEADLINE)
 		g_value_set_uint(value, self->deadline_ms);
+	else if (id == PROP_BARGE_IN)
+		g_value_set_uint(value, self->barge_in_ms);
 	else if (id == PROP_STATE)
 		g_value_set_enum(value, self->state);
 	else if (id == PROP_TRANSPORT)
@@ -588,6 +649,8 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	if (id == PROP_TURN_DEADLINE)
 		self->deadline_ms = g_value_get_uint(value);
+	else if (id == PROP_BARGE_IN)
+		self->barge_in_ms = g_value_get_uint(value);
 	else if (id == PROP_TRANSPORT)
 		g_set_object(&self->transport, g_value_get_object(value));
 	else if (id == PROP_RECOGNIZER)
@@ -634,6 +697,12 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	oc->finalize = finalize;
 	oc->get_property = get_property;
 	oc->set_property = set_property;
+	g_object_class_install_property(
+		oc, PROP_BARGE_IN,
+		g_param_spec_uint(
+			"barge-in-ms", "Barge-in debounce",
+			"Consecutive speech required before recognition or interruption", 10, 5000,
+			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TURN_DEADLINE,
 		g_param_spec_uint("turn-deadline-ms", "Turn deadline", "Maximum turn duration", 1,
@@ -725,6 +794,7 @@ ai_voice_session_init(AiVoiceSession *self)
 	self->pending_text = g_string_new(NULL);
 	self->spoken = g_string_new(NULL);
 	self->deadline_ms = 20000;
+	self->barge_in_ms = 250;
 }
 /**
  * ai_voice_session_new:

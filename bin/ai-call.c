@@ -428,16 +428,17 @@ maybe_connect(Call *call)
 									   AI_SPEECH_SYNTHESIZER(tts), AI_VOICE_ACTIVITY(vad),
 									   conversation);
 	if (app->call_config != NULL) {
-		guint timeout, silence, mode, deadline;
+		guint timeout, silence, mode, deadline, barge_in;
 		g_autofree gchar *fallback = NULL, *transcription_error = NULL;
 		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "trailing-silence-ms",
 					 &silence, "vad-mode", &mode, "turn-deadline-ms", &deadline,
-					 "deadline-message", &fallback, "transcription-error-message",
-					 &transcription_error, NULL);
+					 "barge-in-ms", &barge_in, "deadline-message", &fallback,
+					 "transcription-error-message", &transcription_error, NULL);
 		g_object_set(stt, "timeout-ms", timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
 		g_object_set(call->voice, "turn-deadline-ms", deadline, "deadline-message",
-					 fallback, "transcription-error-message", transcription_error, NULL);
+					 fallback, "transcription-error-message", transcription_error,
+					 "barge-in-ms", barge_in, NULL);
 	}
 	g_signal_connect(call->voice, "error", G_CALLBACK(voice_error), call);
 	g_signal_connect(call->voice, "state-changed", G_CALLBACK(voice_state), call);
