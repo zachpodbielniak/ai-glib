@@ -221,3 +221,23 @@ digest that may be tens of kilobytes.
 =ai_conversation_send_input_images_async(self, line, images, cancellable, callback, user_data)= preserves those blocks through the usual command/mention pipeline. =line= is non-NULL, but may be empty for an image-only turn. =ai_conversation_send_input_images_finish()= has the same result and optional =out_command= output as =send_input_finish()=. A resolved local built-in does not send a turn or consume attachments; the frontend should retain its image draft when no turn starts. Images reach streaming, non-streaming and local-tool calls through the same message list.
 
 The library APIs do not read the clipboard, decode image files, enforce ai-tui's draft limits or promise model vision support. The frontend owns those policies. Existing text-only APIs delegate with a NULL image list, preserving their behavior and ABI. See [[file:../tui.org][Pasting images]] for the supported transport matrix, clipboard helpers, temporary-file lifecycle and end-to-end tests.
+
+** Forking a side conversation
+
+#+begin_src C
+AiConversation *ai_conversation_fork (AiConversation  *self,
+                                      GObject         *provider,
+                                      GError         **error);
+#+end_src
+
+Snapshots completed portable history into a new conversation that uses
+=provider=. =provider= must be a fresh instance, not the parent's object
+and not in use elsewhere. The call is allowed during a turn; the in-flight
+request, partial output and unfinished tool calls are excluded. CLI resume
+flags on =provider= are cleared so the branch cannot write the parent's
+native session. Local tools, command set, brigade and tool endpoint are not
+inherited. Existing send APIs still reject overlapping requests on each
+conversation.
+
+See [[file:../message-queue.org][Queued follow-ups and side questions]] for
+the TUI queue, =/btw=, and [[file:ai-prompt-queue.org][AiPromptQueue]].

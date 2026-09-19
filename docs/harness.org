@@ -291,6 +291,7 @@ before a single file has been read.
 | Command      | Argument     | What it does                                  |
 |--------------+--------------+-----------------------------------------------|
 | =/help=      |              | every command, skill and agent, with origins  |
+| =/btw=       | =<question>= | side question; does not interrupt the current turn |
 | =/clear=     |              | empty the transcript, the history and the todos |
 | =/quit=      |              | leave                                         |
 | =/exit=      |              | leave, same as =/quit=                        |

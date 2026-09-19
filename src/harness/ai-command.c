@@ -42,6 +42,7 @@ typedef struct
 } BuiltinCommand;
 
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
+    { "btw",      "Ask a side question without interrupting the current turn", "<question>" },
     { "help",     "List every command, skill and agent",        NULL },
     { "clear",    "Empty the transcript and the history",       NULL },
     { "reset",    "Start a fresh session and return to the splash screen", NULL },

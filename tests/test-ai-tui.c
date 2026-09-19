@@ -2955,6 +2955,7 @@ typedef struct
 } CommandCase;
 
 static const CommandCase COMMAND_CASES[] = {
+	{ "btw", "Usage: /btw" },
 	{ "help", "clear the line" },
 	{ "clear", NULL },
 	{ "reset", NULL },
@@ -3200,12 +3201,15 @@ test_theme_fallbacks(void)
 }
 
 static void
-test_busy_queues_follow_up(void)
+test_busy_queues_follow_up(gconstpointer data)
 {
+	gboolean separate = GPOINTER_TO_INT(data);
 	Stub *stub;
 	g_autofree gchar *script = NULL;
 	g_autofree gchar *second = NULL;
 	g_autofree gchar *pane = NULL;
+	g_autofree gchar *recorded = NULL;
+	g_autofree gchar *path = NULL;
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
 	second = g_strdup(
@@ -3229,19 +3233,95 @@ test_busy_queues_follow_up(void)
 		stub->dir, stub->dir, stub->dir);
 	sandbox_write(stub->dir, "grok", script);
 	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
-	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, separate ? "--no-animation --no-coalesce" : "--no-animation");
 	tmux_send(TUI_SESSION, "first request");
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
 	tmux_send(TUI_SESSION, "second-draft");
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED 1"));
+	tmux_send(TUI_SESSION, "third-draft");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED 2"));
+	tmux_send(TUI_SESSION, "unfinished-composer");
 	pane = tmux_capture(TUI_SESSION);
 	g_assert_null(strstr(pane, "the reply"));
 	sandbox_write(stub->dir, "release", "ready\n");
-	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
-	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	/* Separate replies may already have scrolled the first turn off screen.
+	 * Assert delivery using recorded requests below, not old viewport rows. */
+	if (!separate) {
+		g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	}
 	g_assert_true(tmux_wait_for(TUI_SESSION, "the follow-up"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "unfinished-composer"));
+	path = g_build_filename(stub->dir, "stdin.2.log", NULL);
+	g_assert_true(g_file_get_contents(path, &recorded, NULL, NULL));
+	g_assert_nonnull(strstr(recorded, "second-draft"));
+	if (separate) {
+		g_assert_null(strstr(recorded, "third-draft"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "third-draft"));
+	} else
+		g_assert_nonnull(strstr(recorded, "third-draft"));
+	g_assert_null(strstr(recorded, "unfinished-composer"));
+	g_clear_pointer(&recorded, g_free);
+	g_clear_pointer(&path, g_free);
+	path = g_build_filename(stub->dir, "call", NULL);
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+		const gchar *expected = separate ? "3\n" : "2\n";
+		do {
+			g_clear_pointer(&recorded, g_free);
+			g_file_get_contents(path, &recorded, NULL, NULL);
+			if (g_strcmp0(recorded, expected) == 0) break;
+			g_usleep(1000);
+		} while (g_get_monotonic_time() < deadline);
+		g_assert_cmpstr(recorded, ==, expected);
+	}
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+static void
+test_btw_during_turn(gconstpointer data)
+{
+	gboolean cancel = GPOINTER_TO_INT(data);
+	Stub *stub;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"cat > '%s/request.'$$\n"
+		"if mkdir '%s/first' 2>/dev/null; then\n"
+		" while [ ! -f '%s/release' ]; do sleep 0.05; done\n"
+		" cat '%s/stdout'\n"
+		"else\n"
+		" %s\n"
+		" printf '%%s\\n' '{\"type\":\"result\",\"result\":\"side-answer-token\",\"session_id\":\"side-id\"}'\n"
+		"fi\n", stub->dir, stub->dir, stub->dir, stub->dir, cancel ? "sleep 30" : ":");
+	sandbox_write(stub->dir, "grok", script);
+	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_send(TUI_SESSION, "main-work-token");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
+	tmux_send(TUI_SESSION, "/btw explain-this-token");
+	tmux_send(TUI_SESSION, "Enter");
+	if (cancel) {
+		g_assert_true(tmux_wait_for(TUI_SESSION, "BTW started: explain-this-token"));
+		tmux_send(TUI_SESSION, "/btw --cancel");
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "main turn unchanged"));
+	} else
+		g_assert_true(tmux_wait_for(TUI_SESSION, "side-answer-token"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "the reply"));
+	g_assert_nonnull(strstr(pane, "waiting"));
+	sandbox_write(stub->dir, "release", "ready\n");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }
@@ -3577,7 +3657,10 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/composer-editing", test_composer_editing);
 	g_test_add_func("/ai-glib/ai-tui/keys/command-paths", test_command_paths);
 	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
-	g_test_add_func("/ai-glib/ai-tui/keys/busy-queue", test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/busy-queue", GINT_TO_POINTER(0), test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/busy-queue-separate", GINT_TO_POINTER(1), test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/btw", GINT_TO_POINTER(0), test_btw_during_turn);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/btw-cancel", GINT_TO_POINTER(1), test_btw_during_turn);
 	g_test_add_func("/ai-glib/ai-tui/keys/control-shortcuts", test_control_shortcuts);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/activity-motion", GINT_TO_POINTER(FALSE), test_activity_motion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/reduced-motion", GINT_TO_POINTER(TRUE), test_activity_motion);

@@ -59,6 +59,7 @@ layer as a whole.
 | [[file:ai-view-block.org][AiViewBlock]]         | A renderable unit, and the render contract   |
 | [[file:ai-tool-call.org][AiToolCall]]           | One tool call, and how a tool name reads     |
 | [[file:ai-conversation.org][AiConversation]]    | Drives a provider, folds events into blocks  |
+| [[file:ai-prompt-queue.org][AiPromptQueue]]      | Bounded FIFO of follow-up submissions        |
 
 See [[file:../events.org][The event stream]] for per-provider coverage and
 ordering guarantees.
