@@ -164,7 +164,7 @@ synthesis_request(SoupServer *server, SoupServerMessage *message, const gchar *p
 	SoupMessageBody *request = soup_server_message_get_request_body(message);
 	gboolean low = g_strstr_len(request->data, request->length, "low") != NULL;
 	guint total =
-		g_strstr_len(request->data, request->length, "long") != NULL ? 720000 : 24000;
+		g_strstr_len(request->data, request->length, "long") != NULL ? 1920000 : 24000;
 	g_byte_array_append(body, (const guint8 *)"SR=24000\n", 9);
 	/* Non-10ms synthesis frames exercise partial transport buffers. */
 	for (offset = 0; offset < total; offset += 333) {
@@ -342,7 +342,7 @@ test_livekit(void)
 	g_signal_connect(transport, "audio", G_CALLBACK(received), &inbound);
 	g_signal_connect(transport, "participant-joined", G_CALLBACK(participant_joined),
 					 &inbound);
-	timeout = g_timeout_add_seconds(100, expired, NULL);
+	timeout = g_timeout_add_seconds(165, expired, NULL);
 	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(transport), "voice-test", tx, NULL,
 								  joined, &result);
 	g_main_loop_run(loop);
@@ -386,17 +386,38 @@ test_livekit(void)
 		g_main_context_iteration(NULL, TRUE);
 	g_atomic_int_set(&heard, 0);
 	ai_voice_session_say(session, "A long test reply.");
-	limit = g_get_monotonic_time() + 40000000;
-	while ((g_atomic_int_get(&heard) < 1400000 ||
+	limit = g_get_monotonic_time() + 105000000;
+	while ((g_atomic_int_get(&heard) < 3800000 ||
 			ai_voice_session_get_state(session) != AI_VOICE_LISTENING) &&
 		   g_get_monotonic_time() < limit) {
 		while (g_main_context_iteration(NULL, FALSE))
 			;
 		g_usleep(1000);
 	}
-	g_assert_cmpint(g_atomic_int_get(&heard), >=, 1400000);
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 3800000);
+	g_assert_cmpuint(recovery_started, ==, 0);
 	g_assert_cmpint(ai_voice_session_get_state(session), ==, AI_VOICE_LISTENING);
-	g_test_message("30 second reply: %d decoded tone samples", g_atomic_int_get(&heard));
+	g_test_message("80 second reply: %d decoded tone samples", g_atomic_int_get(&heard));
+	/* Cross 90 seconds without buffering more than the transport's queue bound. */
+	limit = g_get_monotonic_time() + 16000000;
+	while (g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_assert_cmpuint(recovery_started, ==, 0);
+	g_atomic_int_set(&heard, 0);
+	ai_voice_session_say(session, "Still joined after ninety seconds.");
+	limit = g_get_monotonic_time() + 5000000;
+	while (g_atomic_int_get(&heard) < 24000 && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 24000);
+	g_assert_cmpuint(recovery_started, ==, 0);
+	g_test_message("Publisher remained joined past 90 seconds and delivered new speech");
+
 	/* A publisher bus error must not permanently stop the voice session. */
 	{
 		g_autoptr(GError) injected = g_error_new_literal(
