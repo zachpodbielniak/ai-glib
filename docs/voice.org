@@ -318,8 +318,10 @@ AI_VOICE_LIVEKIT_TEST=1 build/release/tests/test-voice-livekit
 
 It starts its own dev server and a receive-only observer before the transport
 joins. =ai_voice_session_say()= uses an in-process HTTP synthesis server; the
-observer must receive decoded samples above amplitude 1000 before any remote
-microphone is published. A second transport then publishes late; audio must
+observer must receive at least 8000 decoded samples in packets with RMS above
+1000 before any remote microphone is published. The fake TTS emits 24 kHz
+audio in non-10-ms frames. A pad probe checks contiguous timestamps on the
+real appsrc, including silence and a deliberately delayed main-loop dispatch. A second transport then publishes late; audio must
 flow in both directions. Self-audio must never appear as a remote participant.
 The test leaves all connections when finished. The offline
 =/voice/session/say-non-silent-pcm= test separately asserts that synthesis
@@ -340,3 +342,19 @@ PCM, first non-silent appsrc PCM and synthesis first-PCM timings. Missing pad
 metadata reports the dependency-patch requirement. Tokens and credentials are
 never logged. A first appsrc acceptance is local evidence, not remote hearing;
 the media regression checks a real remote decoded stream separately.
+
+** Audio timing and recognition failures
+
+The LiveKit publisher timestamps both silence and synthesized PCM from one
+integer sample counter anchored to the pipeline clock. It disables appsrc
+wall-clock timestamping: delayed dispatch and short synthesis frames must not
+introduce timestamp gaps. Each dispatch catches up with bounded work, keeps
+at most one 10 ms packet ahead, and completes writes only after their local
+media-clock end time. This is not an acknowledgement of remote playout.
+
+STT ignores additional response metadata, including fractional =start= and
+=end= timestamps and integer =stable_ms= and =transcribe_ms= fields.
+={"type":"error","detail":"..."}= emits a recognition failure with the server
+detail; the session speaks its configurable =transcription-error-message=.
+An empty final completes recognition and resets VAD without a session
+transcript, provider turn or spoken reply.
