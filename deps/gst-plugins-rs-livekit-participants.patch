@@ -1,0 +1,12 @@
+diff --git a/net/webrtc/src/livekit_signaller/imp.rs b/net/webrtc/src/livekit_signaller/imp.rs
+index 7fe8121..f60e71a 100644
+--- a/net/webrtc/src/livekit_signaller/imp.rs
++++ b/net/webrtc/src/livekit_signaller/imp.rs
+@@ -581,7 +581,6 @@ impl Signaller {
+                 }
+                 _ => return,
+             }
+-            return;
+         }
+ 
+         let mut connection = self.connection.lock().unwrap();

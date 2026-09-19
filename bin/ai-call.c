@@ -266,6 +266,22 @@ voice_error(AiVoiceSession *voice, GError *error, gpointer data)
 	g_printerr("Voice: %s\n", error->message);
 }
 static void
+voice_state(AiVoiceSession *voice, AiVoiceState state, gpointer data)
+{
+	Call *call = data;
+	GEnumClass *states = g_type_class_ref(AI_TYPE_VOICE_STATE);
+	GEnumValue *value = g_enum_get_value(states, state);
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Voice state: room=%s state=%s", call->room,
+		  value != NULL ? value->value_nick : "unknown");
+	g_type_class_unref(states);
+}
+static void
+info_log(const gchar *domain, GLogLevelFlags level, const gchar *message, gpointer data)
+{
+	/* INFO lifecycle messages are visible without G_MESSAGES_DEBUG. */
+	g_printerr("%s INFO: %s\n", domain, message);
+}
+static void
 voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 				 gboolean final, gpointer data)
 {
@@ -281,12 +297,14 @@ first_pcm(AiSpeechSynthesizer *synth, GBytes *pcm, gpointer data)
 	Call *call = data;
 	gint64 now = g_get_monotonic_time();
 	if (call->transcript_at != 0) {
-		g_print("voice timing: final-transcript-to-first-PCM=%" G_GINT64_FORMAT "ms\n",
-				(now - call->transcript_at) / 1000);
+		g_log("ai-call", G_LOG_LEVEL_INFO,
+			  "voice timing: final-transcript-to-first-PCM=%" G_GINT64_FORMAT "ms",
+			  (now - call->transcript_at) / 1000);
 		call->transcript_at = 0;
 	} else if (call->answered_at != 0) {
-		g_print("voice timing: membership-to-first-PCM=%" G_GINT64_FORMAT "ms\n",
-				(now - call->answered_at) / 1000);
+		g_log("ai-call", G_LOG_LEVEL_INFO,
+			  "voice timing: membership-to-first-PCM=%" G_GINT64_FORMAT "ms",
+			  (now - call->answered_at) / 1000);
 		call->answered_at = 0;
 	}
 }
@@ -296,6 +314,7 @@ greet(Call *call)
 	if (call->greeted || call->voice == NULL || call->closing)
 		return;
 	call->greeted = TRUE;
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Call greeting queued: room=%s", call->room);
 	ai_voice_session_say(call->voice, call->opening != NULL ? call->opening
 									  : call->outbound		? call->app->outbound_greeting
 															: call->app->greeting);
@@ -356,6 +375,7 @@ joined_room(GObject *source, GAsyncResult *result, gpointer data)
 	if (!ai_audio_transport_join_finish(AI_AUDIO_TRANSPORT(source), result, &error))
 		failed(call, error);
 	else if (!call->closing) {
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Call media joined: room=%s", call->room);
 		if (call->outbound) {
 			call->answer_deadline = g_get_monotonic_time() + 30000000;
 			check_answer(call);
@@ -420,6 +440,7 @@ maybe_connect(Call *call)
 					 fallback, "transcription-error-message", transcription_error, NULL);
 	}
 	g_signal_connect(call->voice, "error", G_CALLBACK(voice_error), call);
+	g_signal_connect(call->voice, "state-changed", G_CALLBACK(voice_state), call);
 	g_signal_connect(call->voice, "transcript", G_CALLBACK(voice_transcript), call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
@@ -942,6 +963,8 @@ main(int argc, char **argv)
 		return 0;
 	}
 
+	g_log_set_handler("ai-call", G_LOG_LEVEL_INFO, info_log, NULL);
+	g_log_set_handler("ai-glib", G_LOG_LEVEL_INFO, info_log, NULL);
 	app.config = ai_config_new();
 	if (config_path != NULL && !ai_config_load_from_file(app.config, config_path, &error))
 		goto fail;
@@ -984,8 +1007,8 @@ main(int argc, char **argv)
 	}
 	if (!g_file_get_contents(identity_file, &app.identity, NULL, &error))
 		goto fail;
-	if (!ai_provider_factory_resolve_defaults(app.config, "ai-call", provider_name,
-											  model, &app.provider, &app.model, &error))
+	if (!ai_provider_factory_resolve_defaults(app.config, "ai-call", provider_name, model,
+											  &app.provider, &app.model, &error))
 		goto fail;
 	if (credentials == NULL)
 		g_object_get(call_config, "credentials", &credentials, NULL);
@@ -1021,9 +1044,8 @@ main(int argc, char **argv)
 			g_build_filename(g_get_user_runtime_dir(), "ai-outbound-call.json", NULL);
 	if (app.jwt_url == NULL || *app.jwt_url == '\0' || app.foci == NULL ||
 		*app.foci == '\0' || app.device == NULL || *app.device == '\0') {
-		g_set_error_literal(
-			&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-			"Configure ai_call.jwt-url, focus-url and a nonempty device");
+		g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+							"Configure ai_call.jwt-url, focus-url and a nonempty device");
 		goto fail;
 	}
 	app.http = soup_session_new_with_options("timeout", 40, NULL);

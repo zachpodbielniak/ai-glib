@@ -14,6 +14,7 @@ typedef struct {
 typedef struct {
 	GWeakRef owner;
 	gchar *speaker, *name;
+	gboolean received_pcm;
 } Track;
 typedef struct {
 	AiLivekitTransport *self;
@@ -23,7 +24,7 @@ typedef struct {
 } Delivery;
 struct _AiLivekitTransport {
 	GObject parent_instance;
-	gchar *url, *receive_token;
+	gchar *url, *receive_token, *publisher_identity;
 	GMainContext *context;
 	GstElement *pipeline, *input, *output, *appsrc;
 	GSource *bus_source, *clock;
@@ -31,7 +32,7 @@ struct _AiLivekitTransport {
 	GTask *joining;
 	gint64 join_deadline;
 	gsize queued_bytes;
-	gboolean leaving;
+	gboolean leaving, sent_pcm;
 };
 static void
 transport_iface(AiAudioTransportInterface *iface);
@@ -70,12 +71,16 @@ deliver(gpointer data)
 	Delivery *d = data;
 	if (d->self->pipeline == NULL || d->self->leaving)
 		return G_SOURCE_REMOVE;
-	if (d->kind == 0)
+	if (d->kind == 0) {
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit participant joined: %s (%s)",
+			  d->speaker, d->name);
 		g_signal_emit_by_name(d->self, "participant-joined", d->speaker, d->name);
-	else if (d->kind == 1)
+	} else if (d->kind == 1)
 		g_signal_emit_by_name(d->self, "audio", d->speaker, d->pcm);
-	else
+	else {
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit participant left: %s", d->speaker);
 		g_signal_emit_by_name(d->self, "participant-left", d->speaker);
+	}
 	return G_SOURCE_REMOVE;
 }
 static void
@@ -128,6 +133,12 @@ sample(GstAppSink *sink, gpointer data)
 	buffer = gst_sample_get_buffer(sample);
 	if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
 		g_autoptr(GBytes) bytes = g_bytes_new(map.data, map.size);
+		if (!t->received_pcm) {
+			t->received_pcm = TRUE;
+			g_log("ai-glib", G_LOG_LEVEL_INFO,
+				  "LiveKit first received PCM: speaker=%s samples=%" G_GSIZE_FORMAT,
+				  t->speaker, map.size / 2);
+		}
 		post(t, 1, bytes);
 		gst_buffer_unmap(buffer, &map);
 	}
@@ -147,8 +158,34 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 	if (!g_str_has_prefix(GST_PAD_NAME(pad), "audio_"))
 		return;
 	g_object_get(pad, "participant-info", &info, NULL);
-	if (info == NULL)
+	if (info == NULL) {
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "LiveKit audio pad has no participant metadata; check plugin "
+			  "participant-update patch");
 		return;
+	}
+	/* Keep server auto-subscription enabled for tracks published after join.
+	 * Consume our publisher locally rather than using the signaller exclusion
+	 * list, which disables auto-subscribe in gst-plugins-rs 0.14. */
+	if (g_strcmp0(gst_structure_get_string(info, "identity"), self->publisher_identity) ==
+		0) {
+		gst_structure_free(info);
+		bin = gst_parse_bin_from_description("queue ! fakesink sync=false async=false",
+											 TRUE, &error);
+		pipeline = gst_object_get_parent(GST_OBJECT(input));
+		if (bin != NULL && pipeline != NULL) {
+			gst_bin_add(GST_BIN(pipeline), bin);
+			target = gst_element_get_static_pad(bin, "sink");
+			gst_pad_link(pad, target);
+			gst_object_unref(target);
+			gst_element_sync_state_with_parent(bin);
+		} else if (bin != NULL)
+			gst_object_unref(bin);
+		if (pipeline != NULL)
+			gst_object_unref(pipeline);
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit self-audio track consumed locally");
+		return;
+	}
 	track = g_new0(Track, 1);
 	g_weak_ref_init(&track->owner, self);
 	track->speaker = g_strdup(gst_structure_get_string(info, "sid"));
@@ -186,6 +223,9 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 	gst_object_unref(pipeline);
 	target = gst_element_get_static_pad(bin, "sink");
 	if (gst_pad_link(pad, target) == GST_PAD_LINK_OK) {
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "LiveKit subscribed audio track: pad=%s speaker=%s", GST_PAD_NAME(pad),
+			  track->speaker);
 		post(track, 0, NULL);
 		gst_element_sync_state_with_parent(bin);
 	}
@@ -212,6 +252,7 @@ bus_message(GstBus *bus, GstMessage *message, gpointer data)
 		g_autoptr(GError) error = NULL;
 		g_autofree gchar *debug = NULL;
 		gst_message_parse_error(message, &error, &debug);
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit media error: %s", error->message);
 		if (self->joining != NULL) {
 			g_task_return_error(self->joining, g_error_copy(error));
 			g_clear_object(&self->joining);
@@ -237,6 +278,8 @@ tick(gpointer data)
 		if (g_task_return_error_if_cancelled(self->joining))
 			g_clear_object(&self->joining);
 		else if (rx_state != 0 && tx_state >= 3) {
+			g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit joined: receiver=%d publisher=%d",
+				  rx_state, tx_state);
 			g_task_return_boolean(self->joining, TRUE);
 			g_clear_object(&self->joining);
 		} else if (g_get_monotonic_time() >= self->join_deadline) {
@@ -265,6 +308,18 @@ tick(gpointer data)
 		gst_buffer_fill(buffer, 0, raw + o->offset, count);
 		GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(count / 2, GST_SECOND, 16000);
 		flow = gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
+		if (flow == GST_FLOW_OK && !self->sent_pcm) {
+			guint i;
+			for (i = 0; i < count; i++)
+				if (raw[o->offset + i] != 0) {
+					self->sent_pcm = TRUE;
+					g_log("ai-glib", G_LOG_LEVEL_INFO,
+						  "LiveKit first non-silent appsrc PCM accepted: "
+						  "samples=%" G_GSIZE_FORMAT,
+						  count / 2);
+					break;
+				}
+		}
 		o->offset += count;
 		if (flow != GST_FLOW_OK) {
 			g_queue_pop_head(&self->playback);
@@ -307,6 +362,7 @@ token_identity(const gchar *token)
 {
 	g_auto(GStrv) parts = g_strsplit(token, ".", 3);
 	g_autofree guchar *decoded = NULL;
+	g_autofree gchar *padded = NULL;
 	g_autoptr(JsonParser) parser = json_parser_new();
 	gsize size;
 	gchar *p;
@@ -318,7 +374,10 @@ token_identity(const gchar *token)
 		else if (*p == '_')
 			*p = '/';
 	}
-	decoded = g_base64_decode(parts[1], &size);
+	/* JWT uses unpadded base64url; GLib needs complete padded quanta. */
+	padded = g_strconcat(parts[1], "===", NULL);
+	padded[((strlen(parts[1]) + 3) / 4) * 4] = '\0';
+	decoded = g_base64_decode(padded, &size);
 	if (!json_parser_load_from_data(parser, (gchar *)decoded, size, NULL))
 		return NULL;
 	return g_strdup(ai_json_get_string(ai_json_root_object(parser), "sub", NULL));
@@ -348,11 +407,10 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(transport);
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
 	g_autoptr(GTask) starter = NULL;
-	g_autofree gchar *identity = NULL;
+
 	GObject *rx = NULL, *tx = NULL;
 	GstCaps *caps;
 	GstBus *bus;
-	GValue excluded = G_VALUE_INIT, value = G_VALUE_INIT;
 	if (self->pipeline != NULL || !ai_livekit_transport_is_available() ||
 		self->receive_token == NULL) {
 		g_task_return_new_error(
@@ -360,7 +418,17 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 			"LiveKit plugin missing, receive-token missing, or already joined");
 		return;
 	}
+	g_free(self->publisher_identity);
+	self->publisher_identity = token_identity(token);
+	if (self->publisher_identity == NULL || *self->publisher_identity == '\0') {
+		g_task_return_new_error(
+			task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+			"Publisher JWT needs a valid subject for self-audio filtering");
+		return;
+	}
 	self->leaving = FALSE;
+	self->sent_pcm = FALSE;
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit joining with server auto-subscription");
 	self->pipeline = gst_pipeline_new(NULL);
 	g_signal_connect(self->pipeline, "deep-element-added", G_CALLBACK(configure_ice),
 					 NULL);
@@ -382,16 +450,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	g_object_set(rx, "ws-url", self->url, "auth-token", self->receive_token, "room-name",
 				 room, NULL);
 	g_object_set(tx, "ws-url", self->url, "auth-token", token, "room-name", room, NULL);
-	identity = token_identity(token);
-	if (identity != NULL) {
-		g_value_init(&excluded, GST_TYPE_ARRAY);
-		g_value_init(&value, G_TYPE_STRING);
-		g_value_set_string(&value, identity);
-		gst_value_array_append_value(&excluded, &value);
-		g_object_set_property(rx, "excluded-producer-peer-ids", &excluded);
-		g_value_unset(&value);
-		g_value_unset(&excluded);
-	}
+
 	g_object_unref(rx);
 	g_object_unref(tx);
 	g_signal_connect_object(self->input, "pad-added", G_CALLBACK(pad_added), self, 0);
@@ -441,6 +500,7 @@ leave_async(AiAudioTransport *transport, GCancellable *cancel, GAsyncReadyCallba
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(transport);
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
 	GstElement *pipeline = detach(self);
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit leaving");
 	self->leaving = TRUE;
 	if (pipeline == NULL) {
 		g_task_return_boolean(task, TRUE);
@@ -526,6 +586,7 @@ finalize(GObject *object)
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(object);
 	g_free(self->url);
 	g_free(self->receive_token);
+	g_free(self->publisher_identity);
 	g_main_context_unref(self->context);
 	G_OBJECT_CLASS(ai_livekit_transport_parent_class)->finalize(object);
 }
