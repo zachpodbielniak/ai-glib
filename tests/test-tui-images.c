@@ -126,7 +126,9 @@ test_composer(void)
 	FILE *input = tmpfile();
 	FILE *output = tmpfile();
 	SCREEN *screen = newterm("xterm", output, input);
-	App app = { 0 };
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GPtrArray) sides = g_ptr_array_new_with_free_func(g_object_unref);
+	App app = { .send_queue = queue, .side_questions = sides };
 	GList *blocks;
 	guint i;
 
@@ -164,9 +166,9 @@ test_composer(void)
 	app_send(&app);
 	g_assert_cmpuint(app.input->len, ==, 0);
 	g_assert_null(app.images);
-	g_assert_cmpuint(g_queue_get_length(&app.send_queue), ==, 1);
+	g_assert_cmpuint(ai_prompt_queue_get_length(app.send_queue), ==, 1);
 	g_main_loop_run(loop);
-	g_assert_true(g_queue_is_empty(&app.send_queue));
+	g_assert_true((ai_prompt_queue_get_length(app.send_queue) == 0));
 	blocks = ai_message_get_content_blocks(ai_conversation_get_messages(conversation)->data);
 	g_assert_cmpuint(g_list_length(blocks), ==, 5);
 	g_assert_true(AI_IS_IMAGE_CONTENT(blocks->next->data));
@@ -207,7 +209,9 @@ test_idle_double_interrupt_quits(void)
 {
 	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
 	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
-	App app = { 0 };
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GPtrArray) sides = g_ptr_array_new_with_free_func(g_object_unref);
+	App app = { .send_queue = queue, .side_questions = sides };
 
 	app.conversation = conversation;
 	app.input = g_string_new(NULL);
@@ -225,7 +229,9 @@ test_csi_u_ctrl_c_quits(void)
 	FILE *input = tmpfile();
 	FILE *output = tmpfile();
 	SCREEN *screen = newterm("xterm", output, input);
-	App app = { 0 };
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GPtrArray) sides = g_ptr_array_new_with_free_func(g_object_unref);
+	App app = { .send_queue = queue, .side_questions = sides };
 
 	g_assert_nonnull(screen);
 	app.conversation = conversation;
@@ -261,7 +267,9 @@ test_draft_rejection(void)
 	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
 	g_autoptr(AiCommandSet) commands = ai_command_set_new(NULL);
 	g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
-	App app = { 0 };
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GPtrArray) sides = g_ptr_array_new_with_free_func(g_object_unref);
+	App app = { .send_queue = queue, .side_questions = sides };
 
 	app.conversation = conversation;
 	app.input = g_string_new("describe");
@@ -393,7 +401,9 @@ test_cli_roundtrip(gconstpointer data)
 	g_autoptr(AiImageContent) image = png_image();
 	g_autoptr(GList) images = g_list_append(NULL, image);
 	guint i;
-	App app = { 0 };
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GPtrArray) sides = g_ptr_array_new_with_free_func(g_object_unref);
+	App app = { .send_queue = queue, .side_questions = sides };
 
 	app.conversation = conversation;
 	app.dump_loop = loop;
@@ -491,6 +501,32 @@ clipboard_fixture(const gchar *mode)
 	return 0;
 }
 
+static void
+test_side_provider_settings(void)
+{
+	g_autoptr(AiClaudeCodeClient) parent = ai_claude_code_client_new();
+	g_autoptr(GObject) copy = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *model = NULL;
+	g_autofree gchar *mcp = NULL;
+	gboolean resume = TRUE, skip = FALSE;
+	g_object_set(parent, "model", "fixture-model", "session-id", "parent-id",
+		"continue-session", TRUE, "skip-permissions", TRUE,
+		"mcp-config-path", "/fixture/parent-endpoint.json", NULL);
+	copy = side_provider_new(G_OBJECT(parent), &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(copy);
+	g_assert_true(copy != G_OBJECT(parent));
+	g_object_get(copy, "model", &model, "continue-session", &resume,
+		"skip-permissions", &skip, "mcp-config-path", &mcp, NULL);
+	g_assert_cmpstr(model, ==, "fixture-model");
+	g_assert_false(resume);
+	g_assert_true(skip);
+	g_assert_null(mcp);
+	g_assert_null(ai_cli_client_get_session_id(AI_CLI_CLIENT(copy)));
+	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(parent)), ==, "parent-id");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -524,6 +560,7 @@ main(int argc, char **argv)
 		g_autofree gchar *name = g_strconcat("/tui-images/clipboard/", modes[i], NULL);
 		g_test_add_data_func(name, modes[i], test_clipboard);
 	}
+	g_test_add_func("/tui-images/side-provider-settings", test_side_provider_settings);
 	g_test_add_func("/tui-images/missing-helper", test_missing_helper);
 	g_test_add_func("/tui-images/formats", test_formats);
 	g_test_add_func("/tui-images/composer", test_composer);
