@@ -5,7 +5,7 @@
 
 typedef struct {
 	GObject parent;
-	guint writes, flushes;
+	guint writes, flushes, non_silent_samples;
 } TestTransport;
 typedef GObjectClass TestTransportClass;
 static void
@@ -25,6 +25,13 @@ write_pcm(AiAudioTransport *transport, GBytes *pcm, GCancellable *cancel,
 		  GAsyncReadyCallback cb, gpointer data)
 {
 	g_autoptr(GTask) task = g_task_new(transport, cancel, cb, data);
+	{
+		gsize size, i;
+		const guint8 *raw = g_bytes_get_data(pcm, &size);
+		for (i = 0; i + 1 < size; i += 2)
+			if ((gint16)((guint16)raw[i] | ((guint16)raw[i + 1] << 8)) != 0)
+				((TestTransport *)transport)->non_silent_samples++;
+	}
 	((TestTransport *)transport)->writes++;
 	g_task_return_boolean(task, TRUE);
 }
@@ -111,6 +118,7 @@ typedef struct {
 	GPtrArray *texts;
 	guint hold_after;
 	GTask *held;
+	GBytes *pcm;
 } TestSynthesizer;
 typedef GObjectClass TestSynthesizerClass;
 static void
@@ -122,6 +130,7 @@ static void
 synth_finalize(GObject *object)
 {
 	g_ptr_array_unref(((TestSynthesizer *)object)->texts);
+	g_clear_pointer(&((TestSynthesizer *)object)->pcm, g_bytes_unref);
 	G_OBJECT_CLASS(test_synthesizer_parent_class)->finalize(object);
 }
 static void
@@ -141,7 +150,8 @@ synthesize(AiSpeechSynthesizer *self, const gchar *text, GCancellable *cancel,
 	TestSynthesizer *s = (TestSynthesizer *)self;
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
 	guint8 samples[320] = {0};
-	g_autoptr(GBytes) pcm = g_bytes_new(samples, sizeof(samples));
+	g_autoptr(GBytes) pcm =
+		s->pcm != NULL ? g_bytes_ref(s->pcm) : g_bytes_new(samples, sizeof(samples));
 	g_ptr_array_add(s->texts, g_strdup(text));
 	g_signal_emit_by_name(self, "audio", pcm);
 	if (s->hold_after != 0 && s->texts->len >= s->hold_after)

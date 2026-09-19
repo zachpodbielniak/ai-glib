@@ -270,10 +270,26 @@ stalled_turn(Fixture *f, gconstpointer data)
 	g_assert_cmpint(g_atomic_int_get(&stalled->cancelled), ==, 1);
 }
 
+static void
+say_non_silent(Fixture *f, gconstpointer data)
+{
+	guint8 samples[3200];
+	guint i;
+	for (i = 0; i < sizeof(samples); i += 2) {
+		samples[i] = 0x40;
+		samples[i + 1] = 0x1f;
+	}
+	f->tts->pcm = g_bytes_new(samples, sizeof(samples));
+	ai_voice_session_say(f->session, "A generic greeting.");
+	wait_replies(f, 1);
+	g_assert_cmpuint(f->transport->non_silent_samples, ==, 1600);
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/voice/session/say-non-silent-pcm", Fixture, NULL, setup, say_non_silent,
+			   teardown);
 	g_test_add("/voice/session/barge-in-pending-provider", Fixture, NULL, setup,
 			   stalled_turn, teardown);
 	g_test_add("/voice/session/never-answering-provider", Fixture, "deadline", setup,

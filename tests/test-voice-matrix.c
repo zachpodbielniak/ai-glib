@@ -209,10 +209,24 @@ stale_membership(MatrixFixture *f, gconstpointer data)
 	g_main_loop_run(f->app.loop);
 	g_source_remove(timeout);
 }
+static void
+info_visible(void)
+{
+    if (g_test_subprocess()) {
+        g_unsetenv("G_MESSAGES_DEBUG");
+        g_log_set_handler("ai-glib", G_LOG_LEVEL_INFO, info_log, NULL);
+        g_log("ai-glib", G_LOG_LEVEL_INFO, "media lifecycle diagnostic");
+        return;
+    }
+    g_test_trap_subprocess(NULL, 3000000, 0);
+    g_test_trap_assert_passed();
+    g_test_trap_assert_stderr("*ai-glib INFO: media lifecycle diagnostic*");
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/voice/matrix/info-without-debug", info_visible);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,
 			   answer_cleanup, matrix_teardown);
 	g_test_add("/voice/matrix/cleanup-retry", MatrixFixture, GINT_TO_POINTER(1),
