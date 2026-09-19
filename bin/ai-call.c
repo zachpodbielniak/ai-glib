@@ -419,8 +419,17 @@ maybe_connect(Call *call)
 			g_object_get(app->call_config, "max-agents", &agents, NULL);
 		ai_conversation_enable_background_agents(conversation, agents);
 	}
-	call->transport =
-		AI_AUDIO_TRANSPORT(ai_livekit_transport_new(app->livekit_url, call->rx_token));
+	{
+		guint attempts = 3, delay = 500, bitrate = 64000;
+		if (app->call_config != NULL)
+			g_object_get(app->call_config, "media-reconnect-attempts", &attempts,
+						 "media-reconnect-delay-ms", &delay, "opus-bitrate", &bitrate,
+						 NULL);
+		call->transport =
+			g_object_new(AI_TYPE_LIVEKIT_TRANSPORT, "url", app->livekit_url,
+						 "receive-token", call->rx_token, "reconnect-attempts", attempts,
+						 "reconnect-delay-ms", delay, "opus-bitrate", bitrate, NULL);
+	}
 	stt = ai_websocket_recognizer_new(app->stt_url);
 	tts = ai_http_synthesizer_new(app->tts_url);
 	vad = ai_webrtc_voice_activity_new();

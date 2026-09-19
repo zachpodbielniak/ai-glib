@@ -17,24 +17,30 @@ typedef struct {
 	GWeakRef owner;
 	gchar *speaker, *name;
 	gboolean received_pcm;
+	guint64 generation;
 } Track;
 typedef struct {
 	AiLivekitTransport *self;
 	gchar *speaker, *name;
 	GBytes *pcm;
 	guint kind;
+	guint64 generation;
 } Delivery;
 struct _AiLivekitTransport {
 	GObject parent_instance;
 	gchar *url, *receive_token, *publisher_identity;
 	GMainContext *context;
 	GstElement *pipeline, *input, *output, *appsrc;
-	GSource *bus_source, *clock;
+	GSource *bus_source, *clock, *retry_source;
+	GCancellable *retry_cancel;
+	gchar *room, *token;
+	guint retry_count, reconnect_attempts, reconnect_delay_ms, opus_bitrate;
+	gboolean recovering;
 	GQueue playback;
 	GTask *joining;
 	gint64 join_deadline;
 	gsize queued_bytes;
-	guint64 output_samples;
+	guint64 output_samples, generation;
 	guint output_rate;
 	GstClockTime output_origin;
 	gboolean leaving, sent_pcm;
@@ -43,6 +49,17 @@ static void
 transport_iface(AiAudioTransportInterface *iface);
 G_DEFINE_TYPE_WITH_CODE(AiLivekitTransport, ai_livekit_transport, G_TYPE_OBJECT,
 						G_IMPLEMENT_INTERFACE(AI_TYPE_AUDIO_TRANSPORT, transport_iface))
+static void
+begin_recovery(AiLivekitTransport *self);
+static void
+cancel_recovery(AiLivekitTransport *self);
+static void
+stop_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel);
+static GstElement *
+detach(AiLivekitTransport *self);
+static void
+join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
+		   GCancellable *cancel, GAsyncReadyCallback cb, gpointer data);
 static void
 clear_source(GSource **source)
 {
@@ -74,7 +91,8 @@ static gboolean
 deliver(gpointer data)
 {
 	Delivery *d = data;
-	if (d->self->pipeline == NULL || d->self->leaving)
+	if (d->self->pipeline == NULL || d->self->leaving ||
+		d->generation != d->self->generation)
 		return G_SOURCE_REMOVE;
 	if (d->kind == 0) {
 		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit participant joined: %s (%s)",
@@ -111,6 +129,7 @@ post(Track *track, guint kind, GBytes *pcm)
 	d->speaker = g_strdup(track->speaker);
 	d->name = g_strdup(track->name);
 	d->kind = kind;
+	d->generation = track->generation;
 	d->pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
 	source = g_idle_source_new();
 	g_source_set_callback(source, deliver, d, delivery_free);
@@ -192,6 +211,7 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 		return;
 	}
 	track = g_new0(Track, 1);
+	track->generation = self->generation;
 	g_weak_ref_init(&track->owner, self);
 	track->speaker = g_strdup(gst_structure_get_string(info, "sid"));
 	track->name = g_strdup(gst_structure_get_string(info, "name"));
@@ -246,6 +266,7 @@ pad_removed(GstElement *input, GstPad *pad, gpointer data)
 		return;
 	g_weak_ref_init(&track.owner, data);
 	track.speaker = (gchar *)speaker;
+	track.generation = AI_LIVEKIT_TRANSPORT(data)->generation;
 	post(&track, 2, NULL);
 	g_weak_ref_clear(&track.owner);
 }
@@ -257,12 +278,20 @@ bus_message(GstBus *bus, GstMessage *message, gpointer data)
 		g_autoptr(GError) error = NULL;
 		g_autofree gchar *debug = NULL;
 		gst_message_parse_error(message, &error, &debug);
-		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit media error: %s", error->message);
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "LiveKit media error: element=%s message=%s debug=%s",
+			  GST_MESSAGE_SRC(message) ? GST_OBJECT_NAME(GST_MESSAGE_SRC(message))
+									   : "unknown",
+			  error->message, debug != NULL ? debug : "(none)");
 		if (self->joining != NULL) {
 			g_task_return_error(self->joining, g_error_copy(error));
 			g_clear_object(&self->joining);
+			return G_SOURCE_CONTINUE;
 		}
-		g_signal_emit_by_name(self, "error", error);
+		if (!self->leaving && self->reconnect_attempts > 0 && !self->recovering)
+			begin_recovery(self);
+		else if (!self->recovering)
+			g_signal_emit_by_name(self, "error", error);
 	}
 	return G_SOURCE_CONTINUE;
 }
@@ -376,6 +405,9 @@ tick(gpointer data)
 				for (i = 0; i < count; i++)
 					if (raw[o->offset + i] != 0) {
 						self->sent_pcm = TRUE;
+						GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(self->pipeline),
+														  GST_DEBUG_GRAPH_SHOW_MEDIA_TYPE,
+														  "voice-speaking");
 						g_log("ai-glib", G_LOG_LEVEL_INFO,
 							  "LiveKit first non-silent appsrc PCM accepted: "
 							  "samples=%" G_GSIZE_FORMAT,
@@ -416,7 +448,8 @@ started(GObject *source, GAsyncResult *result, gpointer data)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(source);
 	g_autoptr(GError) error = NULL;
-	if (!g_task_propagate_boolean(G_TASK(result), &error) && self->joining != NULL) {
+	if (!g_task_propagate_boolean(G_TASK(result), &error) && self->joining != NULL &&
+		g_task_get_task_data(G_TASK(result)) == self->pipeline) {
 		g_task_return_error(self->joining, g_steal_pointer(&error));
 		g_clear_object(&self->joining);
 	}
@@ -449,6 +482,24 @@ token_identity(const gchar *token)
 }
 /* LiveKit supplies ICE traversal. UPnP probes on every local interface add
  * latency and fail on addressless VPN interfaces; do not request router maps. */
+static gboolean
+configure_encoder(GstElement *sink, const gchar *consumer, const gchar *pad,
+				  GstElement *encoder, gpointer data)
+{
+	AiLivekitTransport *self = data;
+	GstElementFactory *factory = gst_element_get_factory(encoder);
+	if (factory == NULL ||
+		g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "opusenc") !=
+			0)
+		return FALSE;
+	gst_util_set_object_arg(G_OBJECT(encoder), "audio-type", "generic");
+	gst_util_set_object_arg(G_OBJECT(encoder), "bandwidth", "fullband");
+	g_object_set(encoder, "bitrate", (gint)self->opus_bitrate, NULL);
+	g_log("ai-glib", G_LOG_LEVEL_INFO,
+		  "LiveKit encoder: opusenc audio-type=generic bandwidth=fullband bitrate=%u",
+		  self->opus_bitrate);
+	return TRUE;
+}
 static void
 configure_ice(GstBin *bin, GstBin *subbin, GstElement *element, gpointer data)
 {
@@ -484,6 +535,12 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 			"LiveKit plugin missing, receive-token missing, or already joined");
 		return;
 	}
+	if (!self->recovering) {
+		g_free(self->room);
+		g_free(self->token);
+		self->room = g_strdup(room);
+		self->token = g_strdup(token);
+	}
 	g_free(self->publisher_identity);
 	self->publisher_identity = token_identity(token);
 	if (self->publisher_identity == NULL || *self->publisher_identity == '\0') {
@@ -493,6 +550,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 		return;
 	}
 	self->leaving = FALSE;
+	self->generation++;
 	self->sent_pcm = FALSE;
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit joining with server auto-subscription");
 	self->pipeline = gst_pipeline_new(NULL);
@@ -517,13 +575,15 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	}
 	g_object_set(self->input, "stun-server", NULL, NULL);
 	g_object_set(self->output, "stun-server", NULL, NULL);
+	g_signal_connect_object(self->output, "encoder-setup", G_CALLBACK(configure_encoder),
+							self, 0);
 	gst_bin_add_many(GST_BIN(self->pipeline), self->input, self->appsrc, converter,
 					 self->output, NULL);
 	caps = gst_caps_from_string(
 		"audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved");
 	g_object_set(self->appsrc, "caps", caps, "is-live", TRUE, "format", GST_FORMAT_TIME,
 				 "do-timestamp", FALSE, "min-latency", (gint64)(10 * GST_MSECOND),
-				 "block", FALSE, NULL);
+				 "max-bytes", (guint64)(4 * 1024 * 1024), "block", FALSE, NULL);
 	gst_caps_unref(caps);
 	gst_element_link(self->appsrc, converter);
 	gst_element_link_pads(converter, "src", self->output, "audio_%u");
@@ -584,7 +644,9 @@ leave_async(AiAudioTransport *transport, GCancellable *cancel, GAsyncReadyCallba
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(transport);
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
-	GstElement *pipeline = detach(self);
+	GstElement *pipeline;
+	cancel_recovery(self);
+	pipeline = detach(self);
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit leaving");
 	self->leaving = TRUE;
 	if (pipeline == NULL) {
@@ -599,6 +661,87 @@ finish(AiAudioTransport *self, GAsyncResult *result, GError **error)
 {
 	g_return_val_if_fail(g_task_is_valid(result, self), FALSE);
 	return g_task_propagate_boolean(G_TASK(result), error);
+}
+static void
+schedule_recovery(AiLivekitTransport *self);
+static void
+recovery_joined(GObject *source, GAsyncResult *result, gpointer data)
+{
+	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(source);
+	g_autoptr(GError) error = NULL;
+	gboolean ok = g_task_propagate_boolean(G_TASK(result), &error);
+	if (!self->recovering || self->leaving)
+		return;
+	if (ok) {
+		self->recovering = FALSE;
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit media recovered after %u attempt(s)",
+			  self->retry_count);
+		g_signal_emit_by_name(self, "reconnected");
+	} else
+		schedule_recovery(self);
+}
+static gboolean
+retry_join(gpointer data)
+{
+	AiLivekitTransport *self = data;
+	g_clear_pointer(&self->retry_source, g_source_unref);
+	if (!self->recovering || self->leaving)
+		return G_SOURCE_REMOVE;
+	self->retry_count++;
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "LiveKit reconnect attempt %u", self->retry_count);
+	join_async(AI_AUDIO_TRANSPORT(self), self->room, self->token, self->retry_cancel,
+			   recovery_joined, NULL);
+	return G_SOURCE_REMOVE;
+}
+static void
+recovery_stopped(GObject *source, GAsyncResult *result, gpointer data)
+{
+	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(source);
+	g_task_propagate_boolean(G_TASK(result), NULL);
+	if (!self->recovering || self->leaving)
+		return;
+	if (self->retry_count >= self->reconnect_attempts) {
+		g_autoptr(GError) error = g_error_new_literal(
+			G_IO_ERROR, G_IO_ERROR_FAILED, "LiveKit reconnect attempts exhausted");
+		self->recovering = FALSE;
+		g_signal_emit_by_name(self, "error", error);
+		return;
+	}
+	self->retry_source = g_timeout_source_new(self->reconnect_delay_ms);
+	g_source_set_callback(self->retry_source, retry_join, g_object_ref(self),
+						  g_object_unref);
+	g_source_attach(self->retry_source, self->context);
+}
+static void
+schedule_recovery(AiLivekitTransport *self)
+{
+	g_autoptr(GTask) task = g_task_new(self, NULL, recovery_stopped, NULL);
+	GstElement *pipeline = detach(self);
+	if (pipeline == NULL)
+		g_task_return_boolean(task, TRUE);
+	else {
+		g_task_set_task_data(task, pipeline, (GDestroyNotify)gst_object_unref);
+		g_task_run_in_thread(task, stop_pipeline);
+	}
+}
+static void
+begin_recovery(AiLivekitTransport *self)
+{
+	self->recovering = TRUE;
+	self->retry_count = 0;
+	g_clear_object(&self->retry_cancel);
+	self->retry_cancel = g_cancellable_new();
+	g_signal_emit_by_name(self, "reconnecting");
+	if (self->recovering && !self->leaving)
+		schedule_recovery(self);
+}
+static void
+cancel_recovery(AiLivekitTransport *self)
+{
+	self->recovering = FALSE;
+	clear_source(&self->retry_source);
+	if (self->retry_cancel != NULL)
+		g_cancellable_cancel(self->retry_cancel);
 }
 static void
 write_pcm_async(AiAudioTransport *transport, GBytes *pcm, guint sample_rate,
@@ -648,6 +791,12 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_string(value, self->url);
 	else if (id == 2)
 		g_value_set_string(value, self->receive_token);
+	else if (id == 3)
+		g_value_set_uint(value, self->reconnect_attempts);
+	else if (id == 4)
+		g_value_set_uint(value, self->reconnect_delay_ms);
+	else if (id == 5)
+		g_value_set_uint(value, self->opus_bitrate);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -659,6 +808,12 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->url = g_value_dup_string(value);
 	else if (id == 2)
 		self->receive_token = g_value_dup_string(value);
+	else if (id == 3)
+		self->reconnect_attempts = g_value_get_uint(value);
+	else if (id == 4)
+		self->reconnect_delay_ms = g_value_get_uint(value);
+	else if (id == 5)
+		self->opus_bitrate = g_value_get_uint(value);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -666,7 +821,9 @@ static void
 dispose(GObject *object)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(object);
-	GstElement *pipeline = detach(self);
+	GstElement *pipeline;
+	cancel_recovery(self);
+	pipeline = detach(self);
 	if (pipeline != NULL) {
 		g_autoptr(GTask) task = g_task_new(NULL, NULL, NULL, NULL);
 		g_task_set_task_data(task, pipeline, (GDestroyNotify)gst_object_unref);
@@ -680,6 +837,9 @@ finalize(GObject *object)
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(object);
 	g_free(self->url);
 	g_free(self->receive_token);
+	g_free(self->room);
+	g_free(self->token);
+	g_clear_object(&self->retry_cancel);
 	g_free(self->publisher_identity);
 	g_main_context_unref(self->context);
 	G_OBJECT_CLASS(ai_livekit_transport_parent_class)->finalize(object);
@@ -692,6 +852,24 @@ ai_livekit_transport_class_init(AiLivekitTransportClass *klass)
 	oc->set_property = set_property;
 	oc->dispose = dispose;
 	oc->finalize = finalize;
+	g_object_class_install_property(
+		oc, 3,
+		g_param_spec_uint(
+			"reconnect-attempts", "Reconnect attempts",
+			"Maximum media recovery attempts; zero disables recovery", 0, 10, 3,
+			G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, 4,
+		g_param_spec_uint("reconnect-delay-ms", "Reconnect delay",
+						  "Delay between media recovery attempts", 1, 60000, 500,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
+							  G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, 5,
+		g_param_spec_uint("opus-bitrate", "Opus bitrate",
+						  "Fullband generic audio bitrate", 48000, 650000, 64000,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
+							  G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, 1,
 		g_param_spec_string("url", "URL", "LiveKit websocket endpoint", NULL,

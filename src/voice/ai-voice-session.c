@@ -68,7 +68,7 @@ struct _AiVoiceSession {
 	guint deadline_ms, barge_in_ms;
 	guint64 generation, provider_generation;
 	AiVoiceState state;
-	gboolean stopped, provider_pending;
+	gboolean stopped, provider_pending, media_recovering;
 };
 enum {
 	PROP_0,
@@ -276,7 +276,7 @@ static void
 pump(AiVoiceSession *self)
 {
 	Line *line;
-	if (self->stopped || self->speech != NULL)
+	if (self->stopped || self->media_recovering || self->speech != NULL)
 		return;
 	line = g_queue_pop_head(&self->lines);
 	if (line == NULL && !self->provider_pending && !recognizing(self) &&
@@ -548,6 +548,31 @@ stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
 	pump(self);
 }
 static void
+transport_reconnecting(AiAudioTransport *transport, gpointer data)
+{
+	AiVoiceSession *self = data;
+	GHashTableIter iter;
+	gpointer key;
+	if (self->stopped)
+		return;
+	self->media_recovering = TRUE;
+	interrupt_turn(self);
+	g_hash_table_iter_init(&iter, self->participants);
+	while (g_hash_table_iter_next(&iter, &key, NULL)) {
+		ai_speech_recognizer_cancel(self->recognizer, key);
+		ai_voice_activity_reset(self->activity, key);
+	}
+	g_hash_table_remove_all(self->participants);
+	state(self, AI_VOICE_LISTENING);
+}
+static void
+transport_reconnected(AiAudioTransport *transport, gpointer data)
+{
+	AiVoiceSession *self = data;
+	self->media_recovering = FALSE;
+	pump(self);
+}
+static void
 transport_error(AiAudioTransport *transport, GError *error, gpointer data)
 {
 	AiVoiceSession *self = data;
@@ -570,6 +595,7 @@ ai_voice_session_stop(AiVoiceSession *self)
 	if (self->stopped)
 		return;
 	self->stopped = TRUE;
+	self->media_recovering = TRUE;
 	interrupt_turn(self);
 	g_hash_table_iter_init(&iter, self->participants);
 	while (g_hash_table_iter_next(&iter, &key, NULL)) {
@@ -683,6 +709,10 @@ constructed(GObject *object)
 	g_signal_connect(self->transport, "audio", G_CALLBACK(audio_in), self);
 	g_signal_connect(self->transport, "participant-joined", G_CALLBACK(joined), self);
 	g_signal_connect(self->transport, "participant-left", G_CALLBACK(left), self);
+	g_signal_connect(self->transport, "reconnecting", G_CALLBACK(transport_reconnecting),
+					 self);
+	g_signal_connect(self->transport, "reconnected", G_CALLBACK(transport_reconnected),
+					 self);
 	g_signal_connect(self->transport, "error", G_CALLBACK(transport_error), self);
 	g_signal_connect(self->recognizer, "transcript", G_CALLBACK(transcript), self);
 	g_signal_connect(self->recognizer, "error", G_CALLBACK(stt_error), self);

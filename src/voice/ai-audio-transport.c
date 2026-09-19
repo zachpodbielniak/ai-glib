@@ -5,6 +5,22 @@ static void
 ai_audio_transport_default_init(AiAudioTransportInterface *iface)
 {
 	/**
+	 * AiAudioTransport::reconnecting:
+	 * @self: the transport
+	 *
+	 * Media recovery began. Discard the interrupted turn; await reconnected.
+	 */
+	g_signal_new("reconnecting", G_TYPE_FROM_INTERFACE(iface), G_SIGNAL_RUN_LAST, 0, NULL,
+				 NULL, NULL, G_TYPE_NONE, 0);
+	/**
+	 * AiAudioTransport::reconnected:
+	 * @self: the transport
+	 *
+	 * Media is available again; new speech can be submitted.
+	 */
+	g_signal_new("reconnected", G_TYPE_FROM_INTERFACE(iface), G_SIGNAL_RUN_LAST, 0, NULL,
+				 NULL, NULL, G_TYPE_NONE, 0);
+	/**
 	 * AiAudioTransport::audio:
 	 * @self: the emitter
 	 * @speaker: stable participant id
