@@ -13,6 +13,13 @@ settings(void)
 	g_object_get(config, "barge-in-ms", &debounce, NULL);
 	g_assert_cmpuint(debounce, ==, 250);
 	g_assert_true(
+		ai_call_config_set_text(config, "media-reconnect-attempts", "2", &error));
+	g_assert_true(
+		ai_call_config_set_text(config, "media-reconnect-delay-ms", "100", &error));
+	g_assert_true(ai_call_config_set_text(config, "opus-bitrate", "96000", &error));
+	g_assert_false(ai_call_config_set_text(config, "opus-bitrate", "32000", &error));
+	g_clear_error(&error);
+	g_assert_true(
 		g_file_set_contents(path,
 							"ai_call:\n  greeting: 'Hello caller'\n  turn-deadline-ms: "
 							"1234\n  barge-in-ms: 300\n  jwt-url: https://fixture/jwt\n",

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "voice-mocks.h"
 #include <libsoup/soup.h>
+#include <stdarg.h>
 static void
 joined_mock(AiAudioTransport *self, const gchar *room, const gchar *token,
 			GCancellable *cancel, GAsyncReadyCallback cb, gpointer data)
@@ -45,7 +46,19 @@ mock_provider(AiProviderType type, AiConfig *config, GError **error)
 {
 	return G_OBJECT(ai_mock_provider_new());
 }
-#define ai_livekit_transport_new mock_livekit
+static gpointer
+mock_object_new(GType type, const gchar *first, ...)
+{
+	gpointer object;
+	va_list args;
+	if (type == AI_TYPE_LIVEKIT_TRANSPORT)
+		return mock_livekit(NULL, NULL);
+	va_start(args, first);
+	object = g_object_new_valist(type, first, args);
+	va_end(args);
+	return object;
+}
+#define g_object_new mock_object_new
 #define ai_websocket_recognizer_new mock_stt
 #define ai_http_synthesizer_new mock_tts
 #define ai_webrtc_voice_activity_new mock_vad
@@ -53,6 +66,7 @@ mock_provider(AiProviderType type, AiConfig *config, GError **error)
 #define main ai_call_program_main
 #include "../bin/ai-call.c"
 #undef main
+#undef g_object_new
 
 typedef struct {
 	App app;
@@ -103,7 +117,8 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 			body = "{\"event_id\":\"$member\"}";
 		}
 	} else if (g_str_has_suffix(path, "/state"))
-		body = "[{\"type\":\"org.matrix.msc3401.call.member\",\"sender\":\"@assistant:test\","
+		body = "[{\"type\":\"org.matrix.msc3401.call.member\",\"sender\":\"@assistant:"
+			   "test\","
 			   "\"state_key\":\"old-device\",\"content\":{\"application\":\"m.call\"}}]";
 	else if (strstr(path, "/sync") != NULL) {
 		soup_server_message_pause(message);
@@ -212,21 +227,21 @@ stale_membership(MatrixFixture *f, gconstpointer data)
 static void
 info_visible(void)
 {
-    if (g_test_subprocess()) {
-        g_unsetenv("G_MESSAGES_DEBUG");
-        g_log_set_handler("ai-glib", G_LOG_LEVEL_INFO, info_log, NULL);
-        g_log("ai-glib", G_LOG_LEVEL_INFO, "media lifecycle diagnostic");
-        return;
-    }
-    g_test_trap_subprocess(NULL, 3000000, 0);
-    g_test_trap_assert_passed();
-    g_test_trap_assert_stderr("*ai-glib INFO: media lifecycle diagnostic*");
+	if (g_test_subprocess()) {
+		g_unsetenv("G_MESSAGES_DEBUG");
+		g_log_set_handler("ai-glib", G_LOG_LEVEL_INFO, info_log, NULL);
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "media lifecycle diagnostic");
+		return;
+	}
+	g_test_trap_subprocess(NULL, 3000000, 0);
+	g_test_trap_assert_passed();
+	g_test_trap_assert_stderr("*ai-glib INFO: media lifecycle diagnostic*");
 }
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
-    g_test_add_func("/voice/matrix/info-without-debug", info_visible);
+	g_test_add_func("/voice/matrix/info-without-debug", info_visible);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,
 			   answer_cleanup, matrix_teardown);
 	g_test_add("/voice/matrix/cleanup-retry", MatrixFixture, GINT_TO_POINTER(1),

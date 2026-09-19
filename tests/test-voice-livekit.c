@@ -13,6 +13,14 @@ typedef struct {
 } Timeline;
 static gint timestamp_gaps;
 static gint timestamp_buffers;
+static GstElement *publisher_pipeline;
+static gint low100, low200, dsp_count;
+static guint media_created, recovery_started;
+static void
+recovering(AiAudioTransport *transport, gpointer data)
+{
+	recovery_started++;
+}
 static GstPadProbeReturn
 check_timeline(GstPad *pad, GstPadProbeInfo *info, gpointer data)
 {
@@ -35,10 +43,17 @@ element_added(GSignalInvocationHint *hint, guint n, const GValue *values, gpoint
 {
 	GstElement *element = g_value_get_object(&values[1]);
 	GstElementFactory *factory = gst_element_get_factory(element);
+	if (factory != NULL &&
+		g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)),
+				  "webrtcdsp") == 0)
+		g_atomic_int_inc(&dsp_count);
 	if (factory != NULL && g_strcmp0(GST_ELEMENT_NAME(element), "voice-output") == 0 &&
 		g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "appsrc") ==
 			0) {
 		GstPad *pad = gst_element_get_static_pad(element, "src");
+		media_created++;
+		gst_clear_object(&publisher_pipeline);
+		publisher_pipeline = GST_ELEMENT(gst_object_get_parent(GST_OBJECT(element)));
 		gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, check_timeline,
 						  g_new0(Timeline, 1), g_free);
 		gst_object_unref(pad);
@@ -146,14 +161,20 @@ synthesis_request(SoupServer *server, SoupServerMessage *message, const gchar *p
 	g_autoptr(GByteArray) body = g_byte_array_new();
 	const guint8 end[] = {0, 0, 0, 0};
 	guint i, offset;
+	SoupMessageBody *request = soup_server_message_get_request_body(message);
+	gboolean low = g_strstr_len(request->data, request->length, "low") != NULL;
+	guint total =
+		g_strstr_len(request->data, request->length, "long") != NULL ? 720000 : 24000;
 	g_byte_array_append(body, (const guint8 *)"SR=24000\n", 9);
 	/* Non-10ms synthesis frames exercise partial transport buffers. */
-	for (offset = 0; offset < 24000; offset += 333) {
-		guint count = MIN(333, 24000 - offset);
+	for (offset = 0; offset < total; offset += 333) {
+		guint count = MIN(333, total - offset);
 		guint32 size = GUINT32_TO_BE(count * 2);
 		g_byte_array_append(body, (const guint8 *)&size, 4);
 		for (i = offset; i < offset + count; i++) {
-			gint16 value = (gint16)(8000 * sin(2 * G_PI * 5 * (i % 12) / 12));
+			gint16 value = low ? (gint16)(4000 * sin(2 * G_PI * (i % 240) / 240) +
+										  4000 * sin(2 * G_PI * (i % 120) / 120))
+							   : (gint16)(8000 * sin(2 * G_PI * 5 * (i % 12) / 12));
 			guint8 sample[] = {(guint16)value & 255, (guint16)value >> 8};
 			g_byte_array_append(body, sample, 2);
 		}
@@ -172,6 +193,7 @@ observer_sample(GstAppSink *sink, gpointer data)
 	GstBuffer *buffer;
 	guint i;
 	gdouble real = 0, imaginary = 0;
+	gdouble r100 = 0, i100 = 0, r200 = 0, i200 = 0;
 	if (sample == NULL)
 		return GST_FLOW_EOS;
 	buffer = gst_sample_get_buffer(sample);
@@ -179,6 +201,10 @@ observer_sample(GstAppSink *sink, gpointer data)
 		for (i = 0; i + 1 < map.size; i += 2) {
 			gint32 value =
 				(gint16)((guint16)map.data[i] | ((guint16)map.data[i + 1] << 8));
+			r100 += value * cos(2 * G_PI * ((i / 2) % 480) / 480);
+			i100 += value * sin(2 * G_PI * ((i / 2) % 480) / 480);
+			r200 += value * cos(2 * G_PI * ((i / 2) % 240) / 240);
+			i200 += value * sin(2 * G_PI * ((i / 2) % 240) / 240);
 			real += value * cos(2 * G_PI * 5 * ((i / 2) % 24) / 24);
 			imaginary += value * sin(2 * G_PI * 5 * ((i / 2) % 24) / 24);
 		}
@@ -187,6 +213,14 @@ observer_sample(GstAppSink *sink, gpointer data)
 			(real * real + imaginary * imaginary) / ((map.size / 2) * (map.size / 2)) >
 				250000)
 			g_atomic_int_add((gint *)data, map.size / 2);
+		/* Source amplitude is 4000 per tone; 3 dB power ratio is 0.501187. */
+		if (map.size >= 1920) {
+			gdouble scale = (map.size / 2) * (map.size / 2);
+			if ((r100 * r100 + i100 * i100) / scale > 2004749)
+				g_atomic_int_add(&low100, map.size / 2);
+			if ((r200 * r200 + i200 * i200) / scale > 2004749)
+				g_atomic_int_add(&low200, map.size / 2);
+		}
 		gst_buffer_unmap(buffer, &map);
 	}
 	gst_sample_unref(sample);
@@ -230,9 +264,13 @@ test_livekit(void)
 	g_autoptr(GSubprocessLauncher) launcher = NULL;
 	Result result = {0}, inbound = {0};
 	guint timeout;
+	g_autoptr(GSocketListener) ports = NULL;
+	g_autofree gchar *server_url = NULL, *server_config = NULL;
+	guint http_port, tcp_port, udp_port;
 	guint added_signal;
 	gulong hook;
 	GstElement *observer, *observer_source;
+	GstElement *main_pipeline;
 	g_autoptr(GObject) signaller = NULL;
 	g_autoptr(SoupServer) speech_server = NULL;
 	g_autofree gchar *speech_url = NULL, *observer_token = NULL;
@@ -258,10 +296,20 @@ test_livekit(void)
 											   "/tmp/ai-voice-livekit-test-server.log");
 	g_subprocess_launcher_set_stderr_file_path(
 		launcher, "/tmp/ai-voice-livekit-test-server-error.log");
-	server = g_subprocess_launcher_spawn(
-		launcher, &error, executable, "--dev", "--bind", "127.0.0.1", "--node-ip",
-		"127.0.0.1", "--config-body",
-		"port: 17980\nrtc:\n  tcp_port: 17981\n  udp_port: 17982\n", NULL);
+	ports = g_socket_listener_new();
+	http_port = g_socket_listener_add_any_inet_port(ports, NULL, &error);
+	g_assert_no_error(error);
+	tcp_port = g_socket_listener_add_any_inet_port(ports, NULL, &error);
+	g_assert_no_error(error);
+	udp_port = g_socket_listener_add_any_inet_port(ports, NULL, &error);
+	g_assert_no_error(error);
+	server_url = g_strdup_printf("ws://127.0.0.1:%u", http_port);
+	server_config = g_strdup_printf("port: %u\nrtc:\n  tcp_port: %u\n  udp_port: %u\n",
+									http_port, tcp_port, udp_port);
+	g_socket_listener_close(ports);
+	server = g_subprocess_launcher_spawn(launcher, &error, executable, "--dev", "--bind",
+										 "127.0.0.1", "--node-ip", "127.0.0.1",
+										 "--config-body", server_config, NULL);
 	g_assert_no_error(error);
 	g_assert_nonnull(server);
 	g_usleep(500000);
@@ -272,8 +320,8 @@ test_livekit(void)
 	gst_bin_add(GST_BIN(observer), observer_source);
 	g_object_set(observer_source, "stun-server", NULL, NULL);
 	g_object_get(observer_source, "signaller", &signaller, NULL);
-	g_object_set(signaller, "ws-url", "ws://127.0.0.1:17980", "auth-token",
-				 observer_token, "room-name", "voice-test", NULL);
+	g_object_set(signaller, "ws-url", server_url, "auth-token", observer_token,
+				 "room-name", "voice-test", NULL);
 	g_signal_connect(observer_source, "pad-added", G_CALLBACK(observer_pad), &heard);
 	gst_element_set_state(observer, GST_STATE_PLAYING);
 	limit = g_get_monotonic_time() + 5000000;
@@ -286,14 +334,15 @@ test_livekit(void)
 	g_assert_cmpint(connected, !=, 0);
 	rx = jwt("receiver");
 	tx = jwt("publisher");
-	transport = ai_livekit_transport_new("ws://127.0.0.1:17980", rx);
+	transport = ai_livekit_transport_new(server_url, rx);
 	loop = g_main_loop_new(NULL, FALSE);
 	result.loop = loop;
 	inbound.loop = loop;
+	g_signal_connect(transport, "reconnecting", G_CALLBACK(recovering), NULL);
 	g_signal_connect(transport, "audio", G_CALLBACK(received), &inbound);
 	g_signal_connect(transport, "participant-joined", G_CALLBACK(participant_joined),
 					 &inbound);
-	timeout = g_timeout_add_seconds(20, expired, NULL);
+	timeout = g_timeout_add_seconds(100, expired, NULL);
 	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(transport), "voice-test", tx, NULL,
 								  joined, &result);
 	g_main_loop_run(loop);
@@ -331,12 +380,74 @@ test_livekit(void)
 				   "appsrc buffers, "
 				   "zero timestamp gaps",
 				   g_atomic_int_get(&heard), g_atomic_int_get(&timestamp_buffers));
+	limit = g_get_monotonic_time() + 3000000;
+	while (ai_voice_session_get_state(session) != AI_VOICE_LISTENING &&
+		   g_get_monotonic_time() < limit)
+		g_main_context_iteration(NULL, TRUE);
+	g_atomic_int_set(&heard, 0);
+	ai_voice_session_say(session, "A long test reply.");
+	limit = g_get_monotonic_time() + 40000000;
+	while ((g_atomic_int_get(&heard) < 1400000 ||
+			ai_voice_session_get_state(session) != AI_VOICE_LISTENING) &&
+		   g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 1400000);
+	g_assert_cmpint(ai_voice_session_get_state(session), ==, AI_VOICE_LISTENING);
+	g_test_message("30 second reply: %d decoded tone samples", g_atomic_int_get(&heard));
+	/* A publisher bus error must not permanently stop the voice session. */
+	{
+		g_autoptr(GError) injected = g_error_new_literal(
+			GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED, "Injected publisher failure");
+		g_test_expect_message(
+			"ai-glib", G_LOG_LEVEL_INFO,
+			"*element=*Injected publisher failure*debug=publisher regression detail*");
+		gst_element_post_message(publisher_pipeline,
+								 gst_message_new_error(GST_OBJECT(publisher_pipeline),
+													   injected,
+													   "publisher regression detail"));
+	}
+	limit = g_get_monotonic_time() + 5000000;
+	while (g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_test_assert_expected_messages();
+	g_atomic_int_set(&heard, 0);
+	ai_voice_session_say(session, "After recovery.");
+	limit = g_get_monotonic_time() + 5000000;
+	while (g_atomic_int_get(&heard) < 24000 && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_assert_cmpint(g_atomic_int_get(&heard), >=, 24000);
+	limit = g_get_monotonic_time() + 3000000;
+	while (ai_voice_session_get_state(session) != AI_VOICE_LISTENING &&
+		   g_get_monotonic_time() < limit)
+		g_main_context_iteration(NULL, TRUE);
+	ai_voice_session_say(session, "A low frequency test.");
+	limit = g_get_monotonic_time() + 5000000;
+	while ((g_atomic_int_get(&low100) < 24000 || g_atomic_int_get(&low200) < 24000) &&
+		   g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE))
+			;
+		g_usleep(1000);
+	}
+	g_assert_cmpint(g_atomic_int_get(&low100), >=, 24000);
+	g_assert_cmpint(g_atomic_int_get(&low200), >=, 24000);
+	g_assert_cmpint(g_atomic_int_get(&dsp_count), ==, 0);
+	g_test_message("100/200 Hz: %d/%d samples with less than 3 dB loss", low100, low200);
+	main_pipeline = gst_object_ref(publisher_pipeline);
 	ai_voice_session_stop(session);
 	g_assert_cmpuint(inbound.participants, ==, 0);
 	g_assert_false(inbound.audio);
 	peer_rx = jwt("peer-receiver");
 	peer_tx = jwt("peer-publisher");
-	peer = ai_livekit_transport_new("ws://127.0.0.1:17980", peer_rx);
+	peer = ai_livekit_transport_new(server_url, peer_rx);
 	g_signal_connect(peer, "audio", G_CALLBACK(received), &result);
 	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(peer), "voice-test", peer_tx, NULL,
 								  joined, &result);
@@ -366,8 +477,30 @@ test_livekit(void)
 	ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(peer), NULL, left, &result);
 	g_main_loop_run(loop);
 	g_assert_no_error(result.error);
+	{
+		g_autoptr(GError) injected = g_error_new_literal(
+			GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED, "Cancel pending recovery");
+		gst_element_post_message(main_pipeline,
+								 gst_message_new_error(GST_OBJECT(main_pipeline),
+													   injected, "leave regression"));
+	}
+	limit = g_get_monotonic_time() + 1000000;
+	while (recovery_started < 2 && g_get_monotonic_time() < limit)
+		g_main_context_iteration(NULL, TRUE);
+	g_assert_cmpuint(recovery_started, ==, 2);
 	ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(transport), NULL, left, &result);
 	g_main_loop_run(loop);
+	{
+		guint before = media_created;
+		limit = g_get_monotonic_time() + 1000000;
+		while (g_get_monotonic_time() < limit) {
+			while (g_main_context_iteration(NULL, FALSE))
+				;
+			g_usleep(1000);
+		}
+		g_assert_cmpuint(media_created, ==, before);
+	}
+	gst_object_unref(main_pipeline);
 	g_source_remove(timeout);
 	g_assert_no_error(result.error);
 	g_assert_true(result.ok);
@@ -375,6 +508,7 @@ test_livekit(void)
 	gst_object_unref(observer);
 	soup_server_disconnect(speech_server);
 	g_signal_remove_emission_hook(added_signal, hook);
+	gst_clear_object(&publisher_pipeline);
 	g_assert_cmpint(g_atomic_int_get(&timestamp_gaps), ==, 0);
 	g_subprocess_send_signal(server, 15);
 	g_subprocess_wait(server, NULL, NULL);

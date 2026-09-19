@@ -342,7 +342,8 @@ debounce_notice(Fixture *f, gconstpointer data)
 	g_signal_emit_by_name(f->transport, "participant-joined", "second", "Second");
 	frame(f, "second", 1);
 	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
-	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+	g_test_expect_message(
+		"ai-glib", G_LOG_LEVEL_INFO,
 		"barge-in by Caller after 250 ms of speech, cancelling speaking");
 	frame(f, "caller", 1);
 	g_test_assert_expected_messages();
@@ -351,10 +352,35 @@ debounce_notice(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(f->stt->fed, ==, 25);
 	g_assert_false(g_hash_table_contains(f->stt->active, "second"));
 }
+static void
+media_recovery(Fixture *f, gconstpointer data)
+{
+	f->tts->hold_after = 1;
+	ai_voice_session_say(f->session, "Interrupted notice.");
+	g_assert_nonnull(f->tts->held);
+	g_signal_emit_by_name(f->transport, "reconnecting");
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	drain();
+	f->tts->hold_after = 0;
+	ai_voice_session_say(f->session, "Queued during recovery.");
+	drain();
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_signal_emit_by_name(f->transport, "reconnected");
+	wait_replies(f, 2);
+	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
+	ai_mock_provider_push_text(f->provider, "The next turn works.");
+	utterance(f, "caller");
+	wait_replies(f, 3);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 2), ==, "The next turn works.");
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/voice/session/media-recovery", Fixture, NULL, setup, media_recovery,
+			   teardown);
 	g_test_add("/voice/session/debounce-noise", Fixture, GINT_TO_POINTER(1), setup,
 			   debounce_noise, teardown);
 	g_test_add("/voice/session/debounce-notice", Fixture, GINT_TO_POINTER(1), setup,
