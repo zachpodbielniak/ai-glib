@@ -63,9 +63,15 @@ static gboolean  opt_launch_cmd_print = FALSE;
 static gchar *opt_theme = NULL;
 static gboolean opt_list_themes = FALSE;
 static gboolean opt_no_animation = FALSE;
+static gboolean opt_no_coalesce = FALSE;
+static gint opt_queue_limit = 32;
 static gboolean theme_explicit = FALSE;
 
 static const GOptionEntry option_entries[] = {
+	{ "no-coalesce", 0, 0, G_OPTION_ARG_NONE, &opt_no_coalesce,
+	  "Send queued follow-ups as separate turns", NULL },
+	{ "queue-limit", 0, 0, G_OPTION_ARG_INT, &opt_queue_limit,
+	  "Maximum queued follow-ups (1–4096, default 32)", "N" },
 	{ "no-herdr", 0, 0, G_OPTION_ARG_NONE, &opt_no_herdr,
 	  "Disable automatic herdr pane lifecycle reporting", NULL },
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme, "Terminal theme (overrides AI_TUI_THEME and NO_COLOR)", "NAME" },
@@ -325,10 +331,6 @@ attr_for_tag(AiStyleTag tag)
  */
 #define AGENT_MAX_CONCURRENT (4)
 
-/* Follow-ups typed during a turn. Enter queues rather than discarding
- * the draft; the next item is sent when the current turn finishes. */
-#define SEND_QUEUE_LIMIT (32)
-
 /*
  * A keycode of our own, for a key ncurses has no name for.
  *
@@ -367,12 +369,6 @@ static const gchar *SPINNER_FRAMES[] = {
 
 typedef struct
 {
-	gchar *text;
-	GList *images; /* (element-type AiImageContent) */
-} QueuedPrompt;
-
-typedef struct
-{
     AiConversation *conversation;
 	AiMcpHost *mcp_host;
 	AiTuiHerdr *herdr;
@@ -400,7 +396,8 @@ typedef struct
 	gboolean sending;
 	gboolean pasting;
 	GList *images;                 /* AiImageContent references in the draft */
-	GQueue send_queue;             /* QueuedPrompt, FIFO follow-ups */
+	AiPromptQueue *send_queue;     /* Pending submissions, coalesced at turn boundaries */
+	GPtrArray *side_questions;     /* AiConversation; async completion owns callbacks */
 	GCancellable *clipboard_cancel;
 	gboolean clipboard_pending;
 	gboolean skip_permissions;
@@ -986,7 +983,7 @@ app_awaiting_user(App *app)
 {
 	return app->awaiting_since != 0 && app->input->len == 0 &&
 		app->approval_prompt == NULL && !app->searching &&
-		g_queue_is_empty(&app->send_queue) &&
+		(ai_prompt_queue_get_length(app->send_queue) == 0) &&
 		!ai_conversation_get_busy(app->conversation);
 }
 
@@ -1155,7 +1152,7 @@ draw_status(App *app)
             ai_conversation_get_activity(app->conversation);
         g_autofree gchar *elapsed = format_elapsed(
             ai_conversation_get_activity_elapsed(app->conversation));
-		guint queued = g_queue_get_length(&app->send_queue);
+		guint queued = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *queued_note = queued > 0
 			? g_strdup_printf(" · %u queued", queued)
 			: g_strdup("");
@@ -1191,7 +1188,7 @@ draw_status(App *app)
                                model != NULL ? model : "",
                                app->interrupt_id != 0
                                    ? "^C again to quit"
-                                   : g_queue_get_length(&app->send_queue) > 0
+                                   : ai_prompt_queue_get_length(app->send_queue) > 0
                                        ? "queued prompts · Enter to send"
                                    : app_awaiting_user(app)
                                        ? "your turn · type to reply"
@@ -1477,7 +1474,7 @@ draw_input(App *app)
 	wattrset(app->input_win, border);
 	draw_frame(app->input_win);
 	{
-		guint queued = g_queue_get_length(&app->send_queue);
+		guint queued = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *label = NULL;
 		g_autofree gchar *title = NULL;
 		gint title_cols;
@@ -2808,7 +2805,11 @@ handle_builtin(App *app, AiCommandResult *result)
         return;
     }
 
-    if (g_strcmp0(name, "clear") == 0)
+    if (g_strcmp0(name, "btw") == 0)
+	{
+		say(app, "/btw is available in the interactive composer");
+	}
+    else if (g_strcmp0(name, "clear") == 0)
     {
         ai_conversation_clear(app->conversation);
         app->selected = -1;
@@ -3381,9 +3382,9 @@ handle_interrupt(App *app)
         return FALSE;
     }
 
-	if (!g_queue_is_empty(&app->send_queue))
+	if (ai_prompt_queue_get_length(app->send_queue) != 0)
 	{
-		guint n = g_queue_get_length(&app->send_queue);
+		guint n = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *notice = g_strdup_printf(
 			"Dropped %u queued prompt%s", n, n == 1 ? "" : "s");
 
@@ -3982,7 +3983,7 @@ drain_keys(App *app)
 
             case 4:   /* ^D: quit, on an empty line */
                 if (app->input->len == 0 && app->images == NULL && !app->clipboard_pending &&
-					g_queue_is_empty(&app->send_queue))
+					(ai_prompt_queue_get_length(app->send_queue) == 0))
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
@@ -4096,21 +4097,9 @@ on_resize(gpointer user_data)
  * ================================================================ */
 
 static void
-queued_prompt_free(gpointer data)
-{
-	QueuedPrompt *item = data;
-
-	if (item == NULL)
-		return;
-	g_free(item->text);
-	g_list_free_full(item->images, g_object_unref);
-	g_free(item);
-}
-
-static void
 app_clear_send_queue(App *app)
 {
-	g_queue_clear_full(&app->send_queue, queued_prompt_free);
+	if (app->send_queue != NULL) ai_prompt_queue_clear(app->send_queue);
 }
 
 static gboolean
@@ -4673,22 +4662,132 @@ image_draft_is_rejected(App *app)
 	return FALSE;
 }
 
+/* A side question owns its client and transcript. Its completion is discarded
+ * after reset, and drained before App leaves scope. */
+typedef struct {
+	App *app;
+	AiConversation *origin;
+	gchar *question;
+} SideQuestion;
+
+static void
+on_side_question(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	SideQuestion *side = user_data;
+	App *app = side->app;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *answer = NULL;
+	GList *messages;
+
+	ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
+	if (app->running && app->conversation == side->origin) {
+		messages = ai_conversation_get_messages(AI_CONVERSATION(source));
+		if (error == NULL && messages != NULL)
+			answer = ai_message_get_text(g_list_last(messages)->data);
+		say(app, "BTW — %s\n%s", side->question,
+		    error != NULL ? error->message : (answer != NULL ? answer : "No answer"));
+	}
+	g_ptr_array_remove(app->side_questions, source);
+	g_object_unref(side->origin);
+	g_free(side->question);
+	g_free(side);
+}
+
+/* Client properties are the configuration contract. Never share request state
+ * or resume a native session, nor hand a child the parent's live MCP endpoint. */
+static GObject *
+side_provider_new(GObject *parent, GError **error)
+{
+	GParamSpec **specs;
+	const gchar **names;
+	GValue *values;
+	guint n, i, used = 0;
+	GObject *provider;
+
+	if (!AI_IS_CLIENT(parent) && !AI_IS_CLI_CLIENT(parent)) {
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+			"This provider needs an application-supplied independent client for /btw");
+		return NULL;
+	}
+	specs = g_object_class_list_properties(G_OBJECT_GET_CLASS(parent), &n);
+	names = g_new0(const gchar *, n);
+	values = g_new0(GValue, n);
+	for (i = 0; i < n; i++) {
+		GParamSpec *spec = specs[i];
+		GType type = G_PARAM_SPEC_VALUE_TYPE(spec);
+		if (!(spec->flags & G_PARAM_READABLE) || !(spec->flags & G_PARAM_WRITABLE) ||
+		    g_str_equal(spec->name, "session-id") ||
+		    g_str_equal(spec->name, "continue-session") ||
+		    g_str_equal(spec->name, "fork-session") ||
+		    strstr(spec->name, "mcp") != NULL ||
+		    (g_type_is_a(type, G_TYPE_OBJECT) && type != AI_TYPE_CONFIG))
+			continue;
+		names[used] = spec->name;
+		g_value_init(&values[used], type);
+		g_object_get_property(parent, spec->name, &values[used]);
+		used++;
+	}
+	provider = g_object_new_with_properties(G_OBJECT_TYPE(parent), used, names, values);
+	for (i = 0; i < used; i++) g_value_unset(&values[i]);
+	g_free(values);
+	g_free(names);
+	g_free(specs);
+	return provider;
+}
+
+static gboolean
+app_side_question(App *app, const gchar *question)
+{
+	g_autoptr(GObject) provider = NULL;
+	g_autoptr(AiConversation) branch = NULL;
+	g_autoptr(GError) error = NULL;
+	SideQuestion *side;
+
+	if (*question == '\0') {
+		say(app, "Usage: /btw <question> or /btw --cancel");
+		return TRUE;
+	}
+	if (g_str_equal(question, "--cancel")) {
+		guint i;
+		for (i = 0; i < app->side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app->side_questions, i));
+		say(app, "Cancelling side questions; main turn unchanged");
+		return TRUE;
+	}
+	if (app->images != NULL) {
+		ui_feedback(app, "/btw accepts text; attachments remain in your draft", AI_STYLE_ERROR);
+		return FALSE;
+	}
+	if (app->side_questions->len >= 4) {
+		ui_feedback(app, "Four side questions are already running", AI_STYLE_ERROR);
+		return FALSE;
+	}
+	provider = side_provider_new(ai_conversation_get_provider(app->conversation), &error);
+	if (provider != NULL) branch = ai_conversation_fork(app->conversation, provider, &error);
+	if (branch == NULL) {
+		ui_feedback(app, error->message, AI_STYLE_ERROR);
+		return FALSE;
+	}
+	side = g_new0(SideQuestion, 1);
+	side->app = app;
+	side->origin = g_object_ref(app->conversation);
+	side->question = g_strdup(question);
+	g_ptr_array_add(app->side_questions, g_object_ref(branch));
+	say(app, "BTW started: %s", question);
+	ai_conversation_send_async(branch, question, NULL, on_side_question, side);
+	return TRUE;
+}
+
 static void
 app_enqueue_draft(App *app, const gchar *line)
 {
-	QueuedPrompt *item;
-
-	if (g_queue_get_length(&app->send_queue) >= SEND_QUEUE_LIMIT)
-	{
-		ui_feedback(app, "Send queue is full", AI_STYLE_ERROR);
+	g_autoptr(GError) error = NULL;
+	if (!ai_prompt_queue_push(app->send_queue, line, app->images,
+	                         line[0] == '/', &error)) {
+		ui_feedback(app, error->message, AI_STYLE_ERROR);
 		return;
 	}
-
-	item = g_new0(QueuedPrompt, 1);
-	item->text = g_strdup(line);
-	item->images = app->images;
-	app->images = NULL;
-	g_queue_push_tail(&app->send_queue, item);
+	g_clear_list(&app->images, g_object_unref);
 	g_ptr_array_add(app->history, g_strdup(line));
 	g_string_truncate(app->input, 0);
 	app->cursor = 0;
@@ -4726,9 +4825,25 @@ app_send_from_composer(
         return;
     }
 
-	if (app->sending || ai_conversation_get_busy(app->conversation))
+	if (!opt_no_expand && g_str_has_prefix(line, "/btw") &&
+	    (line[4] == '\0' || g_ascii_isspace(line[4]))) {
+		const gchar *question = line + 4;
+		while (g_ascii_isspace(*question)) question++;
+		if (app_side_question(app, question)) {
+			if (record_history) g_ptr_array_add(app->history, g_strdup(line));
+			g_string_truncate(app->input, 0);
+			app->cursor = 0;
+			app->history_pos = -1;
+		}
+		return;
+	}
+
+	if (app->sending || ai_conversation_get_busy(app->conversation) ||
+	    (record_history && ai_prompt_queue_get_length(app->send_queue) > 0))
 	{
 		app_enqueue_draft(app, line);
+		if (!app->sending && !ai_conversation_get_busy(app->conversation))
+			app_flush_send_queue(app);
 		return;
 	}
 
@@ -4768,20 +4883,31 @@ app_send_from_composer(
 static gboolean
 app_flush_send_queue(App *app)
 {
-	QueuedPrompt *item;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *draft = NULL;
+	GList *draft_images;
+	guint cursor;
+	gint history_pos;
 
 	if (app->sending || ai_conversation_get_busy(app->conversation) ||
-		g_queue_is_empty(&app->send_queue))
+		ai_prompt_queue_get_length(app->send_queue) == 0)
 		return FALSE;
 
-	item = g_queue_pop_head(&app->send_queue);
-	g_string_assign(app->input, item->text != NULL ? item->text : "");
+	/* A queued turn never consumes the unsent composer or its attachments. */
+	draft = g_strdup(app->input->str);
+	draft_images = app->images;
+	cursor = app->cursor;
+	history_pos = app->history_pos;
+	app->images = NULL;
+	text = ai_prompt_queue_pop(app->send_queue, &app->images);
+	g_string_assign(app->input, text);
 	app->cursor = (guint)app->input->len;
-	g_clear_list(&app->images, g_object_unref);
-	app->images = item->images;
-	item->images = NULL;
-	queued_prompt_free(item);
 	app_send_from_composer(app, FALSE);
+	g_clear_list(&app->images, g_object_unref);
+	app->images = draft_images;
+	g_string_assign(app->input, draft);
+	app->cursor = cursor;
+	app->history_pos = history_pos;
 	return app->sending || ai_conversation_get_busy(app->conversation);
 }
 
@@ -4937,6 +5063,11 @@ app_reset(App *app)
 		g_signal_connect_swapped(app->conversation, "notify::activity", G_CALLBACK(app_schedule_redraw), app);
 	}
 
+	{
+		guint i;
+		for (i = 0; i < app->side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app->side_questions, i));
+	}
 	/* Forget drafts and navigation as well as the visible conversation. */
 	g_ptr_array_set_size(app->history, 0);
 	g_string_truncate(app->input, 0);
@@ -5363,6 +5494,10 @@ main(int argc, char *argv[])
                 "SPDX-License-Identifier: AGPL-3.0-or-later\n");
         return 0;
     }
+    if (opt_queue_limit < 1 || opt_queue_limit > 4096) {
+		g_printerr("--queue-limit must be between 1 and 4096\n");
+		return 1;
+	}
 	if (opt_list_themes)
 	{
 		guint i;
@@ -5431,6 +5566,9 @@ main(int argc, char *argv[])
 	opt_skip_permissions = app.skip_permissions;
 	g_signal_connect(ai_conversation_get_transcript(app.conversation), "items-changed",
 		G_CALLBACK(on_transcript_items_changed), &app);
+    app.send_queue = g_object_new(AI_TYPE_PROMPT_QUEUE,
+		"coalesce", !opt_no_coalesce, "max-length", (guint)opt_queue_limit, NULL);
+	app.side_questions = g_ptr_array_new_with_free_func(g_object_unref);
     app.input = g_string_new(prompt);
     app.cursor = (guint)app.input->len;
     app.history = g_ptr_array_new_with_free_func(g_free);
@@ -5577,6 +5715,8 @@ main(int argc, char *argv[])
         g_clear_object(&app.registry);
         g_object_unref(app.conversation);
         g_object_unref(provider);
+        g_clear_object(&app.send_queue);
+        g_ptr_array_unref(app.side_questions);
         g_string_free(app.input, TRUE);
         g_ptr_array_unref(app.history);
 
@@ -5648,6 +5788,8 @@ main(int argc, char *argv[])
             g_clear_object(&app.registry);
             g_object_unref(app.conversation);
             g_object_unref(provider);
+            g_clear_object(&app.send_queue);
+            g_ptr_array_unref(app.side_questions);
             g_string_free(app.input, TRUE);
             g_ptr_array_unref(app.history);
 
@@ -5664,6 +5806,8 @@ main(int argc, char *argv[])
         g_clear_object(&app.registry);
         g_object_unref(app.conversation);
         g_object_unref(provider);
+        g_clear_object(&app.send_queue);
+        g_ptr_array_unref(app.side_questions);
         g_string_free(app.input, TRUE);
         g_ptr_array_unref(app.history);
         return 1;
@@ -5796,6 +5940,12 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	{
+		guint i;
+		for (i = 0; i < app.side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app.side_questions, i));
+		while (app.side_questions->len != 0) g_main_context_iteration(NULL, TRUE);
+	}
 	if (app.clipboard_pending)
 	{
 		g_cancellable_cancel(app.clipboard_cancel);
@@ -5834,6 +5984,8 @@ main(int argc, char *argv[])
     g_clear_object(&app.cancellable);
     g_object_unref(app.conversation);
     g_object_unref(provider);
+    g_clear_object(&app.send_queue);
+	g_ptr_array_unref(app.side_questions);
     g_string_free(app.input, TRUE);
     g_ptr_array_unref(app.history);
     g_main_loop_unref(app.loop);

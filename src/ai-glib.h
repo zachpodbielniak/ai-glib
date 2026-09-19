@@ -50,6 +50,7 @@
 #include "view/ai-view-tool-block.h"
 #include "view/ai-transcript.h"
 #include "view/ai-conversation.h"
+#include "view/ai-prompt-queue.h"
 
 /* Model classes */
 #include "model/ai-usage.h"

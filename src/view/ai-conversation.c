@@ -65,6 +65,7 @@ struct _AiConversation
     gboolean        stream;
     gboolean        local_tools;
     gboolean        busy;
+	guint           turn_history_length;
 
     GCancellable   *cancellable;      /* live only during a turn */
     GTask          *task;             /* borrowed; the in-flight send */
@@ -897,6 +898,7 @@ ai_conversation_send_images_async(
     close_open_blocks(self);
     self->open_tools = NULL;
 
+    self->turn_history_length = g_list_length(self->messages);
     message = ai_message_new_user(text != NULL ? text : "");
     for (l = images; l != NULL; l = l->next)
         ai_message_add_content_block(message, g_object_ref(l->data));
@@ -2960,4 +2962,59 @@ ai_conversation_send_input_images_finish(
 	GError **error
 ){
 	return ai_conversation_send_input_finish(self, result, out_command, error);
+}
+
+/**
+ * ai_conversation_fork:
+ * @self: the parent conversation
+ * @provider: (transfer none): a fresh, independently owned provider instance
+ * @error: return location for an error
+ *
+ * Snapshots completed portable history, system prompt and working directory.
+ * May be called during a turn; that turn's input and partial output are excluded.
+ * The provider must not be the parent's instance or in use elsewhere. CLI
+ * resume flags are cleared so a branch cannot modify the parent's native session.
+ * Native on-disk history is not read during an active turn. Already carried
+ * context is copied. The branch has its own transcript and executor; local tools,
+ * commands, brigade and tool endpoint are not inherited. A host may explicitly
+ * configure them on the returned conversation. CLI-owned tool permissions are
+ * the caller's responsibility. Invoke on the parent's owning main context.
+ *
+ * Returns: (transfer full) (nullable): an independent conversation, or NULL
+ */
+AiConversation *
+ai_conversation_fork(AiConversation *self, GObject *provider, GError **error)
+{
+	g_autoptr(AiConversation) branch = NULL;
+	GList *l;
+	guint count, i;
+	g_return_val_if_fail(AI_IS_CONVERSATION(self), NULL);
+	if (!AI_IS_PROVIDER(provider) || provider == self->provider) {
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"A branch requires an independent provider instance");
+		return NULL;
+	}
+	if (AI_IS_CLI_CLIENT(provider)) {
+		ai_cli_client_set_session_id(AI_CLI_CLIENT(provider), NULL);
+		if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "continue-session"))
+			g_object_set(provider, "continue-session", FALSE, NULL);
+		if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "fork-session"))
+			g_object_set(provider, "fork-session", FALSE, NULL);
+		ai_cli_client_mark_portable_context(AI_CLI_CLIENT(provider));
+	}
+	branch = ai_conversation_new(provider);
+	ai_conversation_set_system_prompt(branch, self->system_prompt);
+	ai_conversation_set_working_directory(branch, self->working_directory);
+	ai_conversation_set_max_tokens(branch, self->max_tokens);
+	ai_conversation_set_stream(branch, self->stream);
+	ai_conversation_set_local_tools(branch, FALSE);
+	branch->carried_context = g_strdup(self->carried_context);
+	count = self->busy ? self->turn_history_length : g_list_length(self->messages);
+	for (l = self->messages, i = 0; l != NULL && i < count; l = l->next, i++) {
+		g_autoptr(JsonNode) json = ai_message_to_json(l->data);
+		g_autoptr(AiMessage) copy = ai_message_new_from_json(json, error);
+		if (copy == NULL) return NULL;
+		branch->messages = g_list_append(branch->messages, g_steal_pointer(&copy));
+	}
+	return g_steal_pointer(&branch);
 }
