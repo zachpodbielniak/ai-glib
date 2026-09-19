@@ -292,7 +292,7 @@ voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 	}
 }
 static void
-first_pcm(AiSpeechSynthesizer *synth, GBytes *pcm, gpointer data)
+first_pcm(AiSpeechSynthesizer *synth, GBytes *pcm, guint sample_rate, gpointer data)
 {
 	Call *call = data;
 	gint64 now = g_get_monotonic_time();

@@ -7,10 +7,11 @@ ai_speech_synthesizer_default_init(AiSpeechSynthesizerInterface *iface)
 	/**
 	 * AiSpeechSynthesizer::audio:
 	 * @self: the emitter
-	 * @pcm: 16 kHz mono signed little-endian PCM
+	 * @pcm: native-rate mono signed 16-bit little-endian PCM
+	 * @sample_rate: sample rate of this buffer in Hz
 	 */
 	g_signal_new("audio", G_TYPE_FROM_INTERFACE(iface), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
-				 NULL, G_TYPE_NONE, 1, G_TYPE_BYTES);
+				 NULL, G_TYPE_NONE, 2, G_TYPE_BYTES, G_TYPE_UINT);
 }
 
 G_DEFINE_INTERFACE(AiSpeechSynthesizer, ai_speech_synthesizer, G_TYPE_OBJECT)

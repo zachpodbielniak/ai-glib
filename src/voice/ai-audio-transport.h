@@ -22,6 +22,10 @@ struct _AiAudioTransportInterface {
 	gboolean (*write_finish)(AiAudioTransport *self, GAsyncResult *result,
 							 GError **error);
 	void (*flush)(AiAudioTransport *self);
+	void (*write_pcm_async)(AiAudioTransport *self, GBytes *pcm, guint sample_rate,
+							GCancellable *cancellable, GAsyncReadyCallback callback,
+							gpointer user_data);
+	gboolean (*write_pcm_finish)(AiAudioTransport *self, GAsyncResult *result, GError **error);
 	gpointer _reserved[8];
 };
 
@@ -53,4 +57,11 @@ ai_audio_transport_write_finish(AiAudioTransport *self, GAsyncResult *result,
 
 void
 ai_audio_transport_flush(AiAudioTransport *self);
+void
+ai_audio_transport_write_pcm_async(AiAudioTransport *self, GBytes *pcm, guint sample_rate,
+								   GCancellable *cancellable,
+								   GAsyncReadyCallback callback, gpointer user_data);
+gboolean
+ai_audio_transport_write_pcm_finish(AiAudioTransport *self, GAsyncResult *result,
+									GError **error);
 G_END_DECLS

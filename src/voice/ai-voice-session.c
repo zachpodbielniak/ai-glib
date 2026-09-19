@@ -189,7 +189,8 @@ played(GObject *source, GAsyncResult *result, gpointer data)
 	Playback *p = data;
 	Speech *s = p->speech;
 	g_autoptr(GError) error = NULL;
-	if (!ai_audio_transport_write_finish(AI_AUDIO_TRANSPORT(source), result, &error)) {
+	if (!ai_audio_transport_write_pcm_finish(AI_AUDIO_TRANSPORT(source), result,
+											 &error)) {
 		s->discarded = TRUE;
 		report(s->session, error);
 	}
@@ -199,7 +200,7 @@ played(GObject *source, GAsyncResult *result, gpointer data)
 	speech_complete(s);
 }
 static void
-audio_out(AiSpeechSynthesizer *synthesizer, GBytes *pcm, gpointer data)
+audio_out(AiSpeechSynthesizer *synthesizer, GBytes *pcm, guint sample_rate, gpointer data)
 {
 	AiVoiceSession *self = data;
 	Speech *s = self->speech;
@@ -219,7 +220,8 @@ audio_out(AiSpeechSynthesizer *synthesizer, GBytes *pcm, gpointer data)
 	p->size = size;
 	s->pending++;
 	s->queued += size;
-	ai_audio_transport_write_async(self->transport, pcm, s->cancel, played, p);
+	ai_audio_transport_write_pcm_async(self->transport, pcm, sample_rate, s->cancel,
+									   played, p);
 }
 static void
 synthesized(GObject *source, GAsyncResult *result, gpointer data)

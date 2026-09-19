@@ -10,6 +10,7 @@ typedef struct {
 	GTask *task;
 	GBytes *pcm;
 	gsize offset;
+	guint rate;
 	GstClockTime end_time;
 } Output;
 typedef struct {
@@ -34,6 +35,7 @@ struct _AiLivekitTransport {
 	gint64 join_deadline;
 	gsize queued_bytes;
 	guint64 output_samples;
+	guint output_rate;
 	GstClockTime output_origin;
 	gboolean leaving, sent_pcm;
 };
@@ -271,12 +273,15 @@ push_pcm(AiLivekitTransport *self, GstBuffer *buffer, guint samples)
 {
 	GST_BUFFER_PTS(buffer) =
 		self->output_origin +
-		gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000);
+		gst_util_uint64_scale(self->output_samples, GST_SECOND, self->output_rate);
 	GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
 	GST_BUFFER_OFFSET(buffer) = self->output_samples;
 	self->output_samples += samples;
 	GST_BUFFER_OFFSET_END(buffer) = self->output_samples;
-	GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(samples, GST_SECOND, 16000);
+	GST_BUFFER_DURATION(buffer) =
+		self->output_origin +
+		gst_util_uint64_scale(self->output_samples, GST_SECOND, self->output_rate) -
+		GST_BUFFER_PTS(buffer);
 	return gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
 }
 static gboolean
@@ -323,8 +328,8 @@ tick(gpointer data)
 	/* Catch up after a delayed main-loop dispatch, with bounded work per tick.
 	 * Keep no more than 10 ms queued ahead of the media clock for barge-in. */
 	for (packets = 0; packets < 20; packets++) {
-		if (self->output_origin +
-				gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000) >
+		if (self->output_origin + gst_util_uint64_scale(self->output_samples, GST_SECOND,
+														self->output_rate) >
 			now)
 			break;
 		/* Retire completed writes without inserting a silent tick between frames. */
@@ -340,18 +345,32 @@ tick(gpointer data)
 			g_task_return_boolean(o->task, TRUE);
 			output_free(o);
 		}
+		if (o != NULL && o->rate != self->output_rate) {
+			GstCaps *caps;
+			self->output_origin += gst_util_uint64_scale(self->output_samples, GST_SECOND,
+														 self->output_rate);
+			self->output_samples = 0;
+			self->output_rate = o->rate;
+			caps = gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE",
+									   "rate", G_TYPE_INT, (gint)o->rate, "channels",
+									   G_TYPE_INT, 1, "layout", G_TYPE_STRING,
+									   "interleaved", NULL);
+			gst_app_src_set_caps(GST_APP_SRC(self->appsrc), caps);
+			gst_caps_unref(caps);
+		}
 		if (o != NULL) {
 			gsize size;
 			const guint8 *raw = g_bytes_get_data(o->pcm, &size);
-			gsize count = MIN((gsize)320, size - o->offset);
+			gsize count = MIN((gsize)(2 * (self->output_rate / 100)), size - o->offset);
 			GstBuffer *buffer = gst_buffer_new_allocate(NULL, count, NULL);
 			GstFlowReturn flow;
 			gst_buffer_fill(buffer, 0, raw + o->offset, count);
 			GST_BUFFER_DURATION(buffer) =
-				gst_util_uint64_scale(count / 2, GST_SECOND, 16000);
+				gst_util_uint64_scale(count / 2, GST_SECOND, self->output_rate);
 			flow = push_pcm(self, buffer, count / 2);
 			o->end_time = self->output_origin +
-						  gst_util_uint64_scale(self->output_samples, GST_SECOND, 16000);
+						  gst_util_uint64_scale(self->output_samples, GST_SECOND,
+												self->output_rate);
 			if (flow == GST_FLOW_OK && !self->sent_pcm) {
 				guint i;
 				for (i = 0; i < count; i++)
@@ -373,10 +392,11 @@ tick(gpointer data)
 				output_free(o);
 			}
 		} else if (self->appsrc != NULL) {
-			GstBuffer *silence = gst_buffer_new_allocate(NULL, 320, NULL);
-			gst_buffer_memset(silence, 0, 0, 320);
+			GstBuffer *silence =
+				gst_buffer_new_allocate(NULL, 2 * (self->output_rate / 100), NULL);
+			gst_buffer_memset(silence, 0, 0, 2 * (self->output_rate / 100));
 			GST_BUFFER_DURATION(silence) = 10 * GST_MSECOND;
-			push_pcm(self, silence, 160);
+			push_pcm(self, silence, self->output_rate / 100);
 		}
 	}
 	return G_SOURCE_CONTINUE;
@@ -454,6 +474,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	g_autoptr(GTask) starter = NULL;
 
 	GObject *rx = NULL, *tx = NULL;
+	GstElement *converter;
 	GstCaps *caps;
 	GstBus *bus;
 	if (self->pipeline != NULL || !ai_livekit_transport_is_available() ||
@@ -479,18 +500,33 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 					 NULL);
 	self->input = gst_element_factory_make("livekitwebrtcsrc", NULL);
 	self->output = gst_element_factory_make("livekitwebrtcsink", NULL);
-	self->appsrc = gst_element_factory_make("appsrc", NULL);
+	self->appsrc = gst_element_factory_make("appsrc", "voice-output");
+	converter = gst_parse_bin_from_description(
+		"audioconvert ! audioresample quality=10 ! "
+		"capsfilter "
+		"caps=\"audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved\"",
+		TRUE, NULL);
+	if (converter == NULL) {
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+								"Audio conversion plugins unavailable");
+		gst_clear_object(&self->appsrc);
+		gst_clear_object(&self->input);
+		gst_clear_object(&self->output);
+		gst_clear_object(&self->pipeline);
+		return;
+	}
 	g_object_set(self->input, "stun-server", NULL, NULL);
 	g_object_set(self->output, "stun-server", NULL, NULL);
-	gst_bin_add_many(GST_BIN(self->pipeline), self->input, self->appsrc, self->output,
-					 NULL);
+	gst_bin_add_many(GST_BIN(self->pipeline), self->input, self->appsrc, converter,
+					 self->output, NULL);
 	caps = gst_caps_from_string(
-		"audio/x-raw,format=S16LE,rate=16000,channels=1,layout=interleaved");
+		"audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved");
 	g_object_set(self->appsrc, "caps", caps, "is-live", TRUE, "format", GST_FORMAT_TIME,
 				 "do-timestamp", FALSE, "min-latency", (gint64)(10 * GST_MSECOND),
 				 "block", FALSE, NULL);
 	gst_caps_unref(caps);
-	gst_element_link_pads(self->appsrc, "src", self->output, "audio_%u");
+	gst_element_link(self->appsrc, converter);
+	gst_element_link_pads(converter, "src", self->output, "audio_%u");
 	g_object_get(self->input, "signaller", &rx, NULL);
 	g_object_get(self->output, "signaller", &tx, NULL);
 	g_object_set(rx, "ws-url", self->url, "auth-token", self->receive_token, "room-name",
@@ -509,6 +545,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	self->joining = g_steal_pointer(&task);
 	self->join_deadline = g_get_monotonic_time() + 15000000;
 	self->output_samples = 0;
+	self->output_rate = 48000;
 	self->output_origin = GST_CLOCK_TIME_NONE;
 	self->clock = g_timeout_source_new(10);
 	g_source_set_callback(self->clock, tick, self, NULL);
@@ -564,8 +601,8 @@ finish(AiAudioTransport *self, GAsyncResult *result, GError **error)
 	return g_task_propagate_boolean(G_TASK(result), error);
 }
 static void
-write_async(AiAudioTransport *transport, GBytes *pcm, GCancellable *cancel,
-			GAsyncReadyCallback cb, gpointer data)
+write_pcm_async(AiAudioTransport *transport, GBytes *pcm, guint sample_rate,
+				GCancellable *cancel, GAsyncReadyCallback cb, gpointer data)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(transport);
 	g_autoptr(GTask) task = g_task_new(self, cancel, cb, data);
@@ -580,8 +617,15 @@ write_async(AiAudioTransport *transport, GBytes *pcm, GCancellable *cancel,
 	o = g_new0(Output, 1);
 	o->task = g_steal_pointer(&task);
 	o->pcm = g_bytes_ref(pcm);
+	o->rate = sample_rate;
 	self->queued_bytes += size;
 	g_queue_push_tail(&self->playback, o);
+}
+static void
+write_async(AiAudioTransport *transport, GBytes *pcm, GCancellable *cancel,
+			GAsyncReadyCallback cb, gpointer data)
+{
+	write_pcm_async(transport, pcm, 16000, cancel, cb, data);
 }
 static void
 transport_iface(AiAudioTransportInterface *iface)
@@ -591,6 +635,8 @@ transport_iface(AiAudioTransportInterface *iface)
 	iface->leave_async = leave_async;
 	iface->leave_finish = finish;
 	iface->write_async = write_async;
+	iface->write_pcm_async = write_pcm_async;
+	iface->write_pcm_finish = finish;
 	iface->write_finish = finish;
 	iface->flush = flush;
 }

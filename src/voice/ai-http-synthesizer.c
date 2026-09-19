@@ -16,8 +16,6 @@ typedef struct {
 	GByteArray *pending;
 	guint rate;
 	guint32 frame_size;
-	guint64 input_samples, next_position;
-	gint16 previous;
 	gboolean header, length;
 } Synthesis;
 
@@ -47,36 +45,14 @@ complete(GTask *task, GError *error)
 	g_object_unref(task);
 }
 
-/* Integer linear interpolation, preserving phase across HTTP frames. */
+/* Preserve native PCM; transport backends own filtered output conversion. */
 static void
 emit_pcm(GTask *task, const guint8 *data, guint len)
 {
 	Synthesis *s = g_task_get_task_data(task);
-	g_autoptr(GByteArray) output = g_byte_array_new();
-	g_autoptr(GBytes) pcm = NULL;
-	guint i;
-	for (i = 0; i < len; i += 2) {
-		gint16 current = (gint16)((guint16)data[i] | ((guint16)data[i + 1] << 8));
-		guint64 position = s->input_samples * 16000;
-		while (s->next_position <= position) {
-			gint64 value = current;
-			guint8 encoded[2];
-			if (s->input_samples != 0) {
-				guint64 fraction = s->next_position - (s->input_samples - 1) * 16000;
-				value = s->previous + ((gint64)current - s->previous) * fraction / 16000;
-			}
-			encoded[0] = (guint16)value & 255;
-			encoded[1] = (guint16)value >> 8;
-			g_byte_array_append(output, encoded, 2);
-			s->next_position += s->rate;
-		}
-		s->previous = current;
-		s->input_samples++;
-	}
-	if (output->len != 0 && !g_cancellable_is_cancelled(g_task_get_cancellable(task))) {
-		pcm = g_byte_array_free_to_bytes(g_steal_pointer(&output));
-		g_signal_emit_by_name(g_task_get_source_object(task), "audio", pcm);
-	}
+	g_autoptr(GBytes) pcm = g_bytes_new(data, len);
+	if (!g_cancellable_is_cancelled(g_task_get_cancellable(task)))
+		g_signal_emit_by_name(g_task_get_source_object(task), "audio", pcm, s->rate);
 }
 
 /* 1 = sentinel, 0 = need bytes, -1 = malformed. */
@@ -298,7 +274,7 @@ ai_http_synthesizer_init(AiHttpSynthesizer *self)
  * ai_http_synthesizer_new:
  * @url: HTTP streaming synthesis endpoint
  *
- * Returns: (transfer full): a synthesizer emitting 16 kHz S16LE PCM
+ * Returns: (transfer full): a synthesizer emitting native-rate S16LE PCM
  */
 AiHttpSynthesizer *
 ai_http_synthesizer_new(const gchar *url)
