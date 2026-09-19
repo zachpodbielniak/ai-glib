@@ -32,7 +32,7 @@ listening -> transcribing -> thinking -> speaking -> listening
                       +------ barge-in -----+
 #+end_example
 
-A session begins listening. VAD speech opens that participant's STT stream;
+A session begins listening. Confirmed VAD speech opens that participant's STT stream;
 trailing silence sends EOS. A final transcript becomes =[Display name]: text=
 in the conversation. Final utterances from multiple participants are queued.
 Leaving a participant cancels only that participant's recognition.
@@ -84,7 +84,16 @@ command; select/configure a conversation before lending it to the session.
 
 ** Barge-in and history
 
-The first speech frame during thinking or speaking cancels the provider run's
+The writable =barge-in-ms= session property requires consecutive VAD speech
+before starting STT or interrupting a turn. It defaults to 250 ms (range
+10–5000 ms, rounded up to a 10 ms frame). A silence frame resets the count;
+participants never share counts. Short bursts do not open STT. Confirmed
+onset audio is buffered in memory and replayed to STT so initial words are
+preserved. Greetings and all =ai_voice_session_say()= notices use this same
+debounce, including while waiting for the first synthesized audio.
+
+Once the threshold is reached during thinking or speaking, the session logs
+an INFO decision with the speaker and speech duration and cancels the provider run's
 =GCancellable= and the current synthesis/playback cancellable, then flushes the
 transport queue. An old turn cannot enqueue speech into its successor.
 
@@ -256,6 +265,7 @@ ai_call:
   outbound-greeting: "Hello. Is now a good time?"
   turn-deadline-ms: 20000
   trailing-silence-ms: 600
+  barge-in-ms: 250
   vad-mode: 2
   stt-timeout-ms: 30000
   max-agents: 4
@@ -358,3 +368,7 @@ STT ignores additional response metadata, including fractional =start= and
 detail; the session speaks its configurable =transcription-error-message=.
 An empty final completes recognition and resets VAD without a session
 transcript, provider turn or spoken reply.
+
+The binary maps =ai_call.barge-in-ms=, =AI_VOICE_BARGE_IN_MS= and
+=--call-set barge-in-ms=250= to the session property. Whitespace-only final
+transcripts are discarded; valid phrases are never filtered by a blacklist.

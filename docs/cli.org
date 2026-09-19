@@ -523,6 +523,10 @@ the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =AI_CALL_OUTBOUND_GREETING=. Speech/media endpoints use =AI_VOICE_STT_URL=,
 =AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
 
+=ai_call.barge-in-ms= (default 250), =AI_VOICE_BARGE_IN_MS=, or
+=--call-set barge-in-ms=250= configures consecutive speech required before
+STT and barge-in, including greetings and notices.
+
 SIGINT/SIGTERM stops audio and removes the configured identity's Matrix membership before exit;
 failed removals are retried. Startup sweeps stale memberships for that identity. Run only
 one answerer for a Matrix identity/device. The outbound drop file format is
