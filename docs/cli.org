@@ -527,7 +527,9 @@ the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =--call-set barge-in-ms=250= configures consecutive speech required before
 STT and barge-in, including greetings and notices.
 
-SIGINT/SIGTERM stops audio and removes the configured identity's Matrix membership before exit;
+SIGINT/SIGTERM cancels the current turn, attempts =ai_call.goodbye-message=
+(default =Goodbye.=) for at most two seconds, then leaves media and removes
+the configured identity's Matrix membership before exit;
 failed removals are retried. Startup sweeps stale memberships for that identity. Run only
 one answerer for a Matrix identity/device. The outbound drop file format is
 ={"room_id":"!room:server","message":"Opening line","target":"@caller:server"}=.
@@ -539,3 +541,13 @@ recovery. =ai_call.opus-bitrate= defaults to 64000 bits/s, with a minimum of
 =AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Media errors log the
 GStreamer element and debug detail, and successful recovery resumes the voice
 session without discarding its conversation.
+Retry delays double up to ten seconds. Pending speech resumes after media
+returns, with a short replay window that may repeat audio near the failure.
+
+=ai_call.tts-timeout-ms= (default 10000; =AI_VOICE_TTS_TIMEOUT_MS=) bounds
+synthesis inactivity. The binary prewarms =ai_call.synthesis-error-message=
+in memory for speech-service failures. A failed request plays that cache once;
+if startup prewarming also failed, spoken fallback cannot be guaranteed.
+=AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and =AI_CALL_GOODBYE_MESSAGE= override the
+corresponding text. Call summaries report duration, transcripts, errors,
+reconnects and dropped/late buffers at INFO.

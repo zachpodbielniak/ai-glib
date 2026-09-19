@@ -63,8 +63,15 @@ Signals, on the session's constructing thread-default context:
 =state= is also a read-only property. =turn-deadline-ms= defaults to 20000. At
 the deadline the provider and TTS cancellables are cancelled, pending playback
 is flushed, and the session says a fallback line instead of going silent.
-Speech-service errors are reported through =error=; unavailable TTS cannot
-itself speak a fallback.
+The deadline bounds provider work, not playback of a completed reply. Its
+remaining time is paused during media recovery. Speech-service errors are
+reported through =error= and logged with their specific cause.
+
+An embedding host can supply =fallback-pcm= (a =GBytes= of mono S16LE samples,
+at most 4 MiB) and =fallback-sample-rate= (default 16000). A failed synthesis
+cancels the failed turn and plays this cached =synthesis-error-message= once.
+Without cached PCM, the session makes one synthesis attempt for that message;
+failure of the fallback cannot recursively generate more fallbacks.
 
 =ai_voice_session_say()= queues greetings and other out-of-band notices.
 =ai_voice_session_stop()= must be called before releasing an active session.
@@ -165,6 +172,10 @@ HTTP chunk boundaries are unrelated to protocol frames. Parsing spans reads,
 validates sample rate and even PCM byte lengths, bounds frame allocation, and
 requires the zero sentinel. EOF without it is an error. Native PCM bytes are emitted unchanged, with the validated header rate on
 every audio signal. Every HTTP operation and body read is cancellable.
+=AiHttpSynthesizer:timeout-ms= bounds inactivity (default 10000 ms), including
+waiting for response headers. Successful reads reset the timer. Expiry reports
+=G_IO_ERROR_TIMED_OUT= and releases the synthesizer for the next request without
+cancelling the caller's =GCancellable=.
 
 * LiveKit
 
@@ -200,11 +211,22 @@ primary subscriber handshake using a separate data-channel peer connection,
 routes subscriber ICE (including server-provided STUN/TURN settings), and tears
 it down with the signalling connection. Media auto-subscription stays disabled
 on the producer; input continues through the receive transport.
+The patch also resolves a replacement pad's missing cached =msid= from the
+negotiated remote SDP after renegotiation. This preserves participant attribution
+and subscription delivery when an existing publisher rejoins.
+Signaller shutdown cancels the complete event task, rather than only its current
+receive wait, and bounds signalling-client closure. A closed event stream exits
+the task instead of spinning. This prevents teardown from blocking reconnection
+when the SFU disappears during negotiation.
+Publisher payload-chain setup is dispatched with GStreamer's =call_async= from
+remote-description callbacks. Pipeline state changes must not run on the WebRTC
+peer-connection thread, where they can wait for that same thread and deadlock
+teardown.
 Apply =deps/gst-plugins-rs-livekit-participants.patch= to that
 upstream checkout before building. This is an upstream dependency fix, not an
 FFI shim. Newer plugin revisions need only the portions of the patch not already fixed
-upstream. A checkout with the older subscription-only patch must reverse that
-patch before applying this combined version. Build upstream plugins outside this repository:
+upstream. A checkout with an earlier version of this patch must reverse that
+version before applying this combined patch. Build upstream plugins outside this repository:
 
 #+begin_src sh
 git apply /path/to/ai-glib/deps/gst-plugins-rs-livekit-participants.patch
@@ -257,7 +279,7 @@ A custom backend implements the corresponding GInterface and can be injected
 without modifying the session or any provider. The binary composes the shipped
 backends; it does not discover arbitrary backend modules at runtime.
 
-=deadline-message= and =transcription-error-message= are writable session
+=deadline-message=, =transcription-error-message= and =synthesis-error-message= are writable session
 properties; NULL or an empty string disables that spoken fallback. VAD exposes
 =mode= and =trailing-silence-ms=; the websocket recognizer exposes =timeout-ms=.
 Backend endpoint properties are construct-only, avoiding endpoint changes
@@ -278,6 +300,7 @@ ai_call:
   outbound-path: /path/to/outbound-call.json
   greeting: "Hello. How can I help?"
   outbound-greeting: "Hello. Is now a good time?"
+  goodbye-message: "Goodbye."
   turn-deadline-ms: 20000
   trailing-silence-ms: 600
   barge-in-ms: 250
@@ -286,9 +309,11 @@ ai_call:
   opus-bitrate: 64000
   vad-mode: 2
   stt-timeout-ms: 30000
+  tts-timeout-ms: 10000
   max-agents: 4
   deadline-message: "Please try again shortly."
   transcription-error-message: "Please repeat that."
+  synthesis-error-message: "Speech is temporarily unavailable. Please try again."
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -303,9 +328,18 @@ Credentials, identity file, JWT URL and public focus URL must be supplied.
 There are no compiled personal paths, Matrix domains, participant names or UID.
 The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables use the =AI_CALL_= prefix. Numeric policy overrides are
 =AI_VOICE_TURN_DEADLINE_MS=, =AI_VOICE_TRAILING_SILENCE_MS=,
-=AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
+=AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS=, =AI_VOICE_TTS_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
 fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE= and
-=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE=.
+=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE= and =AI_VOICE_SYNTHESIS_ERROR_MESSAGE=.
+=AI_CALL_GOODBYE_MESSAGE= overrides the shutdown line.
+
+At startup, the binary asynchronously synthesizes the configured synthesis-error
+line into a bounded in-memory cache. Prewarming has a four-second deadline and
+does not delay Matrix sync. Only a complete, valid stream enters the cache.
+Sessions receive the cache when it becomes available. If TTS has never been
+reachable during this process, there is no cached voice to play: the failure
+is logged and the session still returns to listening. A cache is not an
+independent speech service and cannot guarantee a spoken line in that case.
 
 * ai-call and Matrix
 
@@ -319,6 +353,13 @@ other identities trigger an answer. Hangup checks room state rather than assumin
 means everyone left. Cleanup writes empty membership content and retries
 failed clears, including during SIGTERM/SIGINT. The cleanup HTTP requests use
 an independent cancellation scope. A late membership PUT is cleared again.
+
+SIGTERM/SIGINT during a connected call cancels the active turn and attempts
+=goodbye-message= before leaving. Synthesis and local playout share a two-second
+shutdown budget; an unreachable or stalled synthesizer cannot delay leave past
+that budget. Empty goodbye text disables this attempt. Matrix membership
+clearing and its retries follow independently; the two-second audio budget is
+not a deadline for successful Matrix cleanup.
 
 Outbound JSON drop files use the Python answerer's =room_id=, =message= and
 =target= fields. The file is consumed before starting the call. Ring events
@@ -334,6 +375,9 @@ read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
 ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
 =test-voice-activity= and
 =test-voice-matrix= (answer, cleanup retry, stale state).
+Additional offline tests cover speech-service failure and successful next-turn
+recovery (=test-voice-failures=), complete-only fallback caching
+(=test-call-speech-cache=), and live-call signal shutdown with a stalled goodbye.
 
 The local media integration is opt-in and skips when LiveKit or the plugins
 are absent:
@@ -400,9 +444,9 @@ Input =AiAudioTransport::audio= retains its existing speaker/16-kHz-PCM shape.
 A bus error logs the source element, error message and GStreamer debug detail
 at INFO. After an established connection fails, LiveKit emits =reconnecting=,
 asynchronously stops the failed pipeline, and rejoins using the existing room
-credentials. The session cancels the interrupted turn and participant STT
-streams while keeping the conversation available. Notices queued during recovery
-wait for media to return. It emits =reconnected= after
+credentials. Pending playback keeps its queue and current offset. The session
+preserves its active turn, state, participant recognition and conversation
+history; notices queued during recovery wait for media to return. It emits =reconnected= after
 a successful rejoin. Exhausted retries emit the terminal =error= signal.
 
 Construct-only LiveKit properties =reconnect-attempts= (default 3, zero
@@ -412,6 +456,15 @@ from =media-reconnect-attempts=, =media-reconnect-delay-ms= and =opus-bitrate=,
 with environment overrides =AI_VOICE_RECONNECT_ATTEMPTS=,
 =AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Explicit leave
 cancels pending recovery; callbacks from old media generations are ignored.
+Retry delay doubles after each failed attempt, capped at 10000 ms. Reconnection
+is a safety net: the patched primary handshake completes the original join
+without depending on periodic reconnects.
+
+A short recent-audio replay window covers packets accepted locally just before
+the connection failed. This can repeat a small portion of speech. RTP does not
+acknowledge remote playout, so exactly-once hearing across a network failure is
+not a guarantee of the write API. Barge-in and explicit leave discard this
+replay along with queued speech.
 
 The encoder setup hook selects generic audio and fullband Opus and logs its
 bitrate. Appsrc has a 4 MiB queue limit setting and retains sample-clock pacing.
@@ -419,13 +472,52 @@ With =GST_DEBUG_DUMP_DOT_DIR= set, first speech writes a pipeline graph containi
 media types for diagnosis; audio is never saved. The graph and element audit
 in the media test contain no =webrtcdsp= stage.
 
-The local test plays a 30-second reply, injects a media error, verifies speech
-after rejoining, and checks that leaving during recovery creates no new media
-connection. A decoded 100 Hz + 200 Hz test requires each component to lose
-less than 3 dB. The observed production failure was not reproduced by the
-long-playback test; retained debug details are needed to diagnose a recurrence.
+The local test injects a publisher error during a reply, checks resumed speech
+and subscription recovery, and checks that leaving during recovery creates no
+new media connection. A decoded 100 Hz + 200 Hz test requires each component to
+lose less than 3 dB.
 
 The primary-connection regression uses full publish/subscribe grants, plays
 80 seconds of audio across the server's 60-second join timeout, then checks
 fresh decoded speech after more than 90 seconds without any reconnect event.
 This test failed with =JOIN_TIMEOUT= before the signaller handshake fix.
+
+** Extended runs
+
+=make test-voice-endurance= runs more than five minutes of continuous PCM in
+both directions, checking progress across the join-timeout boundary with no
+media errors or reconnects. =make soak= runs the scripted peer for fifteen
+minutes with speech, silence and talk-over cycles. Both targets use the local
+LiveKit server and runtime plugins; they are separate from the default suite.
+Set =GST_PLUGIN_PATH= and =LD_LIBRARY_PATH= for privately installed dependencies
+as in the media-test example above.
+
+** Failure modes and caller-visible behavior
+
+| Failure | What the caller hears | INFO diagnostics |
+|---------+-----------------------+------------------|
+| Short VAD noise burst | Playback continues; no recognition opens | A barge-in decision appears only after confirmed speech reaches the configured threshold |
+| Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
+| STT ready/final timeout or server error | One configured transcription-error line when speech output is available; next turn can proceed | Specific recognition error or server detail |
+| TTS unreachable, truncated response or inactivity timeout | One cached synthesis-error line; if no cache exists, one bounded synthesis attempt, then listening | Specific connection/protocol/timeout error; cache readiness or unavailability |
+| Publisher/receiver media error | Speech pauses during recovery and resumes, possibly with a short repeated prefix | GStreamer element/debug reason, attempt number and retry delay, recovery result |
+| Recovery attempts exhausted | The binary ends the call and clears its membership | Final media error and accumulated recovery counters |
+| Provider deadline | Configured deadline line, then listening | Provider timeout |
+| SIGTERM/SIGINT | Short goodbye if it can be synthesized and played within two seconds | Goodbye failure/timeout if applicable, leave and membership cleanup |
+
+Transport health properties =reconnect-count=, =dropped-buffers= and
+=late-buffers= are read-only 64-bit counters. Each call logs join-to-first
+published PCM and final-transcript-to-first PCM timings. Hangup emits one
+summary with duration, transcript/error totals and the three transport counters.
+These diagnostics need no GStreamer debug flags in =ai-call=.
+
+** Recorded robustness validation
+
+The 305-second bidirectional run completed 610 writes with PCM progress in
+both directions every second, no media errors and no reconnects. The
+900-second scripted soak completed 90 speech/silence/talk-over cycles:
+180 transcripts and decoded replies, zero missed utterances, zero media
+errors and zero reconnects. Recovery and leave-during-recovery checks also
+passed after the soak. These measurements use a local LiveKit server and
+scripted speech services; they do not replace listening tests with external
+speech services and a Matrix client.
