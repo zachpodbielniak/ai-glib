@@ -1,0 +1,119 @@
+#+title: Queued follow-ups and side questions
+
+* Sending while a turn runs
+
+In =ai-tui=, Enter accepts a follow-up while the model is busy. The composer
+clears and shows the number of queued submissions. The active request is not
+cancelled. At its completion, adjacent text submissions are joined with two
+newlines and sent as one prompt, in arrival order. For example, two follow-ups
+=Also check the tests= and =Include the documentation= become one next turn.
+This reduces request overhead; it does not promise a particular latency.
+Messages arriving during that next turn wait for the following turn.
+
+Slash commands and image-bearing submissions are barriers. They execute
+separately, in order, and text on opposite sides of a barrier is never merged.
+This avoids turning =/model= or a prompt command into ordinary prose, and
+preserves which prompt an image belongs to. Prompt expansion occurs at dispatch,
+using the session's then-current command registry and working directory.
+
+The queue is memory-only, scoped to the current TUI session, and bounded to
+32 submissions by default. =--queue-limit N= accepts 1 through 4096.
+=--no-coalesce= sends each queued submission as its own turn. A full queue
+leaves the rejected input and attachments in the composer.
+An unfinished composer draft is preserved when queued work starts.
+
+Cancellation pauses draining: Enter on an empty composer resumes the queue.
+Submitting another prompt while paused appends it to the queue and resumes
+in FIFO order. Ctrl-C follows the existing order: cancel the current turn,
+clear an editable draft, discard pending submissions, then quit. Reset and
+exit discard the queue. Provider errors are displayed and draining continues;
+the failed submission is not automatically retried.
+
+* Side questions with =/btw=
+
+#+begin_example
+/btw Why does that function need a private main context?
+#+end_example
+
+In the interactive composer this starts an independent conversation immediately,
+even while the main turn runs. The completed answer appears as a labelled BTW
+notice. It is visible in transcript exports but is not added to the main
+provider's message history. The main request, cancellation token, queue and
+native session ID remain unchanged. Up to four side questions can run at once.
+Use =/btw --cancel= to cancel side questions without stopping the main turn.
+Each question starts a fresh branch; subsequent =/btw= questions do not continue
+previous side questions.
+
+The branch copies completed portable messages, the system prompt and already
+carried context, current provider/model settings and working directory. It
+excludes the in-progress turn, including its initial request, partial answer
+and unfinished tool calls. It does not read a live CLI transcript from disk.
+Thus a question about unfinished work should include the relevant details.
+
+HTTP branches do not enable local tools. CLI branches run a separate process
+with the parent's configured tool permissions, but clear resume/continue/fork
+state and omit ai-tui's live MCP endpoint configuration. They share the working
+directory: a side question is conversation isolation, not filesystem isolation.
+No parent executor, brigade, tools or approval state are shared. Reset and exit
+cancel side questions; callbacks from a replaced session cannot write into the
+new one. Side failures are shown separately and do not cancel the main turn.
+
+=/btw= accepts text only; attached images remain in the draft with an explanatory
+error. =--no-expand= disables local slash handling, including =/btw=. The command
+is interactive; =--dump= reports this rather than starting unobserved work.
+The TUI can construct independent clients for the built-in HTTP and CLI client
+families. Custom provider hosts supply their own independent client through the
+library fork API.
+
+* Library APIs
+
+=AiPromptQueue= is a final GObject, independent of terminal code. Its properties
+are =length= (read-only, number of submissions), =max-length= (default 32), and
+=coalesce= (default true). =notify::length= fires after successful changes.
+Lowering the limit retains existing entries and refuses additions until space
+is available. Each text submission and merged batch is limited to 1 MiB.
+
+#+begin_src C
+g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+g_autoptr(GError) error = NULL;
+g_autofree gchar *batch = NULL;
+
+ai_prompt_queue_push(queue, "Check cancellation", NULL, FALSE, &error);
+ai_prompt_queue_push(queue, "Also check shutdown", NULL, FALSE, &error);
+/* After the active send callback has completed: */
+batch = ai_prompt_queue_pop(queue, NULL);
+/* batch is "Check cancellation\n\nAlso check shutdown" */
+ai_conversation_send_async(conversation, batch, NULL, on_sent, user_data);
+#+end_src
+
+The queue owns copied text and references to =AiImageContent= attachments.
+=push()= returns an error without mutation for invalid text, invalid attachment
+types or capacity exhaustion. Mark commands =separate=; attachments always form
+a separate batch. =pop()= transfers the batch and its optional attachment list.
+=clear()= affects pending items only. The host owns scheduling, cancellation and
+error policy; ordinary =AiConversation.send_async()= still rejects overlapping
+sends. This preserves existing embedder semantics.
+
+=ai_conversation_fork(parent, independent_provider, error)= creates a new
+conversation with deep-copied portable messages and an independent executor.
+Passing the parent's provider is rejected. The supplied client must be fresh
+and unused elsewhere; the library cannot infer request ownership for an arbitrary
+provider implementation. Local tools are disabled on the branch until the host
+explicitly configures them. No command set, brigade or tool endpoint is inherited.
+The returned conversation uses normal async send/finish and cancellation APIs.
+
+Both APIs are introspectable. Queue access and fork creation belong to the
+owning main context; they are not cross-thread submission mechanisms. The queue
+creates no sources. Branch async completions follow the normal GTask context
+contract.
+
+* Verification
+
+=test-prompt-queue= covers batching, FIFO barriers, capacity/validation,
+attachment ownership, separate mode, context snapshots during active work,
+independent cancellation and CLI session reset. =test-ai-tui= drives the real
+composer in a private tmux server: coalesced request delivery, unsent draft
+preservation and a side answer arriving before the main request completes.
+=test-tui-images= covers queued attachment integration. These tests use scripted
+providers and require no network credentials. Terminal tests skip explicitly
+when tmux is unavailable. =make test-gir-clean= verifies public annotations.

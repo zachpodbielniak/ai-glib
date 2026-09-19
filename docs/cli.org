@@ -492,3 +492,12 @@ Saved chat model defaults do not become media model defaults. For Grok HTTP, =-m
 Grok Build calls run in an isolated session with only the necessary tools enabled. Results must contain a successful structured media tool result with an artifact path or URL; a prose claim of success is an error. Requests are agent-mediated: exact tool arguments depend on the wrapped CLI agent following the supplied structured instruction. Neither provider is tested by spending real generation credits in the normal test suite.
 
 HTTP video generation submits once, then polls to completion with retry handling for polling requests. The library rejects unknown or malformed status replies, reports expired jobs and moderation errors, and honors cancellation and timeout while waiting or receiving data. The CLI streams the final artifact to disk without buffering the entire video. URLs expire, so save them promptly. See [[file:api-reference/ai-video-generator.org][the public video API]], [[file:providers/grok.org][Imagine HTTP]], [[file:providers/grok-build.org][Grok Build]], and [[file:specs/xai-imagine-provenance.org][the downloaded specification and provenance]].
+
+** Queued follow-ups and side questions
+
+=ai-tui= accepts follow-ups during an active turn and coalesces adjacent text
+submissions into the next prompt. Use =--no-coalesce= for separate turns and
+=--queue-limit N= to bound pending submissions. =/btw <question>= starts an
+independent side conversation without interrupting the main request.
+See [[file:message-queue.org][Queued follow-ups and side questions]] for
+command barriers, cancellation, context isolation and the library APIs.
