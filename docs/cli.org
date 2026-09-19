@@ -531,3 +531,11 @@ SIGINT/SIGTERM stops audio and removes the configured identity's Matrix membersh
 failed removals are retried. Startup sweeps stale memberships for that identity. Run only
 one answerer for a Matrix identity/device. The outbound drop file format is
 ={"room_id":"!room:server","message":"Opening line","target":"@caller:server"}=.
+
+Media recovery is configured with =ai_call.media-reconnect-attempts= (default 3)
+and =ai_call.media-reconnect-delay-ms= (default 500); zero attempts disables
+recovery. =ai_call.opus-bitrate= defaults to 64000 bits/s, with a minimum of
+48000. The corresponding environment overrides are =AI_VOICE_RECONNECT_ATTEMPTS=,
+=AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Media errors log the
+GStreamer element and debug detail, and successful recovery resumes the voice
+session without discarding its conversation.

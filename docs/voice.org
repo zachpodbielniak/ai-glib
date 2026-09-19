@@ -273,6 +273,9 @@ ai_call:
   turn-deadline-ms: 20000
   trailing-silence-ms: 600
   barge-in-ms: 250
+  media-reconnect-attempts: 3
+  media-reconnect-delay-ms: 500
+  opus-bitrate: 64000
   vad-mode: 2
   stt-timeout-ms: 30000
   max-agents: 4
@@ -383,3 +386,33 @@ transcripts are discarded; valid phrases are never filtered by a blacklist.
 The native-rate output change adds =sample_rate= to =AiSpeechSynthesizer::audio=;
 consumers of this unreleased voice API must update their callback signature.
 Input =AiAudioTransport::audio= retains its existing speaker/16-kHz-PCM shape.
+
+** Media recovery and encoder diagnostics
+
+A bus error logs the source element, error message and GStreamer debug detail
+at INFO. After an established connection fails, LiveKit emits =reconnecting=,
+asynchronously stops the failed pipeline, and rejoins using the existing room
+credentials. The session cancels the interrupted turn and participant STT
+streams while keeping the conversation available. Notices queued during recovery
+wait for media to return. It emits =reconnected= after
+a successful rejoin. Exhausted retries emit the terminal =error= signal.
+
+Construct-only LiveKit properties =reconnect-attempts= (default 3, zero
+disables recovery), =reconnect-delay-ms= (default 500), and =opus-bitrate=
+(default 64000, minimum 48000) configure this behavior. The binary maps them
+from =media-reconnect-attempts=, =media-reconnect-delay-ms= and =opus-bitrate=,
+with environment overrides =AI_VOICE_RECONNECT_ATTEMPTS=,
+=AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Explicit leave
+cancels pending recovery; callbacks from old media generations are ignored.
+
+The encoder setup hook selects generic audio and fullband Opus and logs its
+bitrate. Appsrc has a 4 MiB queue limit setting and retains sample-clock pacing.
+With =GST_DEBUG_DUMP_DOT_DIR= set, first speech writes a pipeline graph containing
+media types for diagnosis; audio is never saved. The graph and element audit
+in the media test contain no =webrtcdsp= stage.
+
+The local test plays a 30-second reply, injects a media error, verifies speech
+after rejoining, and checks that leaving during recovery creates no new media
+connection. A decoded 100 Hz + 200 Hz test requires each component to lose
+less than 3 dB. The observed production failure was not reproduced by the
+long-playback test; retained debug details are needed to diagnose a recurrence.
