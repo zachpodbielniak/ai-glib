@@ -337,6 +337,50 @@ test_tts_native(void)
 	g_clear_object(&tts);
 	teardown(&w);
 }
+static void
+stalled_http(SoupServer *server, SoupServerMessage *msg, const gchar *path,
+			 GHashTable *query, gpointer data)
+{
+	SoupMessageBody *body = soup_server_message_get_response_body(msg);
+	soup_server_message_set_status(msg, 200, NULL);
+	soup_message_headers_set_encoding(soup_server_message_get_response_headers(msg),
+									  SOUP_ENCODING_CHUNKED);
+	soup_message_body_set_accumulate(body, FALSE);
+	soup_message_body_append(body, SOUP_MEMORY_STATIC, "SR=24000\n", 9);
+	/* Intentionally leave the chunked body incomplete after the rate header. */
+}
+static void
+test_tts_timeout(void)
+{
+	Wire w = {0};
+	g_autoptr(AiHttpSynthesizer) tts = NULL;
+	g_autoptr(GCancellable) cancel = g_cancellable_new();
+	guint timeout;
+	setup(&w);
+	soup_server_add_handler(w.server, NULL, stalled_http, NULL, NULL);
+	tts = ai_http_synthesizer_new(w.url);
+	g_assert_nonnull(g_object_class_find_property(G_OBJECT_GET_CLASS(tts), "timeout-ms"));
+	g_object_set(tts, "timeout-ms", 30, NULL);
+	ai_speech_synthesizer_synthesize_async(AI_SPEECH_SYNTHESIZER(tts), "hello world",
+										   cancel, synthesized, &w);
+	timeout = g_timeout_add_seconds(3, expired, NULL);
+	g_main_loop_run(w.loop);
+	g_source_remove(timeout);
+	g_assert_error(w.error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+	g_assert_false(g_cancellable_is_cancelled(cancel));
+	g_clear_error(&w.error);
+	soup_server_remove_handler(w.server, NULL);
+	soup_server_add_handler(w.server, NULL, http_request, &w, NULL);
+	ai_speech_synthesizer_synthesize_async(AI_SPEECH_SYNTHESIZER(tts), "hello world",
+										   cancel, synthesized, &w);
+	timeout = g_timeout_add_seconds(3, expired, NULL);
+	g_main_loop_run(w.loop);
+	g_source_remove(timeout);
+	g_assert_no_error(w.error);
+	g_assert_true(w.done);
+	g_clear_object(&tts);
+	teardown(&w);
+}
 int
 main(int argc, char **argv)
 {
@@ -354,5 +398,6 @@ main(int argc, char **argv)
 	g_test_add_data_func("/voice/wire/tts-invalid-rate", "SR=nope\n", test_tts_bad);
 	g_test_add_data_func("/voice/wire/tts-missing-sentinel", "SR=16000\n", test_tts_bad);
 	g_test_add_func("/voice/wire/tts-native-fragmented-frame", test_tts_native);
+	g_test_add_func("/voice/wire/tts-inactivity-timeout", test_tts_timeout);
 	return g_test_run();
 }

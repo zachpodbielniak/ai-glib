@@ -355,30 +355,98 @@ debounce_notice(Fixture *f, gconstpointer data)
 static void
 media_recovery(Fixture *f, gconstpointer data)
 {
+	guint states;
 	f->tts->hold_after = 1;
-	ai_voice_session_say(f->session, "Interrupted notice.");
+	ai_voice_session_say(f->session, "Continued notice.");
 	g_assert_nonnull(f->tts->held);
+	states = f->states->len;
 	g_signal_emit_by_name(f->transport, "reconnecting");
-	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
-	g_task_return_boolean(f->tts->held, TRUE);
-	g_clear_object(&f->tts->held);
-	drain();
-	f->tts->hold_after = 0;
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->states->len, ==, states);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
 	ai_voice_session_say(f->session, "Queued during recovery.");
 	drain();
 	g_assert_cmpuint(f->tts->texts->len, ==, 1);
 	g_signal_emit_by_name(f->transport, "reconnected");
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	f->tts->hold_after = 0;
 	wait_replies(f, 2);
-	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
 	ai_mock_provider_push_text(f->provider, "The next turn works.");
 	utterance(f, "caller");
 	wait_replies(f, 3);
 	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 2), ==, "The next turn works.");
 }
+
+static void
+iterate_for(guint milliseconds)
+{
+	gint64 until = g_get_monotonic_time() + (gint64)milliseconds * 1000;
+	while (g_get_monotonic_time() < until) {
+		drain();
+		g_usleep(1000);
+	}
+}
+static void
+completed_provider_playback(Fixture *f, gconstpointer data)
+{
+	gint64 until = g_get_monotonic_time() + 3000000;
+	g_object_set(f->session, "turn-deadline-ms", 100, NULL);
+	f->tts->hold_after = 1;
+	ai_mock_provider_push_text(f->provider, "A complete long reply.");
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < until) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	iterate_for(250);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	wait_replies(f, 1);
+	{
+		GList *messages = ai_conversation_get_messages(f->conversation);
+		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
+		g_assert_cmpstr(text, ==, "A complete long reply.");
+	}
+}
+static void
+recovery_pauses_deadline(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "turn-deadline-ms", 200, "deadline-message",
+				 "Provider deadline expired.", NULL);
+	ai_mock_provider_set_delay_ms(f->provider, 5000);
+	ai_mock_provider_push_text(f->provider, "Too late.");
+	utterance(f, "caller");
+	iterate_for(60);
+	g_signal_emit_by_name(f->transport, "reconnecting");
+	iterate_for(300);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_THINKING);
+	g_signal_emit_by_name(f->transport, "reconnected");
+	iterate_for(60);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	/* The remaining approximately 140 ms resumes, rather than a new 200 ms. */
+	iterate_for(110);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==,
+					"Provider deadline expired.");
+	wait_replies(f, 1);
+}
+
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/voice/session/completed-provider-playback", Fixture, NULL, setup,
+			   completed_provider_playback, teardown);
+	g_test_add("/voice/session/recovery-pauses-deadline", Fixture, NULL, setup,
+			   recovery_pauses_deadline, teardown);
 	g_test_add("/voice/session/media-recovery", Fixture, NULL, setup, media_recovery,
 			   teardown);
 	g_test_add("/voice/session/debounce-noise", Fixture, GINT_TO_POINTER(1), setup,

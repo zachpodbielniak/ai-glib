@@ -8,8 +8,16 @@ settings(void)
 	g_autofree gchar *path = NULL, *text = NULL;
 	g_autoptr(GError) error = NULL;
 	guint deadline, debounce;
+	g_autofree gchar *goodbye = NULL;
 	gint fd = g_file_open_tmp("call-config-XXXXXX", &path, NULL);
 	g_close(fd, NULL);
+	g_object_get(config, "goodbye-message", &goodbye, NULL);
+	g_assert_cmpstr(goodbye, ==, "Goodbye.");
+	g_assert_true(
+		ai_call_config_set_text(config, "goodbye-message", "Until next time.", &error));
+	g_clear_pointer(&goodbye, g_free);
+	g_object_get(config, "goodbye-message", &goodbye, NULL);
+	g_assert_cmpstr(goodbye, ==, "Until next time.");
 	g_object_get(config, "barge-in-ms", &debounce, NULL);
 	g_assert_cmpuint(debounce, ==, 250);
 	g_assert_true(
