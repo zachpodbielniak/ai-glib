@@ -145,3 +145,20 @@ and explicit queue clearing still discard pending entries.
 provider recovery through the real command handler and a subprocess fixture.
 It verifies retained image ownership, failed provider changes, and draft text
 preservation as well as successful delivery.
+
+** Attachments not consumed by a queued submission
+
+Local commands (such as =/help=) and input-resolution errors do not submit
+attachments to a provider. When such a queued entry drains, its images return
+to the unsent composer after any images already there. Draft text and cursor
+are preserved; subsequent queued turns do not implicitly acquire these images.
+No reattachment is necessary.
+
+Recovery preserves every image even if the composer already has four. The
+four-image limit controls new clipboard additions; restored images can exceed
+it, and further clipboard additions are refused until the draft is sent or
+cleared. Explicit reset, quit and draft clearing retain their discard behavior.
+
+The =queued-command-image=, =queued-resolution-error-image= and
+=queued-command-full-draft= cases in =test-tui-images= cover these ownership
+transfers, including recovery into an already full composer.

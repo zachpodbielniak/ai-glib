@@ -26,7 +26,7 @@ The prompt comes from leftover arguments if present, otherwise from stdin when s
 
 ** Pasting images
 
-Copy an image or screenshot to the desktop clipboard, focus the composer, and press =C-v= (Ctrl+V). The upper composer border shows the number of attached images. Type your question and press =Enter= to send text and images together; an image-only turn is also valid. Repeat =C-v= to attach another image, up to four per draft. Each image is limited to 5 MiB of encoded image-file bytes before base64 conversion. The transcript records =[Images attached]= without printing binary data or base64.
+Copy an image or screenshot to the desktop clipboard, focus the composer, and press =C-v= (Ctrl+V). The upper composer border shows the number of attached images. Type your question and press =Enter= to send text and images together; an image-only turn is also valid. Repeat =C-v= to attach another image, up to four per draft. Images restored after a queued local command or resolution error are retained even if this exceeds four; further clipboard additions wait until you send or clear the draft. Each image is limited to 5 MiB of encoded image-file bytes before base64 conversion. The transcript records =[Images attached]= without printing binary data or base64.
 
 =C-v= reads image data directly from the desktop clipboard. The terminal's usual paste shortcut (often Ctrl+Shift+V) continues to paste text, including bracketed multiline text; pasting an image filename or URL that way does not attach the file. Inside cmacs/vterm or tmux, the host must pass =C-v= through to ai-tui. Over SSH, the clipboard must be accessible on the machine running ai-tui; the remote process cannot read an unforwarded local desktop clipboard.
 

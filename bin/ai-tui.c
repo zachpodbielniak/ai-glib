@@ -4926,8 +4926,10 @@ app_flush_send_queue(App *app)
 	g_string_assign(app->input, text);
 	app->cursor = (guint)app->input->len;
 	app_send_from_composer(app, FALSE);
-	g_clear_list(&app->images, g_object_unref);
-	app->images = draft_images;
+	/* A local command or input-resolution failure has not transferred these
+	 * images into a turn. Return them to the composer alongside its own images;
+	 * never attach them to the next queued prompt or discard them on restore. */
+	app->images = g_list_concat(draft_images, app->images);
 	g_string_assign(app->input, draft);
 	app->cursor = cursor;
 	app->history_pos = history_pos;

@@ -616,6 +616,43 @@ test_side_provider_settings(void)
 	g_assert_cmpstr(ai_cli_client_get_session_id(AI_CLI_CLIENT(parent)), ==, "parent-id");
 }
 
+static void
+test_queued_command_image_retained(gconstpointer data)
+{
+	g_autoptr(AiMockProvider) mock = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(AiCommandSet) commands = ai_command_set_new(NULL);
+	g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+	g_autoptr(GString) input = g_string_new(GPOINTER_TO_INT(data) == 1 ? "/unknown-review-command" : "/help");
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(AiImageContent) image = png_image();
+	App app = { .conversation = conversation, .send_queue = queue,
+	            .commands = commands, .input = input, .history = history,
+	            .dump_loop = loop, .sending = TRUE };
+	ai_conversation_set_command_set(conversation, commands);
+	app.images = g_list_append(NULL, g_object_ref(image));
+	app_send(&app);
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
+	if (GPOINTER_TO_INT(data) == 2) {
+		guint i;
+		for (i = 0; i < TUI_IMAGE_MAX_COUNT; i++)
+			app.images = g_list_append(app.images, png_image());
+	}
+	app.sending = FALSE;
+	g_string_assign(input, "unsent next question");
+	g_assert_true(app_flush_send_queue(&app));
+	g_main_loop_run(loop);
+	g_assert_null(ai_conversation_get_messages(conversation));
+	g_assert_cmpstr(input->str, ==, "unsent next question");
+	g_assert_nonnull(app.images);
+	g_assert_true(g_list_last(app.images)->data == image);
+	g_assert_cmpuint(g_list_length(app.images), ==,
+		GPOINTER_TO_INT(data) == 2 ? TUI_IMAGE_MAX_COUNT + 1 : 1);
+	g_clear_list(&app.images, g_object_unref);
+	g_clear_object(&app.cancellable);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -668,6 +705,9 @@ main(int argc, char **argv)
 		g_autofree gchar *name = g_strdup_printf("/tui-images/cli-roundtrip/%u", i);
 		g_test_add_data_func(name, GUINT_TO_POINTER(i), test_cli_roundtrip);
 	}
+	g_test_add_data_func("/tui-images/queued-command-image", GINT_TO_POINTER(0), test_queued_command_image_retained);
+	g_test_add_data_func("/tui-images/queued-resolution-error-image", GINT_TO_POINTER(1), test_queued_command_image_retained);
+	g_test_add_data_func("/tui-images/queued-command-full-draft", GINT_TO_POINTER(2), test_queued_command_image_retained);
 	result = g_test_run();
 	g_unlink(helper);
 	g_assert_cmpint(g_rmdir(directory), ==, 0);
