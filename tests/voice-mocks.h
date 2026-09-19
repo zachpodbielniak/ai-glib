@@ -56,7 +56,7 @@ transport_iface(AiAudioTransportInterface *iface)
 typedef struct {
 	GObject parent;
 	GHashTable *active;
-	guint cancelled;
+	guint cancelled, fed;
 } TestRecognizer;
 typedef GObjectClass TestRecognizerClass;
 static void
@@ -90,6 +90,7 @@ static gboolean
 feed(AiSpeechRecognizer *self, const gchar *speaker, GBytes *pcm, GError **error)
 {
 	g_assert_true(g_hash_table_contains(((TestRecognizer *)self)->active, speaker));
+	((TestRecognizer *)self)->fed++;
 	return TRUE;
 }
 static void
@@ -117,6 +118,7 @@ typedef struct {
 	GObject parent;
 	GPtrArray *texts;
 	guint hold_after;
+	gboolean delay_audio;
 	GTask *held;
 	GBytes *pcm;
 } TestSynthesizer;
@@ -153,7 +155,8 @@ synthesize(AiSpeechSynthesizer *self, const gchar *text, GCancellable *cancel,
 	g_autoptr(GBytes) pcm =
 		s->pcm != NULL ? g_bytes_ref(s->pcm) : g_bytes_new(samples, sizeof(samples));
 	g_ptr_array_add(s->texts, g_strdup(text));
-	g_signal_emit_by_name(self, "audio", pcm);
+	if (!s->delay_audio)
+		g_signal_emit_by_name(self, "audio", pcm);
 	if (s->hold_after != 0 && s->texts->len >= s->hold_after)
 		s->held = g_steal_pointer(&task);
 	else

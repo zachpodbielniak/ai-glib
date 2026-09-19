@@ -7,18 +7,22 @@ settings(void)
 	g_autoptr(AiCallConfig) config = ai_call_config_new();
 	g_autofree gchar *path = NULL, *text = NULL;
 	g_autoptr(GError) error = NULL;
-	guint deadline;
+	guint deadline, debounce;
 	gint fd = g_file_open_tmp("call-config-XXXXXX", &path, NULL);
 	g_close(fd, NULL);
+	g_object_get(config, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 250);
 	g_assert_true(
 		g_file_set_contents(path,
 							"ai_call:\n  greeting: 'Hello caller'\n  turn-deadline-ms: "
-							"1234\n  jwt-url: https://fixture/jwt\n",
+							"1234\n  barge-in-ms: 300\n  jwt-url: https://fixture/jwt\n",
 							-1, NULL));
 	g_assert_true(ai_call_config_load(config, path, &error));
 	g_object_get(config, "greeting", &text, "turn-deadline-ms", &deadline, NULL);
 	g_assert_cmpstr(text, ==, "Hello caller");
 	g_assert_cmpuint(deadline, ==, 1234);
+	g_object_get(config, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 300);
 	g_assert_true(g_file_set_contents(
 		path, "ai_call:\n  greeting: changed\n  turn-deadline-ms: -1\n", -1, NULL));
 	g_assert_false(ai_call_config_load(config, path, &error));
@@ -35,6 +39,16 @@ settings(void)
 	g_clear_pointer(&text, g_free);
 	g_object_get(config, "greeting", &text, NULL);
 	g_assert_cmpstr(text, ==, "CLI caller");
+	g_setenv("AI_VOICE_BARGE_IN_MS", "400", TRUE);
+	g_assert_true(ai_call_config_apply_environment(config, &error));
+	g_unsetenv("AI_VOICE_BARGE_IN_MS");
+	g_object_get(config, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 400);
+	g_assert_true(ai_call_config_set_text(config, "barge-in-ms", "200", &error));
+	g_object_get(config, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 200);
+	g_assert_false(ai_call_config_set_text(config, "barge-in-ms", "0", &error));
+	g_clear_error(&error);
 	g_unlink(path);
 }
 int

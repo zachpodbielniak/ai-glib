@@ -41,6 +41,8 @@ setup(Fixture *f, gconstpointer data)
 	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
 							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
 							  f->vad, "conversation", f->conversation, NULL);
+	if (data != GINT_TO_POINTER(1))
+		g_object_set(f->session, "barge-in-ms", 10, NULL);
 	g_array_append_val(f->states, initial);
 	g_signal_connect(f->session, "state-changed", G_CALLBACK(on_state), f);
 	g_signal_connect(f->session, "transcript", G_CALLBACK(on_transcript), f);
@@ -247,6 +249,7 @@ stalled_turn(Fixture *f, gconstpointer data)
 	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
 							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
 							  f->vad, "conversation", f->conversation, NULL);
+	g_object_set(f->session, "barge-in-ms", 10, NULL);
 	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
 	if (data != NULL) {
 		stalled->emit_text = FALSE;
@@ -300,16 +303,62 @@ static void
 silence_final(Fixture *f, gconstpointer data)
 {
 	frame(f, "caller", 1);
-	g_signal_emit_by_name(f->stt, "transcript", "caller", "", TRUE);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", " \t\r\n", TRUE);
 	drain();
 	g_assert_cmpuint(f->speakers->len, ==, 0);
 	g_assert_cmpuint(f->tts->texts->len, ==, 0);
 	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
 }
+static void
+debounce_noise(Fixture *f, gconstpointer data)
+{
+	guint i, debounce;
+	g_object_get(f->session, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 250);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+	frame(f, "caller", 0);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	frame(f, "caller", 1);
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+	g_assert_cmpuint(f->stt->fed, ==, 25);
+}
+static void
+debounce_notice(Fixture *f, gconstpointer data)
+{
+	guint i;
+	f->tts->hold_after = 1;
+	f->tts->delay_audio = TRUE;
+	ai_voice_session_say(f->session, "A notice.");
+	g_assert_nonnull(f->tts->held);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	g_signal_emit_by_name(f->transport, "participant-joined", "second", "Second");
+	frame(f, "second", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+		"barge-in by Caller after 250 ms of speech, cancelling speaking");
+	frame(f, "caller", 1);
+	g_test_assert_expected_messages();
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+	g_assert_cmpuint(f->stt->fed, ==, 25);
+	g_assert_false(g_hash_table_contains(f->stt->active, "second"));
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/voice/session/debounce-noise", Fixture, GINT_TO_POINTER(1), setup,
+			   debounce_noise, teardown);
+	g_test_add("/voice/session/debounce-notice", Fixture, GINT_TO_POINTER(1), setup,
+			   debounce_notice, teardown);
 	g_test_add("/voice/session/stt-error-spoken", Fixture, NULL, setup,
 			   recognition_error_spoken, teardown);
 	g_test_add("/voice/session/silence-final", Fixture, NULL, setup, silence_final,
