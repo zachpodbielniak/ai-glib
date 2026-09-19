@@ -124,16 +124,78 @@ test_queue_clipboard_pending(void)
 	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(mock));
 	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
 	g_autoptr(GString) input = g_string_new("unfinished draft");
+	g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+	g_autoptr(GTask) pasted = g_task_new(NULL, NULL, NULL, NULL);
 	App app = { .conversation = conversation, .send_queue = queue,
-	            .input = input, .clipboard_pending = TRUE };
-	g_autofree gchar *queued = NULL;
+	            .input = input, .clipboard_pending = TRUE, .dump_loop = loop,
+	            .cursor = 4, .history_pos = -1 };
+	g_autofree gchar *sent_text = NULL;
+	GList *blocks;
 
+	ai_mock_provider_push_text(mock, "reply");
 	g_assert_true(ai_prompt_queue_push(queue, "follow-up", NULL, FALSE, NULL));
+	g_assert_true(app_flush_send_queue(&app));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 0);
+	g_assert_true(app.clipboard_pending);
+	g_assert_cmpstr(input->str, ==, "unfinished draft");
+	g_assert_cmpuint(app.cursor, ==, 4);
+	g_task_return_pointer(pasted, png_image(), g_object_unref);
+	on_image_pasted(NULL, G_ASYNC_RESULT(pasted), &app);
+	g_main_loop_run(loop);
+	g_assert_false(app.sending);
+	g_assert_false(app.clipboard_pending);
+	g_assert_cmpuint(g_list_length(app.images), ==, 1);
+	g_assert_cmpstr(input->str, ==, "unfinished draft");
+	sent_text = ai_message_get_text(ai_conversation_get_messages(conversation)->data);
+	g_assert_cmpstr(sent_text, ==, "follow-up");
+	blocks = ai_message_get_content_blocks(ai_conversation_get_messages(conversation)->data);
+	g_assert_cmpuint(g_list_length(blocks), ==, 1);
+	g_clear_list(&app.images, g_object_unref);
+	g_clear_object(&app.cancellable);
+}
+
+static void
+test_queue_provider_recovery(void)
+{
+	g_autoptr(AiGrokBuildClient) provider = ai_grok_build_client_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(AiCommandSet) commands = ai_command_set_new(NULL);
+	g_autoptr(GString) input = g_string_new("unsent draft");
+	g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+	g_autoptr(GPtrArray) history = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(AiImageContent) image = png_image();
+	g_autoptr(GList) images = g_list_append(NULL, image);
+	App app = { .conversation = conversation, .send_queue = queue,
+	            .input = input, .dump_loop = loop, .commands = commands,
+	            .history = history };
+	GList *blocks;
+
+	ai_conversation_set_command_set(conversation, commands);
+	g_assert_true(ai_prompt_queue_push(queue, "describe", images, FALSE, NULL));
 	g_assert_false(app_flush_send_queue(&app));
 	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
-	g_assert_cmpstr(input->str, ==, "unfinished draft");
-	queued = ai_prompt_queue_pop(queue, NULL);
-	g_assert_cmpstr(queued, ==, "follow-up");
+	g_string_assign(input, "/provider nonexistent-provider");
+	app_send(&app);
+	g_assert_true(app.sending);
+	g_main_loop_run(loop);
+	g_assert_true(ai_conversation_get_provider(conversation) == G_OBJECT(provider));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
+	g_string_assign(input, "/provider claude-code");
+	app_send(&app);
+	g_assert_true(app.sending);
+	g_main_loop_run(loop);
+	g_assert_true(AI_IS_CLAUDE_CODE_CLIENT(ai_conversation_get_provider(conversation)));
+	/* Interactive on_input_sent drains here; dump fixtures drive it explicitly. */
+	g_string_assign(input, "still editing");
+	g_assert_true(app_flush_send_queue(&app));
+	g_main_loop_run(loop);
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 0);
+	g_assert_cmpstr(input->str, ==, "still editing");
+	blocks = ai_message_get_content_blocks(ai_conversation_get_messages(conversation)->data);
+	g_assert_cmpuint(g_list_length(blocks), ==, 2);
+	g_assert_true(blocks->next->data == image);
+	g_clear_object(&app.cancellable);
 }
 
 static void
@@ -592,6 +654,7 @@ main(int argc, char **argv)
 	g_test_add_func("/tui-images/formats", test_formats);
 	g_test_add_func("/tui-images/composer", test_composer);
 	g_test_add_func("/tui-images/queue-clipboard-pending", test_queue_clipboard_pending);
+	g_test_add_func("/tui-images/queue-provider-recovery", test_queue_provider_recovery);
 	g_test_add_func("/tui-images/idle-double-interrupt-quits",
 		test_idle_double_interrupt_quits);
 	g_test_add_func("/tui-images/csi-u-ctrl-c-quits",

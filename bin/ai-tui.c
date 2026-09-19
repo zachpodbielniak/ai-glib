@@ -397,6 +397,7 @@ typedef struct
 	gboolean pasting;
 	GList *images;                 /* AiImageContent references in the draft */
 	AiPromptQueue *send_queue;     /* Pending submissions, coalesced at turn boundaries */
+	gboolean queue_blocked;       /* Oldest image requires a compatible provider */
 	GPtrArray *side_questions;     /* AiConversation; async completion owns callbacks */
 	GCancellable *clipboard_cancel;
 	gboolean clipboard_pending;
@@ -4100,6 +4101,7 @@ static void
 app_clear_send_queue(App *app)
 {
 	if (app->send_queue != NULL) ai_prompt_queue_clear(app->send_queue);
+	app->queue_blocked = FALSE;
 }
 
 static gboolean
@@ -4802,8 +4804,10 @@ app_send_from_composer(
 	gboolean  record_history
 ){
     g_autofree gchar *line = NULL;
+	gboolean recovery_command;
 
-	if (app->clipboard_pending)
+	/* A pending clipboard read belongs to the unsent draft, not this batch. */
+	if (record_history && app->clipboard_pending)
 		return;
 	if (image_draft_is_rejected(app))
 		return;
@@ -4838,8 +4842,15 @@ app_send_from_composer(
 		return;
 	}
 
+	/* An idle, image-blocked queue must not trap the command that repairs it.
+	 * Other submissions retain FIFO order, and active turns are never bypassed. */
+	recovery_command = app->queue_blocked &&
+		g_str_has_prefix(line, "/provider") &&
+		(line[9] == '\0' || g_ascii_isspace(line[9])) &&
+		image_draft_is_local_command(app);
 	if (app->sending || ai_conversation_get_busy(app->conversation) ||
-	    (record_history && ai_prompt_queue_get_length(app->send_queue) > 0))
+	    (record_history && ai_prompt_queue_get_length(app->send_queue) > 0 &&
+	     !recovery_command))
 	{
 		app_enqueue_draft(app, line);
 		if (!app->sending && !ai_conversation_get_busy(app->conversation))
@@ -4892,7 +4903,7 @@ app_flush_send_queue(App *app)
 	guint cursor;
 	gint history_pos;
 
-	if (app->clipboard_pending || app->sending || ai_conversation_get_busy(app->conversation) ||
+	if (app->sending || ai_conversation_get_busy(app->conversation) ||
 		ai_prompt_queue_get_length(app->send_queue) == 0)
 		return FALSE;
 
@@ -4908,6 +4919,7 @@ app_flush_send_queue(App *app)
 	rejected = image_draft_is_rejected(app);
 	app->input = draft_input;
 	app->images = draft_images;
+	app->queue_blocked = rejected;
 	if (rejected) return FALSE;
 	app->images = NULL;
 	text = ai_prompt_queue_pop(app->send_queue, &app->images);

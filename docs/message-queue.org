@@ -118,16 +118,30 @@ preservation and a side answer arriving before the main request completes.
 providers and require no network credentials. Terminal tests skip explicitly
 when tmux is unavailable. =make test-gir-clean= verifies public annotations.
 
-** Clipboard reads while a turn finishes
+* Automatic dispatch and recovery
 
-If a clipboard image read is pending when a turn finishes, queue draining
-pauses before removing any submissions. Once the clipboard operation finishes,
-Enter resumes the queue (and queues any current draft after existing entries).
-The queued text and the unsent draft remain separate.
+A pending clipboard image read belongs to the unsent composer. Queued turns
+continue when the active turn finishes, even while that read is pending. Its
+image is attached to the draft when the read completes, never to the queued
+turn. The draft text, cursor and attachments survive queued dispatch. Enter
+still waits for clipboard completion when submitting that draft itself.
 
 Queue hosts can use =ai_prompt_queue_peek()= to inspect the oldest submission
 without removing it. Its text and attachment list are borrowed until removal
 or clearing. The TUI uses this to retain queued images rejected after switching
-to a provider without image support. Draining pauses with an error. To recover
-in the TUI, clear pending entries with Ctrl+C, switch provider, then recall the
-text from input history and reattach the image before sending.
+to a provider without image support. Draining pauses with an error. While idle
+and blocked this way, =/provider NAME= executes immediately rather than joining
+the queue. A successful switch to an image-capable provider resumes the oldest
+batch automatically, retaining its original text and image objects. An invalid
+or incompatible provider choice leaves the queued submissions intact.
+
+This recovery exception applies only to the local =/provider= command on an
+image-blocked queue. Other submissions remain in FIFO order, active turns are
+never interrupted, and =--no-expand= continues to send slash commands literally.
+Cancellation still pauses queued work until the user resumes it. Reset, exit
+and explicit queue clearing still discard pending entries.
+
+=test-tui-images= exercises clipboard completion during queued dispatch and
+provider recovery through the real command handler and a subprocess fixture.
+It verifies retained image ownership, failed provider changes, and draft text
+preservation as well as successful delivery.
