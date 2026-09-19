@@ -26,8 +26,16 @@ def main():
         print("SKIP: python3-gobject not installed", file=sys.stderr)
         return 0
 
+    # GLib caches HOME on first use. Redirect before importing the typelib so
+    # a scan cannot see the developer's real ~/.claude or agent skills.
+    gi_home = tempfile.TemporaryDirectory(prefix="ai-gi-")
+    os.environ["HOME"] = gi_home.name
+    os.environ["XDG_CONFIG_HOME"] = gi_home.name
+    os.environ["XDG_STATE_HOME"] = gi_home.name
+
     gi.require_version("AiGlib", "1.0")
     from gi.repository import AiGlib, Gio  # noqa: E402
+    gi_home  # keep the directory until process exit
 
     # OpenCode options remain usable through GIR, including exact file paths.
     opencode: AiGlib.OpenCodeClient = AiGlib.OpenCodeClient.new()
@@ -313,6 +321,39 @@ def main():
     assert conversation.get_busy() is False
     conversation.set_system_prompt("be brief")
     assert conversation.get_system_prompt() == "be brief"
+
+    queue = AiGlib.PromptQueue.new()
+    assert queue.props.max_length == 32
+    assert queue.props.coalesce is True
+    assert queue.get_length() == 0
+    assert queue.push("one", None, False)
+    assert queue.push("two", None, False)
+    assert queue.get_length() == 2
+    batch = queue.pop()
+    if isinstance(batch, tuple):
+        batch = batch[0]
+    assert batch == "one\n\ntwo"
+    peeked = queue.peek()
+    assert peeked[0] is None if isinstance(peeked, tuple) else peeked is None
+    queue.props.coalesce = False
+    queue.props.max_length = 1
+    assert queue.push("kept", None, False)
+    try:
+        queue.push("rejected", None, False)
+        raise AssertionError("a full queue must reject the extra submission")
+    except Exception:
+        pass
+
+    other = AiGlib.GrokBuildClient.new()
+    side = conversation.fork(other)
+    assert side is not None
+    assert side is not conversation
+    shared = None
+    try:
+        shared = conversation.fork(grok)
+    except Exception:
+        shared = None
+    assert shared is None
 
     # Idle: no activity, no elapsed. An Emacs frontend draws its own
     # spinner and takes the words from here.

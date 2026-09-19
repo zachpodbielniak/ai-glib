@@ -3012,8 +3012,16 @@ ai_conversation_fork(AiConversation *self, GObject *provider, GError **error)
 	count = self->busy ? self->turn_history_length : g_list_length(self->messages);
 	for (l = self->messages, i = 0; l != NULL && i < count; l = l->next, i++) {
 		g_autoptr(JsonNode) json = ai_message_to_json(l->data);
-		g_autoptr(AiMessage) copy = ai_message_new_from_json(json, error);
-		if (copy == NULL) return NULL;
+		g_autoptr(AiMessage) copy = NULL;
+
+		if (json == NULL) {
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_SERIALIZATION_ERROR,
+				"A branch could not snapshot a message");
+			return NULL;
+		}
+		copy = ai_message_new_from_json(json, error);
+		if (copy == NULL)
+			return NULL;
 		branch->messages = g_list_append(branch->messages, g_steal_pointer(&copy));
 	}
 	return g_steal_pointer(&branch);

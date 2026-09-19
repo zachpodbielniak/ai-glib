@@ -151,7 +151,7 @@ ai_prompt_queue_push(AiPromptQueue *self, const gchar *text, GList *images,
 		}
 	}
 	if (self->pending.length >= self->limit) {
-		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "Send queue is full");
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST, "Send queue is full");
 		return FALSE;
 	}
 	prompt = g_new0(Prompt, 1);

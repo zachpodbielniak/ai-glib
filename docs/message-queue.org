@@ -87,8 +87,8 @@ ai_conversation_send_async(conversation, batch, NULL, on_sent, user_data);
 #+end_src
 
 The queue owns copied text and references to =AiImageContent= attachments.
-=push()= returns an error without mutation for invalid text, invalid attachment
-types or capacity exhaustion. Mark commands =separate=; attachments always form
+=push()= returns =AI_ERROR_INVALID_REQUEST= without mutation for invalid text,
+invalid attachment types or capacity exhaustion. Mark commands =separate=; attachments always form
 a separate batch. =pop()= transfers the batch and its optional attachment list.
 =clear()= affects pending items only. The host owns scheduling, cancellation and
 error policy; ordinary =AiConversation.send_async()= still rejects overlapping

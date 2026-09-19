@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <ai-glib.h>
+#include <string.h>
+
+static gchar *sandbox = NULL;
 
 static void
 changed(GObject *object, GParamSpec *spec, gpointer data)
@@ -34,6 +37,7 @@ static void
 barriers(void)
 {
 	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GError) error = NULL;
 	g_autofree gchar *text = NULL;
 	g_assert_true(ai_prompt_queue_push(queue, "one", NULL, FALSE, NULL));
 	g_assert_true(ai_prompt_queue_push(queue, "/model next", NULL, TRUE, NULL));
@@ -48,10 +52,37 @@ barriers(void)
 	g_assert_cmpstr(text, ==, "two");
 	g_object_set(queue, "coalesce", FALSE, "max-length", 1, NULL);
 	g_assert_true(ai_prompt_queue_push(queue, "kept", NULL, FALSE, NULL));
-	g_assert_false(ai_prompt_queue_push(queue, "rejected", NULL, FALSE, NULL));
+	g_assert_false(ai_prompt_queue_push(queue, "rejected", NULL, FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
 	ai_prompt_queue_clear(queue);
 	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 0);
 	g_assert_false(ai_prompt_queue_push(queue, " \t\n", NULL, FALSE, NULL));
+}
+
+static void
+validation(void)
+{
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *too_long = g_malloc(1024 * 1024 + 2);
+	GList *not_an_image = g_list_append(NULL, queue);
+
+	memset(too_long, 'a', 1024 * 1024 + 1);
+	too_long[1024 * 1024 + 1] = '\0';
+	g_assert_false(ai_prompt_queue_push(queue, NULL, NULL, FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	g_assert_false(ai_prompt_queue_push(queue, "\xFF\xFE not utf-8", NULL, FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	g_assert_false(ai_prompt_queue_push(queue, too_long, NULL, FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	g_assert_false(ai_prompt_queue_push(queue, "picture", not_an_image, FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 0);
+	g_list_free(not_an_image);
 }
 
 static void
@@ -210,9 +241,14 @@ fork_cancel_side(void)
 
 int main(int argc, char **argv)
 {
+	sandbox = g_dir_make_tmp("ai-prompt-queue-XXXXXX", NULL);
+	g_setenv("HOME", sandbox, TRUE);
+	g_setenv("XDG_CONFIG_HOME", sandbox, TRUE);
+	g_setenv("XDG_STATE_HOME", sandbox, TRUE);
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/queue/batch", batch);
 	g_test_add_func("/queue/images", images);
+	g_test_add_func("/queue/validation", validation);
 	g_test_add_func("/queue/fork-cli-session", fork_cli_session);
 	g_test_add_func("/queue/fork-cancel-side", fork_cancel_side);
 	g_test_add_func("/queue/barriers-limit-validation", barriers);

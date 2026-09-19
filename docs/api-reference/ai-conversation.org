@@ -222,11 +222,22 @@ digest that may be tens of kilobytes.
 
 The library APIs do not read the clipboard, decode image files, enforce ai-tui's draft limits or promise model vision support. The frontend owns those policies. Existing text-only APIs delegate with a NULL image list, preserving their behavior and ABI. See [[file:../tui.org][Pasting images]] for the supported transport matrix, clipboard helpers, temporary-file lifecycle and end-to-end tests.
 
-** Queued follow-ups and side questions
+** Forking a side conversation
 
-=ai-tui= accepts follow-ups during an active turn and coalesces adjacent text
-submissions into the next prompt. Use =--no-coalesce= for separate turns and
-=--queue-limit N= to bound pending submissions. =/btw <question>= starts an
-independent side conversation without interrupting the main request.
+#+begin_src C
+AiConversation *ai_conversation_fork (AiConversation  *self,
+                                      GObject         *provider,
+                                      GError         **error);
+#+end_src
+
+Snapshots completed portable history into a new conversation that uses
+=provider=. =provider= must be a fresh instance, not the parent's object
+and not in use elsewhere. The call is allowed during a turn; the in-flight
+request, partial output and unfinished tool calls are excluded. CLI resume
+flags on =provider= are cleared so the branch cannot write the parent's
+native session. Local tools, command set, brigade and tool endpoint are not
+inherited. Existing send APIs still reject overlapping requests on each
+conversation.
+
 See [[file:../message-queue.org][Queued follow-ups and side questions]] for
-command barriers, cancellation, context isolation and the library APIs.
+the TUI queue, =/btw=, and [[file:ai-prompt-queue.org][AiPromptQueue]].

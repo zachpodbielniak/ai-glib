@@ -37,6 +37,7 @@ see their provider pages.
 - [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
 - [[file:native-session.org][Native session import]] - Read a wrapped CLI's own transcript so a switch does not lose it
 - [[file:tui.org][ai-tui]] - The terminal agent harness
+- [[file:message-queue.org][Queued follow-ups and /btw]] - Coalesced next turns and independent side questions
 - [[file:mcp.org][MCP hosting]] - Opt-in conversation, TODO, and agent control with CLI provider injection
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 - [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON
@@ -90,6 +91,7 @@ see their provider pages.
 - [[file:api-reference/ai-view-block.org][AiViewBlock]] - Blocks and the render contract
 - [[file:api-reference/ai-tool-call.org][AiToolCall]] - Tool calls and how they read
 - [[file:api-reference/ai-conversation.org][AiConversation]] - Drives a provider into a transcript
+- [[file:api-reference/ai-prompt-queue.org][AiPromptQueue]] - Bounded FIFO of follow-up submissions
 
 *** Examples
 - [[file:examples/index.org][Examples Index]] - All examples
@@ -175,7 +177,3 @@ configuration, supported APIs, examples and compatibility limits.
 * Video generation
 
 Generate MP4 artifacts with =ai --video-gen -p grok= or =-p grok-build=. The same functionality is available through =AiVideoGenerator= and =AiVideoRequest= for text-to-video, image animation and reference-conditioned video with optional preset voices. See [[file:api-reference/ai-video-generator.org][the video interface]], [[file:cli.org][CLI flags and examples]], and [[file:specs/xai-imagine-provenance.org][Imagine specification snapshots]]. Grok Build also implements =AiImageGenerator= through its =image_gen= and =image_edit= tools.
-
-** Follow-up messages
-
-- [[file:message-queue.org][Message queue and /btw]] — coalesced next turns and independent side questions

@@ -285,6 +285,10 @@ ai_conversation_send_input_finish(
 );
 
 AiConversation *
-ai_conversation_fork(AiConversation *self, GObject *provider, GError **error);
+ai_conversation_fork(
+    AiConversation  *self,
+    GObject         *provider,
+    GError         **error
+);
 
 G_END_DECLS
