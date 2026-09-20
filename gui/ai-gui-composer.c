@@ -10,14 +10,16 @@
 #include <string.h>
 
 #include "ai-gui-composer.h"
+#include "ai-gui-content.h"
+#include "ai-gui-preview.h"
 #include "ai-gui-style.h"
 
 #define COMPOSER_MAX_CANDIDATES 40
 
 typedef struct
 {
-	gchar   *path;
-	AiImage *image;
+	gchar          *path;
+	AiImageContent *image;
 } AiGuiAttachment;
 
 struct _AiGuiComposer
@@ -62,6 +64,7 @@ enum
 {
 	SIGNAL_SUBMIT,
 	SIGNAL_STOP,
+	SIGNAL_NOTICE,
 	N_SIGNALS
 };
 
@@ -70,6 +73,7 @@ static guint signals[N_SIGNALS];
 static void composer_update_completion(AiGuiComposer *self);
 static void composer_rebuild_attachments(AiGuiComposer *self);
 static void composer_load_models(AiGuiComposer *self);
+static void composer_choose_files(AiGuiComposer *self);
 
 /* ================================================================
  * Attachments
@@ -81,7 +85,7 @@ attachment_free(gpointer data)
 	AiGuiAttachment *attachment = data;
 
 	g_free(attachment->path);
-	g_clear_pointer(&attachment->image, ai_image_free);
+	g_clear_object(&attachment->image);
 	g_free(attachment);
 }
 
@@ -95,6 +99,34 @@ on_attachment_removed(
 
 	g_ptr_array_remove(self->files, entry);
 	composer_rebuild_attachments(self);
+}
+
+/*
+ * The hint line says what is about to be sent.
+ *
+ * With four images attached and a full message box, "Enter sends" is
+ * true and useless: what somebody needs to know at that moment is that
+ * the pictures go too, and how many.
+ */
+static void
+composer_sync_hint(AiGuiComposer *self)
+{
+	if (self->hint_label == NULL)
+		return;
+
+	if (self->files->len > 0)
+	{
+		g_autofree gchar *text = g_strdup_printf(
+			"%u image%s attached · Enter sends them with your message",
+			self->files->len, self->files->len == 1 ? "" : "s");
+
+		gtk_label_set_text(GTK_LABEL(self->hint_label), text);
+		return;
+	}
+
+	gtk_label_set_text(GTK_LABEL(self->hint_label), self->busy
+		? "Working — Enter queues a follow-up, Esc stops"
+		: "Enter sends · Shift+Enter newline · Tab completes · Ctrl+O attaches");
 }
 
 static void
@@ -118,8 +150,20 @@ composer_rebuild_attachments(AiGuiComposer *self)
 		gtk_widget_add_css_class(chip, "card");
 		gtk_widget_add_css_class(chip, "ai-attachment");
 
-		icon = gtk_image_new_from_icon_name(attachment->image != NULL
-			? "image-x-generic-symbolic" : "text-x-generic-symbolic");
+		/*
+		 * The picture itself rather than a generic icon. Four chips
+		 * that all say "image" are four chips nobody can tell apart at
+		 * the moment it matters -- just before sending them.
+		 */
+		icon = attachment->image != NULL
+			? ai_gui_preview_thumbnail(attachment->image, 28) : NULL;
+
+		if (icon == NULL)
+		{
+			icon = gtk_image_new_from_icon_name(attachment->image != NULL
+				? "image-x-generic-symbolic" : "text-x-generic-symbolic");
+		}
+
 		gtk_box_append(GTK_BOX(chip), icon);
 
 		label = gtk_label_new(name);
@@ -140,6 +184,7 @@ composer_rebuild_attachments(AiGuiComposer *self)
 	}
 
 	gtk_widget_set_visible(self->attachments, self->files->len > 0);
+	composer_sync_hint(self);
 }
 
 /*
@@ -150,6 +195,14 @@ composer_rebuild_attachments(AiGuiComposer *self)
  * because the harness layer expands the mention, which also means the
  * model sees the path it was given rather than an anonymous blob.
  */
+/*
+ * An image becomes an attachment; anything else becomes an `@path`.
+ *
+ * That split is the library's, not a simplification: only images have a
+ * wire format of their own, and a text file reaches the model because
+ * the harness layer expands the mention -- which also means the model
+ * sees the path it was given rather than an anonymous blob.
+ */
 void
 ai_gui_composer_attach_file(
 	AiGuiComposer *self,
@@ -158,7 +211,7 @@ ai_gui_composer_attach_file(
 	g_autofree gchar *path = NULL;
 	g_autoptr(GError) error = NULL;
 	AiGuiAttachment *attachment;
-	AiImage *image;
+	AiImageContent *image;
 
 	g_return_if_fail(AI_GUI_IS_COMPOSER(self));
 	g_return_if_fail(G_IS_FILE(file));
@@ -166,19 +219,43 @@ ai_gui_composer_attach_file(
 	path = g_file_get_path(file);
 
 	if (path == NULL)
+	{
+		g_signal_emit(self, signals[SIGNAL_NOTICE], 0,
+		              "That location is not a local file.");
 		return;
+	}
 
-	image = ai_image_new_from_file(path, &error);
-
-	if (image == NULL)
+	if (ai_gui_content_classify(path, NULL) != AI_GUI_CONTENT_IMAGE)
 	{
 		g_autofree gchar *quoted = strchr(path, ' ') != NULL
 			? g_strdup_printf("@\"%s\"", path)
 			: g_strdup_printf("@%s", path);
 
-		g_debug("ai-gui: %s is not an image (%s); mentioning it instead",
-		        path, error != NULL ? error->message : "unknown");
 		ai_gui_composer_insert(self, quoted);
+		return;
+	}
+
+	/*
+	 * The cap is enforced before the bytes are read. Reading four
+	 * mebibytes to then refuse them is work nobody asked for, and the
+	 * message has to name the limit or it is just a refusal.
+	 */
+	if (self->files->len >= AI_GUI_CONTENT_MAX_IMAGES)
+	{
+		g_signal_emit(self, signals[SIGNAL_NOTICE], 0,
+			"Four images is the limit for one message. Send these first.");
+		return;
+	}
+
+	image = ai_gui_content_image_from_file(path, &error);
+
+	if (image == NULL)
+	{
+		/*
+		 * Said out loud rather than logged. A silent refusal is
+		 * indistinguishable from a drag that missed the window.
+		 */
+		g_signal_emit(self, signals[SIGNAL_NOTICE], 0, error->message);
 		return;
 	}
 
@@ -188,6 +265,79 @@ ai_gui_composer_attach_file(
 
 	g_ptr_array_add(self->files, attachment);
 	composer_rebuild_attachments(self);
+}
+
+/*
+ * The clipboard, for a screenshot that was never a file.
+ *
+ * Read as a #GdkTexture and re-encoded to PNG rather than asked for as
+ * image/png: a screenshot tool publishes a texture, and asking for the
+ * MIME type would get an offer nobody has to honour.
+ */
+static void
+on_clipboard_texture(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      user_data
+){
+	AiGuiComposer *self = user_data;
+	g_autoptr(GdkTexture) texture = NULL;
+	g_autoptr(GBytes) bytes = NULL;
+	g_autoptr(GError) error = NULL;
+	AiImageContent *image;
+	AiGuiAttachment *attachment;
+
+	texture = gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), result,
+	                                            &error);
+
+	if (texture == NULL)
+	{
+		if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+		{
+			g_signal_emit(self, signals[SIGNAL_NOTICE], 0,
+			              "The clipboard has no image in it.");
+		}
+
+		g_object_unref(self);
+		return;
+	}
+
+	bytes = gdk_texture_save_to_png_bytes(texture);
+	image = bytes != NULL ? ai_gui_content_image_from_bytes(bytes, &error)
+	                      : NULL;
+
+	if (image == NULL)
+	{
+		g_signal_emit(self, signals[SIGNAL_NOTICE], 0, error != NULL
+			? error->message : "Could not encode the pasted image.");
+		g_object_unref(self);
+		return;
+	}
+
+	attachment = g_new0(AiGuiAttachment, 1);
+	attachment->path = g_strdup("Pasted image");
+	attachment->image = image;
+
+	g_ptr_array_add(self->files, attachment);
+	composer_rebuild_attachments(self);
+	g_object_unref(self);
+}
+
+void
+ai_gui_composer_paste_image(AiGuiComposer *self)
+{
+	g_return_if_fail(AI_GUI_IS_COMPOSER(self));
+
+	if (self->files->len >= AI_GUI_CONTENT_MAX_IMAGES)
+	{
+		g_signal_emit(self, signals[SIGNAL_NOTICE], 0,
+			"Four images is the limit for one message. Send these first.");
+		return;
+	}
+
+	gdk_clipboard_read_texture_async(
+		gtk_widget_get_clipboard(GTK_WIDGET(self)), NULL,
+		on_clipboard_texture, g_object_ref(self));
 }
 
 GList *
@@ -203,7 +353,7 @@ ai_gui_composer_take_images(AiGuiComposer *self)
 		AiGuiAttachment *attachment = g_ptr_array_index(self->files, i);
 
 		if (attachment->image != NULL)
-			images = g_list_append(images, ai_image_copy(attachment->image));
+			images = g_list_append(images, g_object_ref(attachment->image));
 	}
 
 	g_ptr_array_set_size(self->files, 0);
@@ -712,6 +862,43 @@ on_key_pressed(
 	 * it. ai-tui uses this key for the dashboard and one habit should
 	 * cover both front-ends.
 	 */
+	/*
+	 * Ctrl+V, intercepted only when the clipboard holds an image.
+	 *
+	 * A text paste must still be a text paste, so the decision is the
+	 * clipboard's formats rather than the key: asking for a texture
+	 * unconditionally would swallow every ordinary paste while the read
+	 * was in flight.
+	 */
+	if (control && !shift && keyval == GDK_KEY_v)
+	{
+		GdkClipboard *clipboard = gtk_widget_get_clipboard(GTK_WIDGET(self));
+		GdkContentFormats *formats = gdk_clipboard_get_formats(clipboard);
+
+		if (formats != NULL &&
+		    gdk_content_formats_contain_gtype(formats, GDK_TYPE_TEXTURE))
+		{
+			ai_gui_composer_paste_image(self);
+			return TRUE;
+		}
+
+		return FALSE;
+	}
+
+	/* Ctrl+O for the file chooser, Ctrl+Shift+V to force an image paste
+	 * when the clipboard holds both text and a picture. */
+	if (control && !shift && keyval == GDK_KEY_o)
+	{
+		composer_choose_files(self);
+		return TRUE;
+	}
+
+	if (control && shift && (keyval == GDK_KEY_v || keyval == GDK_KEY_V))
+	{
+		ai_gui_composer_paste_image(self);
+		return TRUE;
+	}
+
 	if (control && !shift &&
 	    (keyval == GDK_KEY_backslash || keyval == GDK_KEY_bar))
 	{
@@ -780,11 +967,8 @@ on_files_chosen(
 }
 
 static void
-on_attach_clicked(
-	GtkButton *button,
-	gpointer   user_data
-){
-	AiGuiComposer *self = user_data;
+composer_choose_files(AiGuiComposer *self)
+{
 	g_autoptr(GtkFileDialog) dialog = gtk_file_dialog_new();
 	GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(self));
 
@@ -800,6 +984,14 @@ on_attach_clicked(
 
 	gtk_file_dialog_open_multiple(dialog, GTK_IS_WINDOW(root)
 		? GTK_WINDOW(root) : NULL, NULL, on_files_chosen, self);
+}
+
+static void
+on_attach_clicked(
+	GtkButton *button,
+	gpointer   user_data
+){
+	composer_choose_files(user_data);
 }
 
 static void
@@ -1146,9 +1338,7 @@ ai_gui_composer_set_busy(
 	else
 		gtk_widget_remove_css_class(self->send_button, "destructive-action");
 
-	gtk_label_set_text(GTK_LABEL(self->hint_label), busy
-		? "Working — Enter queues a follow-up, Esc stops"
-		: "Enter sends · Shift+Enter newline · Tab completes / and @");
+	composer_sync_hint(self);
 }
 
 /* ================================================================
@@ -1224,6 +1414,21 @@ ai_gui_composer_class_init(AiGuiComposerClass *klass)
 	 */
 	signals[SIGNAL_STOP] = g_signal_new("stop", G_TYPE_FROM_CLASS(klass),
 		G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+	/**
+	 * AiGuiComposer::notice:
+	 * @self: the composer
+	 * @message: what went wrong
+	 *
+	 * Something the person did could not be done.
+	 *
+	 * A refused attachment used to go to g_debug, where it is
+	 * indistinguishable from a drag that missed the window. The window
+	 * turns this into a toast.
+	 */
+	signals[SIGNAL_NOTICE] = g_signal_new("notice", G_TYPE_FROM_CLASS(klass),
+		G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+		G_TYPE_STRING);
 }
 
 static void

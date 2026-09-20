@@ -110,7 +110,27 @@ static const gchar *APP_CSS =
 	".ai-status-done { color: @success_color; background: alpha(@success_color, 0.16); }\n"
 	".ai-status-stopped { opacity: 0.8; }\n"
 	".ai-status-idle { opacity: 0.6; }\n"
-	".ai-status-disconnected { opacity: 0.45; }\n";
+	".ai-status-disconnected { opacity: 0.45; }\n"
+	/*
+	 * Tool calls, attachments and code. These resolve through the
+	 * libadwaita named colours a palette has already redefined, so they
+	 * follow the theme without this file knowing what any theme is.
+	 */
+	".ai-tool-call {\n"
+	"  padding: 6px 8px;\n"
+	"  border-radius: 8px;\n"
+	"  background: alpha(currentColor, 0.05);\n"
+	"}\n"
+	".ai-call-ok { color: @success_color; }\n"
+	".ai-call-failed { color: @error_color; }\n"
+	".ai-call-pending { color: @warning_color; }\n"
+	".ai-tool-result {\n"
+	"  font-size: 0.88em;\n"
+	"  opacity: 0.85;\n"
+	"  padding: 4px 6px;\n"
+	"}\n"
+	".ai-thumbnail { border-radius: 8px; }\n"
+	".ai-thumbnail-button { padding: 0; border-radius: 8px; }\n";
 
 typedef struct
 {

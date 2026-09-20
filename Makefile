@@ -271,6 +271,7 @@ GUI_BINARY  = $(OUTDIR)/bin/ai-gui
 # the reason none of them does. A test that needed a display would pass
 # or fail by whose machine ran it.
 GUI_MODEL_SOURCES = \
+	$(GUIDIR)/ai-gui-content.c \
 	$(GUIDIR)/ai-gui-settings.c \
 	$(GUIDIR)/ai-gui-session.c \
 	$(GUIDIR)/ai-gui-session-store.c \
@@ -424,6 +425,11 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
 	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
 		$(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-content: $(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(OUTDIR)/tests/test-ai-gui-theme: $(TESTDIR)/test-ai-gui-theme.c $(GUIDIR)/ai-gui-settings.c $(GUI_HEADERS) $(SRCDIR)/core/ai-theme.h $(LIB_SHARED) | $(OUTDIR)/tests

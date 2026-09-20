@@ -13,6 +13,7 @@
 
 #include "core/ai-json-util.h"
 
+#include "ai-gui-content.h"
 #include "ai-gui-session.h"
 #include "ai-gui-work.h"
 
@@ -1155,6 +1156,9 @@ session_dispatch(
 	const gchar  *text,
 	GList        *images
 ){
+	AiTranscript *transcript = ai_conversation_get_transcript(self->conversation);
+	guint before = ai_transcript_get_n_blocks(transcript);
+
 	g_clear_object(&self->cancellable);
 	self->cancellable = g_cancellable_new();
 	self->sending = TRUE;
@@ -1197,6 +1201,37 @@ session_dispatch(
 		                                  images, self->cancellable,
 		                                  on_send_ready, self);
 	}
+
+	/*
+	 * The attachments, kept beside the turn block the conversation just
+	 * appended.
+	 *
+	 * The transcript deliberately records `[Images attached]` and not
+	 * the bytes, so the window keeps them itself -- which is the only
+	 * way a thumbnail can be drawn where the image was actually sent.
+	 * The block is appended synchronously, before the first await, so
+	 * it is there by the time this line runs; a built-in resolves
+	 * without appending anything, which is what the count guards.
+	 */
+	if (images != NULL &&
+	    ai_transcript_get_n_blocks(transcript) > before)
+	{
+		AiViewBlock *turn = ai_transcript_get_last(transcript);
+
+		if (turn != NULL && AI_IS_VIEW_TURN_BLOCK(turn))
+		{
+			ai_gui_content_attach_images(G_OBJECT(turn), images);
+
+			/*
+			 * And say so. ai_transcript_append() has already told the
+			 * list view about this block, so its row was bound and
+			 * rendered a moment ago -- before the attachments existed.
+			 * Without this the thumbnails appear only if something else
+			 * happens to redraw the row.
+			 */
+			ai_view_block_changed(turn);
+		}
+	}
 }
 
 /*
@@ -1224,7 +1259,7 @@ session_pump_queue(AiGuiSession *self)
 	if (text != NULL)
 		session_dispatch(self, text, images);
 
-	g_list_free_full(images, (GDestroyNotify)ai_image_free);
+	g_list_free_full(images, g_object_unref);
 }
 
 gboolean

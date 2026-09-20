@@ -74,6 +74,18 @@ ai_gui_composer_insert(
 	const gchar   *text
 );
 
+/**
+ * ai_gui_composer_paste_image:
+ * @self: a composer
+ *
+ * Attaches an image from the desktop clipboard.
+ *
+ * Bound to Ctrl+V, but only when the clipboard actually holds one: a
+ * text paste has to stay a text paste.
+ */
+void
+ai_gui_composer_paste_image(AiGuiComposer *self);
+
 void
 ai_gui_composer_attach_file(
 	AiGuiComposer *self,

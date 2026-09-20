@@ -45,4 +45,19 @@ ai_gui_block_row_get_block(AiGuiBlockRow *self);
 void
 ai_gui_block_row_refresh(AiGuiBlockRow *self);
 
+/**
+ * ai_gui_block_row_set_directory:
+ * @self: a row
+ * @directory: (nullable): where a relative path in this block resolves
+ *
+ * A tool target and an `@mention` are usually written relative to the
+ * conversation's working directory, so a click cannot be turned into a
+ * file without it.
+ */
+void
+ai_gui_block_row_set_directory(
+	AiGuiBlockRow *self,
+	const gchar   *directory
+);
+
 G_END_DECLS

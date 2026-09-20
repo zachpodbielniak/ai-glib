@@ -412,7 +412,16 @@ on_composer_submit(
 			error != NULL ? error->message : "could not send");
 	}
 
-	g_list_free_full(images, (GDestroyNotify)ai_image_free);
+	g_list_free_full(images, g_object_unref);
+}
+
+static void
+on_composer_notice(
+	AiGuiComposer *composer,
+	const gchar   *message,
+	gpointer       user_data
+){
+	ai_gui_window_toast(user_data, "%s", message);
 }
 
 static void
@@ -737,6 +746,28 @@ on_link_row_clicked(
 
 	if (url != NULL && !ai_gui_work_open_url(url, &error))
 		ai_gui_window_toast(self, "%s", error->message);
+}
+
+void
+ai_gui_window_attach_files(
+	AiGuiWindow        *self,
+	const gchar *const *paths
+){
+	gsize i;
+
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	if (paths == NULL)
+		return;
+
+	for (i = 0; paths[i] != NULL; i++)
+	{
+		g_autoptr(GFile) file = g_file_new_for_commandline_arg(paths[i]);
+
+		ai_gui_composer_attach_file(AI_GUI_COMPOSER(self->composer), file);
+	}
+
+	ai_gui_composer_focus(AI_GUI_COMPOSER(self->composer));
 }
 
 void
@@ -1213,6 +1244,93 @@ action_copy_transcript(
 	ai_gui_window_toast(self, "Transcript copied");
 }
 
+/*
+ * One table, so the dialog and docs/gui.org cannot drift apart.
+ *
+ * A window with this many verbs needs somewhere to list them; a person
+ * who has to read the source to learn that Ctrl+T exists will never
+ * learn that Ctrl+T exists.
+ */
+typedef struct
+{
+	const gchar *group;
+	const gchar *keys;
+	const gchar *what;
+} AiGuiShortcut;
+
+static const AiGuiShortcut SHORTCUTS[] = {
+	{ "Conversation", "Enter",            "Send, or queue a follow-up while a turn runs" },
+	{ "Conversation", "Shift+Enter",      "New line" },
+	{ "Conversation", "Esc",              "Stop the turn in flight" },
+	{ "Conversation", "Tab",              "Complete the / or @ at the cursor" },
+	{ "Conversation", "Ctrl+Up / Down",   "Walk the prompts you have sent" },
+	{ "Conversation", "Ctrl+L",           "Focus the message box" },
+
+	{ "Attachments",  "Ctrl+O",           "Attach files" },
+	{ "Attachments",  "Ctrl+V",           "Paste an image from the clipboard" },
+	{ "Attachments",  "Ctrl+Shift+V",     "Paste an image even when text is also on the clipboard" },
+	{ "Attachments",  "Click a thumbnail", "See it full size, and save a copy" },
+	{ "Attachments",  "Click a file name", "Preview the file the transcript is talking about" },
+
+	{ "Session",      "Ctrl+N",           "New session" },
+	{ "Session",      "F9",               "Show or hide the session list" },
+	{ "Session",      "Ctrl+F",           "Find in this conversation" },
+	{ "Session",      "Ctrl+Shift+E",     "Export the transcript" },
+	{ "Session",      "Right-click a block", "Copy it, copy it as Markdown, or save it" },
+
+	{ "Window",       "Ctrl+backslash",   "Project dashboard, and back" },
+	{ "Window",       "Ctrl+Shift+G",     "Background agents" },
+	{ "Window",       "Ctrl+T",           "Next theme" },
+	{ "Window",       "Ctrl+comma",       "Preferences" },
+	{ "Window",       "Ctrl+question",    "This list" }
+};
+
+static void
+action_shortcuts(
+	GtkWidget   *widget,
+	const gchar *name,
+	GVariant    *parameter
+){
+	AdwPreferencesDialog *dialog =
+		ADW_PREFERENCES_DIALOG(adw_preferences_dialog_new());
+	AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+	AdwPreferencesGroup *group = NULL;
+	const gchar *current = NULL;
+	gsize i;
+
+	adw_dialog_set_title(ADW_DIALOG(dialog), "Keyboard shortcuts");
+	adw_preferences_page_set_title(page, "Shortcuts");
+
+	for (i = 0; i < G_N_ELEMENTS(SHORTCUTS); i++)
+	{
+		GtkWidget *row;
+		GtkWidget *keys;
+
+		if (g_strcmp0(current, SHORTCUTS[i].group) != 0)
+		{
+			current = SHORTCUTS[i].group;
+			group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+			adw_preferences_group_set_title(group, current);
+			adw_preferences_page_add(page, group);
+		}
+
+		row = adw_action_row_new();
+		adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
+		                              SHORTCUTS[i].what);
+
+		keys = gtk_label_new(SHORTCUTS[i].keys);
+		gtk_widget_add_css_class(keys, "dim-label");
+		gtk_widget_add_css_class(keys, "ai-monospace");
+		gtk_widget_set_valign(keys, GTK_ALIGN_CENTER);
+		adw_action_row_add_suffix(ADW_ACTION_ROW(row), keys);
+
+		adw_preferences_group_add(group, row);
+	}
+
+	adw_preferences_dialog_add(dialog, page);
+	adw_dialog_present(ADW_DIALOG(dialog), widget);
+}
+
 static void
 action_about(
 	GtkWidget   *widget,
@@ -1302,6 +1420,7 @@ window_build_menu(void)
 	g_menu_append(view, "Background agents…", "win.agents");
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(view));
 
+	g_menu_append(app, "Keyboard shortcuts", "win.shortcuts");
 	g_menu_append(app, "Preferences", "win.preferences");
 	g_menu_append(app, "About ai-gui", "win.about");
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(app));
@@ -1428,6 +1547,8 @@ window_build_content(AiGuiWindow *self)
 	                 G_CALLBACK(on_composer_submit), self);
 	g_signal_connect(self->composer, "stop",
 	                 G_CALLBACK(on_composer_stop), self);
+	g_signal_connect(self->composer, "notice",
+	                 G_CALLBACK(on_composer_notice), self);
 	gtk_box_append(GTK_BOX(content), self->composer);
 
 	self->stack = gtk_stack_new();
@@ -1589,6 +1710,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 	                                action_copy_transcript);
 	gtk_widget_class_install_action(widget_class, "win.about", NULL,
 	                                action_about);
+	gtk_widget_class_install_action(widget_class, "win.shortcuts", NULL,
+	                                action_shortcuts);
 
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_n,
 		GDK_CONTROL_MASK, "win.new-session", NULL);
@@ -1605,6 +1728,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK, "win.dashboard", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_t,
 		GDK_CONTROL_MASK, "win.cycle-theme", NULL);
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_question,
+		GDK_CONTROL_MASK, "win.shortcuts", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_e,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.export", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_g,

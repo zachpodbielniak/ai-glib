@@ -38,6 +38,7 @@ static gboolean  opt_no_dashboard = FALSE;
 static gchar    *opt_theme = NULL;
 static gchar    *opt_color_scheme = NULL;
 static gboolean  opt_list_themes = FALSE;
+static gchar   **opt_attach = NULL;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 
@@ -78,6 +79,8 @@ static const GOptionEntry option_entries[] = {
 	{ "no-dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_no_dashboard,
 	  "Open a conversation even when the saved preference says otherwise",
 	  NULL },
+	{ "attach", 'a', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_attach,
+	  "Attach a file to the first message (repeatable)", "FILE" },
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme,
 	  "Colour theme (overrides AI_GUI_THEME and NO_COLOR)", "NAME" },
 	{ "list-themes", 0, 0, G_OPTION_ARG_NONE, &opt_list_themes,
@@ -208,8 +211,20 @@ on_activate(
 	}
 
 	ai_gui_style_init(startup_theme, startup_color_scheme);
-	gtk_window_present(GTK_WINDOW(
-		ai_gui_window_new(ADW_APPLICATION(app), options)));
+
+	{
+		AiGuiWindow *window = ai_gui_window_new(ADW_APPLICATION(app), options);
+
+		gtk_window_present(GTK_WINDOW(window));
+
+		/*
+		 * Attached after the window is up, so a file that cannot be
+		 * read reports itself in the window rather than on a terminal
+		 * nobody launched this from.
+		 */
+		ai_gui_window_attach_files(window,
+		                           (const gchar * const *)opt_attach);
+	}
 }
 
 gint
@@ -321,6 +336,7 @@ main(
 	g_free(opt_directory);
 	g_free(opt_theme);
 	g_free(opt_color_scheme);
+	g_strfreev(opt_attach);
 	g_free(startup_theme);
 	g_free(startup_color_scheme);
 	g_strfreev(opt_set);

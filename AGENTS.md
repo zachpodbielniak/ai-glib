@@ -1215,6 +1215,50 @@ The approval dialog spins its nested `GMainLoop` on
 is held as a `GSource *` and torn down with `g_source_destroy()` — both for
 the reasons the main-context section above gives.
 
+### Attachments, previews and tool calls
+
+**An attachment is an `AiImageContent`, never a bare `AiImage`.** The
+whole library pipeline — `ai_prompt_queue_push()`, `ai_message_add_content_block()`,
+`ai_conversation_send_images_async()`'s `AI_IS_IMAGE_CONTENT` check — takes
+the *content block* and reference-counts it. `gui/` built the boxed payload
+instead, so every one of those paths type-punned a `GObject`: attaching
+anything at all did not work, and queueing one behind a running turn called
+`g_object_ref` on a struct that has no type instance.
+`tests/test-ai-gui-content.c` pushes one through the real prompt queue for
+exactly that reason.
+
+Four rules on top of that:
+
+- **An image is recognised by its signature**, in `ai_gui_content_sniff_image()`
+  — never by extension and never by what a clipboard owner advertises. A
+  `.png` that is really HTML otherwise fails inside a provider, in a message
+  about base64.
+- **The bytes are not in the transcript.** A view block is text and spans;
+  `AiConversation` records `[Images attached]` deliberately. The window keeps
+  the blocks beside the block with `ai_gui_content_attach_images()`, and then
+  calls `ai_view_block_changed()` — `ai_transcript_append()` has already bound
+  and rendered the row by the time the images exist, so without that the
+  thumbnails appear only if something else happens to redraw it.
+- **Which runs are clickable is the view layer's answer**, not a guess:
+  `AI_STYLE_TOOL_TARGET`, `AI_STYLE_MENTION`, `AI_STYLE_LINK`. Re-deriving
+  "this looks like a path" from prose would invent an answer the library
+  already has. `ai_gui_content_span_at()` is GTK-free and tested; the only
+  part that needs a display is `pango_layout_xy_to_index()`.
+- **A preview never opens by itself.** It is an explicit click, and the
+  document reader is bounded to a megabyte and never splits a UTF-8
+  character at the cut.
+
+Tool blocks render the library's summary line exactly as ai-tui does, and
+add a row per call from `AiViewToolBlock`'s own accessors when expanded.
+State colours come from CSS classes resolving to `@success_color` and
+friends, which a palette has already redefined — so this file never learns
+what red is, and a failed call matches the summary above it.
+
+Fenced code is parsed *only* to decide what the copy button puts on the
+clipboard. Rendering stays entirely in the view layer, so a fence
+`ai_gui_content_code_blocks()` misreads costs a button and never the
+transcript.
+
 ### Themes
 
 **The palettes are one table**, `AI_THEMES` in `src/core/ai-theme.h`, read

@@ -97,6 +97,23 @@ void
 ai_gui_window_refresh_links(AiGuiWindow *self);
 
 /**
+ * ai_gui_window_attach_files:
+ * @self: a window
+ * @paths: (nullable) (array zero-terminated=1): files to attach
+ *
+ * Puts files into the composer as though they had been dropped on it.
+ *
+ * An image becomes an attachment and anything else an `@mention`, the
+ * same split a drag makes, so `--attach` and the paperclip cannot
+ * disagree about what a file is.
+ */
+void
+ai_gui_window_attach_files(
+	AiGuiWindow        *self,
+	const gchar *const *paths
+);
+
+/**
  * ai_gui_window_set_theme:
  * @self: a window
  * @name: a palette name, as `--theme` spells it

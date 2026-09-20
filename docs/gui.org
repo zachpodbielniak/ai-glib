@@ -107,6 +107,10 @@ Sessions on the left, the conversation on the right, an
 | =Ctrl+Shift+G= | Background agents |
 | =Ctrl+backslash= | Project dashboard, and back again |
 | =Ctrl+T= | Next theme |
+| =Ctrl+O= | Attach files |
+| =Ctrl+V= | Paste an image from the clipboard |
+| =Ctrl+Shift+V= | Paste an image even when text is on the clipboard too |
+| =Ctrl+?= | Every shortcut, in a window |
 
 ** Attachments
 
@@ -220,10 +224,12 @@ belong in the image build rather than in a transient overlay.
 | =gui/ai-gui-approval.c= | The approval dialog and its nested loop |
 | =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; palettes and the stylesheet |
 | =gui/ai-gui-settings.c= | Theme and light/dark, remembered; *no GTK* |
+| =gui/ai-gui-content.c= | Attachments, previewable files, fenced code, clicked spans; *no GTK* |
+| =gui/ai-gui-preview.c= | The image and document viewers |
 
 The files marked *no GTK* are the ones =tests/test-ai-gui-session.c=,
-=tests/test-ai-gui-work.c= and =tests/test-ai-gui-theme.c= link
-directly. That is why they do not include a toolkit header: a suite that
+=tests/test-ai-gui-work.c=, =tests/test-ai-gui-theme.c= and
+=tests/test-ai-gui-content.c= link directly. That is why they do not include a toolkit header: a suite that
 needed a display would pass or fail by whose machine ran it, exactly as one
 reading the developer's real =~/.claude= would.
 
@@ -285,6 +291,46 @@ are coloured from GNOME's own palette. Under =monochrome= nothing is
 coloured at all, and the faint tags are the only ones that look
 different, which is the same rule ai-tui follows when it has no colours
 to use.
+
+** Tool calls
+
+A tool group renders as [[file:tui.org][ai-tui]] renders it --- the same summary line, from
+the same view layer, so =Edited 3 files, ran 2 commands  +21-6= reads
+the same in both. Expanding it does something a terminal cannot: each
+call gets its own row.
+
+| Part | What it shows |
+|------+---------------|
+| State | An icon in the theme's green, red or amber: ok, failed or denied, running, pending |
+| Name | The tool |
+| Target | The file or command. Click it to preview the file. |
+| Diff | =+21 −6= when the call changed lines |
+| Timing | Milliseconds under a second, seconds above |
+| Result | What the call returned, monospace, capped at twelve lines |
+
+The summary stays a summary and the detail is one click away rather
+than one scroll.
+
+** Code in an answer
+
+A =Copy code= button appears on any assistant block containing a fenced
+block, and copies every fence in order --- an answer that gives three
+snippets is usually three steps of one thing. The button is hidden when
+there is no code, because a button that does nothing is worse than no
+button.
+
+Rendering still goes entirely through the view layer. The fences are
+parsed only to decide what to put on the clipboard, so a fence this
+misreads costs a clipboard button and never the transcript.
+
+** The menu on a block
+
+Right-click any block: *Copy*, *Copy as Markdown*, *Save as…*. Copying
+takes the block *expanded*, whatever the row is showing --- copying a
+collapsed tool group would put "Ran 3 commands" on the clipboard, which
+is the one thing nobody wants to paste. An assistant answer is already
+Markdown; everything else goes in a fence rather than being pasted into
+a document as prose.
 
 ** The project dashboard
 

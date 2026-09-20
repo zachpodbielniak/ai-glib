@@ -119,12 +119,23 @@ on_item_bind(
 	GObject                  *object,
 	gpointer                  user_data
 ){
+	AiGuiChatView *self = user_data;
 	GtkListItem *item = GTK_LIST_ITEM(object);
 	GtkWidget *child = gtk_list_item_get_child(item);
 	gpointer block = gtk_list_item_get_item(item);
 
-	if (child != NULL && AI_IS_VIEW_BLOCK(block))
-		ai_gui_block_row_set_block(AI_GUI_BLOCK_ROW(child), block);
+	if (child == NULL || !AI_IS_VIEW_BLOCK(block))
+		return;
+
+	/*
+	 * Set before the block, so the first render already knows where a
+	 * relative tool target points. Afterwards the row would have to be
+	 * refreshed a second time to make its targets clickable.
+	 */
+	ai_gui_block_row_set_directory(AI_GUI_BLOCK_ROW(child),
+		self->session != NULL
+			? ai_gui_session_get_working_directory(self->session) : NULL);
+	ai_gui_block_row_set_block(AI_GUI_BLOCK_ROW(child), block);
 }
 
 static void
