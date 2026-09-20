@@ -77,7 +77,7 @@ test_usage_panel(void)
 	FILE *input = tmpfile();
 	FILE *output = tmpfile();
 	SCREEN *screen;
-	AiTuiUsage usage = { 0 };
+	AiQuota usage = { 0 };
 	JsonArray *entries;
 	JsonObject *row;
 	gint next;
@@ -117,8 +117,8 @@ test_usage_panel(void)
 	erase();
 	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
 	assert_row(3, 90, "REMAINING (stale)");
-	entries = ai_json_get_array(usage_object(usage.data), "entries");
-	row = usage_object(json_array_get_element(entries, 0));
+	entries = ai_json_get_array(ai_quota_object(usage.data), "entries");
+	row = ai_quota_object(json_array_get_element(entries, 0));
 	json_object_set_string_member(row, "label", "safe\n\033[2J very long native allowance name");
 	json_object_set_double_member(row, "used_percent", 0);
 	erase();
@@ -134,7 +134,7 @@ test_usage_panel(void)
 	assert_row(19, 80, "footer preserved");
 	panel_usage_line(2, 104, 28, "中文中文", A_NORMAL);
 	assert_row(2, 104, "中文");
-	usage_clear(&usage);
+	ai_quota_clear(&usage);
 	endwin();
 	delscreen(screen);
 	fclose(input);

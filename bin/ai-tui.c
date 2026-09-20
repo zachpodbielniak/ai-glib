@@ -31,8 +31,8 @@
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
+#include "core/ai-quota.h"
 #include "ai-tui-panel.h"
-#include "ai-tui-usage.h"
 #include "ai-tui-images.h"
 
 /* ================================================================
@@ -359,7 +359,7 @@ typedef struct
     WINDOW         *status_win;
     WINDOW         *input_win;
 	gboolean details;
-	AiTuiUsage usage;
+	AiQuota usage;
 	gboolean tiny;
 	gint content_width;
 	gint input_first;
@@ -1653,7 +1653,7 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
-	usage_refresh(&app->usage, provider, app->running && !app->dashboard);
+	ai_quota_refresh(&app->usage, provider, app->running && !app->dashboard);
 	y = panel_usage(y + 1, x, 28, &app->usage,
 		theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, theme_attr(PAIR_SURFACE));
     app->link_first_row = app->link_last_row = -1;
@@ -6214,9 +6214,9 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
-	usage_stop(&app.usage);
-	while (app.usage.pending) g_main_context_iteration(NULL, TRUE);
-	usage_clear(&app.usage);
+	ai_quota_stop(&app.usage);
+	ai_quota_drain(&app.usage);
+	ai_quota_clear(&app.usage);
 	ai_conversation_cancel(app.conversation);
 	while (app.sending || ai_conversation_get_busy(app.conversation)) g_main_context_iteration(NULL, TRUE);
 	{

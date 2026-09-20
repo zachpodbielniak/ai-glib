@@ -774,6 +774,12 @@ remaining/limit or used/limit pair can also supply the percentage. An
 unlabeled percentage, missing denominator, or invalid value is unavailable,
 never an invented zero.
 
+The direction rule, the display rounding and the refresh policy live in
+=src/core/ai-quota.h= and are shared with [[file:gui.org][ai-gui]], which shows the same
+allowances in its header bar. A terminal saying 75% remaining while a
+window says 25% for one account would be worse than either saying
+nothing, so neither front-end decides this for itself.
+
 This uses the same native account report as =ai --usage -p PROVIDER=.
 Allowances are account-wide or named model pools, not this conversation's
 token count. Source labels and reset information are retained; reports
@@ -798,7 +804,7 @@ and clipped to the panel; the terminal footer remains reserved.
 
 *** Quota regression tests
 
-=tests/test-tui-usage.c= checks percentage direction (including Codex),
+=tests/test-quota.c= checks percentage direction (including Codex),
 unknown/invalid values, independent client snapshots, caching, failed
 refreshes, provider/model/directory changes and cancellation.
 =tests/test-ai-tui-panel.c= inspects real curses cells for bars, partial/stale

@@ -4,7 +4,7 @@
 
 #include <ncurses.h>
 #include <ai-glib.h>
-#include "ai-tui-usage.h"
+#include "core/ai-quota.h"
 
 /**
  * panel_text:
@@ -82,30 +82,25 @@ panel_usage_line(gint y, gint x, gint width, const gchar *text, attr_t attr)
 }
 
 static inline gint
-panel_usage(gint y, gint x, gint width, AiTuiUsage *usage, attr_t heading, attr_t normal)
+panel_usage(gint y, gint x, gint width, AiQuota *usage, attr_t heading, attr_t normal)
 {
-	JsonObject *data = usage_object(usage->data);
-	JsonArray *entries = ai_json_get_array(data, "entries");
+	JsonArray *entries = ai_quota_entries(usage);
 	guint i, count = entries != NULL ? json_array_get_length(entries) : 0;
-	gboolean partial = g_strcmp0(ai_json_get_string(data, "availability", NULL), "partial") == 0;
-	const gchar *title = usage->failed && data != NULL ? "REMAINING (stale)" :
-		usage->pending && data != NULL ? "REMAINING (refreshing)" :
-		partial ? "REMAINING (partial)" : "ACCOUNT REMAINING";
 
-	y = panel_usage_line(y, x, width, title, heading);
-	if (data == NULL || count == 0)
+	/* The heading -- stale, refreshing, partial -- is decided in
+	 * core/ai-quota.h so the window says the same words. */
+	y = panel_usage_line(y, x, width, ai_quota_heading(usage), heading);
+	if (usage->data == NULL || count == 0)
 		return panel_usage_line(y, x, width,
 			usage->pending ? "Loading..." : "Unavailable", normal);
 	for (i = 0; i < count && i < 3 && y < LINES - 4; i++)
 	{
-		JsonNode *node = json_array_get_element(entries, i);
-		JsonObject *row = usage_object(node);
-		const gchar *reset = ai_json_get_string(row, "reset_text", NULL);
-		g_autofree gchar *bar = usage_bar(row);
+		JsonObject *row = ai_quota_object(json_array_get_element(entries, i));
+		const gchar *reset = ai_quota_row_reset(row);
+		g_autofree gchar *bar = ai_quota_format_bar(row);
 
-		y = panel_usage_line(y, x, width, ai_json_get_string(row, "label", "Allowance"), normal);
+		y = panel_usage_line(y, x, width, ai_quota_row_label(row), normal);
 		y = panel_usage_line(y, x, width, bar, normal);
-		if (reset == NULL) reset = ai_json_get_string(row, "reset_at", NULL);
 		if (reset != NULL && y < LINES - 3)
 		{
 			g_autofree gchar *label = g_strdup_printf("Reset: %s", reset);
