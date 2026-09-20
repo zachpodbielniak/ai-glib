@@ -55,6 +55,10 @@ static gboolean  opt_dry_run = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
 static gboolean  opt_no_herdr = FALSE;
+static gboolean opt_dashboard = FALSE;
+static gboolean opt_no_dashboard = FALSE;
+static gboolean opt_no_tmux_titles = FALSE;
+static gchar *opt_workspace_session = NULL;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 static gboolean  opt_launch = FALSE;
@@ -68,6 +72,10 @@ static gint opt_queue_limit = 32;
 static gboolean theme_explicit = FALSE;
 
 static const GOptionEntry option_entries[] = {
+    { "dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_dashboard, "Open the project dashboard", NULL },
+    { "no-dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_no_dashboard, "Open a conversation instead of the configured dashboard", NULL },
+    { "no-tmux-titles", 0, 0, G_OPTION_ARG_NONE, &opt_no_tmux_titles, "Leave tmux titles unchanged", NULL },
+    { "workspace-session", 0, 0, G_OPTION_ARG_STRING, &opt_workspace_session, "Resume a disconnected dashboard session", "UUID" },
 	{ "no-coalesce", 0, 0, G_OPTION_ARG_NONE, &opt_no_coalesce,
 	  "Send queued follow-ups as separate turns", NULL },
 	{ "queue-limit", 0, 0, G_OPTION_ARG_INT, &opt_queue_limit,
@@ -470,13 +478,43 @@ typedef struct
      * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
 	gboolean             dump_waiting_models;
+    AiWorkSession *work;
+    gchar *work_directory;
+    gchar *work_notice;
+    gchar *original_pane_title;
+    const gchar *work_outcome;
+    GPtrArray *work_rows;
+    guint work_selected;
+    guint work_link;
+    guint work_timer;
+    GCancellable *link_cancel;
+    guint link_pending;
+    guint launch_pending;
+    guint link_generation;
+    guint link_refresh_cursor;
+    gint64 link_refreshed;
+    gint work_lock_fd;
+    gboolean work_registered;
+    gboolean dashboard;
+    gboolean title_pending;
+    gint link_first_row;
+    gint link_last_row;
+    gint link_pressed;
 } App;
+
+static void app_schedule_redraw(App *app);
+static gboolean app_flush_send_queue(App *app);
+static void chrome_text(gint y, gint x, gint width, const gchar *text, attr_t attr);
+#include <termios.h>
+#include "ai-tui-workspace.h"
+
 
 /* Publish expansion, provider I/O and approvals through one state mapping.
  * This callback also runs in dump mode, where there are no curses windows. */
 static void
 app_sync_herdr(App *app)
 {
+	work_publish(app);
 	ai_tui_herdr_update(app->herdr,
 		app->sending || ai_conversation_get_busy(app->conversation),
 		app->approval_prompt != NULL);
@@ -485,7 +523,7 @@ app_sync_herdr(App *app)
 /* Dispatch termination on the main loop so normal cleanup can release the
  * herdr identity and restore the terminal, including during an approval. */
 static gboolean
-on_herdr_shutdown(gpointer data)
+on_shutdown(gpointer data)
 {
 	App *app = data;
 
@@ -508,6 +546,7 @@ typedef struct
 } Row;
 
 static void app_schedule_redraw(App *app);
+static gboolean app_flush_send_queue(App *app);
 static void selection_clear(App *app);
 static void tui_mouse_enable(void);
 static GPtrArray *build_rows(App *app, gint width);
@@ -1086,6 +1125,10 @@ ui_turn_finished(App *app, const GError *error)
 	/* However a turn ended --- answered, stopped, or failed --- nothing
 	 * further happens until the user says so, so all three hand over. */
 	app->awaiting_since = g_get_monotonic_time();
+    app->work_outcome = error == NULL ? "DONE" :
+        (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+         g_error_matches(error, AI_ERROR, AI_ERROR_CANCELLED)) ? "STOPPED" : "ERROR";
+    work_publish(app);
 
 	if (error == NULL)
 		ui_feedback(app, "Turn complete", AI_STYLE_TOOL_OK);
@@ -1620,9 +1663,9 @@ draw_chrome(App *app)
 	chrome_text(LINES - 1, 1, COLS - 2,
 		app->searching ? "RET next | <up> / S-RET previous | C-u clear | ESC close" :
 		app->candidates != NULL ? "TAB / arrows choose | RET accept | ESC dismiss | C-o help" :
-		COLS < 65 ? "RET send  C-o help  C-c stop" :
-		COLS < 100 ? "RET send | C-f find | C-o help | C-t theme | C-p panel" :
-		"RET send  M-RET newline  C-g editor  C-f search  C-o help  C-t theme  C-p panel  C-l latest",
+		COLS < 65 ? "RET send  ^\\ dashboard  C-c stop" :
+		COLS < 100 ? "RET send | ^\\ dashboard | C-f find | C-o help | C-p panel" :
+		"RET send  ^\\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
 	attrset(theme_attr(PAIR_SURFACE));
@@ -1631,6 +1674,27 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+    app->link_first_row = app->link_last_row = -1;
+    if (app->work != NULL)
+    {
+        g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+        guint link_index;
+        y = panel_text(y + 1, x, 28, "LINKED WORK / ^] open", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+        app->link_first_row = y;
+        for (link_index = 0; links[link_index] != NULL && y < LINES - 5; link_index++)
+        {
+            /* One clickable row per link; /links shows full URLs. */
+            const gchar *title = ai_work_session_get_link_title(app->work, links[link_index]);
+            const gchar *state = ai_work_session_get_link_state(app->work, links[link_index]);
+            const gchar *number = strrchr(links[link_index], '/');
+            g_autofree gchar *label = g_strdup_printf("%s #%s %s %s", strstr(links[link_index], "/issues/") != NULL ? "ISSUE" : "PR", number != NULL ? number + 1 : "?",
+                state != NULL ? state : "unfetched", title != NULL ? title : links[link_index]);
+            chrome_text(y++, x, 28, label, theme_attr(PAIR_ACCENT) | A_UNDERLINE);
+        }
+        app->link_last_row = y;
+        if (app->work_notice != NULL) y = panel_text(y, x, 28, app->work_notice, attr_for_tag(AI_STYLE_ERROR), FALSE);
+        if (links[0] == NULL) y = panel_text(y, x, 28, "/issue link URL or /pr link URL", theme_attr(PAIR_SURFACE), FALSE);
+    }
 	y = panel_text(y + 1, x, 28, "APPEARANCE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, THEMES[theme_index].name, theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, theme_colour ? "^T cycle / ^P hide" : "No color / ^P hide", theme_attr(PAIR_SURFACE), FALSE);
@@ -1702,6 +1766,8 @@ app_redraw(App *app)
     /* The input decides how much room is left, so its height is settled
      * before anything is measured against the transcript window. */
     app_layout(app);
+    if (app->dashboard && !app->tiny) { work_draw(app); return; }
+    curs_set(1);
 	bkgd(' ' | attr_for_tag(AI_STYLE_DEFAULT));
 	erase();
 	if (app->tiny)
@@ -2724,6 +2790,13 @@ change_directory(App *app, const gchar *path)
     }
 
     ai_conversation_set_working_directory(app->conversation, resolved);
+    if (app->work != NULL)
+    {
+        g_autoptr(AiWorkSession) location = ai_work_session_new(resolved);
+        g_object_set(app->work, "directory", work_field(location, "directory"),
+            "project", work_field(location, "project"), "branch", work_field(location, "branch"), NULL);
+        work_publish(app);
+    }
 
     if (app->completion != NULL)
     {
@@ -2861,6 +2934,64 @@ handle_builtin(App *app, AiCommandResult *result)
     else if (g_strcmp0(name, "kill") == 0)
     {
         kill_agent(app, arguments);
+    }
+    else if (g_strcmp0(name, "work") == 0)
+    {
+        g_autoptr(GError) link_error = NULL;
+        if (app->work == NULL) say(app, "Assignments require an interactive session.");
+        else if (ai_work_session_add_link(app->work, arguments, &link_error))
+        {
+            work_fetch_link(app, arguments, TRUE);
+            say(app, "Loading assignment; your draft is preserved.");
+        }
+        else say(app, "%s", link_error->message);
+    }
+    else if (g_strcmp0(name, "project") == 0)
+    {
+        if (app->work == NULL) say(app, "Projects require an interactive session.");
+        else if (arguments == NULL || !*arguments) work_toggle(app);
+        else
+        {
+            g_autofree gchar *path = resolve_command_path(app, arguments);
+            if (g_file_test(path, G_FILE_TEST_IS_DIR))
+            {
+                g_autoptr(AiWorkSession) project = ai_work_session_new(path);
+                work_launch(app, project, FALSE);
+            }
+            else say(app, "Project directory does not exist.");
+        }
+    }
+    else if (g_strcmp0(name, "dashboard") == 0)
+    {
+        work_toggle(app);
+    }
+    else if (g_strcmp0(name, "links") == 0 || g_strcmp0(name, "issue") == 0 || g_strcmp0(name, "pr") == 0)
+    {
+        g_auto(GStrv) parts = g_strsplit(arguments != NULL ? arguments : "", " ", 2);
+        g_autoptr(GError) link_error = NULL;
+        if (app->work == NULL) say(app, "Links require an interactive session.");
+        else if (g_strcmp0(parts[0], "link") == 0 && parts[1] != NULL)
+        {
+            if (ai_work_session_add_link(app->work, g_strstrip(parts[1]), &link_error))
+            {
+                say(app, "Linked %s", parts[1]);
+                work_fetch_link(app, parts[1], FALSE);
+            }
+            else say(app, "%s", link_error->message);
+            work_publish(app);
+        }
+        else if (g_strcmp0(parts[0], "unlink") == 0 && parts[1] != NULL)
+        {
+            say(app, ai_work_session_remove_link(app->work, g_strstrip(parts[1])) ? "Link removed." : "Link not found.");
+            work_publish(app);
+        }
+        else
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            guint index;
+            for (index = 0; links[index] != NULL; index++) say(app, "%u: %s", index + 1, links[index]);
+            if (index == 0) say(app, "No links. /issue link URL or /pr link URL");
+        }
     }
     else if (g_strcmp0(name, "cwd") == 0)
     {
@@ -3579,6 +3710,23 @@ handle_mouse(
 	gint col = 0;
 	gboolean over;
 
+    if (app->dashboard) return;
+    if (!app->pasting && app->work != NULL && event->x >= app->content_width + 2 &&
+        event->y >= app->link_first_row && event->y < app->link_last_row)
+    {
+        gint index = event->y - app->link_first_row;
+        if (event->bstate & BUTTON1_PRESSED) app->link_pressed = index;
+        if ((event->bstate & BUTTON1_CLICKED) ||
+            ((event->bstate & BUTTON1_RELEASED) && app->link_pressed == index))
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            if ((guint)index < g_strv_length(links)) work_open_url(app, links[index]);
+        }
+        if (event->bstate & BUTTON1_RELEASED) app->link_pressed = -1;
+        return;
+    }
+    if (event->bstate & (BUTTON1_PRESSED | BUTTON1_RELEASED)) app->link_pressed = -1;
+
 	if (app->tiny || app->pasting || app->transcript_win == NULL)
 		return;
 	if ((event->bstate & BUTTON4_PRESSED) &&
@@ -3674,12 +3822,20 @@ drain_keys(App *app)
 			{
 				g_unichar_to_utf8(ch == '\r' ? '\n' : (gunichar)value, utf8);
 				/* Ignore pasted approval answers; require a deliberate key. */
-				if (app->approval_prompt == NULL && !app->searching && !app->tiny)
+				if (!app->dashboard && app->approval_prompt == NULL && !app->searching && !app->tiny)
 					input_insert(app, utf8);
 			}
 			app_schedule_redraw(app);
 			continue;
 		}
+        if (kind == OK && ch == 28) { work_toggle(app); continue; }
+        if (app->dashboard) { work_key(app, ch); continue; }
+        if (kind == OK && ch == 29 && app->work != NULL)
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            if (links[0] != NULL) work_open_url(app, links[app->work_link++ % g_strv_length(links)]);
+            continue;
+        }
 		/* gst/tmux may deliver Ctrl-C as CSI-u rather than SIGINT. Treat
 		 * both encodings as one interrupt, before approval or search steal
 		 * Escape from an unmapped sequence. */
@@ -4842,6 +4998,11 @@ app_send_from_composer(
 		return;
 	}
 
+    if (app->work != NULL && !*work_field(app->work, "title") && line[0] != '/')
+    {
+        g_autofree gchar *title = g_utf8_substring(line, 0, MIN(80, g_utf8_strlen(line, -1)));
+        g_object_set(app->work, "title", title, NULL);
+    }
 	/* An idle, image-blocked queue must not trap the command that repairs it.
 	 * Other submissions retain FIFO order, and active turns are never bypassed. */
 	recovery_command = app->queue_blocked &&
@@ -5070,6 +5231,8 @@ app_reset(App *app)
 			g_object_set(provider, "continue-session", FALSE, NULL);
 	}
 
+    app->link_generation++;
+    app->work_outcome = NULL;
 	/* A new executor also forgets tool approvals, todos and agent results. */
 	g_set_object(&app->conversation, replacement);
 	if (!opt_no_agents)
@@ -5506,6 +5669,10 @@ main(int argc, char *argv[])
 		if (mcp_status >= 0) { if (error != NULL) g_printerr("ai-tui: %s\n", error->message); return mcp_status; }
 	}
 
+    if (opt_dashboard && opt_no_dashboard)
+    {
+        g_printerr("ai-tui: choose --dashboard or --no-dashboard\n"); return 2;
+    }
     if (opt_version)
     {
         g_print("ai-tui %s\n", AI_GLIB_VERSION_STRING);
@@ -5554,6 +5721,28 @@ main(int argc, char *argv[])
 		g_printerr("ai-tui: choose one launch mode; it cannot be combined with dump, dry-run, or local-tool modes\n");
 		return 2;
 	}
+    if (opt_workspace_session != NULL)
+    {
+        g_autofree gchar *directory = ai_work_session_default_directory();
+        g_autoptr(GPtrArray) saved = ai_work_session_list(directory, &error);
+        guint index;
+        AiWorkSession *selected = NULL;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
+                selected = g_ptr_array_index(saved, index);
+        if (selected == NULL || !g_str_equal(work_field(selected, "status"), "DISCONNECTED") ||
+            !*work_field(selected, "provider-session"))
+        {
+            g_printerr("ai-tui: session is missing, active, or has no native resume ID\n");
+            return 2;
+        }
+        opt_provider = g_strdup(work_field(selected, "provider"));
+        opt_model = g_strdup(work_field(selected, "model"));
+        if (g_chdir(work_field(selected, "directory")) != 0)
+        {
+            g_printerr("ai-tui: session working directory is unavailable\n"); return 2;
+        }
+    }
     provider = build_provider(&error);
 
     if (provider == NULL)
@@ -5562,6 +5751,18 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    if (opt_workspace_session != NULL && AI_IS_CLI_CLIENT(provider))
+    {
+        g_autofree gchar *directory = ai_work_session_default_directory();
+        g_autoptr(GPtrArray) saved = ai_work_session_list(directory, NULL);
+        guint index;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+        {
+            AiWorkSession *row = g_ptr_array_index(saved, index);
+            if (g_str_equal(ai_work_session_get_id(row), opt_workspace_session))
+                g_object_set(provider, "session-id", work_field(row, "provider-session"), NULL);
+        }
+    }
 	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
 	{
 		g_autofree gchar *launch_prompt = remaining_args_prompt(argc, argv);
@@ -5753,10 +5954,9 @@ main(int argc, char *argv[])
 		herdr = ai_tui_herdr_new(g_getenv("HERDR_ENV"),
 			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID"));
 	app.herdr = herdr;
-	if (herdr != NULL || mcp_host != NULL)
 	{
-		g_unix_signal_add(SIGTERM, on_herdr_shutdown, &app);
-		g_unix_signal_add(SIGHUP, on_herdr_shutdown, &app);
+		g_unix_signal_add(SIGTERM, on_shutdown, &app);
+		g_unix_signal_add(SIGHUP, on_shutdown, &app);
 	}
 	g_signal_connect_swapped(app.conversation, "notify::busy",
 		G_CALLBACK(app_sync_herdr), &app);
@@ -5837,6 +6037,57 @@ main(int argc, char *argv[])
         g_ptr_array_unref(app.history);
         return 1;
     }
+
+    app.work_directory = ai_work_session_default_directory();
+    if (opt_workspace_session != NULL)
+    {
+        g_autoptr(GPtrArray) saved = ai_work_session_list(app.work_directory, NULL);
+        guint index;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
+                app.work = g_object_ref(g_ptr_array_index(saved, index));
+    }
+    if (app.work == NULL) app.work = ai_work_session_new(ai_conversation_get_working_directory(app.conversation));
+    {
+        g_autoptr(AiConfig) config = ai_config_new();
+        gboolean configured = FALSE;
+        g_auto(GStrv) tmux = g_strsplit(g_getenv("TMUX") != NULL ? g_getenv("TMUX") : "", ",", 3);
+        g_object_get(config, "open-dashboard-on-load", &configured, NULL);
+        gboolean explicit_session = FALSE;
+        guint set_index;
+        for (set_index = 0; opt_set != NULL && opt_set[set_index] != NULL; set_index++)
+            if (g_str_has_prefix(opt_set[set_index], "session-id=") ||
+                g_str_has_prefix(opt_set[set_index], "continue-session")) explicit_session = TRUE;
+        app.dashboard = opt_dashboard || (configured && !opt_no_dashboard &&
+            !opt_continue && !explicit_session && opt_workspace_session == NULL && (prompt == NULL || !*prompt));
+        app.work_registered = !app.dashboard;
+        if (g_path_is_absolute(tmux[0]) && work_pane_valid(g_getenv("TMUX_PANE")))
+        {
+            const gchar *query[] = {"display-message", "-p", "-t", g_getenv("TMUX_PANE"), "#{pane_tty}", NULL};
+            g_autofree gchar *pane_tty = work_tmux(tmux[0], query);
+            /* Nested PTYs (including herdr) inherit TMUX but do not own that pane. */
+            if (pane_tty != NULL && g_strcmp0(pane_tty, ttyname(STDIN_FILENO)) == 0)
+            {
+                const gchar *title_query[] = {"display-message", "-p", "-t", g_getenv("TMUX_PANE"), "#{pane_title}", NULL};
+                g_object_set(app.work, "socket", tmux[0], "pane", g_getenv("TMUX_PANE"), NULL);
+                app.original_pane_title = work_tmux(tmux[0], title_query);
+            }
+        }
+    }
+    {
+        g_autofree gchar *lock_name = g_strconcat(ai_work_session_get_id(app.work), ".lock", NULL);
+        g_autofree gchar *lock_path = g_build_filename(app.work_directory, lock_name, NULL);
+        g_mkdir_with_parents(app.work_directory, 0700);
+        app.work_lock_fd = g_open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (app.work_lock_fd < 0 || flock(app.work_lock_fd, LOCK_EX | LOCK_NB) != 0)
+        {
+            g_printerr("ai-tui: cannot claim workspace session\n"); return 2;
+        }
+    }
+    app.link_pressed = -1;
+    app.link_cancel = g_cancellable_new();
+    work_publish(&app);
+    work_refresh(&app);
 
     /* ---- Terminal ---- */
 	app.search = g_string_new(NULL);
@@ -5958,6 +6209,15 @@ main(int argc, char *argv[])
      */
     g_unix_signal_add(SIGINT, on_sigint, &app);
 
+    app.work_timer = g_timeout_add_seconds(3, work_tick, &app);
+    {
+        struct termios keys;
+        if (tcgetattr(STDIN_FILENO, &keys) == 0)
+        {
+            keys.c_cc[VQUIT] = _POSIX_VDISABLE;
+            tcsetattr(STDIN_FILENO, TCSANOW, &keys);
+        }
+    }
     app_redraw(&app);
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
@@ -5965,6 +6225,8 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	ai_conversation_cancel(app.conversation);
+	while (app.sending || ai_conversation_get_busy(app.conversation)) g_main_context_iteration(NULL, TRUE);
 	{
 		guint i;
 		for (i = 0; i < app.side_questions->len; i++)
@@ -6002,6 +6264,19 @@ main(int argc, char *argv[])
         app.spinner_id = 0;
     }
 
+    if (app.work_timer != 0) g_source_remove(app.work_timer);
+
+    if (app.link_cancel != NULL) g_cancellable_cancel(app.link_cancel);
+    while (app.link_pending != 0 || app.launch_pending != 0) g_main_context_iteration(NULL, TRUE);
+    g_clear_object(&app.link_cancel);
+    while (app.title_pending) g_main_context_iteration(NULL, TRUE);
+    if (app.work_registered) work_title_update(&app, TRUE);
+    while (app.title_pending) g_main_context_iteration(NULL, TRUE);
+    if (app.work_registered) ai_work_session_save(app.work, app.work_directory, FALSE, NULL);
+    if (app.work_lock_fd >= 0) close(app.work_lock_fd);
+    g_clear_object(&app.work);
+    g_clear_pointer(&app.work_rows, g_ptr_array_unref);
+    g_free(app.work_directory); g_free(app.work_notice); g_free(app.original_pane_title);
     completion_close(&app);
     g_clear_object(&app.completion);
     g_clear_object(&app.commands);

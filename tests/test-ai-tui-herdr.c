@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include "../bin/ai-tui-herdr.h"
 #include "test-server.h"
+#include "ai-glib.h"
 
 typedef struct
 {
@@ -167,6 +168,20 @@ peer_stop(Peer *peer)
 static void
 peer_free(Peer *peer)
 {
+    g_autofree gchar *state = g_build_filename(peer->directory, "ai-glib", NULL);
+    g_autofree gchar *sessions = g_build_filename(state, "sessions", NULL);
+    g_autoptr(GDir) dir = g_dir_open(sessions, 0, NULL);
+    const gchar *name;
+    if (dir != NULL)
+    {
+        while ((name = g_dir_read_name(dir)) != NULL)
+        {
+            g_autofree gchar *path = g_build_filename(sessions, name, NULL);
+            g_assert_cmpint(g_unlink(path), ==, 0);
+        }
+        g_assert_cmpint(g_rmdir(sessions), ==, 0);
+        g_assert_cmpint(g_rmdir(state), ==, 0);
+    }
 	peer_stop(peer);
 	g_async_queue_unref(peer->requests);
 	g_assert_cmpint(g_rmdir(peer->directory), ==, 0);
@@ -418,6 +433,7 @@ launch_tui(Peer *peer, const gchar * const *extra, gint *master, TServer *http)
 	g_subprocess_launcher_set_cwd(launcher, peer->directory);
 	g_subprocess_launcher_setenv(launcher, "HOME", peer->directory, TRUE);
 	g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", peer->directory, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_STATE_HOME", peer->directory, TRUE);
 	g_subprocess_launcher_setenv(launcher, "HERDR_ENV", "1", TRUE);
 	g_subprocess_launcher_setenv(launcher, "HERDR_SOCKET_PATH", peer->path, TRUE);
 	g_subprocess_launcher_setenv(launcher, "HERDR_PANE_ID", "w1:p1", TRUE);
@@ -589,6 +605,13 @@ test_application_approval(gconstpointer data)
 
 		while (read(master, buffer, sizeof(buffer)) > 0) { }
 	}
+    {
+        g_autofree gchar *directory = g_build_filename(peer->directory, "ai-glib", "sessions", NULL);
+        g_autoptr(GPtrArray) rows = ai_work_session_list(directory, NULL);
+        g_assert_nonnull(rows);
+        g_assert_cmpuint(rows->len, ==, 1);
+        g_assert_cmpstr(ai_work_session_get_field(g_ptr_array_index(rows, 0), "status"), ==, "INPUT");
+    }
 	tserver_set_response(http, 200,
 		"{\"id\":\"test\",\"choices\":[{\"message\":{\"role\":\"assistant\","
 		"\"content\":\"finished\"},\"finish_reason\":\"stop\"}]}");

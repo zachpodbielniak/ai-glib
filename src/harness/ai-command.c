@@ -42,6 +42,12 @@ typedef struct
 } BuiltinCommand;
 
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
+    { "work", "Load linked issue or PR as an assignment", "<URL>" },
+    { "project", "Open a project in a tmux window", "[directory]" },
+    { "dashboard", "Toggle project dashboard", NULL },
+    { "links", "List linked issues and pull requests", NULL },
+    { "issue", "Link or unlink an issue", "<link|unlink> <URL>" },
+    { "pr", "Link or unlink a pull request", "<link|unlink> <URL>" },
     { "btw",      "Ask a side question without interrupting the current turn", "<question>" },
     { "help",     "List every command, skill and agent",        NULL },
     { "clear",    "Empty the transcript and the history",       NULL },
