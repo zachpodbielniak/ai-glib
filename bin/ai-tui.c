@@ -1686,7 +1686,10 @@ draw_chrome(App *app)
             /* One clickable row per link; /links shows full URLs. */
             const gchar *title = ai_work_session_get_link_title(app->work, links[link_index]);
             const gchar *state = ai_work_session_get_link_state(app->work, links[link_index]);
-            const gchar *number = strrchr(links[link_index], '/');
+            g_autofree gchar *display_url = g_strdup(links[link_index]);
+			const gchar *number;
+			if (g_str_has_suffix(display_url, "/")) display_url[strlen(display_url) - 1] = '\0';
+			number = strrchr(display_url, '/');
             g_autofree gchar *label = g_strdup_printf("%s #%s %s %s", strstr(links[link_index], "/issues/") != NULL ? "ISSUE" : "PR", number != NULL ? number + 1 : "?",
                 state != NULL ? state : "unfetched", title != NULL ? title : links[link_index]);
             chrome_text(y++, x, 28, label, theme_attr(PAIR_ACCENT) | A_UNDERLINE);
@@ -5724,7 +5727,7 @@ main(int argc, char *argv[])
     if (opt_workspace_session != NULL)
     {
         g_autofree gchar *directory = ai_work_session_default_directory();
-        g_autoptr(GPtrArray) saved = ai_work_session_list(directory, &error);
+        g_autoptr(GPtrArray) saved = work_list(directory, &error);
         guint index;
         AiWorkSession *selected = NULL;
         for (index = 0; saved != NULL && index < saved->len; index++)
@@ -5754,7 +5757,7 @@ main(int argc, char *argv[])
     if (opt_workspace_session != NULL && AI_IS_CLI_CLIENT(provider))
     {
         g_autofree gchar *directory = ai_work_session_default_directory();
-        g_autoptr(GPtrArray) saved = ai_work_session_list(directory, NULL);
+        g_autoptr(GPtrArray) saved = work_list(directory, NULL);
         guint index;
         for (index = 0; saved != NULL && index < saved->len; index++)
         {
@@ -6041,13 +6044,15 @@ main(int argc, char *argv[])
     app.work_directory = ai_work_session_default_directory();
     if (opt_workspace_session != NULL)
     {
-        g_autoptr(GPtrArray) saved = ai_work_session_list(app.work_directory, NULL);
+        g_autoptr(GPtrArray) saved = work_list(app.work_directory, NULL);
         guint index;
         for (index = 0; saved != NULL && index < saved->len; index++)
             if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
                 app.work = g_object_ref(g_ptr_array_index(saved, index));
     }
     if (app.work == NULL) app.work = ai_work_session_new(ai_conversation_get_working_directory(app.conversation));
+    /* A recovered record must never retain a previous terminal's target. */
+    g_object_set(app.work, "socket", "", "pane", "", NULL);
     {
         g_autoptr(AiConfig) config = ai_config_new();
         gboolean configured = FALSE;

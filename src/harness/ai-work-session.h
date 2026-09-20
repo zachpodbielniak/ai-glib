@@ -16,7 +16,7 @@ gboolean ai_work_session_add_link(AiWorkSession *self, const gchar *url, GError 
 gboolean ai_work_session_remove_link(AiWorkSession *self, const gchar *url);
 gchar **ai_work_session_dup_links(AiWorkSession *self);
 gboolean ai_work_session_save(AiWorkSession *self, const gchar *directory, gboolean live, GError **error);
-GPtrArray *ai_work_session_list(const gchar *directory, GError **error);
+GList *ai_work_session_list(const gchar *directory, GError **error);
 gchar *ai_work_session_default_directory(void);
 void ai_work_session_refresh_link_async(AiWorkSession *self, const gchar *url,
 	GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);

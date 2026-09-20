@@ -59,6 +59,18 @@ start(const gchar *name, const gchar *option)
 	start_at(name, option, sandbox);
 }
 
+/* Opt-in verbatim evidence from the running binary, suitable for PR demos. */
+static void
+demonstrate(const gchar *session, const gchar *caption)
+{
+	g_autofree gchar *capture = NULL;
+	g_autofree gchar *title = NULL;
+	if (g_getenv("AI_TUI_DEMONSTRATE") == NULL) return;
+	capture = tmux("capture-pane", "-p", "-t", session, NULL);
+	title = tmux("display-message", "-p", "-t", session, "window=#{window_name} pane=#{pane_title}", NULL);
+	g_test_message("DEMONSTRATION: %s\n%s%s", caption, title, capture);
+}
+
 static gboolean
 wait_text(const gchar *session, const gchar *needle)
 {
@@ -137,20 +149,25 @@ test_toggle(void)
 	g_assert_true(wait_text("toggle", "PROJECT DASHBOARD"));
 	key("toggle", "C-\\");
 	g_assert_true(wait_text("toggle", "unsent draft"));
+	demonstrate("toggle", "Ctrl+\\ returns with unsent draft preserved");
 	key("toggle", "C-u");
-	send("toggle", "/issue link https://example.invalid/owner/repo/issues/42"); key("toggle", "Enter");
+	send("toggle", "/issue link https://example.invalid/owner/repo/issues/42/"); key("toggle", "Enter");
 	g_assert_true(wait_text("toggle", "#42"));
+	send("toggle", "/pr link https://example.invalid/owner/repo/pulls/81"); key("toggle", "Enter");
+	g_assert_true(wait_text("toggle", "#81"));
+	demonstrate("toggle", "Linked issue and PR visible in the side panel; Ctrl+] opens the issue URL");
 	key("toggle", "C-]");
 	path = g_build_filename(sandbox, "opened", NULL);
 	{
 		gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
 		while (!g_file_get_contents(path, &opened, NULL, NULL) && g_get_monotonic_time() < deadline) g_usleep(20000);
 	}
-	g_assert_cmpstr(opened, ==, "https://example.invalid/owner/repo/issues/42");
+	g_assert_cmpstr(opened, ==, "https://example.invalid/owner/repo/issues/42/");
 	write_file("delay", "yes");
 	send("toggle", "run tests"); key("toggle", "Enter");
 	key("toggle", "C-\\");
 	g_assert_true(wait_text("toggle", "WORK"));
+	demonstrate("toggle", "Dashboard stays usable while provider work runs");
 	g_assert_true(wait_text("toggle", "DONE"));
 	{
 		gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
@@ -162,6 +179,7 @@ test_toggle(void)
 		} while (g_get_monotonic_time() < deadline);
 	}
 	g_assert_true(g_str_has_prefix(name, "DONE:"));
+	demonstrate("toggle", "Completed turn: dashboard DONE and aggregate window prefix");
 	key("toggle", "C-\\");
 	g_assert_true(wait_text("toggle", "Dashboard test complete"));
 	teardown();
@@ -174,6 +192,7 @@ test_startup(void)
 	write_file("config/ai-glib/config.yaml", "apps:\n  ai-tui:\n    open-dashboard-on-load: true\n");
 	start("configured", NULL);
 	g_assert_true(wait_text("configured", "PROJECT DASHBOARD"));
+	demonstrate("configured", "Bare launch obeys open-dashboard-on-load config");
 	key("configured", "n");
 	g_assert_true(wait_text("configured", "COMPOSE"));
 	start("override", "--no-dashboard");
@@ -182,6 +201,7 @@ test_startup(void)
 	g_assert_true(wait_text("prompt", "Dashboard test complete"));
 	start("explicit", "--dashboard");
 	g_assert_true(wait_text("explicit", "PROJECT DASHBOARD"));
+	demonstrate("explicit", "Dashboard aggregates independently launched conversations");
 	teardown();
 }
 
@@ -206,6 +226,8 @@ test_assignment(void)
 	g_assert_true(g_file_get_contents(input, &received, NULL, NULL));
 	g_assert_nonnull(strstr(received, "Preserve UTF-8 and reject truncated input"));
 	g_assert_null(strstr(received, "keep my next draft"));
+	demonstrate("assignment", "Issue assignment reaches provider; metadata and next draft retained");
+	if (g_getenv("AI_TUI_DEMONSTRATE") != NULL) g_test_message("PROVIDER STDIN:\n%s", received);
 	teardown();
 }
 
@@ -233,6 +255,7 @@ test_window_aggregation(void)
 		g_usleep(50000);
 	} while (g_get_monotonic_time() < deadline);
 	g_assert_true(g_str_has_prefix(name, "ERROR:"));
+	demonstrate(first, "Two panes: ERROR takes precedence over another idle reporter");
 	/* Another reporter cannot erase the error with its idle state. */
 	g_usleep(3200000);
 	g_clear_pointer(&name, g_free);
@@ -243,6 +266,7 @@ test_window_aggregation(void)
 	g_clear_pointer(&name, g_free);
 	name = tmux("display-message", "-p", "-t", second, "#{window_name}", NULL);
 	g_assert_cmpstr(g_strchomp(name), ==, "my manual name");
+	demonstrate(second, "User window rename survives reporter heartbeats");
 	teardown();
 }
 
@@ -250,7 +274,7 @@ static void
 test_resume(void)
 {
 	g_autofree gchar *registry = NULL;
-	g_autoptr(GPtrArray) rows = NULL;
+	g_autolist(AiWorkSession) rows = NULL;
 	g_autofree gchar *id = NULL;
 	g_autofree gchar *option = NULL;
 	g_autofree gchar *out = NULL;
@@ -266,20 +290,21 @@ test_resume(void)
 	registry = g_build_filename(sandbox, "state", "ai-glib", "sessions", NULL);
 	deadline = g_get_monotonic_time() + 6 * G_USEC_PER_SEC;
 	do {
-		g_clear_pointer(&rows, g_ptr_array_unref); rows = ai_work_session_list(registry, NULL);
-		if (rows != NULL && rows->len == 1 && g_str_equal(ai_work_session_get_field(g_ptr_array_index(rows, 0), "status"), "DISCONNECTED")) break;
+		g_clear_list(&rows, g_object_unref); rows = ai_work_session_list(registry, NULL);
+		if (rows != NULL && g_list_length(rows) == 1 && g_str_equal(ai_work_session_get_field(g_list_nth_data(rows, 0), "status"), "DISCONNECTED")) break;
 		g_usleep(50000);
 	} while (g_get_monotonic_time() < deadline);
-	g_assert_nonnull(rows); g_assert_cmpuint(rows->len, ==, 1);
-	g_assert_cmpstr(ai_work_session_get_field(g_ptr_array_index(rows, 0), "status"), ==, "DISCONNECTED");
-	id = g_strdup(ai_work_session_get_id(g_ptr_array_index(rows, 0)));
+	g_assert_nonnull(rows); g_assert_cmpuint(g_list_length(rows), ==, 1);
+	g_assert_cmpstr(ai_work_session_get_field(g_list_nth_data(rows, 0), "status"), ==, "DISCONNECTED");
+	id = g_strdup(ai_work_session_get_id(g_list_nth_data(rows, 0)));
 	option = g_strconcat("--workspace-session=", id, NULL);
 	start("resumed", option);
 	g_assert_true(wait_text("resumed", "#18"));
 	g_assert_true(wait_text("resumed", "COMPOSE"));
-	g_clear_pointer(&rows, g_ptr_array_unref); rows = ai_work_session_list(registry, NULL);
-	g_assert_cmpuint(rows->len, ==, 1);
-	g_assert_cmpstr(ai_work_session_get_id(g_ptr_array_index(rows, 0)), ==, id);
+	g_clear_list(&rows, g_object_unref); rows = ai_work_session_list(registry, NULL);
+	g_assert_cmpuint(g_list_length(rows), ==, 1);
+	g_assert_cmpstr(ai_work_session_get_id(g_list_nth_data(rows, 0)), ==, id);
+	demonstrate("resumed", "Native recovery preserves the stable session and linked issue");
 	teardown();
 }
 
@@ -305,7 +330,7 @@ test_worktree_launch(void)
 	g_autofree gchar *repo = NULL;
 	g_autofree gchar *registry = NULL;
 	g_autoptr(GSubprocess) child = NULL;
-	g_autoptr(GPtrArray) rows = NULL;
+	g_autolist(AiWorkSession) rows = NULL;
 	gint64 deadline;
 	guint i;
 	gboolean found = FALSE;
@@ -327,16 +352,16 @@ test_worktree_launch(void)
 	registry = g_build_filename(sandbox, "state", "ai-glib", "sessions", NULL);
 	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
 	do {
-		g_clear_pointer(&rows, g_ptr_array_unref); rows = ai_work_session_list(registry, NULL);
-		if (rows != NULL && rows->len == 2) break;
+		g_clear_list(&rows, g_object_unref); rows = ai_work_session_list(registry, NULL);
+		if (rows != NULL && g_list_length(rows) == 2) break;
 		g_usleep(50000);
 	} while (g_get_monotonic_time() < deadline);
-	g_assert_nonnull(rows); g_assert_cmpuint(rows->len, ==, 2);
-	g_assert_cmpstr(ai_work_session_get_field(g_ptr_array_index(rows, 0), "project"), ==,
-		ai_work_session_get_field(g_ptr_array_index(rows, 1), "project"));
-	for (i = 0; i < rows->len; i++)
+	g_assert_nonnull(rows); g_assert_cmpuint(g_list_length(rows), ==, 2);
+	g_assert_cmpstr(ai_work_session_get_field(g_list_nth_data(rows, 0), "project"), ==,
+		ai_work_session_get_field(g_list_nth_data(rows, 1), "project"));
+	for (i = 0; i < g_list_length(rows); i++)
 	{
-		AiWorkSession *row = g_ptr_array_index(rows, i);
+		AiWorkSession *row = g_list_nth_data(rows, i);
 		if (g_str_has_prefix(ai_work_session_get_field(row, "branch"), "ai/"))
 		{
 			g_assert_true(g_file_test(ai_work_session_get_field(row, "directory"), G_FILE_TEST_IS_DIR));
@@ -344,6 +369,8 @@ test_worktree_launch(void)
 		}
 	}
 	g_assert_true(found);
+	g_assert_true(wait_text("project:0", "ai/"));
+	demonstrate("project:0", "Created Git worktree registers under the same project");
 	teardown();
 }
 

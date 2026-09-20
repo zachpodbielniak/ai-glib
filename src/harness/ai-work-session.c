@@ -34,10 +34,10 @@ static gchar *
 clean_label(const gchar *text)
 {
 	g_autofree gchar *valid = g_utf8_make_valid(text != NULL ? text : "", -1);
-	gchar *result = g_utf8_substring(valid, 0, MIN(1024, g_utf8_strlen(valid, -1)));
+	g_autofree gchar *result = g_utf8_substring(valid, 0, MIN(1024, g_utf8_strlen(valid, -1)));
 	gchar *p;
 	for (p = result; *p; p++) if ((guchar)*p < 32 || *p == 127) *p = ' ';
-	return result;
+	return g_steal_pointer(&result);
 }
 
 static void
@@ -256,12 +256,12 @@ ai_work_session_remove_link(AiWorkSession *self, const gchar *url)
 gchar **
 ai_work_session_dup_links(AiWorkSession *self)
 {
-	gchar **result;
+	g_auto(GStrv) result = NULL;
 	guint i;
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), NULL);
 	result = g_new0(gchar *, self->links->len + 1);
 	for (i = 0; i < self->links->len; i++) result[i] = g_strdup(g_ptr_array_index(self->links, i));
-	return result;
+	return g_steal_pointer(&result);
 }
 
 /**
@@ -334,12 +334,14 @@ ai_work_session_save(AiWorkSession *self, const gchar *directory, gboolean live,
  *
  * Reads bounded, versioned snapshots. Malformed entries are ignored. Expired or
  * released sessions report DISCONNECTED; their links and resume IDs survive.
+ * Free the returned list with g_list_free_full(list, g_object_unref). An empty
+ * registry returns NULL without setting @error.
  * Returns: (transfer full) (element-type AiWorkSession) (nullable): sessions
  */
-GPtrArray *
+GList *
 ai_work_session_list(const gchar *directory, GError **error)
 {
-	g_autoptr(GPtrArray) result = g_ptr_array_new_with_free_func(g_object_unref);
+	g_autolist(AiWorkSession) result = NULL;
 	g_autoptr(GDir) dir = NULL;
 	const gchar *name;
 	g_return_val_if_fail(directory != NULL, NULL);
@@ -378,17 +380,15 @@ ai_work_session_list(const gchar *directory, GError **error)
 		for (i = 0; links != NULL && links[i] != NULL; i++)
 		{
 			g_autofree gchar *group = g_strdup_printf("link-%u", i);
-			gchar *title = g_key_file_get_string(file, group, "title", NULL);
-			gchar *state = g_key_file_get_string(file, group, "state", NULL);
+			g_autofree gchar *title = g_key_file_get_string(file, group, "title", NULL);
+			g_autofree gchar *state = g_key_file_get_string(file, group, "state", NULL);
 			if (title != NULL) g_hash_table_replace(item->titles, g_strdup(links[i]), clean_label(title));
-			g_free(title);
 			if (state != NULL) g_hash_table_replace(item->states, g_strdup(links[i]), clean_label(state));
-			g_free(state);
 		}
 		age = g_get_real_time() - g_key_file_get_int64(file, "session", "heartbeat", NULL);
 		if (age < 0 || age > 15 * G_USEC_PER_SEC || !g_key_file_get_boolean(file, "session", "live", NULL))
 			g_object_set(item, "status", "DISCONNECTED", NULL);
-		g_ptr_array_add(result, g_steal_pointer(&item));
+		result = g_list_prepend(result, g_steal_pointer(&item));
 	}
 	return g_steal_pointer(&result);
 }
@@ -407,6 +407,8 @@ link_fetch_free(LinkFetch *fetch)
 {
 	g_free(fetch->url); g_free(fetch->title); g_free(fetch->state); g_free(fetch);
 }
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(LinkFetch, link_fetch_free)
 
 static gchar *
 link_tea_login(GUri *uri, GCancellable *cancel, GError **error)
@@ -525,7 +527,7 @@ ai_work_session_refresh_link_async(AiWorkSession *self, const gchar *url,
 	GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
 	g_autoptr(GTask) task = NULL;
-	LinkFetch *fetch;
+	g_autoptr(LinkFetch) fetch = NULL;
 	guint i;
 	g_return_if_fail(AI_IS_WORK_SESSION(self));
 	task = g_task_new(self, cancellable, callback, user_data);
@@ -537,7 +539,7 @@ ai_work_session_refresh_link_async(AiWorkSession *self, const gchar *url,
 	}
 	fetch = g_new0(LinkFetch, 1);
 	fetch->url = g_strdup(url);
-	g_task_set_task_data(task, fetch, (GDestroyNotify)link_fetch_free);
+	g_task_set_task_data(task, g_steal_pointer(&fetch), (GDestroyNotify)link_fetch_free);
 	g_task_run_in_thread(task, link_fetch_thread);
 }
 
@@ -552,7 +554,7 @@ gchar *
 ai_work_session_refresh_link_finish(AiWorkSession *self, GAsyncResult *result, GError **error)
 {
 	LinkFetch *fetch;
-	gchar *text;
+	g_autofree gchar *text = NULL;
 	guint i;
 	g_return_val_if_fail(g_task_is_valid(result, self), NULL);
 	g_return_val_if_fail(g_async_result_is_tagged(result, ai_work_session_refresh_link_async), NULL);
@@ -566,7 +568,7 @@ ai_work_session_refresh_link_finish(AiWorkSession *self, GAsyncResult *result, G
 			g_hash_table_replace(self->states, g_strdup(fetch->url), g_strdup(fetch->state));
 			break;
 		}
-	return text;
+	return g_steal_pointer(&text);
 }
 
 /**

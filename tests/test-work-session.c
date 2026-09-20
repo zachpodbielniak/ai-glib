@@ -67,7 +67,7 @@ test_persistence(void)
 	g_autofree gchar *dir = g_dir_make_tmp("ai-work-session-XXXXXX", NULL);
 	g_autoptr(AiWorkSession) session = ai_work_session_new(dir);
 	g_autoptr(AiWorkSession) other = ai_work_session_new(dir);
-	g_autoptr(GPtrArray) rows = NULL;
+	g_autolist(AiWorkSession) rows = NULL;
 	g_autofree gchar *path = g_build_filename(dir, ai_work_session_get_id(session), NULL);
 	g_autoptr(GKeyFile) file = g_key_file_new();
 	g_autofree gchar *data = NULL;
@@ -82,10 +82,10 @@ test_persistence(void)
 	g_assert_cmpint(g_stat(path, &st), ==, 0);
 	g_assert_cmpint(st.st_mode & 0777, ==, 0600);
 	rows = ai_work_session_list(dir, NULL);
-	g_assert_cmpuint(rows->len, ==, 2);
-	for (i = 0; i < rows->len; i++)
+	g_assert_cmpuint(g_list_length(rows), ==, 2);
+	for (i = 0; i < g_list_length(rows); i++)
 	{
-		AiWorkSession *row = g_ptr_array_index(rows, i);
+		AiWorkSession *row = g_list_nth_data(rows, i);
 		if (g_str_equal(ai_work_session_get_id(row), ai_work_session_get_id(session)))
 		{
 			g_auto(GStrv) links = ai_work_session_dup_links(row);
@@ -99,14 +99,14 @@ test_persistence(void)
 	g_key_file_set_int64(file, "session", "heartbeat", g_get_real_time() - 16 * G_USEC_PER_SEC);
 	data = g_key_file_to_data(file, NULL, NULL);
 	g_assert_true(g_file_set_contents(path, data, -1, NULL));
-	g_clear_pointer(&rows, g_ptr_array_unref);
+	g_clear_list(&rows, g_object_unref);
 	rows = ai_work_session_list(dir, NULL);
-	for (i = 0; i < rows->len; i++)
-		g_assert_cmpstr(ai_work_session_get_field(g_ptr_array_index(rows, i), "status"), ==, "DISCONNECTED");
+	for (i = 0; i < g_list_length(rows); i++)
+		g_assert_cmpstr(ai_work_session_get_field(g_list_nth_data(rows, i), "status"), ==, "DISCONNECTED");
 	g_assert_true(g_file_set_contents(path, "[session]\nversion=99\n", -1, NULL));
-	g_clear_pointer(&rows, g_ptr_array_unref);
+	g_clear_list(&rows, g_object_unref);
 	rows = ai_work_session_list(dir, NULL);
-	g_assert_cmpuint(rows->len, ==, 1);
+	g_assert_cmpuint(g_list_length(rows), ==, 1);
 	remove_tree(dir);
 }
 

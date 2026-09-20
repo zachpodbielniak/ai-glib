@@ -4,6 +4,23 @@
 #include <sys/file.h>
 #include <fcntl.h>
 
+/* Keep indexed dashboard storage private; the public list owns its objects. */
+static GPtrArray *
+work_list(const gchar *directory, GError **error)
+{
+	g_autoptr(GError) local_error = NULL;
+	g_autolist(AiWorkSession) sessions = ai_work_session_list(directory, &local_error);
+	g_autoptr(GPtrArray) rows = g_ptr_array_new_with_free_func(g_object_unref);
+	GList *iter;
+	if (local_error != NULL)
+	{
+		g_propagate_error(error, g_steal_pointer(&local_error)); return NULL;
+	}
+	for (iter = sessions; iter != NULL; iter = iter->next)
+		g_ptr_array_add(rows, g_object_ref(iter->data));
+	return g_steal_pointer(&rows);
+}
+
 static const gchar *
 work_field(AiWorkSession *work, const gchar *name)
 {
@@ -17,7 +34,7 @@ work_tmux(const gchar *socket, const gchar * const *args)
 {
 	g_autoptr(GPtrArray) argv = g_ptr_array_new();
 	g_autoptr(GSubprocess) child = NULL;
-	gchar *output = NULL;
+	g_autofree gchar *output = NULL;
 	guint i;
 	if (socket == NULL || !g_path_is_absolute(socket)) return NULL;
 	g_ptr_array_add(argv, "tmux");
@@ -30,11 +47,10 @@ work_tmux(const gchar *socket, const gchar * const *args)
 	if (child == NULL || !ai_subprocess_communicate_utf8_bounded(child, NULL, 1000,
 		NULL, &output, NULL, NULL) || !g_subprocess_get_successful(child))
 	{
-		g_free(output);
 		return NULL;
 	}
 	g_strchomp(output);
-	return output;
+	return g_steal_pointer(&output);
 }
 
 static gboolean
@@ -87,6 +103,8 @@ work_title_free(WorkTitle *job)
 	g_free(job->title); g_free(job->lock); g_free(job->id); g_free(job);
 }
 
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(WorkTitle, work_title_free)
+
 static void
 work_title_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
 {
@@ -99,6 +117,7 @@ work_title_thread(GTask *task, gpointer source, gpointer data, GCancellable *can
 	g_autofree gchar *seen = g_strdup_printf("%" G_GINT64_FORMAT, g_get_real_time() / G_USEC_PER_SEC);
 	const gchar *best = "";
 	gint fd;
+	gint64 lock_deadline;
 	guint i;
 	const gchar *query[] = {"display-message", "-p", "-t", job->pane,
 		"#{window_id}\t#{window_name}\t#{@ai_base}\t#{@ai_last}\t#{automatic-rename}\t#{@ai_auto}\t#{@ai_session}\tEND", NULL};
@@ -108,7 +127,18 @@ work_title_thread(GTask *task, gpointer source, gpointer data, GCancellable *can
 	(void)source; (void)cancel;
 	fd = g_open(job->lock, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
 	if (fd < 0) { g_task_return_boolean(task, FALSE); return; }
-	if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); g_task_return_boolean(task, FALSE); return; }
+	/* Heartbeats can be synchronized across panes. Give the other reporter a
+	 * bounded chance to finish instead of starving the same pane each tick. */
+	lock_deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
+	while (flock(fd, LOCK_EX | LOCK_NB) != 0)
+	{
+		if ((errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) ||
+			g_get_monotonic_time() >= lock_deadline)
+		{
+			close(fd); g_task_return_boolean(task, FALSE); return;
+		}
+		g_usleep(10000);
+	}
 	meta = work_tmux(job->socket, query);
 	if (meta == NULL) goto done;
 	values = g_strsplit(meta, "\t", -1);
@@ -191,7 +221,7 @@ static void
 work_title_update(App *app, gboolean release)
 {
 	g_autoptr(GTask) task = NULL;
-	WorkTitle *job;
+	g_autoptr(WorkTitle) job = NULL;
 	const gchar *state;
 	if (app->work == NULL || app->title_pending ||
 		!work_pane_valid(work_field(app->work, "pane")) || !*work_field(app->work, "socket")) return;
@@ -206,7 +236,7 @@ work_title_update(App *app, gboolean release)
 		g_strdup_printf("%s: %s", state, *work_field(app->work, "title") ? work_field(app->work, "title") : "ai-tui");
 	job->lock = g_build_filename(app->work_directory, "tmux.lock", NULL);
 	task = g_task_new(NULL, NULL, work_title_done, app);
-	g_task_set_task_data(task, job, (GDestroyNotify)work_title_free);
+	g_task_set_task_data(task, g_steal_pointer(&job), (GDestroyNotify)work_title_free);
 	app->title_pending = TRUE;
 	g_task_run_in_thread(task, work_title_thread);
 }
@@ -262,7 +292,7 @@ static void
 work_refresh(App *app)
 {
 	g_autoptr(GError) error = NULL;
-	g_autoptr(GPtrArray) rows = ai_work_session_list(app->work_directory, &error);
+	g_autoptr(GPtrArray) rows = work_list(app->work_directory, &error);
 	g_autofree gchar *selected = NULL;
 	guint i;
 	if (app->work_rows != NULL && app->work_selected < app->work_rows->len)
@@ -289,7 +319,7 @@ typedef struct
 static void
 work_link_fetched(GObject *source, GAsyncResult *result, gpointer data)
 {
-	WorkFetch *fetch = data;
+	g_autofree WorkFetch *fetch = data;
 	App *app = fetch->app;
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *text = ai_work_session_refresh_link_finish(AI_WORK_SESSION(source), result, &error);
@@ -310,18 +340,17 @@ work_link_fetched(GObject *source, GAsyncResult *result, gpointer data)
 		work_publish(app);
 		app_schedule_redraw(app);
 	}
-	g_free(fetch);
 }
 
 static void
 work_fetch_link(App *app, const gchar *url, gboolean assign)
 {
-	WorkFetch *fetch = g_new0(WorkFetch, 1);
+	g_autofree WorkFetch *fetch = g_new0(WorkFetch, 1);
 	fetch->app = app;
 	fetch->generation = app->link_generation;
 	fetch->assign = assign;
 	app->link_pending++;
-	ai_work_session_refresh_link_async(app->work, url, app->link_cancel, work_link_fetched, fetch);
+	ai_work_session_refresh_link_async(app->work, url, app->link_cancel, work_link_fetched, g_steal_pointer(&fetch));
 }
 
 static gboolean
@@ -382,7 +411,10 @@ work_draw(App *app)
 		guint link_index;
 		for (link_index = 0; links[link_index] != NULL && link_index < 2; link_index++)
 		{
-			const gchar *number = strrchr(links[link_index], '/');
+			g_autofree gchar *display_url = g_strdup(links[link_index]);
+			const gchar *number;
+			if (g_str_has_suffix(display_url, "/")) display_url[strlen(display_url) - 1] = '\0';
+			number = strrchr(display_url, '/');
 			g_string_append_printf(badges, " %s#%s", strstr(links[link_index], "/issues/") != NULL ? "ISSUE" : "PR", number != NULL ? number + 1 : "?");
 		}
 		if (g_strv_length(links) > 2) g_string_append_printf(badges, " +%u", g_strv_length(links) - 2);
@@ -444,6 +476,8 @@ work_launch_free(WorkLaunch *job)
 	g_free(job->socket); g_free(job->directory); g_free(job->executable);
 	g_free(job->session); g_free(job->provider); g_free(job->model); g_strfreev(job->environment); g_free(job);
 }
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(WorkLaunch, work_launch_free)
 
 static void
 work_launch_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
@@ -522,7 +556,7 @@ static void
 work_launch_full(App *app, AiWorkSession *row, gboolean resume, gboolean worktree)
 {
 	g_autoptr(GTask) task = NULL;
-	WorkLaunch *job;
+	g_autoptr(WorkLaunch) job = NULL;
 	if (resume && (!g_str_equal(work_field(row, "status"), "DISCONNECTED") || !*work_field(row, "provider-session")))
 	{
 		g_free(app->work_notice); app->work_notice = g_strdup("Resume requires a disconnected session with a native provider session ID."); return;
@@ -542,18 +576,18 @@ work_launch_full(App *app, AiWorkSession *row, gboolean resume, gboolean worktre
 	{
 		const gchar *names[] = {"HOME", "PATH", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
 			"GROK_PATH", "CLAUDE_CODE_PATH", "OPENCODE_PATH", "CURSOR_AGENT_PATH", "AGY_PATH", "CODEX_PATH", NULL};
-		GPtrArray *environment = g_ptr_array_new_with_free_func(g_free);
+		g_autoptr(GPtrArray) environment = g_ptr_array_new_with_free_func(g_free);
 		guint i;
 		for (i = 0; names[i] != NULL; i++)
 			if (g_getenv(names[i]) != NULL)
 				g_ptr_array_add(environment, g_strdup_printf("%s=%s", names[i], g_getenv(names[i])));
 		g_ptr_array_add(environment, NULL);
-		job->environment = (gchar **)g_ptr_array_free(environment, FALSE);
+		job->environment = (gchar **)g_ptr_array_free(g_steal_pointer(&environment), FALSE);
 	}
-	if (job->executable == NULL) { work_launch_free(job); return; }
+	if (job->executable == NULL) return;
 	app->launch_pending++;
 	task = g_task_new(NULL, app->link_cancel, work_launch_done, app);
-	g_task_set_task_data(task, job, (GDestroyNotify)work_launch_free);
+	g_task_set_task_data(task, g_steal_pointer(&job), (GDestroyNotify)work_launch_free);
 	g_task_run_in_thread(task, work_launch_thread);
 }
 

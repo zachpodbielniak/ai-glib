@@ -20,8 +20,9 @@ vector; =ai_work_session_remove_link()= removes a local association.
 
 =ai_work_session_save()= atomically replaces only this UUID's snapshot in an
 explicit registry directory. =ai_work_session_list()= returns an owned
-=GPtrArray<AiWorkSession>=, ignoring malformed, oversized and unsupported-version
-records. Missing directories return an empty array; directory access errors
+=GList<AiWorkSession>=, ignoring malformed, oversized and unsupported-version
+records. Free it with =g_list_free_full(list, g_object_unref)=. Missing directories
+return an empty list (NULL without an error); directory access errors
 propagate. Non-live or expired records become DISCONNECTED without losing
 metadata. Embedders must ensure each UUID has one writer; ai-tui uses advisory
 locks. This API stores metadata, not provider transcripts.

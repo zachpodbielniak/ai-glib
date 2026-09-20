@@ -1,0 +1,406 @@
+TAP version 14
+# random seed: R02Scfbbc7a8dd52822124861094f7e9d605
+1..7
+# Start of dashboard tests
+# DEMONSTRATION: Ctrl+\ returns with unsent draft preserved
+# window=ai-tui pane=IDLE: ai-tui
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-SNSSV3
+#
+#                                                                                                               SESSION
+#                                                                                                               Grok Build
+#                                                                                                               grok-4.6
+#
+#                                                                                                               LINKED WORK / ^] open
+#                                                                                                               /issue link URL or /pr link
+#     ▄▀█ █      AI / GLIB                                                                                      URL
+#     █▀█ █      A workspace for your next idea.
+#                                                                                                               APPEARANCE
+#                                                                                                               catppuccin-mocha
+#     MAKE SOMETHING WORTH SHIPPING.                                                                            No color / ^P hide
+#     Your terminal. Your models. One conversation.
+#                                                                                                               LATEST REPORTED USAGE
+#     Start with a question or a concrete task.                                                                 Not reported yet
+#     /help      Explore commands and key bindings
+#     /model     Inspect or change the model                                                                    TODOS / 0
+#     @path      Bring a file into the conversation                                                             No todos yet /todos
+#     /running   Check background agents
+#                                                                                                               AGENTS / 0
+#     Ctrl-T change the mood.  Ctrl-G open your editor.                                                         No agents running /running
+#
+#                                                                                                               TOOLS
+#                                                                                                               Managed by provider CLI
+#
+#
+#
+#
+#  Grok Build / grok-4.6   ready
+#  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ unsent draft                                                                                           │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+# DEMONSTRATION: Linked issue and PR visible in the side panel; Ctrl+] opens the issue URL
+# window=ai-tui pane=WORK: ai-tui
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-SNSSV3
+#    ○ Linked https://example.invalid/owner/repo/issues/42/
+#                                                                                                               SESSION
+#    ○ Linked https://example.invalid/owner/repo/pulls/81                                                       Grok Build
+#                                                                                                               grok-4.6
+#
+#                                                                                                               LINKED WORK / ^] open
+#                                                                                                               ISSUE #42 unfetched https:/…
+#                                                                                                               PR #81 unfetched https://ex…
+#
+#                                                                                                               APPEARANCE
+#                                                                                                               catppuccin-mocha
+#                                                                                                               No color / ^P hide
+#
+#                                                                                                               LATEST REPORTED USAGE
+#                                                                                                               Not reported yet
+#
+#                                                                                                               TODOS / 0
+#                                                                                                               No todos yet /todos
+#
+#                                                                                                               AGENTS / 0
+#                                                                                                               No agents running /running
+#
+#                                                                                                               TOOLS
+#                                                                                                               Managed by provider CLI
+#
+#
+#
+#
+#  Grok Build / grok-4.6   ready
+#  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ Ask, build, investigate...  / commands  @ files                                                        │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+# DEMONSTRATION: Dashboard stays usable while provider work runs
+# window=ai-tui pane=IDLE: ai-tui
+#  PROJECT DASHBOARD
+#  State       Project / branch / task
+#
+#  WORK         ai-dashboard-pty-SNSSV3 ISSUE#42 PR#81 /  / run tests
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#  Waiting for the model / 0 background / 0/0 todos / 0s
+#  https://example.invalid/owner/repo/pulls/81
+#  Link metadata needs one authenticated tea account matching this host
+# Enter jump | n new | w worktree | r resume | o link | Tab next link | ^\ back | q quit
+#
+# DEMONSTRATION: Completed turn: dashboard DONE and aggregate window prefix
+# window=DONE: ai-tui pane=DONE: run tests
+#  PROJECT DASHBOARD
+#  State       Project / branch / task
+#
+#  DONE         ai-dashboard-pty-SNSSV3 ISSUE#42 PR#81 /  / run tests
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#  Ready / 0 background / 0/0 todos / 0s
+#  https://example.invalid/owner/repo/pulls/81
+#  Link metadata needs one authenticated tea account matching this host
+# Enter jump | n new | w worktree | r resume | o link | Tab next link | ^\ back | q quit
+#
+ok 1 /dashboard/toggle-links-running
+# slow test /dashboard/toggle-links-running executed in 3.62 secs
+# DEMONSTRATION: Bare launch obeys open-dashboard-on-load config
+# window=ai-tui pane=fai-vm
+#  PROJECT DASHBOARD
+#  State       Project / branch / task
+#
+#  No sessions yet. Press n to start here.
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+# Enter jump | n new | w worktree | r resume | o link | Tab next link | ^\ back | q quit
+#
+# DEMONSTRATION: Dashboard aggregates independently launched conversations
+# window=ai-tui pane=fai-vm
+#  PROJECT DASHBOARD
+#  State       Project / branch / task
+#
+#  DONE         ai-dashboard-pty-IW1DV3 /  / explicit prompt
+#  IDLE         ai-dashboard-pty-IW1DV3 /  / grok-build
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#  Ready / 0 background / 0/0 todos / 0s
+#
+#
+# Enter jump | n new | w worktree | r resume | o link | Tab next link | ^\ back | q quit
+#
+ok 2 /dashboard/startup
+# DEMONSTRATION: Issue assignment reaches provider; metadata and next draft retained
+# window=WORK: ai-tui pane=WORK: Assigned work: Fix assigned parser
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-RMYQV3
+#    ○ Loading assignment; your draft is preserved.
+#                                                                                                               SESSION
+#     YOU                                                                                                       Grok Build
+#  │ > Assigned work: Fix assigned parser                                                                       grok-4.6
+#  │ Source: https://github.com/example/project/issues/12
+#  │ State: OPEN                                                                                                LINKED WORK / ^] open
+#                                                                                                               ISSUE #12 OPEN Fix assigned…
+#  │ Preserve UTF-8 and reject truncated input
+#                                                                                                               APPEARANCE
+#     ASSISTANT                                                                                                 catppuccin-mocha
+#  │ Dashboard test complete                                                                                    No color / ^P hide
+#
+#                                                                                                               LATEST REPORTED USAGE
+#
+#                                                                                                               TODOS / 0
+#                                                                                                               No todos yet /todos
+#
+#                                                                                                               AGENTS / 0
+#                                                                                                               No agents running /running
+#
+#                                                                                                               TOOLS
+#                                                                                                               Managed by provider CLI
+#
+#
+#
+#
+#
+#
+#  Turn complete  |  grok-4.6
+#  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ keep my next draft                                                                                     │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+# PROVIDER STDIN:
+# Assigned work: Fix assigned parser
+# Source: https://github.com/example/project/issues/12
+# State: OPEN
+#
+# Preserve UTF-8 and reject truncated input
+#
+# IMPORTANT: Always include a plain text response. Tool use is fine, but you MUST provide a text summary of your work when finished. Never end your turn on tool calls alone.
+ok 3 /dashboard/assignment
+# slow test /dashboard/assignment executed in 1.20 secs
+# DEMONSTRATION: Two panes: ERROR takes precedence over another idle reporter
+# window=ERROR: ai-tui pane=ERROR: fail
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-8HQMV3
+#     YOU
+#  │ > fail
+#
+#    ✖ CLI error: Deliberate provider failure
+#
+#    ○ CLI error: Deliberate provider failure
+#
+#
+#
+#
+#  Grok Build / grok-4.6   your turn · type to reply
+#  ╭─ YOUR TURN ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ Your turn · type a reply, or / commands  @ files                                                                                       │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+# DEMONSTRATION: User window rename survives reporter heartbeats
+# window=my manual name pane=IDLE: ai-tui
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-8HQMV3
+#     MAKE SOMETHING WORTH SHIPPING.
+#     Your terminal. Your models. One conversation.
+#
+#     Start with a question or a concrete task.
+#     /help      Explore commands and key bindings
+#     /model     Inspect or change the model
+#     @path      Bring a file into the conversation
+#     /running   Check background agents
+#
+#     Ctrl-T change the mood.  Ctrl-G open your editor.
+#  Grok Build / grok-4.6   ready
+#  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ Ask, build, investigate...  / commands  @ files                                                                                        │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+ok 4 /dashboard/window-aggregation
+# slow test /dashboard/window-aggregation executed in 9.77 secs
+# DEMONSTRATION: Native recovery preserves the stable session and linked issue
+# window=ai-tui pane=IDLE: finish
+#   ai   Grok Build                                                                                                        catppuccin-mocha
+#   /tmp/ai-dashboard-pty-ISCQV3
+#
+#                                                                                                               SESSION
+#                                                                                                               Grok Build
+#                                                                                                               grok-4.6
+#
+#                                                                                                               LINKED WORK / ^] open
+#                                                                                                               ISSUE #18 unfetched https:/…
+#     ▄▀█ █      AI / GLIB
+#     █▀█ █      A workspace for your next idea.                                                                APPEARANCE
+#                                                                                                               catppuccin-mocha
+#                                                                                                               No color / ^P hide
+#     MAKE SOMETHING WORTH SHIPPING.
+#     Your terminal. Your models. One conversation.                                                             LATEST REPORTED USAGE
+#                                                                                                               Not reported yet
+#     Start with a question or a concrete task.
+#     /help      Explore commands and key bindings                                                              TODOS / 0
+#     /model     Inspect or change the model                                                                    No todos yet /todos
+#     @path      Bring a file into the conversation
+#     /running   Check background agents                                                                        AGENTS / 0
+#                                                                                                               No agents running /running
+#     Ctrl-T change the mood.  Ctrl-G open your editor.
+#                                                                                                               TOOLS
+#                                                                                                               Managed by provider CLI
+#
+#
+#
+#
+#
+#  Grok Build / grok-4.6   ready
+#  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
+#  │ Ask, build, investigate...  / commands  @ files                                                        │
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
+#
+ok 5 /dashboard/resume
+ok 6 /dashboard/title-optout
+# DEMONSTRATION: Created Git worktree registers under the same project
+# window=ai-tui pane=IDLE: ai-tui
+#  PROJECT DASHBOARD
+#  State       Project / branch / task
+#
+#  IDLE         repo / master / grok-build
+#  IDLE         repo / ai/d18f19cd-5da3-4e74-8980-af0b17a34384 / grok-build
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#  Ready / 0 background / 0/0 todos / 0s
+#
+#
+# Enter jump | n new | w worktree | r resume | o link | Tab next link | ^\ back | q quit
+#
+ok 7 /dashboard/worktree-launch
+# slow test /dashboard/worktree-launch executed in 2.94 secs
+# End of dashboard tests

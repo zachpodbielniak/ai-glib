@@ -159,3 +159,10 @@ The naming adapter verifies that stdin is the actual tmux pane TTY before
 claiming it, so an inherited =TMUX_PANE= inside another terminal host does not
 rename the outer window. Focus actions verify the pane's published session UUID
 before switching, preventing a reused pane ID from opening unrelated work.
+
+A reproducible verbatim terminal demonstration is in
+[[file:demonstrations/project-dashboard.txt][project-dashboard.txt]]. Generate a fresh capture with
+=AI_TUI_DEMONSTRATE=1 build/release/tests/test-tui-dashboard=. It runs the built
+binary against stub provider/forge CLIs in isolated tmux servers. The Python
+binding smoke test additionally exercises session ownership, properties, links
+and persisted records through the generated typelib.

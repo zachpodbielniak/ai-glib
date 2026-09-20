@@ -1730,7 +1730,8 @@ test_switch_command_enter(gconstpointer data)
 		notice = "Provider:";
 	Stub *stub;
 	g_autofree gchar *stdin_path = NULL;
-	g_autofree gchar *partial = g_strndup(command, 4);
+	/* /pro now also completes /project; use an unambiguous prefix. */
+	g_autofree gchar *partial = g_strndup(command, g_str_equal(command, "/provider") ? 5 : 4);
 	g_autofree gchar *pane = NULL;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
@@ -2955,6 +2956,12 @@ typedef struct
 } CommandCase;
 
 static const CommandCase COMMAND_CASES[] = {
+	{ "dashboard", NULL },
+	{ "project", NULL },
+	{ "links", "No links." },
+	{ "issue", "No links." },
+	{ "pr", "No links." },
+	{ "work", "Use a full issue or PR URL" },
 	{ "btw", "Usage: /btw" },
 	{ "help", "clear the line" },
 	{ "clear", NULL },
@@ -2997,17 +3004,24 @@ test_builtin_enter(gconstpointer data)
 	g_autofree gchar *stdin_path = NULL;
 	g_autofree gchar *saved = NULL;
 	gboolean clears;
+	gboolean view_command;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
 	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
 	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
 	command = g_strconcat("/", test_case->name, NULL);
+	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 	tmux_command("/expand command-audit-sentinel", "Would send:");
 	tmux_send(TUI_SESSION, command);
 	tmux_send(TUI_SESSION, "Enter");
+	if (view_command)
+	{
+		g_assert_true(tmux_wait_for(TUI_SESSION, "PROJECT DASHBOARD"));
+		tmux_send(TUI_SESSION, "C-\\");
+	}
 	if (g_str_equal(test_case->name, "quit") ||
 	    g_str_equal(test_case->name, "exit"))
 		g_assert_true(tmux_wait_for_exit(TUI_SESSION));
@@ -3023,7 +3037,7 @@ test_builtin_enter(gconstpointer data)
 		else
 		{
 			g_assert_nonnull(strstr(saved, "command-audit-sentinel"));
-			g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
+			if (!view_command) g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
 				stub->dir : test_case->notice));
 		}
 	}
