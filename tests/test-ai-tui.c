@@ -2756,6 +2756,92 @@ test_theme_options(void)
 	run_free(run);
 }
 
+/* Real PTY coverage: opening, hiding, model changes, and typing/quitting
+ * during a blocked native report. The fixture accepts no model-turn method. */
+static void
+test_usage_sidebar(void)
+{
+	Stub *stub;
+	g_autofree gchar *queries = NULL;
+	g_autofree gchar *stall = NULL;
+	g_autofree gchar *log = NULL;
+	g_autofree gchar *python = g_find_program_in_path("python3");
+	gint64 started;
+	Run *dump;
+	const gchar *dump_args[] = { "-p", "grok-build", "--dump", "/help", NULL };
+	const gchar *script =
+		"#!/usr/bin/env python3\n"
+		"import json, pathlib, sys, time\n"
+		"root = pathlib.Path(__file__).parent\n"
+		"assert sys.argv[1:] == ['agent', '--no-leader', 'stdio']\n"
+		"for line in sys.stdin:\n"
+		"    req = json.loads(line)\n"
+		"    method = req['method']\n"
+		"    assert method in ('initialize', '_x.ai/billing')\n"
+		"    if method == 'initialize':\n"
+		"        result = {}\n"
+		"    else:\n"
+		"        with (root / 'queries').open('a') as f: f.write('query\\n')\n"
+		"        if (root / 'stall').exists(): time.sleep(10)\n"
+		"        result = {'config': {'creditUsagePercent': 25}}\n"
+		"    print(json.dumps({'id': req['id'], 'result': result}), flush=True)\n";
+
+	if (!tmux_available() || python == NULL)
+	{
+		g_test_skip("tmux and python3 are required for the usage PTY fixture");
+		return;
+	}
+	stub = stub_new("");
+	queries = g_build_filename(stub->dir, "queries", NULL);
+	stall = g_build_filename(stub->dir, "stall", NULL);
+	g_assert_true(g_file_set_contents(stub->stub, script, -1, NULL));
+	dump = run_tui(dump_args, "GROK_PATH", stub->stub);
+	g_assert_cmpint(dump->status, ==, 0);
+	g_assert_false(g_file_test(queries, G_FILE_TEST_EXISTS));
+	run_free(dump);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation --no-agents");
+	/* The harness starts at 100 columns: the hidden panel must not query. */
+	g_assert_false(g_file_test(queries, G_FILE_TEST_EXISTS));
+	tmux_resize("120", "32");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "75% remaining"));
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\n");
+	tmux_send(TUI_SESSION, "C-p");
+	tmux_send(TUI_SESSION, "C-p");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "75% remaining"));
+	g_clear_pointer(&log, g_free);
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\n");
+	g_assert_true(g_file_set_contents(stall, "", -1, NULL));
+	tmux_send(TUI_SESSION, "/model usage-fixture-model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Loading..."));
+	/* Wait for the blocked RPC itself, not merely its loading placeholder. */
+	started = g_get_monotonic_time();
+	do
+	{
+		g_clear_pointer(&log, g_free);
+		g_file_get_contents(queries, &log, NULL, NULL);
+		if (g_strcmp0(log, "query\nquery\n") == 0) break;
+		g_usleep(10000);
+	} while (g_get_monotonic_time() - started < 5 * G_USEC_PER_SEC);
+	g_assert_cmpstr(log, ==, "query\nquery\n");
+	tmux_send(TUI_SESSION, "typing-during-usage-fetch");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "typing-during-usage-fetch"));
+	tmux_send(TUI_SESSION, "C-u");
+	started = g_get_monotonic_time();
+	tmux_send(TUI_SESSION, "/quit");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for_exit(TUI_SESSION));
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 5 * G_USEC_PER_SEC);
+	g_clear_pointer(&log, g_free);
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\nquery\n");
+	g_remove(queries);
+	g_remove(stall);
+	stub_free(stub);
+}
+
 static void
 test_themes_and_resizing(void)
 {
@@ -3671,6 +3757,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/themes", test_theme_options);
 	g_test_add_func("/ai-glib/ai-tui/inline-tool-previews", test_inline_tool_previews);
 	g_test_add_func("/ai-glib/ai-tui/keys/themes-resize", test_themes_and_resizing);
+	g_test_add_func("/ai-glib/ai-tui/keys/usage-sidebar", test_usage_sidebar);
 	g_test_add_func("/ai-glib/ai-tui/keys/unicode-search", test_unicode_and_search);
 	g_test_add_func("/ai-glib/ai-tui/keys/long-paste", test_long_bracketed_paste);
 	g_test_add_func("/ai-glib/ai-tui/keys/composer-editing", test_composer_editing);

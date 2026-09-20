@@ -23,11 +23,13 @@
 
 #include "ai-gui-session-store.h"
 #include "ai-gui-util.h"
+#include "ai-gui-work.h"
 
 typedef struct
 {
 	gchar *home;
 	gchar *sessions;
+	gchar *registry;
 	gchar *cwd;
 	gchar *original_cwd;
 } Fixture;
@@ -57,12 +59,14 @@ fixture_set_up(
 	g_assert_nonnull(fixture->home);
 
 	fixture->sessions = g_build_filename(fixture->home, "sessions", NULL);
+	fixture->registry = g_build_filename(fixture->home, "registry", NULL);
 	fixture->cwd = g_build_filename(fixture->home, "project", NULL);
 	g_assert_cmpint(g_mkdir_with_parents(fixture->cwd, 0700), ==, 0);
 
 	g_setenv("HOME", fixture->home, TRUE);
 	g_setenv("XDG_DATA_HOME", fixture->home, TRUE);
 	g_setenv("XDG_CONFIG_HOME", fixture->home, TRUE);
+	g_setenv("XDG_STATE_HOME", fixture->home, TRUE);
 	g_assert_cmpint(g_chdir(fixture->cwd), ==, 0);
 }
 
@@ -77,6 +81,7 @@ fixture_tear_down(
 	g_free(fixture->original_cwd);
 	g_free(fixture->home);
 	g_free(fixture->sessions);
+	g_free(fixture->registry);
 	g_free(fixture->cwd);
 }
 
@@ -313,6 +318,77 @@ test_store_is_a_list_model(
 	g_assert_true(item == second);
 }
 
+/*
+ * A session registers with the shared dashboard registry, and what it
+ * publishes is what ai-tui's dashboard will read.
+ *
+ * Registration runs git in a worker, so the loop is pumped until the
+ * record arrives rather than assumed present -- which is also the
+ * contract ai_gui_session_get_work() states.
+ */
+static void
+test_session_registers_with_the_dashboard(
+	Fixture       *fixture,
+	gconstpointer  data
+){
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGuiSession) session = NULL;
+	g_autoptr(GPtrArray) rows = NULL;
+	AiWorkSession *work = NULL;
+	gint64 deadline;
+
+	session = ai_gui_session_new(options, "ollama", NULL, &error);
+	g_assert_no_error(error);
+
+	/*
+	 * Set before the loop is ever iterated. The registration worker's
+	 * completion callback is dispatched on the main context, so it
+	 * cannot have run yet -- this is ordering, not a race.
+	 */
+	ai_gui_session_set_work_directory(session, fixture->registry);
+
+	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+	while ((work = ai_gui_session_get_work(session)) == NULL &&
+	       g_get_monotonic_time() < deadline)
+	{
+		g_main_context_iteration(NULL, FALSE);
+	}
+
+	g_assert_nonnull(work);
+
+	ai_gui_session_publish_work(session);
+
+	rows = ai_gui_work_list(fixture->registry, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(rows);
+	g_assert_cmpuint(rows->len, ==, 1);
+
+	{
+		AiWorkSession *row = g_ptr_array_index(rows, 0);
+
+		/* The canonical provider name, as everywhere else: the factory
+		 * wants `ollama`, never the display name. */
+		g_assert_cmpstr(ai_work_session_get_field(row, "provider"), ==,
+		                "ollama");
+		g_assert_cmpstr(ai_work_session_get_field(row, "directory"), ==,
+		                fixture->cwd);
+		g_assert_cmpstr(ai_work_session_get_field(row, "status"), ==, "IDLE");
+		g_assert_true(ai_gui_work_is_live(row));
+	}
+
+	/* A normal exit keeps the metadata and drops liveness, so the row
+	 * stays visible and resumable rather than vanishing. */
+	ai_gui_session_release_work(session);
+	g_clear_pointer(&rows, g_ptr_array_unref);
+
+	rows = ai_gui_work_list(fixture->registry, NULL);
+	g_assert_nonnull(rows);
+	g_assert_cmpuint(rows->len, ==, 1);
+	g_assert_false(ai_gui_work_is_live(g_ptr_array_index(rows, 0)));
+}
+
 /* ---------------------------------------------------------------- */
 
 static void
@@ -392,6 +468,9 @@ main(
 	           fixture_tear_down);
 	g_test_add("/ai-gui/store/list-model", Fixture, NULL,
 	           fixture_set_up, test_store_is_a_list_model, fixture_tear_down);
+	g_test_add("/ai-gui/session/registers-with-the-dashboard", Fixture, NULL,
+	           fixture_set_up, test_session_registers_with_the_dashboard,
+	           fixture_tear_down);
 
 	g_test_add_func("/ai-gui/util/value-from-string", test_value_from_string);
 	g_test_add_func("/ai-gui/util/summarise-prompt", test_summarise_prompt);

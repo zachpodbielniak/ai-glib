@@ -31,6 +31,7 @@
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
+#include "core/ai-quota.h"
 #include "ai-tui-panel.h"
 #include "ai-tui-images.h"
 
@@ -163,38 +164,34 @@ pair_for_tag(AiStyleTag tag)
  * build until somebody picks a colour, which is the loud failure the
  * silent one deserved.
  */
-static const short TAG_COLOURS[] = {
-    -1,             /* default       */
-    COLOR_WHITE,    /* user-prompt   */
-    COLOR_WHITE,    /* heading       */
-    COLOR_BLUE,     /* dim           */
-    COLOR_MAGENTA,  /* tool-name     */
-    COLOR_CYAN,     /* tool-target   */
-    COLOR_YELLOW,   /* tool-pending  */
-    COLOR_GREEN,    /* tool-ok       */
-    COLOR_RED,      /* tool-failed   */
-    COLOR_GREEN,    /* added         */
-    COLOR_RED,      /* removed       */
-    COLOR_CYAN,     /* code          */
-    COLOR_BLUE,     /* thinking      */
-    COLOR_RED,      /* error         */
-    COLOR_YELLOW,   /* status        */
-    COLOR_BLUE,     /* link          */
-    COLOR_BLUE,     /* marker        */
-    COLOR_CYAN,     /* mention       */
-    COLOR_MAGENTA,  /* command       */
-    -1,             /* todo-pending  */
-    COLOR_YELLOW,   /* todo-active   */
-    COLOR_GREEN,    /* todo-done     */
-	COLOR_MAGENTA,  /* syntax-keyword */
-	COLOR_GREEN,    /* syntax-string */
-	COLOR_BLUE,     /* syntax-comment */
-	COLOR_YELLOW,   /* syntax-number */
-	COLOR_YELLOW,   /* syntax-type */
-	COLOR_CYAN      /* syntax-function */
-};
+/*
+ * What a role looks like when the theme names no colours of its own.
+ *
+ * `terminal`, and any terminal that cannot do 256, draw from the
+ * sixteen the user has already configured rather than from a palette
+ * this program picked. Muted has no entry among those sixteen, so it
+ * falls back to the ordinary foreground -- except for a link, which has
+ * to stand out from the prose around it.
+ */
+static short
+native_colour_for_role(AiThemeRole role, AiStyleTag tag, short fg)
+{
+	switch (role)
+	{
+		case AI_THEME_ROLE_TEXT:     return COLOR_WHITE;
+		case AI_THEME_ROLE_MUTED:    return tag == AI_STYLE_LINK ? COLOR_CYAN : fg;
+		case AI_THEME_ROLE_ACCENT:   return COLOR_MAGENTA;
+		case AI_THEME_ROLE_CYAN:
+		case AI_THEME_ROLE_FUNCTION: return COLOR_CYAN;
+		case AI_THEME_ROLE_GREEN:    return COLOR_GREEN;
+		case AI_THEME_ROLE_YELLOW:
+		case AI_THEME_ROLE_NUMBER:   return COLOR_YELLOW;
+		case AI_THEME_ROLE_RED:      return COLOR_RED;
+		case AI_THEME_ROLE_DEFAULT:
+		default:                     return fg;
+	}
+}
 
-G_STATIC_ASSERT(G_N_ELEMENTS(TAG_COLOURS) == AI_STYLE_N_TAGS);
 
 static void
 init_colours(void)
@@ -223,26 +220,13 @@ init_colours(void)
 
     for (i = 0; i < AI_STYLE_N_TAGS; i++)
     {
-		short colour = TAG_COLOURS[i];
-		if (!native)
-		{
-			guint rgb = theme->text;
-			switch (colour) {
-			case COLOR_BLUE: rgb = theme->muted; break;
-			case COLOR_MAGENTA: rgb = theme->accent; break;
-			case COLOR_CYAN: rgb = theme->cyan; break;
-			case COLOR_GREEN: rgb = theme->green; break;
-			case COLOR_YELLOW: rgb = theme->yellow; break;
-			case COLOR_RED: rgb = theme->red; break;
-			default: break;
-			}
-			if (i == AI_STYLE_SYNTAX_NUMBER) rgb = theme->number;
-			if (i == AI_STYLE_SYNTAX_FUNCTION) rgb = theme->function;
-			colour = theme_nearest(rgb);
-		}
-		else if (colour == COLOR_BLUE)
-			colour = i == AI_STYLE_LINK ? COLOR_CYAN : fg;
-		else if (colour == -1) colour = fg;
+		/* Which palette entry a tag uses is decided once, in
+		 * src/core/ai-theme.h, so the window agrees with this. */
+		AiThemeRole role = ai_theme_role_for_tag((AiStyleTag)i);
+		short colour = native
+			? native_colour_for_role(role, (AiStyleTag)i, fg)
+			: theme_nearest(ai_theme_colour(theme, role));
+
 		if (init_pair(pair_for_tag((AiStyleTag)i), colour, bg) == ERR)
 		{
 			theme_colour = FALSE;
@@ -260,31 +244,19 @@ static attr_t
 attr_for_tag(AiStyleTag tag)
 {
     attr_t attr = theme_colour ? COLOR_PAIR(pair_for_tag(tag)) : 0;
+    AiThemeEmphasis emphasis = ai_theme_emphasis_for_tag(tag);
 
-    switch (tag)
-    {
-        case AI_STYLE_USER_PROMPT:
-        case AI_STYLE_HEADING:
-        case AI_STYLE_TOOL_NAME:
-        case AI_STYLE_COMMAND:
-        case AI_STYLE_TODO_ACTIVE:
-            attr |= A_BOLD;
-            break;
-        case AI_STYLE_DIM:
-        case AI_STYLE_THINKING:
-        case AI_STYLE_MARKER:
-        case AI_STYLE_TODO_DONE:
-            if (!theme_colour) attr |= A_DIM;
-            break;
-        case AI_STYLE_MENTION:
-            attr |= A_UNDERLINE;
-            break;
-        case AI_STYLE_ERROR:
-            attr |= A_BOLD;
-            break;
-        default:
-            break;
-    }
+    if (emphasis & AI_THEME_EMPHASIS_BOLD)
+        attr |= A_BOLD;
+
+    if (emphasis & AI_THEME_EMPHASIS_UNDERLINE)
+        attr |= A_UNDERLINE;
+
+    /* Dim only where there is no colour: a palette already says "muted"
+     * with its muted entry, and doing both would quiet the same tag
+     * twice in one front-end and once in the other. */
+    if ((emphasis & AI_THEME_EMPHASIS_FAINT) && !theme_colour)
+        attr |= A_DIM;
 
     return attr;
 }
@@ -387,6 +359,7 @@ typedef struct
     WINDOW         *status_win;
     WINDOW         *input_win;
 	gboolean details;
+	AiQuota usage;
 	gboolean tiny;
 	gint content_width;
 	gint input_first;
@@ -503,6 +476,12 @@ typedef struct
 } App;
 
 static void app_schedule_redraw(App *app);
+static void
+on_usage_changed(gpointer data)
+{
+	app_schedule_redraw(data);
+}
+
 static gboolean app_flush_send_queue(App *app);
 static void chrome_text(gint y, gint x, gint width, const gchar *text, attr_t attr);
 #include <termios.h>
@@ -1674,6 +1653,9 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+	ai_quota_refresh(&app->usage, provider, app->running && !app->dashboard);
+	y = panel_usage(y + 1, x, 28, &app->usage,
+		theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, theme_attr(PAIR_SURFACE));
     app->link_first_row = app->link_last_row = -1;
     if (app->work != NULL)
     {
@@ -6214,6 +6196,8 @@ main(int argc, char *argv[])
      */
     g_unix_signal_add(SIGINT, on_sigint, &app);
 
+    app.usage.changed = on_usage_changed;
+    app.usage.user_data = &app;
     app.work_timer = g_timeout_add_seconds(3, work_tick, &app);
     {
         struct termios keys;
@@ -6230,6 +6214,9 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	ai_quota_stop(&app.usage);
+	ai_quota_drain(&app.usage);
+	ai_quota_clear(&app.usage);
 	ai_conversation_cancel(app.conversation);
 	while (app.sending || ai_conversation_get_busy(app.conversation)) g_main_context_iteration(NULL, TRUE);
 	{

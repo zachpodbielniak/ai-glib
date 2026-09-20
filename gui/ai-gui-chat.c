@@ -288,6 +288,38 @@ chat_sync_status(AiGuiChatView *self)
 	gtk_widget_set_visible(self->queue_label, queued > 0);
 }
 
+void
+ai_gui_chat_view_restyle(AiGuiChatView *self)
+{
+	GListModel *model;
+
+	g_return_if_fail(AI_GUI_IS_CHAT_VIEW(self));
+
+	model = gtk_filter_list_model_get_model(self->filtered);
+
+	if (model == NULL)
+		return;
+
+	/*
+	 * Dropping the model and putting it back is what unbinds and
+	 * rebinds every row, and rebinding is the only thing that makes a
+	 * row ask ai_gui_style_attributes() again. Reaching into the list
+	 * view for its rows is not possible -- a #GtkListView keeps them
+	 * behind its item manager, not as children.
+	 *
+	 * The reference is held across the gap: set_model() with %NULL drops
+	 * the list's own, and a transcript freed there would take the
+	 * conversation with it.
+	 */
+	g_object_ref(model);
+	gtk_filter_list_model_set_model(self->filtered, NULL);
+	gtk_filter_list_model_set_model(self->filtered, model);
+	g_object_unref(model);
+
+	if (self->follow)
+		ai_gui_chat_view_scroll_to_bottom(self);
+}
+
 static gboolean
 on_tick(gpointer user_data)
 {

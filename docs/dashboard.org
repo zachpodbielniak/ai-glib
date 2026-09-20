@@ -2,6 +2,11 @@
 
 * A quick view of every ai-tui
 
+The registry described here is shared: =ai-gui= registers the same
+records and shows the same list, so a desktop window can focus a
+terminal session's pane and a terminal can see a desktop window's work.
+See [[file:gui.org][ai-gui]] for the desktop side.
+
 Run =ai-tui --dashboard=, or press =Ctrl+\= in any interactive ai-tui.
 The same key returns to the conversation with its draft, scroll position and
 pending approval intact. Provider work continues while the dashboard is open.

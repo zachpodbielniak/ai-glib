@@ -89,4 +89,38 @@ ai_gui_composer_set_busy(
 	gboolean       busy
 );
 
+/**
+ * ai_gui_composer_get_selected_provider:
+ * @self: a composer
+ *
+ * The provider the next question should go to.
+ *
+ * Returns: (transfer none) (nullable): a canonical provider name
+ */
+const gchar *
+ai_gui_composer_get_selected_provider(AiGuiComposer *self);
+
+/**
+ * ai_gui_composer_get_selected_model:
+ * @self: a composer
+ *
+ * Returns: (transfer none) (nullable): the model id, or %NULL for the
+ *   provider's own default
+ */
+const gchar *
+ai_gui_composer_get_selected_model(AiGuiComposer *self);
+
+/**
+ * ai_gui_composer_sync_model:
+ * @self: a composer
+ *
+ * Re-reads the session's provider and model into the pickers.
+ *
+ * Called after a switch that did not come from the pickers — the
+ * preferences dialog, or a restored session — so the two controls never
+ * disagree about which model the next question goes to.
+ */
+void
+ai_gui_composer_sync_model(AiGuiComposer *self);
+
 G_END_DECLS

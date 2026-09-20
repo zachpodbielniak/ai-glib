@@ -161,6 +161,21 @@ test_config(void)
 	g_assert_nonnull(error);
 	g_object_get(config, "open-dashboard-on-load", &enabled, NULL);
 	g_assert_true(enabled);
+	/* The preference is per application: ai-gui has a dashboard of its own
+	 * and each front-end may want a different default. Reading it only for
+	 * ai-tui's index meant apps.ai-gui.open-dashboard-on-load validated and
+	 * was then silently discarded. */
+	g_clear_error(&error);
+	g_assert_true(g_file_set_contents(path,
+		"apps:\n  ai-tui:\n    open-dashboard-on-load: false\n"
+		"  ai-gui:\n    open-dashboard-on-load: true\n", -1, NULL));
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_no_error(error);
+	g_assert_true(ai_config_get_app_dashboard(config, "ai-gui"));
+	g_assert_false(ai_config_get_app_dashboard(config, "ai-tui"));
+	g_object_get(config, "open-dashboard-on-load", &enabled, NULL);
+	g_assert_false(enabled);
+	g_assert_false(ai_config_get_app_dashboard(config, "ai"));
 	remove_tree(dir);
 }
 

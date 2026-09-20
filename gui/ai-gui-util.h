@@ -32,6 +32,7 @@ G_BEGIN_DECLS
  * @approve_all: approve every local tool call without asking
  * @expand: resolve `@` mentions and `/` commands
  * @agents: let the model start background agents
+ * @dashboard: open on the project dashboard rather than a conversation
  *
  * The command line, in one struct.
  *
@@ -56,6 +57,7 @@ typedef struct
 	gboolean  approve_all;
 	gboolean  expand;
 	gboolean  agents;
+	gboolean  dashboard;
 } AiGuiOptions;
 
 AiGuiOptions *

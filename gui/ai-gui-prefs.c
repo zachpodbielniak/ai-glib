@@ -10,10 +10,14 @@
 #include <string.h>
 
 #include "ai-gui-prefs.h"
+#include "ai-gui-style.h"
+
+#include "core/ai-theme.h"
 
 typedef struct
 {
 	AiGuiSession *session;
+	AiGuiWindow  *window;
 	AdwDialog    *dialog;
 	GtkWidget    *provider_row;
 	GtkWidget    *model_row;
@@ -29,6 +33,7 @@ prefs_free(
 	AiGuiPrefs *prefs = data;
 
 	g_clear_object(&prefs->session);
+	g_clear_object(&prefs->window);
 	g_strfreev(prefs->provider_names);
 	g_free(prefs);
 }
@@ -428,6 +433,134 @@ prefs_build_session_page(AiGuiPrefs *prefs)
 }
 
 /* ================================================================
+ * Appearance page
+ * ================================================================ */
+
+static const gchar *const COLOR_SCHEMES[] = { "system", "light", "dark" };
+static const gchar *const COLOR_SCHEME_LABELS[] = {
+	"Follow the desktop", "Light", "Dark"
+};
+
+static void
+on_theme_selected(
+	GObject    *row,
+	GParamSpec *pspec,
+	gpointer    user_data
+){
+	AiGuiPrefs *prefs = user_data;
+	guint selected = adw_combo_row_get_selected(ADW_COMBO_ROW(row));
+	const AiTheme *theme = ai_theme_get(selected);
+
+	if (g_strcmp0(theme->name, ai_gui_style_get_theme()) == 0)
+		return;
+
+	ai_gui_window_set_theme(prefs->window, theme->name);
+}
+
+static void
+on_scheme_selected(
+	GObject    *row,
+	GParamSpec *pspec,
+	gpointer    user_data
+){
+	AiGuiPrefs *prefs = user_data;
+	guint selected = adw_combo_row_get_selected(ADW_COMBO_ROW(row));
+
+	if (selected >= G_N_ELEMENTS(COLOR_SCHEMES))
+		return;
+
+	ai_gui_window_set_color_scheme(prefs->window, COLOR_SCHEMES[selected]);
+}
+
+static AdwPreferencesPage *
+prefs_build_appearance_page(AiGuiPrefs *prefs)
+{
+	AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+	AdwPreferencesGroup *group =
+		ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+	GtkWidget *theme_row;
+	GtkWidget *scheme_row;
+	guint i;
+
+	adw_preferences_page_set_title(page, "Appearance");
+	adw_preferences_page_set_icon_name(page, "applications-graphics-symbolic");
+
+	adw_preferences_group_set_title(group, "Theme");
+	adw_preferences_group_set_description(group,
+		"The same palettes ai-tui draws in a terminal, so one session "
+		"looks like the next whichever front-end it is in. Ctrl+T cycles.");
+
+	/* ---- palette ---- */
+
+	{
+		g_autoptr(GtkStringList) names = gtk_string_list_new(NULL);
+		guint selected = 0;
+
+		for (i = 0; i < ai_theme_count(); i++)
+		{
+			gtk_string_list_append(names, ai_theme_get(i)->name);
+
+			if (g_strcmp0(ai_theme_get(i)->name,
+			              ai_gui_style_get_theme()) == 0)
+			{
+				selected = i;
+			}
+		}
+
+		theme_row = adw_combo_row_new();
+		adw_preferences_row_set_title(ADW_PREFERENCES_ROW(theme_row), "Palette");
+		adw_action_row_set_subtitle(ADW_ACTION_ROW(theme_row),
+			"terminal follows the desktop theme; monochrome uses no colour "
+			"at all");
+		adw_combo_row_set_model(ADW_COMBO_ROW(theme_row),
+		                        G_LIST_MODEL(g_object_ref(names)));
+		/*
+		 * Selected before the handler is connected. Setting it after
+		 * would fire a change for the value that was already in force,
+		 * writing the settings file on every visit to this page.
+		 */
+		adw_combo_row_set_selected(ADW_COMBO_ROW(theme_row), selected);
+		g_signal_connect(theme_row, "notify::selected",
+		                 G_CALLBACK(on_theme_selected), prefs);
+		adw_preferences_group_add(group, theme_row);
+	}
+
+	/* ---- light or dark ---- */
+
+	{
+		g_autoptr(GtkStringList) labels =
+			gtk_string_list_new(COLOR_SCHEME_LABELS);
+		guint selected = 0;
+
+		for (i = 0; i < G_N_ELEMENTS(COLOR_SCHEMES); i++)
+		{
+			if (g_strcmp0(COLOR_SCHEMES[i],
+			              ai_gui_style_get_color_scheme()) == 0)
+			{
+				selected = i;
+			}
+		}
+
+		scheme_row = adw_combo_row_new();
+		adw_preferences_row_set_title(ADW_PREFERENCES_ROW(scheme_row),
+		                              "Light or dark");
+		adw_action_row_set_subtitle(ADW_ACTION_ROW(scheme_row),
+			"Applies to terminal and monochrome. A named palette carries "
+			"its own.");
+		adw_combo_row_set_model(ADW_COMBO_ROW(scheme_row),
+		                        G_LIST_MODEL(g_object_ref(labels)));
+		adw_combo_row_set_selected(ADW_COMBO_ROW(scheme_row), selected);
+		g_signal_connect(scheme_row, "notify::selected",
+		                 G_CALLBACK(on_scheme_selected), prefs);
+		adw_preferences_group_add(group, scheme_row);
+	}
+
+	adw_preferences_page_add(page, group);
+
+	return page;
+}
+
+/* ================================================================
  * Provider page
  * ================================================================ */
 
@@ -676,6 +809,11 @@ ai_gui_prefs_present(
 
 	prefs = g_new0(AiGuiPrefs, 1);
 	prefs->session = g_object_ref(session);
+	prefs->window = GTK_IS_WIDGET(parent)
+		? AI_GUI_WINDOW(gtk_widget_get_root(parent)) : NULL;
+
+	if (prefs->window != NULL)
+		g_object_ref(prefs->window);
 
 	dialog = ADW_PREFERENCES_DIALOG(adw_preferences_dialog_new());
 	prefs->dialog = ADW_DIALOG(dialog);
@@ -683,6 +821,9 @@ ai_gui_prefs_present(
 
 	adw_preferences_dialog_add(dialog, prefs_build_session_page(prefs));
 	adw_preferences_dialog_add(dialog, prefs_build_provider_page(prefs));
+
+	if (prefs->window != NULL)
+		adw_preferences_dialog_add(dialog, prefs_build_appearance_page(prefs));
 
 	/*
 	 * The dialog owns the state for exactly as long as it exists.

@@ -249,6 +249,7 @@ ai_gui_options_copy(const AiGuiOptions *self)
 	copy->approve_all = self->approve_all;
 	copy->expand = self->expand;
 	copy->agents = self->agents;
+	copy->dashboard = self->dashboard;
 
 	return copy;
 }

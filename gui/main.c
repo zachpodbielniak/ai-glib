@@ -14,7 +14,10 @@
 #include <stdlib.h>
 
 #include "ai-gui.h"
+#include "ai-gui-settings.h"
 #include "ai-gui-style.h"
+
+#include "core/ai-theme.h"
 
 static gchar    *opt_provider = NULL;
 static gchar    *opt_model = NULL;
@@ -30,6 +33,11 @@ static gboolean  opt_local_tools = FALSE;
 static gboolean  opt_yes = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
+static gboolean  opt_dashboard = FALSE;
+static gboolean  opt_no_dashboard = FALSE;
+static gchar    *opt_theme = NULL;
+static gchar    *opt_color_scheme = NULL;
+static gboolean  opt_list_themes = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 
@@ -65,6 +73,17 @@ static const GOptionEntry option_entries[] = {
 	  "Send input verbatim: no @ mentions, no / commands", NULL },
 	{ "no-agents", 0, 0, G_OPTION_ARG_NONE, &opt_no_agents,
 	  "Do not let the model start background agents", NULL },
+	{ "dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_dashboard,
+	  "Open the project dashboard instead of a conversation", NULL },
+	{ "no-dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_no_dashboard,
+	  "Open a conversation even when the saved preference says otherwise",
+	  NULL },
+	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme,
+	  "Colour theme (overrides AI_GUI_THEME and NO_COLOR)", "NAME" },
+	{ "list-themes", 0, 0, G_OPTION_ARG_NONE, &opt_list_themes,
+	  "List colour themes and exit", NULL },
+	{ "color-scheme", 0, 0, G_OPTION_ARG_STRING, &opt_color_scheme,
+	  "Light or dark: system, light, dark", "NAME" },
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
 	  "Print the version and exit", NULL },
 	{ "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
@@ -90,6 +109,13 @@ static const gchar *description_text =
 	"  # Any provider property, the same names `ai --set` takes\n"
 	"  ai-gui -p grok-build --set reasoning-effort=high\n"
 	"\n"
+	"  # Every ai-gui and ai-tui session on this machine, at a glance\n"
+	"  ai-gui --dashboard\n"
+	"\n"
+	"  # The same palettes ai-tui draws, and the desktop's own\n"
+	"  ai-gui --theme nord\n"
+	"  ai-gui --theme terminal --color-scheme dark\n"
+	"\n"
 	"Sessions are kept under $XDG_DATA_HOME/ai-glib/gui/sessions and\n"
 	"restored on the next start. A restored transcript is a record to\n"
 	"read; where the provider keeps its own session, that session is\n"
@@ -113,6 +139,54 @@ static const gchar *license_text =
 	"License along with this program. If not, see\n"
 	"<https://www.gnu.org/licenses/>.\n";
 
+/*
+ * The appearance this run starts in.
+ *
+ * Resolved once in main() rather than read again in on_activate(),
+ * because a second activation raises the window that is already open
+ * and must not re-theme it out from under somebody who has since
+ * changed it.
+ */
+static gchar *startup_theme;
+static gchar *startup_color_scheme;
+
+/*
+ * --theme beats AI_GUI_THEME beats the saved choice beats the default,
+ * and NO_COLOR only gets a say when none of the three above spoke. That
+ * is the order ai-tui uses, including the part where naming a theme
+ * explicitly overrides NO_COLOR: somebody who typed `--theme nord`
+ * asked for colour.
+ */
+static void
+resolve_appearance(void)
+{
+	g_autoptr(AiGuiSettings) saved = ai_gui_settings_load(NULL);
+	const gchar *requested = opt_theme != NULL ? opt_theme
+		: g_getenv("AI_GUI_THEME");
+
+	if (requested != NULL && *requested != '\0' &&
+	    ai_theme_find(requested, NULL) == NULL)
+	{
+		/*
+		 * g_message, not a failure: the window still opens. Refusing to
+		 * start over a misspelled theme would be a poor trade, and the
+		 * line is printed so the misspelling is not a mystery.
+		 */
+		g_message("ai-gui: unknown theme '%s'; use --list-themes", requested);
+		requested = NULL;
+	}
+
+	if (requested == NULL || *requested == '\0')
+	{
+		requested = g_getenv("NO_COLOR") != NULL ? "monochrome"
+			: saved->theme;
+	}
+
+	startup_theme = g_strdup(requested);
+	startup_color_scheme = g_strdup(opt_color_scheme != NULL
+		? opt_color_scheme : saved->color_scheme);
+}
+
 static void
 on_activate(
 	GApplication *app,
@@ -133,7 +207,7 @@ on_activate(
 		return;
 	}
 
-	ai_gui_style_init();
+	ai_gui_style_init(startup_theme, startup_color_scheme);
 	gtk_window_present(GTK_WINDOW(
 		ai_gui_window_new(ADW_APPLICATION(app), options)));
 }
@@ -171,6 +245,19 @@ main(
 		return 0;
 	}
 
+	if (opt_list_themes)
+	{
+		guint i;
+
+		for (i = 0; i < ai_theme_count(); i++)
+			g_print("%s%s\n", ai_theme_get(i)->name, i == 0 ? " (default)" : "");
+
+		g_print("\n`terminal` (also spelled `system`) follows the desktop "
+		        "theme and\n--color-scheme; the named palettes carry their "
+		        "own light or dark.\n");
+		return 0;
+	}
+
 	options = g_new0(AiGuiOptions, 1);
 	options->provider = g_strdup(opt_provider);
 	options->model = g_strdup(opt_model);
@@ -188,6 +275,35 @@ main(
 	options->expand = !opt_no_expand;
 	options->agents = !opt_no_agents;
 
+	/*
+	 * The saved preference applies only to a bare launch.
+	 *
+	 * --continue or an explicit `--set session-id=` means somebody has
+	 * already said which conversation they want, and opening a list of
+	 * all of them instead would be answering a question they did not
+	 * ask. --dashboard says it outright and wins either way.
+	 */
+	{
+		g_autoptr(AiConfig) config = ai_config_new();
+		gboolean explicit_session = opt_continue;
+		gsize i;
+
+		for (i = 0; opt_set != NULL && opt_set[i] != NULL; i++)
+		{
+			if (g_str_has_prefix(opt_set[i], "session-id=") ||
+			    g_str_has_prefix(opt_set[i], "continue-session"))
+			{
+				explicit_session = TRUE;
+			}
+		}
+
+		options->dashboard = opt_dashboard ||
+			(ai_config_get_app_dashboard(config, "ai-gui") &&
+			 !opt_no_dashboard && !explicit_session);
+	}
+
+	resolve_appearance();
+
 	app = adw_application_new(AI_GUI_APP_ID, G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect(app, "activate", G_CALLBACK(on_activate), options);
 
@@ -203,6 +319,10 @@ main(
 	g_free(opt_system);
 	g_free(opt_effort);
 	g_free(opt_directory);
+	g_free(opt_theme);
+	g_free(opt_color_scheme);
+	g_free(startup_theme);
+	g_free(startup_color_scheme);
 	g_strfreev(opt_set);
 
 	return status;

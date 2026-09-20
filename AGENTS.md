@@ -1215,6 +1215,141 @@ The approval dialog spins its nested `GMainLoop` on
 is held as a `GSource *` and torn down with `g_source_destroy()` — both for
 the reasons the main-context section above gives.
 
+### Themes
+
+**The palettes are one table**, `AI_THEMES` in `src/core/ai-theme.h`, read
+by `bin/ai-tui-theme.h` and `gui/ai-gui-style.c` alike. It is a private
+header of `static` data and `static inline` functions — the `ai-json-util.h`
+pattern — so nothing new is exported and nothing new is introspected.
+
+That file settles one question and no more: *given* that a frontend has
+chosen one of these named palettes, which entry does each style tag use.
+The library still has no opinion about what a tag looks like; a frontend
+with a palette of its own ignores the header entirely. There were two
+answers before, written at different times from the same intent, and they
+had drifted — the terminal drew a link muted and the window drew it
+accented, so one person running both saw two programs disagreeing about
+their own theme.
+
+Four rules:
+
+- **`ai_theme_role_for_tag()` and `ai_theme_emphasis_for_tag()` are the
+  mapping.** Changing one changes both front-ends, which is the point.
+  `tests/test-ai-gui-theme.c` asserts the whole table by name and counts it
+  against `AI_STYLE_N_TAGS`, so a tag added to the library cannot be
+  forgotten here silently.
+- **Colour and weight are shared; font family and slant are not.** A
+  terminal can be bold and underlined and cannot be monospace or italic, so
+  those stay in `gui/`'s own small `TYPEFACES` table. Putting them in the
+  shared header would have been stating something one frontend cannot honour.
+- **`terminal` and `monochrome` name no colours** — every field is zero.
+  `ai_theme_is_native()` is the guard before reading one; ai-tui falls back
+  to the sixteen the user configured and ai-gui to GNOME's palette.
+- **A named palette is applied by redefining libadwaita's own colours**
+  (`window_bg_color`, `accent_color`, …), not by styling widgets. Styling
+  the transcript alone produces catppuccin text inside Adwaita-blue chrome.
+  A palette also forces the matching light/dark: a near-black page with
+  light-theme widget internals reads as a bug, not a choice.
+
+**A theme change must restyle the transcript.** A span's colour is a
+`PangoAttribute` baked into a label when the block was last rendered, and
+nothing invalidates it — so recolouring the chrome alone leaves
+light-lavender prose on a latte page. `ai_gui_style_add_changed()` is the
+hook and `ai_gui_chat_view_restyle()` the response; it also covers the
+change nobody initiates, the desktop going dark at sunset while `terminal`
+is active.
+
+Appearance is remembered in `$XDG_DATA_HOME/ai-glib/gui/settings.json`
+(`gui/ai-gui-settings.c`, GTK-free) rather than in `config.yaml`: that file
+is validated by the library and read by `ai` and `ai-tui` too, so a key
+there would have to mean something to all three. A `--theme` on the command
+line is deliberately *not* written back.
+
+### Account quota
+
+**One cache, two front-ends**, `src/core/ai-quota.h` — the same pattern as
+`AI_THEMES` and for the same reason. `AiCliReport` gives each allowance in
+whatever direction its provider stated (Codex says `used_percent`, a Claude
+panel says remaining, some give a count against a limit), and turning that
+into a number a person acts on is a *decision*. A terminal saying 75%
+remaining while a window says 25% for one account is worse than either
+saying nothing.
+
+It is a private header of `static inline` functions — nothing exported,
+nothing introspected — holding the direction rule, the display rounding,
+the "worst allowance" pick, the heading vocabulary *and* the refresh
+policy. `bin/ai-tui-usage.h` was the first copy and was folded into it when
+ai-gui needed the second.
+
+Five rules:
+
+- **Never infer a direction.** An unlabeled `percent`, a missing
+  denominator or an out-of-range value is unavailable. A number that might
+  mean either direction is worth less than no number.
+- **Rounding must not invent an exhausted allowance.** `%.0f` prints 0.4%
+  as `0%`, which reads as "you are out" when you are not — the same
+  invented zero the report layer refuses to produce from missing data.
+  `ai_quota_format_percent()` answers `<1%` and `>99%` at the two ends, and
+  `tests/test-quota.c` names every boundary.
+- **Identity is provider *and* model *and* working directory.** A report is
+  scoped to all three; relabelling the previous snapshot would attribute
+  somebody else's quota to this session. The generation counter is what
+  discards an in-flight answer that no longer applies.
+- **Visibility is the whole throttle.** A query is a CLI subprocess. ai-tui
+  asks only while the panel is drawn; ai-gui only while the window is
+  active. Failures back off at the same one minute as successes, or a
+  broken CLI becomes a subprocess per redraw.
+- **Teardown is stop, drain, clear, in that order.** `ai_quota_ready()`
+  clears `pending` *before* it checks `stopped`, so the drain always
+  terminates — including when the cancel it just fired is what completed
+  the query. `ai_quota_clear()` asserts `!pending` because skipping the
+  drain leaves a callback pointing at freed memory.
+
+The query runs against a *separate* client built from the active one
+(executable, model, cwd, environment, timeout). Reporting is read-only work
+and has no business sharing the lifetime of the object a turn is using.
+
+### The dashboard and the pickers
+
+`ai-gui` registers an `AiWorkSession` like `ai-tui` does, into the same
+`$XDG_STATE_HOME/ai-glib/sessions` registry — so each front-end's
+dashboard lists the other's work. Four things follow:
+
+- **The ordering is copied, not approximated.** `ai_gui_work_priority()`
+  and `ai_gui_work_compare()` reproduce ai-tui's three keys exactly.
+  Two dashboards reading one registry that sorted it differently would
+  be two answers to "what needs me next". If one changes, change both.
+- **`AiGuiSession:busy` and the record are published from one place.**
+  `ai_gui_session_publish_work()` derives every field from the
+  conversation, the executor and the brigade rather than caching them as
+  they change: a second copy kept in step by hand is a second copy that
+  eventually is not. It runs on every state change *and* on a
+  three-second heartbeat, against the registry's fifteen-second expiry.
+- **A built-in does not set an outcome.** `/help` reporting DONE would
+  tell the dashboard a model had just finished work. The outcome is only
+  written when a real turn ends.
+- **Focusing a foreign row checks `@ai_session` first.** A tmux pane id
+  is reused when a pane closes, so switching without that check opens
+  whatever unrelated work took the number. Resume takes the same
+  advisory lock ai-tui takes, so the exclusion spans both front-ends.
+
+The per-question provider and model menus apply their selection
+immediately before a send, never when the menu changes: a switch
+mid-turn moves the conversation out from under a reply still arriving.
+`ai_provider_list_models_async()` fills the model menu — **check
+`AI_PROVIDER_GET_IFACE(...)->list_models_async` first**, because
+`claude-tmux` implements neither half and the public wrapper answers a
+missing vfunc with a critical, which is fatal under fatal-warnings.
+
+**`Ctrl+backslash` is forwarded by the composer**, not bound on the
+window alone: `GtkTextView` binds it to `delete-from-cursor(WHITESPACE)`
+and consumes it, so a class binding never sees the key while the
+composer has focus — which is every time somebody would press it.
+
+`tests/test-ai-gui-work.c` links `gui/ai-gui-work.c` directly, without a
+display, and sandboxes `XDG_STATE_HOME`: a suite that read the
+developer's real registry would pass or fail by whose machine ran it.
+
 The preferences dialog's provider page is generated by walking the
 provider's writable `GParamSpec` list. A new provider knob is reachable there
 the day it exists, with no edit here — the same property-is-the-interface
@@ -1225,6 +1360,16 @@ rule `ai --set` follows. Do not add a per-provider branch.
 `src/core/ai-config.c`: six places needed that comparison and adding the
 third app found five of them by grep, missing the YAML validator's own list —
 which rejected a config naming the new app on load.
+
+`open-dashboard-on-load` is per app for the same reason and is read with
+`ai_config_get_app_dashboard()`. The loader used to read it only at
+ai-tui's index, so `apps.ai-gui.open-dashboard-on-load` validated — the
+validator checks the key under *any* app — and was then silently
+discarded, which reads exactly like the preference not working rather
+than like a bug. The `AiConfig:open-dashboard-on-load` property remains
+an alias for ai-tui's slot: it predates the second dashboard and is
+documented as ai-tui's, so a host reading it back still sees what it
+set.
 
 See `docs/gui.org`.
 

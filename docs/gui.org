@@ -46,6 +46,36 @@ builds its provider page by walking the provider's own writable
 =GParamSpec= list, so a property added to a client is reachable from the
 command line, from bindings and from this dialog the day it exists.
 
+** Provider and model, per question
+
+Two menus sit under the message box. They choose where the *next*
+question goes, and nothing switches while you are using them: the
+provider is changed immediately before the message is sent, because a
+switch mid-turn would move the conversation out from under a reply that
+is still arriving.
+
+The provider list comes off the =AiProviderType= enum, so a provider
+added to the library appears without an edit here. The model list is
+fetched from the provider itself through
+=ai_provider_list_models_async()= and is searchable — a provider can
+advertise a hundred models. Three things follow from that:
+
+- A provider that cannot list its models (no key, no CLI installed, no
+  network) still offers the one this session is on. The menu degrades;
+  it does not empty.
+- A model the provider does not advertise — one set with
+  =--set model==, say — stays selectable. Dropping it would quietly move
+  the next question somewhere else.
+- =claude-tmux= implements no listing at all, and asking a provider that
+  does not would raise a critical. The interface is checked before the
+  call rather than after.
+
+Switching carries context across, exactly as the preferences dialog's
+switch does: see [[file:provider-switching.org][provider switching]] and
+[[file:native-session.org][native session import]]. While a turn is running the pickers are not
+applied — the follow-up is queued against the current provider and the
+window says so rather than pretending otherwise.
+
 ** The window
 
 Sessions on the left, the conversation on the right, an
@@ -75,6 +105,8 @@ Sessions on the left, the conversation on the right, an
 | =F9= | Show or hide the session list |
 | =Ctrl+Shift+E= | Export the transcript |
 | =Ctrl+Shift+G= | Background agents |
+| =Ctrl+backslash= | Project dashboard, and back again |
+| =Ctrl+T= | Next theme |
 
 ** Attachments
 
@@ -186,9 +218,210 @@ belong in the image build rather than in a transient overlay.
 | =gui/ai-gui-prefs.c= | Preferences, including the generated provider page |
 | =gui/ai-gui-agents.c= | The background-agent panel |
 | =gui/ai-gui-approval.c= | The approval dialog and its nested loop |
-| =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; the stylesheet |
+| =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; palettes and the stylesheet |
+| =gui/ai-gui-settings.c= | Theme and light/dark, remembered; *no GTK* |
+| =gui/ai-gui-quota.c= | The account-allowance indicator and its popover |
 
-The three files marked *no GTK* are the ones =tests/test-ai-gui-session.c=
-links directly. That is why they do not include a toolkit header: a suite that
+The files marked *no GTK* are the ones =tests/test-ai-gui-session.c=,
+=tests/test-ai-gui-work.c= and =tests/test-ai-gui-theme.c= link
+directly. That is why they do not include a toolkit header: a suite that
 needed a display would pass or fail by whose machine ran it, exactly as one
 reading the developer's real =~/.claude= would.
+
+** Appearance
+
+ai-gui draws the same palettes [[file:tui.org][ai-tui]] does, from the same table, and
+defaults to Catppuccin Mocha exactly as ai-tui does.
+
+| Theme | What it is |
+|-------+------------|
+| =catppuccin-mocha= | The default. Dark. |
+| =catppuccin-latte= | Light. |
+| =nord= | Dark. |
+| =terminal= | The desktop's own colours, following your light/dark preference. Also spelled =system=. |
+| =monochrome= | No colour at all: weight, underline and the label's own foreground. |
+
+#+begin_src sh
+ai-gui --list-themes
+ai-gui --theme nord
+ai-gui --theme terminal --color-scheme dark
+AI_GUI_THEME=catppuccin-latte ai-gui
+#+end_src
+
+=Ctrl+T= cycles them in a running window, the same key ai-tui uses, and
+the Appearance page in Preferences has both controls. A choice made in
+the window is remembered in
+=$XDG_DATA_HOME/ai-glib/gui/settings.json=; a =--theme= on the command
+line is for that run only, because a one-off look at nord should not
+become the permanent setting.
+
+Selection order is =--theme=, then =AI_GUI_THEME=, then the saved
+choice, then Catppuccin Mocha. =NO_COLOR= selects =monochrome= only when
+none of those three spoke: naming a theme explicitly is asking for
+colour. An unknown name is a message on stderr and the window still
+opens.
+
+*** Light and dark
+
+=--color-scheme system|light|dark= is the ordinary GTK preference, and
+it applies to =terminal= and =monochrome=. The three named palettes
+carry their own: selecting Catppuccin Latte forces the light variant of
+every widget, because a light page inside dark chrome is not a theme,
+it is a bug. Switch to =terminal= to get the preference back.
+
+*** How a palette reaches the window
+
+A named palette is applied by redefining libadwaita's own colours ---
+=window_bg_color=, =headerbar_bg_color=, =accent_color=, =error_color=
+and the rest --- so the header bar, the popovers, the dialogs and the
+scrollbars are part of the theme rather than Adwaita blue around a
+themed transcript. Which palette entry each style tag draws in is
+decided once, in =src/core/ai-theme.h=, and both front-ends read it:
+that is what makes a tool target the same colour in the window as in the
+terminal.
+
+Under =terminal=, nothing is redefined --- the GTK stylesheet shows
+through, including a high-contrast or third-party one --- and the spans
+are coloured from GNOME's own palette. Under =monochrome= nothing is
+coloured at all, and the faint tags are the only ones that look
+different, which is the same rule ai-tui follows when it has no colours
+to use.
+
+** Account quota
+
+The header bar shows how much of the account allowance is left, beside
+the search and menu buttons. It is the same figure [[file:tui.org][ai-tui]] prints under
+the provider in its session panel, from the same report and the same
+direction rule --- see [[file:cli-reporting.org][CLI reporting]] for which providers can answer and
+what authentication they need.
+
+The indicator shows *the lowest* allowance, not the first: a provider
+that reports a five-hour window and a weekly one usually has plenty of
+the second and none of the first, and the one about to stop the
+conversation is the one worth a single number. It turns amber below 25%
+and red below 10%, using the palette's own warning and error colours so
+it matches whichever theme is loaded. Click it for every allowance, each
+with its own bar and the provider's own words for when it refills.
+
+Four things follow from a report being a CLI subprocess rather than a
+field on a response:
+
+1. *It is hidden when there is nothing to report.* An HTTP provider has
+   no account report at all, and a permanently blank indicator beside one
+   would teach you to ignore the place the number appears.
+2. *Polling follows the window.* A window behind a browser has no
+   business spawning a CLI every minute, so queries stop when the window
+   is not active and resume when it comes forward --- the same rule
+   ai-tui applies to a hidden panel.
+3. *A refresh is at most once a minute*, failures included. Backing off a
+   failing provider at the same rate as a working one is what stops a
+   broken CLI from becoming a subprocess per redraw.
+4. *Switching session, model or working directory drops the snapshot.* An
+   allowance is scoped to all three, and relabelling the previous one
+   would attribute somebody else's quota to this conversation.
+
+A failed refresh keeps the last figure, dimmed, under a =REMAINING
+(stale)= heading rather than blanking it: the last thing that was true is
+more use than nothing, as long as it does not look current. A row whose
+direction the provider never stated gets no bar at all --- an empty bar
+would claim you have none left, which is a different statement from "we
+do not know".
+
+** The project dashboard
+
+=Ctrl+backslash=, the toolbar's grid button, =/dashboard=, or
+=ai-gui --dashboard= at startup. The same key returns to the
+conversation with its draft intact; the turn keeps running behind it.
+
+*The registry is shared with ai-tui.* Every ai-glib front-end on this
+machine writes the same records under =$XDG_STATE_HOME/ai-glib/sessions=,
+so this window lists terminal sessions as well as its own — and can put
+one in front of you. See [[file:dashboard.org][the dashboard]] for what a record contains and
+how it expires.
+
+Rows are ordered by attention: INPUT, ERROR, WORK, DONE, STOPPED, IDLE,
+then DISCONNECTED, and grouped under the project they belong to. That
+ordering is reimplemented here to the letter rather than approximated,
+because two dashboards reading one registry must not disagree about
+which row is first. There is no percentage: a finished model turn does
+not prove an issue is resolved.
+
+| Action | What it does |
+|--------+--------------|
+| Open | This window's own session: switch to it. Anything else: focus its tmux pane |
+| Worktree | Branch =ai/<uuid>= into an adjacent =.ai-worktrees/= checkout and open a session there |
+| Resume | Start a session on a disconnected record's native provider session, adopting the record |
+| Link | Open a linked issue or PR with =xdg-open= |
+| Open project… | Start a conversation in another directory |
+
+Four things are deliberate:
+
+1. *Opening a foreign row goes through tmux, and checks first.* A pane
+   id is reused when a pane closes, so the pane's published
+   =@ai_session= is compared against the record's id before switching.
+   Without that check the action opens whatever unrelated work took the
+   number.
+2. *A new project is a session in this window*, not a new window. ai-tui
+   opens a tmux window because it is a terminal program; this keeps every
+   conversation one click apart instead of scattered across panes.
+3. *Resume adopts the record* rather than starting a second identity
+   beside it, so the links and the title already attached survive — and
+   it takes the same advisory lock ai-tui does, so two front-ends cannot
+   both drive one record.
+4. *A worktree is kept whatever happens next.* Uncommitted changes in the
+   source checkout are not copied, because =git worktree add= does not
+   carry them. Cleanup is Git's usual worktree commands once your work is
+   committed.
+
+*** Opening on the dashboard
+
+#+begin_src yaml
+apps:
+  ai-gui:
+    open-dashboard-on-load: true
+#+end_src
+
+The default is false, and the preference applies only to a bare launch:
+=--continue= or an explicit =--set session-id== means you have already
+said which conversation you want. =--dashboard= says it outright;
+=--no-dashboard= opts out for one run. This is the same key ai-tui uses
+under its own name, and both are read through
+=ai_config_get_app_dashboard()=.
+
+** Linked issues and pull requests
+
+#+begin_example
+/issue link https://git.example.org/team/project/issues/42
+/pr link https://github.com/team/project/pull/81
+/links
+/issue unlink https://git.example.org/team/project/issues/42
+/work https://git.example.org/team/project/issues/42
+#+end_example
+
+Linking records an association. It never posts a comment, closes an
+issue, or changes a remote assignee. =/work= fetches the title, state and
+body and queues *that* as an explicit assignment; a failed fetch submits
+nothing, because sending the model "here is your task:" with nothing
+after it is worse than saying the fetch did not work.
+
+Links appear as a globe in the header bar whenever the session has any.
+Each row reads number, cached remote state, then title — the order
+ai-tui uses, so one link reads the same way in both. The state is
+cached: a stale =open= sits *beside* the number rather than replacing it.
+GitHub metadata needs an authenticated =gh=, Forgejo/Gitea needs =tea=.
+
+** Slash commands
+
+Built-ins resolve in the library and are run here: =/help=, =/commands=,
+=/skills=, =/agents=, =/tools=, =/todos=, =/running=, =/kill=, =/clear=,
+=/reset=, =/reload=, =/cwd=, =/context=, =/expand=, =/save=, =/export=,
+=/links=, =/issue=, =/pr=, =/work=, =/project=, =/dashboard=, =/quit=.
+
+Their output goes into the transcript rather than a toast: =/help= and
+=/links= are output, and output that disappears after three seconds is
+output somebody has to ask for twice.
+
+=/model=, =/provider= and =/effort= report where the controls are instead
+of reimplementing a list you would then have to type an exact id into —
+the two menus under the message box and the preferences dialog. =/btw= is
+an ai-tui feature; open a second session instead.
