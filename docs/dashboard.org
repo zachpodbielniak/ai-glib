@@ -1,0 +1,168 @@
+#+title: Projects, dashboard and linked work
+
+* A quick view of every ai-tui
+
+Run =ai-tui --dashboard=, or press =Ctrl+\= in any interactive ai-tui.
+The same key returns to the conversation with its draft, scroll position and
+pending approval intact. Provider work continues while the dashboard is open.
+=/dashboard= is the command equivalent; the key also works during a turn or
+approval. Bracketed paste never invokes dashboard shortcuts.
+
+Each interactive conversation registers automatically. The dashboard includes
+sessions launched manually, groups related worktrees by their Git common
+directory, and orders rows by attention: INPUT, ERROR, WORK, DONE, STOPPED,
+IDLE, then DISCONNECTED. A non-Git directory is also a project. The current
+activity and links belong to the selected row. There is no estimated percentage:
+a finished model turn does not prove an issue is resolved or a PR is merged.
+
+| Key | Action |
+|-----+--------|
+| Up / Down | Select a session |
+| Enter | Focus its tmux pane, or return to this conversation |
+| n | Start here from the initial dashboard, otherwise open another project window |
+| w | Create an isolated Git worktree and open ai-tui there |
+| r | Resume a disconnected session with a native provider session ID |
+| o | Open the selected linked issue or PR |
+| Tab | Select the next link |
+| Ctrl+\ | Return to the current conversation |
+| q | Exit this ai-tui, cancelling its foreground turn |
+
+=/project /path/to/repository= opens a project in a tmux window. With no
+argument, =/project= opens the dashboard. Existing windows and panes remain
+where you put them: registering a session does not rearrange tmux.
+
+=w= branches from the selected checkout's HEAD into =ai/<UUID>= and creates
+an adjacent =.ai-worktrees/<directory>-<UUID>= checkout. Changes in the source
+checkout are not copied. The worktree is retained if terminal launch fails;
+its path is shown in the error. Cleanup is explicit, using Git's usual worktree
+commands after your work is committed. Git and tmux run in a worker with bounded
+subprocess waits, so creation does not block the dashboard.
+
+* Open the dashboard at startup
+
+In =~/.config/ai-glib/config.yaml= (or the corresponding =XDG_CONFIG_HOME=):
+
+#+begin_src yaml
+apps:
+  ai-tui:
+    open-dashboard-on-load: true
+#+end_src
+
+The default is false. =--no-dashboard= opens a conversation explicitly.
+The configured preference applies only to a bare interactive launch; a prompt,
+=-c=, an explicit native session setting, or =--workspace-session= takes priority.
+=--dashboard= explicitly opens the dashboard. Informational, native launch,
+dry-run and one-shot modes do not register dashboard sessions.
+The preference is also the boolean =AiConfig:open-dashboard-on-load= property.
+
+* Issue and PR assignments
+
+#+begin_example
+/issue link https://git.example.org/team/project/issues/42
+/pr link https://github.com/team/project/pull/81
+/links
+/issue unlink https://git.example.org/team/project/issues/42
+/work https://git.example.org/team/project/issues/42
+#+end_example
+
+Linking records an association without sending a new agent prompt or changing
+remote assignees. =/work= fetches the title, state and body, then queues that
+material as an explicit assignment. An unsent draft is preserved. A failed
+fetch does not submit an empty assignment. Reset or exit suppresses late
+assignment results. External issue text remains external task context and does
+not replace system instructions or grant tool permissions.
+
+The side panel puts LINKED WORK above usage and todos. Each underlined row
+shows the reference number, cached remote state, and title. Click a row to open
+its URL, or press =Ctrl+]= to open links in sequence. =/links= prints full URLs;
+all links are available even if the panel is too short or hidden. The dashboard's
+=o= action opens its selected link. These actions use =xdg-open= on the machine
+running ai-tui; over SSH use the printed URL with your local browser if needed.
+
+GitHub metadata uses an authenticated =gh=. Forgejo/Gitea metadata uses =tea=,
+selecting exactly one account matching the URL's scheme, hostname and port.
+Multiple matching accounts or an unsupported host leave the association usable
+and report the metadata error. No credentials are copied into session records.
+GitLab merge-request URLs can be linked and opened; fetching them is not yet a
+supported adapter. Metadata reads are asynchronous and bounded. Each live
+session refreshes one link per minute, rotating through its links. Displayed
+remote state is cached; a refresh failure retains the last known value. The
+initial implementation reports review state, not CI check or review-approval
+results. Closed/merged links do not automatically mark the task complete.
+
+Full URLs disambiguate host and repository. Up to 32 links are supported per
+session. URLs containing credentials, queries, fragments or control characters
+are rejected. Linking and unlinking never posts comments, closes issues,
+creates PRs, or changes remote assignments.
+
+* tmux names
+
+Pane titles show state and task. Window names aggregate all ai-tui panes in the
+window, with INPUT and ERROR taking priority over WORK. The base window name
+is retained: =INPUT: ai-glib= or =DONE: ai-glib=.
+
+| State | Meaning |
+|-------+---------|
+| INPUT | Local approval or tracked background agent awaiting input |
+| WORK | Foreground work, queued input or active background agents |
+| DONE | Last foreground turn succeeded and no tracked work remains |
+| ERROR | Last foreground turn failed |
+| STOPPED | Last foreground turn was cancelled |
+| IDLE | Fresh conversation; no completion to report |
+| DISCONNECTED | Session exited or its heartbeat expired |
+
+Ordinary idle readiness does not raise INPUT. A wrapped CLI's private approval
+prompt cannot be inferred from silence; it requires an explicit adapter event.
+DONE means turn completion, never project completion. IDLE leaves the window
+without a prefix. =--no-tmux-titles= disables all naming changes for that process.
+No global tmux configuration is edited. A user rename made after ai-tui's last
+window-name update is respected. Normal exit restores the captured pane title
+and restores the base window name and automatic-rename value when the final
+reporter releases it. tmux user options named =@ai_*= are private integration
+metadata. Other terminal hosts, including herdr, keep their existing reporting.
+
+An abrupt kill cannot run restoration. Live reporters ignore another pane's
+expired state after fifteen seconds; a window with no live reporter may retain
+its last prefix until renamed or another ai-tui starts there. The dashboard
+still marks that session disconnected. Nested ai-tui processes sharing the
+same physical pane are not an aggregation boundary; use separate panes.
+
+* Persistence and recovery
+
+Session UUIDs are independent of provider IDs. Records are private, atomically
+replaced files under =$XDG_STATE_HOME/ai-glib/sessions=, defaulting to
+=~/.local/state/ai-glib/sessions=. They contain project/working-directory identity,
+branch, task title, provider/model/native resume ID, tmux target, activity,
+links and cached titles/states. They do not contain the transcript or issue body.
+Each process owns one UUID; an advisory lock prevents two ai-tui processes from
+resuming the same dashboard record. Heartbeats refresh every three seconds and
+expire after fifteen. Normal exit preserves metadata and releases liveness.
+
+The registry is local to this machine and user. Multiple tmux servers are
+identified by socket path and pane ID. The dashboard does not aggregate remote
+machines. Detached tmux sessions continue reporting while their processes run.
+The native provider's existing history reader handles resumed conversations;
+HTTP-provider transcript recovery is not added by this dashboard. Disconnected
+records without a native resume ID remain visible but cannot be resumed with =r=.
+
+* Validation
+
+=tests/test-work-session.c= covers state precedence, qualified links, malformed
+URLs, persistence, expiry, config validation and asynchronous metadata errors.
+=tests/test-tui-dashboard.c= drives the real binary in isolated tmux terminals,
+checking startup preference/overrides, dashboard navigation, draft preservation,
+link opening, active turns and window names. Existing approval, cancellation,
+background-agent and terminal suites remain part of =make test=. Metadata tests
+use stub CLIs; no model service or live forge authentication is required.
+
+The naming adapter verifies that stdin is the actual tmux pane TTY before
+claiming it, so an inherited =TMUX_PANE= inside another terminal host does not
+rename the outer window. Focus actions verify the pane's published session UUID
+before switching, preventing a reused pane ID from opening unrelated work.
+
+A reproducible verbatim terminal demonstration is in
+[[file:demonstrations/project-dashboard.txt][project-dashboard.txt]]. Generate a fresh capture with
+=AI_TUI_DEMONSTRATE=1 build/release/tests/test-tui-dashboard=. It runs the built
+binary against stub provider/forge CLIs in isolated tmux servers. The C/GTest
+suite additionally exercises returned-list ownership, retained object lifetime,
+properties and independently owned link strings.
