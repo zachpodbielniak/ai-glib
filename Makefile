@@ -45,6 +45,7 @@ include config.mk
 # Public headers (to be installed)
 PUBLIC_HEADERS = \
 	$(SRCDIR)/ai-glib.h \
+	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/ai-types.h \
 	$(SRCDIR)/core/ai-error.h \
 	$(SRCDIR)/core/ai-session-limit.h \
@@ -132,6 +133,7 @@ PUBLIC_HEADERS = \
 
 # Library source files
 LIB_SOURCES = \
+	$(SRCDIR)/harness/ai-work-session.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
@@ -424,6 +426,7 @@ $(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODE
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 

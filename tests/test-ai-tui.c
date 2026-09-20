@@ -106,6 +106,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	g_autoptr(GError) error = NULL;
 	g_auto(GStrv) envp = NULL;
 	g_autofree gchar *config = g_build_filename(dir, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(dir, ".local", "state", NULL);
 	gsize i;
 
 	g_ptr_array_add(argv, g_strdup(tui_binary));
@@ -120,6 +121,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", dir, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_unsetenv(envp, "ANTHROPIC_API_KEY");
 	envp = g_environ_unsetenv(envp, "OPENAI_API_KEY");
 
@@ -514,8 +516,8 @@ tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
 
 	command = g_strdup_printf(
 		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
-		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' %s '%s' -p grok-build %s",
-		libs, grok, stub_dir, stub_dir,
+		"XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' EDITOR='%s' %s '%s' -p grok-build %s",
+		libs, grok, stub_dir, stub_dir, stub_dir,
 		editor != NULL ? editor : "true", environment != NULL ? environment : "",
 		tui_binary, options != NULL ? options : "");
 
@@ -566,8 +568,9 @@ tmux_start_tui_piped(const gchar *session, const gchar *stub_dir,
 	command = g_strdup_printf(
 		"printf '%%s\\n' %s | exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME "
 		"TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' "
-		"HOME='%s' XDG_CONFIG_HOME='%s/.config' EDITOR=true '%s' -p grok-build",
-		quoted, libs, grok, stub_dir, stub_dir, tui_binary);
+		"HOME='%s' XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' "
+		"EDITOR=true '%s' -p grok-build",
+		quoted, libs, grok, stub_dir, stub_dir, stub_dir, tui_binary);
 
 	args[14] = command;
 	out = tmux_run(args);
@@ -1629,6 +1632,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	g_auto(GStrv) envp = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *config = g_build_filename(box, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(box, ".local", "state", NULL);
 	gsize i;
 
 	sandbox_write(box, "hello.c", "SHOULD_NOT_BE_INLINED\n");
@@ -1648,6 +1652,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", box, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_setenv(envp, "GROK_PATH", stub->stub, TRUE);
 
 	g_spawn_sync(box, (gchar **)argv->pdata, envp, G_SPAWN_DEFAULT, NULL,
@@ -1730,7 +1735,8 @@ test_switch_command_enter(gconstpointer data)
 		notice = "Provider:";
 	Stub *stub;
 	g_autofree gchar *stdin_path = NULL;
-	g_autofree gchar *partial = g_strndup(command, 4);
+	/* /pro now also completes /project; use an unambiguous prefix. */
+	g_autofree gchar *partial = g_strndup(command, g_str_equal(command, "/provider") ? 5 : 4);
 	g_autofree gchar *pane = NULL;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
@@ -2955,6 +2961,12 @@ typedef struct
 } CommandCase;
 
 static const CommandCase COMMAND_CASES[] = {
+	{ "dashboard", NULL },
+	{ "project", NULL },
+	{ "links", "No links." },
+	{ "issue", "No links." },
+	{ "pr", "No links." },
+	{ "work", "Use a full issue or PR URL" },
 	{ "btw", "Usage: /btw" },
 	{ "help", "clear the line" },
 	{ "clear", NULL },
@@ -2997,17 +3009,24 @@ test_builtin_enter(gconstpointer data)
 	g_autofree gchar *stdin_path = NULL;
 	g_autofree gchar *saved = NULL;
 	gboolean clears;
+	gboolean view_command;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
 	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
 	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
 	command = g_strconcat("/", test_case->name, NULL);
+	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 	tmux_command("/expand command-audit-sentinel", "Would send:");
 	tmux_send(TUI_SESSION, command);
 	tmux_send(TUI_SESSION, "Enter");
+	if (view_command)
+	{
+		g_assert_true(tmux_wait_for(TUI_SESSION, "PROJECT DASHBOARD"));
+		tmux_send(TUI_SESSION, "C-\\");
+	}
 	if (g_str_equal(test_case->name, "quit") ||
 	    g_str_equal(test_case->name, "exit"))
 		g_assert_true(tmux_wait_for_exit(TUI_SESSION));
@@ -3023,7 +3042,7 @@ test_builtin_enter(gconstpointer data)
 		else
 		{
 			g_assert_nonnull(strstr(saved, "command-audit-sentinel"));
-			g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
+			if (!view_command) g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
 				stub->dir : test_case->notice));
 		}
 	}

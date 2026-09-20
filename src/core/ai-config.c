@@ -240,6 +240,14 @@ config_yaml_validate(yaml_document_t *document)
 			    config_parse_provider((const gchar *)node->data.scalar.value) == (AiProviderType)-1)
 				return FALSE;
 		}
+		value_id = config_yaml_member(document, app_id, "open-dashboard-on-load");
+		if (value_id != 0)
+		{
+			node = yaml_document_get_node(document, value_id);
+			if (node->type != YAML_SCALAR_NODE ||
+			    (g_strcmp0((const gchar *)node->data.scalar.value, "true") != 0 &&
+			     g_strcmp0((const gchar *)node->data.scalar.value, "false") != 0)) return FALSE;
+		}
 		value_id = config_yaml_member(document, app_id, "default_model");
 		if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
 			return FALSE;
@@ -323,6 +331,7 @@ struct _AiConfig
     gboolean       default_model_programmatic;  /* TRUE if set via set_default_model() */
 	AiProviderType app_providers[G_N_ELEMENTS(AI_CONFIG_APPS)];
 	gchar *app_models[G_N_ELEMENTS(AI_CONFIG_APPS)];
+	gboolean open_dashboard_on_load;
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -335,6 +344,7 @@ enum
     PROP_0,
     PROP_TIMEOUT,
     PROP_MAX_RETRIES,
+    PROP_OPEN_DASHBOARD_ON_LOAD,
     N_PROPS
 };
 
@@ -387,6 +397,9 @@ ai_config_get_property(
 
     switch (prop_id)
     {
+        case PROP_OPEN_DASHBOARD_ON_LOAD:
+            g_value_set_boolean(value, self->open_dashboard_on_load);
+            break;
         case PROP_TIMEOUT:
             g_value_set_uint(value, self->timeout_seconds);
             break;
@@ -410,6 +423,9 @@ ai_config_set_property(
 
     switch (prop_id)
     {
+        case PROP_OPEN_DASHBOARD_ON_LOAD:
+            self->open_dashboard_on_load = g_value_get_boolean(value);
+            break;
         case PROP_TIMEOUT:
             self->timeout_seconds = g_value_get_uint(value);
             break;
@@ -455,6 +471,15 @@ ai_config_class_init(AiConfigClass *klass)
                           0, G_MAXUINT, AI_CONFIG_DEFAULT_MAX_RETRIES,
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiConfig:open-dashboard-on-load:
+     *
+     * Open the ai-tui project dashboard on an otherwise bare interactive launch.
+     * Explicit prompts, continuation and native launch modes take precedence.
+     */
+    properties[PROP_OPEN_DASHBOARD_ON_LOAD] = g_param_spec_boolean(
+        "open-dashboard-on-load", "Open dashboard on load", "Start ai-tui on its dashboard",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
     g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -1098,6 +1123,13 @@ ai_config_load_from_file(
 		{
 			value = yaml_document_get_node(document, value_id);
 			self->app_providers[i] = config_parse_provider((const gchar *)value->data.scalar.value);
+		}
+		if (i == 1)
+		{
+			gint dashboard_id = config_yaml_member(document, app_id, "open-dashboard-on-load");
+			if (dashboard_id != 0)
+				g_object_set(self, "open-dashboard-on-load", g_str_equal(
+					(const gchar *)yaml_document_get_node(document, dashboard_id)->data.scalar.value, "true"), NULL);
 		}
 		value_id = config_yaml_member(document, app_id, "default_model");
 		if (value_id != 0)

@@ -749,3 +749,9 @@ submissions into the next prompt. Use =--no-coalesce= for separate turns and
 independent side conversation without interrupting the main request.
 See [[file:message-queue.org][Queued follow-ups and side questions]] for
 command barriers, cancellation, context isolation and the library APIs.
+
+* Project dashboard and linked work
+
+=Ctrl+\= toggles the dashboard; =--dashboard= opens it at startup.
+See [[file:dashboard.org][Projects, dashboard and linked work]] for the startup
+preference, tmux status names, issue/PR side-panel links and task recovery.
