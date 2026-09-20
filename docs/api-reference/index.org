@@ -332,3 +332,5 @@ if (error != NULL)
 - Client objects should be used from a single thread
 - GMainLoop integration is required for async operations
 - Use =GTask= for thread-safe async patterns
+
+- [[file:ai-work-session.org][AiWorkSession — project/session metadata and linked work]]

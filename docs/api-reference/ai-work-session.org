@@ -1,0 +1,36 @@
+#+title: AiWorkSession
+
+=AiWorkSession= is a final GObject representing one local work assignment. It
+has a stable UUID independent of its provider session ID. It is owned by the
+calling main context; it is not an object to mutate concurrently from workers.
+
+String properties: =project= (Git common-directory identity or directory),
+=directory= (checkout), =branch=, =title=, =provider= (machine identifier),
+=model=, =provider-session=, =socket=, =pane=, =activity= and =status=.
+Metadata notifications are explicit and emitted only when values change.
+=ai_work_session_get_field()= borrows a property value; unknown fields return
+NULL. =ai_work_session_get_id()= borrows the UUID.
+
+=ai_work_session_new(directory)= performs bounded Git discovery and returns a
+new object. =ai_work_session_update()= reduces foreground activity, explicit
+attention, background count and last outcome into the displayed status.
+=ai_work_session_add_link()= validates an absolute issue/PR URL and is idempotent
+for an identical URL. =ai_work_session_dup_links()= returns an owned string
+vector; =ai_work_session_remove_link()= removes a local association.
+
+=ai_work_session_save()= atomically replaces only this UUID's snapshot in an
+explicit registry directory. =ai_work_session_list()= returns an owned
+=GPtrArray<AiWorkSession>=, ignoring malformed, oversized and unsupported-version
+records. Missing directories return an empty array; directory access errors
+propagate. Non-live or expired records become DISCONNECTED without losing
+metadata. Embedders must ensure each UUID has one writer; ai-tui uses advisory
+locks. This API stores metadata, not provider transcripts.
+
+=ai_work_session_refresh_link_async()= fetches metadata on a worker using a
+supported authenticated CLI. Its finish method returns owned assignment text
+and caches title/state on the caller's context. Cancellation and failed reads
+leave the preceding cache intact. Unlinking during the read does not recreate
+the link. The title/state getters return borrowed cached values or NULL.
+
+See [[file:../dashboard.org][Dashboard and projects]] for configuration, CLI
+adapters, status semantics and persistence boundaries.
