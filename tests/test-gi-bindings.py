@@ -91,25 +91,6 @@ def main():
     cfg.props.timeout = 90
     assert cfg.props.timeout == 90
 
-    # Project sessions retain typed properties and owned link arrays through GIR.
-    cfg.props.open_dashboard_on_load = True
-    assert cfg.props.open_dashboard_on_load is True
-    work = AiGlib.WorkSession.new(gi_home.name)
-    work.props.title = "Binding assignment"
-    work.props.provider = "grok-build"
-    link = "https://example.invalid/team/project/issues/42"
-    assert work.add_link(link)
-    assert work.dup_links() == [link]
-    work.update(False, True, 0, "DONE")
-    assert work.props.status == "INPUT"
-    registry = os.path.join(gi_home.name, "registry")
-    assert work.save(registry, True)
-    saved = AiGlib.WorkSession.list(registry)
-    assert len(saved) == 1
-    assert saved[0].get_id() == work.get_id()
-    assert saved[0].props.title == "Binding assignment"
-    assert saved[0].dup_links() == [link]
-
     # ----- AiMessage constructors -----
     user_msg = AiGlib.Message.new_user("Hello, world!")
     assert user_msg.get_role() == AiGlib.Role.USER

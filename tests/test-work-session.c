@@ -62,6 +62,39 @@ test_links(void)
 }
 
 static void
+test_list_ownership(void)
+{
+	g_autofree gchar *dir = g_dir_make_tmp("ai-session-ownership-XXXXXX", NULL);
+	g_autoptr(AiWorkSession) session = ai_work_session_new(dir);
+	g_autoptr(AiWorkSession) retained = NULL;
+	g_autolist(AiWorkSession) rows = NULL;
+	g_auto(GStrv) links = NULL;
+	g_autofree gchar *title = NULL;
+	gpointer weak = NULL;
+	const gchar *url = "https://example.invalid/team/project/issues/42";
+
+	g_object_set(session, "title", "Retained assignment", NULL);
+	g_assert_true(ai_work_session_add_link(session, url, NULL));
+	g_assert_true(ai_work_session_save(session, dir, TRUE, NULL));
+	rows = ai_work_session_list(dir, NULL);
+	g_assert_cmpuint(g_list_length(rows), ==, 1);
+	retained = g_object_ref(rows->data);
+	weak = retained;
+	g_object_add_weak_pointer(G_OBJECT(retained), &weak);
+	g_clear_list(&rows, g_object_unref);
+	g_assert_nonnull(weak);
+	g_object_get(retained, "title", &title, NULL);
+	g_assert_cmpstr(title, ==, "Retained assignment");
+	links = ai_work_session_dup_links(retained);
+	g_clear_object(&retained);
+	g_assert_null(weak);
+	/* Duplicated links must outlive both the returned list and its objects. */
+	g_assert_cmpstr(links[0], ==, url);
+	g_assert_null(links[1]);
+	remove_tree(dir);
+}
+
+static void
 test_persistence(void)
 {
 	g_autofree gchar *dir = g_dir_make_tmp("ai-work-session-XXXXXX", NULL);
@@ -244,6 +277,7 @@ main(int argc, char **argv)
 	g_test_add_func("/work-session/failed-write", test_failed_write);
 	g_test_add_func("/work-session/links", test_links);
 	g_test_add_func("/work-session/persistence", test_persistence);
+	g_test_add_func("/work-session/list-ownership", test_list_ownership);
 	g_test_add_func("/work-session/config", test_config);
 	g_test_add_func("/work-session/fetch", test_fetch);
 	return g_test_run();
