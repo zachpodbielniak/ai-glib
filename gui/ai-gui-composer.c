@@ -31,6 +31,8 @@ struct _AiGuiComposer
 	GtkWidget *view;
 	GtkWidget *toolbar;
 	GtkWidget *attach_button;
+	GtkWidget *provider_drop;
+	GtkWidget *model_drop;
 	GtkWidget *send_button;
 	GtkWidget *hint_label;
 
@@ -45,8 +47,13 @@ struct _AiGuiComposer
 	gchar        *history_draft;
 
 	AiCompletionResult *completion;
+	GtkStringList      *providers;
+	GtkStringList      *models;
+	GCancellable       *models_cancellable;
+	gchar              *pending_model;
 	gboolean            busy;
 	gboolean            updating;
+	gboolean            syncing;
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiComposer, ai_gui_composer, GTK_TYPE_WIDGET)
@@ -62,6 +69,7 @@ static guint signals[N_SIGNALS];
 
 static void composer_update_completion(AiGuiComposer *self);
 static void composer_rebuild_attachments(AiGuiComposer *self);
+static void composer_load_models(AiGuiComposer *self);
 
 /* ================================================================
  * Attachments
@@ -695,6 +703,22 @@ on_key_pressed(
 		return TRUE;
 	}
 
+	/*
+	 * Ctrl+backslash, forwarded rather than left to the window.
+	 *
+	 * #GtkTextView binds it to delete-from-cursor(WHITESPACE) and
+	 * consumes it, so the window's own binding never sees the key while
+	 * the composer has focus -- which is every time somebody would press
+	 * it. ai-tui uses this key for the dashboard and one habit should
+	 * cover both front-ends.
+	 */
+	if (control && !shift &&
+	    (keyval == GDK_KEY_backslash || keyval == GDK_KEY_bar))
+	{
+		gtk_widget_activate_action(GTK_WIDGET(self), "win.dashboard", NULL);
+		return TRUE;
+	}
+
 	if (control && (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down))
 	{
 		composer_history_step(self, keyval == GDK_KEY_Up ? -1 : 1);
@@ -829,6 +853,234 @@ on_drop(
 }
 
 /* ================================================================
+ * Provider and model, per question
+ * ================================================================ */
+
+/*
+ * The pickers choose where the *next* question goes.
+ *
+ * Nothing is switched while they are being used: a provider switch mid
+ * turn would move the conversation out from under a reply that is still
+ * arriving. The window applies the selection immediately before it
+ * sends, which is what makes "per question" true rather than
+ * approximately true.
+ */
+
+static guint
+composer_string_position(
+	GtkStringList *list,
+	const gchar   *text
+){
+	guint n = g_list_model_get_n_items(G_LIST_MODEL(list));
+	guint i;
+
+	if (text == NULL)
+		return GTK_INVALID_LIST_POSITION;
+
+	for (i = 0; i < n; i++)
+	{
+		if (g_strcmp0(gtk_string_list_get_string(list, i), text) == 0)
+			return i;
+	}
+
+	return GTK_INVALID_LIST_POSITION;
+}
+
+const gchar *
+ai_gui_composer_get_selected_provider(AiGuiComposer *self)
+{
+	guint selected;
+
+	g_return_val_if_fail(AI_GUI_IS_COMPOSER(self), NULL);
+
+	selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(self->provider_drop));
+
+	if (selected == GTK_INVALID_LIST_POSITION)
+		return NULL;
+
+	return gtk_string_list_get_string(self->providers, selected);
+}
+
+const gchar *
+ai_gui_composer_get_selected_model(AiGuiComposer *self)
+{
+	guint selected;
+
+	g_return_val_if_fail(AI_GUI_IS_COMPOSER(self), NULL);
+
+	selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(self->model_drop));
+
+	if (selected == GTK_INVALID_LIST_POSITION)
+		return NULL;
+
+	return gtk_string_list_get_string(self->models, selected);
+}
+
+/* Replace the whole list rather than splice: the previous provider's
+ * models must not survive into the next provider's menu even for the
+ * moment before the answer arrives. */
+static void
+composer_set_models(
+	AiGuiComposer      *self,
+	const gchar *const *names,
+	const gchar        *selected
+){
+	guint position;
+
+	self->syncing = TRUE;
+	gtk_string_list_splice(self->models, 0,
+		g_list_model_get_n_items(G_LIST_MODEL(self->models)), names);
+
+	/*
+	 * A model the provider does not advertise is still the model this
+	 * session is on -- `--set model=...`, or a list that simply does not
+	 * include it. Dropping it would silently move the next question to
+	 * whatever happened to be first.
+	 */
+	if (selected != NULL && *selected != '\0' &&
+	    composer_string_position(self->models, selected) ==
+		    GTK_INVALID_LIST_POSITION)
+	{
+		gtk_string_list_append(self->models, selected);
+	}
+
+	position = composer_string_position(self->models, selected);
+	gtk_drop_down_set_selected(GTK_DROP_DOWN(self->model_drop),
+		position != GTK_INVALID_LIST_POSITION ? position : 0);
+	self->syncing = FALSE;
+
+	gtk_widget_set_sensitive(self->model_drop,
+		g_list_model_get_n_items(G_LIST_MODEL(self->models)) > 0);
+}
+
+static void
+on_models_ready(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      user_data
+){
+	AiGuiComposer *self = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) names = g_ptr_array_new_with_free_func(g_free);
+	g_autofree gchar *wanted = g_strdup(self->pending_model);
+	GList *models;
+	GList *iter;
+
+	models = ai_provider_list_models_finish(AI_PROVIDER(source), result,
+	                                        &error);
+
+	if (error != NULL)
+	{
+		/*
+		 * g_debug: a provider that cannot list models is an absent CLI,
+		 * a missing key or no network -- none of them this program's
+		 * bug, and the picker still offers the current model.
+		 */
+		g_debug("ai-gui: cannot list models: %s", error->message);
+	}
+
+	for (iter = models; iter != NULL; iter = iter->next)
+		g_ptr_array_add(names, g_strdup(iter->data));
+
+	g_list_free_full(models, g_free);
+	g_ptr_array_add(names, NULL);
+
+	composer_set_models(self, (const gchar * const *)names->pdata, wanted);
+	g_object_unref(self);
+}
+
+static void
+composer_load_models(AiGuiComposer *self)
+{
+	g_autoptr(AiConfig) config = NULL;
+	g_autoptr(GError) error = NULL;
+	GObject *provider;
+	const gchar *name = ai_gui_composer_get_selected_provider(self);
+	const gchar *current[] = { NULL };
+
+	g_cancellable_cancel(self->models_cancellable);
+	g_clear_object(&self->models_cancellable);
+	self->models_cancellable = g_cancellable_new();
+
+	if (name == NULL)
+		return;
+
+	/*
+	 * A throwaway provider object, because the session has not switched
+	 * yet and must not be switched merely to populate a menu.
+	 */
+	config = ai_config_new();
+	provider = ai_provider_factory_new_from_string(name, config, &error);
+
+	if (provider == NULL)
+	{
+		g_debug("ai-gui: cannot build %s to list its models: %s", name,
+		        error != NULL ? error->message : "unknown");
+		composer_set_models(self, current, self->pending_model);
+		return;
+	}
+
+	/*
+	 * Not every provider implements the listing vfunc -- claude-tmux
+	 * does not -- and ai_provider_list_models_async() answers a missing
+	 * one with a critical, which is fatal under fatal-warnings. Asking
+	 * the interface first is the check.
+	 */
+	if (AI_PROVIDER_GET_IFACE(AI_PROVIDER(provider))->list_models_async == NULL)
+	{
+		composer_set_models(self, current, self->pending_model);
+		g_object_unref(provider);
+		return;
+	}
+
+	ai_provider_list_models_async(AI_PROVIDER(provider),
+	                              self->models_cancellable, on_models_ready,
+	                              g_object_ref(self));
+	g_object_unref(provider);
+}
+
+static void
+on_provider_selected(
+	GObject    *drop,
+	GParamSpec *pspec,
+	gpointer    user_data
+){
+	AiGuiComposer *self = user_data;
+
+	if (self->syncing)
+		return;
+
+	/* The session's model is meaningless on another provider, so the
+	 * menu starts from that provider's own default. */
+	g_clear_pointer(&self->pending_model, g_free);
+	composer_load_models(self);
+}
+
+void
+ai_gui_composer_sync_model(AiGuiComposer *self)
+{
+	const gchar *provider;
+	guint position;
+
+	g_return_if_fail(AI_GUI_IS_COMPOSER(self));
+
+	if (self->session == NULL)
+		return;
+
+	provider = ai_gui_session_get_provider_id(self->session);
+	position = composer_string_position(self->providers, provider);
+
+	self->syncing = TRUE;
+	gtk_drop_down_set_selected(GTK_DROP_DOWN(self->provider_drop),
+		position != GTK_INVALID_LIST_POSITION ? position : 0);
+	self->syncing = FALSE;
+
+	g_clear_pointer(&self->pending_model, g_free);
+	self->pending_model = g_strdup(ai_gui_session_get_model(self->session));
+	composer_load_models(self);
+}
+
+/* ================================================================
  * Session binding
  * ================================================================ */
 
@@ -864,6 +1116,7 @@ ai_gui_composer_set_session(
 		ai_gui_composer_set_text(self, "");
 	}
 
+	ai_gui_composer_sync_model(self);
 	self->history_position = -1;
 }
 
@@ -913,6 +1166,10 @@ ai_gui_composer_dispose(GObject *object)
 {
 	AiGuiComposer *self = AI_GUI_COMPOSER(object);
 
+	g_cancellable_cancel(self->models_cancellable);
+	g_clear_object(&self->models_cancellable);
+	g_clear_object(&self->providers);
+	g_clear_object(&self->models);
 	g_clear_object(&self->completion);
 	g_clear_object(&self->session);
 	g_clear_pointer(&self->popover, gtk_widget_unparent);
@@ -929,6 +1186,7 @@ ai_gui_composer_finalize(GObject *object)
 	g_clear_pointer(&self->files, g_ptr_array_unref);
 	g_clear_pointer(&self->history, g_ptr_array_unref);
 	g_free(self->history_draft);
+	g_free(self->pending_model);
 
 	G_OBJECT_CLASS(ai_gui_composer_parent_class)->finalize(object);
 }
@@ -1049,6 +1307,52 @@ ai_gui_composer_init(AiGuiComposer *self)
 	g_signal_connect(self->attach_button, "clicked",
 	                 G_CALLBACK(on_attach_clicked), self);
 	gtk_box_append(GTK_BOX(self->toolbar), self->attach_button);
+
+	/* ---- provider and model, for the next question ---- */
+
+	{
+		GEnumClass *klass = g_type_class_ref(AI_TYPE_PROVIDER_TYPE);
+		guint i;
+
+		self->providers = gtk_string_list_new(NULL);
+
+		/*
+		 * Straight off the enum, so a provider added to the library
+		 * appears here without anybody remembering to come back --
+		 * the same reason the preferences dialog reads it.
+		 */
+		for (i = 0; i < klass->n_values; i++)
+			gtk_string_list_append(self->providers, klass->values[i].value_nick);
+
+		g_type_class_unref(klass);
+	}
+
+	self->models = gtk_string_list_new(NULL);
+
+	self->provider_drop = gtk_drop_down_new(
+		G_LIST_MODEL(g_object_ref(self->providers)), NULL);
+	gtk_widget_add_css_class(self->provider_drop, "flat");
+	gtk_widget_set_tooltip_text(self->provider_drop,
+	                            "Provider for the next question");
+	g_signal_connect(self->provider_drop, "notify::selected",
+	                 G_CALLBACK(on_provider_selected), self);
+	gtk_box_append(GTK_BOX(self->toolbar), self->provider_drop);
+
+	self->model_drop = gtk_drop_down_new(
+		G_LIST_MODEL(g_object_ref(self->models)), NULL);
+	gtk_widget_add_css_class(self->model_drop, "flat");
+	gtk_widget_set_tooltip_text(self->model_drop,
+	                            "Model for the next question");
+	/*
+	 * Searchable, because a provider can advertise a hundred models and
+	 * a scroll through all of them is not a choice anybody makes twice.
+	 * The expression is what a #GtkDropDown searches against.
+	 */
+	gtk_drop_down_set_expression(GTK_DROP_DOWN(self->model_drop),
+		gtk_property_expression_new(GTK_TYPE_STRING_OBJECT, NULL, "string"));
+	gtk_drop_down_set_enable_search(GTK_DROP_DOWN(self->model_drop), TRUE);
+	gtk_widget_set_sensitive(self->model_drop, FALSE);
+	gtk_box_append(GTK_BOX(self->toolbar), self->model_drop);
 
 	self->hint_label = gtk_label_new(NULL);
 	gtk_widget_add_css_class(self->hint_label, "dim-label");

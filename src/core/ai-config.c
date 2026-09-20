@@ -331,7 +331,7 @@ struct _AiConfig
     gboolean       default_model_programmatic;  /* TRUE if set via set_default_model() */
 	AiProviderType app_providers[G_N_ELEMENTS(AI_CONFIG_APPS)];
 	gchar *app_models[G_N_ELEMENTS(AI_CONFIG_APPS)];
-	gboolean open_dashboard_on_load;
+	gboolean app_dashboards[G_N_ELEMENTS(AI_CONFIG_APPS)];
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -398,7 +398,17 @@ ai_config_get_property(
     switch (prop_id)
     {
         case PROP_OPEN_DASHBOARD_ON_LOAD:
-            g_value_set_boolean(value, self->open_dashboard_on_load);
+            /*
+             * The property is ai-tui's slot, not a fourth answer.
+             *
+             * The preference is per application -- ai-tui and ai-gui each
+             * have a dashboard and each may want a different default -- but
+             * this property predates the second one and is documented as
+             * ai-tui's. Keeping it as an alias for that slot means a host
+             * reading it back still sees what it set.
+             */
+            g_value_set_boolean(value,
+                self->app_dashboards[config_app_index("ai-tui")]);
             break;
         case PROP_TIMEOUT:
             g_value_set_uint(value, self->timeout_seconds);
@@ -424,7 +434,8 @@ ai_config_set_property(
     switch (prop_id)
     {
         case PROP_OPEN_DASHBOARD_ON_LOAD:
-            self->open_dashboard_on_load = g_value_get_boolean(value);
+            self->app_dashboards[config_app_index("ai-tui")] =
+                g_value_get_boolean(value);
             break;
         case PROP_TIMEOUT:
             self->timeout_seconds = g_value_get_uint(value);
@@ -1124,12 +1135,19 @@ ai_config_load_from_file(
 			value = yaml_document_get_node(document, value_id);
 			self->app_providers[i] = config_parse_provider((const gchar *)value->data.scalar.value);
 		}
-		if (i == 1)
 		{
+			/*
+			 * Read for every app rather than only ai-tui's index.
+			 *
+			 * Hardcoding the index meant apps.ai-gui.open-dashboard-on-load
+			 * validated -- the validator checks the key under any app -- and
+			 * was then silently discarded, which reads exactly like the
+			 * preference not working rather than like a bug.
+			 */
 			gint dashboard_id = config_yaml_member(document, app_id, "open-dashboard-on-load");
 			if (dashboard_id != 0)
-				g_object_set(self, "open-dashboard-on-load", g_str_equal(
-					(const gchar *)yaml_document_get_node(document, dashboard_id)->data.scalar.value, "true"), NULL);
+				self->app_dashboards[i] = g_str_equal(
+					(const gchar *)yaml_document_get_node(document, dashboard_id)->data.scalar.value, "true");
 		}
 		value_id = config_yaml_member(document, app_id, "default_model");
 		if (value_id != 0)
@@ -1406,6 +1424,26 @@ ai_config_get_app_model(AiConfig *self, const gchar *app)
 	index = config_app_index(app);
 	g_return_val_if_fail(index >= 0, NULL);
 	return self->app_models[index];
+}
+
+/**
+ * ai_config_get_app_dashboard:
+ * @self: an #AiConfig
+ * @app: application name: `ai`, `ai-tui` or `ai-gui`
+ *
+ * Reads only apps.@app.open-dashboard-on-load.
+ *
+ * Returns: whether @app should open on its dashboard, %FALSE when absent
+ */
+gboolean
+ai_config_get_app_dashboard(AiConfig *self, const gchar *app)
+{
+	gint index;
+
+	g_return_val_if_fail(AI_IS_CONFIG(self), FALSE);
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, FALSE);
+	return self->app_dashboards[index];
 }
 
 /* Copy each mapping on the edited path so YAML aliases outside it stay unchanged. */

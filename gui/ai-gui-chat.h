@@ -53,6 +53,20 @@ void
 ai_gui_chat_view_scroll_to_bottom(AiGuiChatView *self);
 
 /**
+ * ai_gui_chat_view_restyle:
+ * @self: a chat view
+ *
+ * Re-renders every row against the current palette.
+ *
+ * A span's colour is a #PangoAttribute baked into a label when the block
+ * was last rendered, so changing the theme recolours the chrome and
+ * leaves the words behind. Rebinding is what makes the rows ask for
+ * their attributes again.
+ */
+void
+ai_gui_chat_view_restyle(AiGuiChatView *self);
+
+/**
  * ai_gui_chat_view_set_expanded_all:
  * @self: a chat view
  * @expanded: whether every block should be expanded

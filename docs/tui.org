@@ -171,6 +171,12 @@ A brief startup sweep introduces the composer. While a turn runs, a small two-to
 Motion is deliberately bounded: startup lasts 900 ms, feedback lasts about 1.6 seconds, the turn hand-off breathes for about 2.5 seconds, and an idle session has no ongoing animation timer. The activity and effect clock is shared, and cached transcript rows are reused rather than rebuilt for animation ticks. =--no-animation= disables the startup/border sweeps and spinner rotation; elapsed time still updates once per second and static feedback remains available. There are no blinking text effects, palette changes, or moving transcript contents.
 
 *** Themes
+The palettes live in =src/core/ai-theme.h= and are shared with
+[[file:gui.org][ai-gui]], which draws the same five under the same names and defaults to
+Catppuccin Mocha too. Which palette entry each style tag uses is decided
+there as well, so a tool target is the same colour in a terminal as in a
+window. Changing one changes both.
+
 Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =C-t= cycles themes in the running interface without interrupting the conversation or discarding a draft.
 
 #+begin_src bash

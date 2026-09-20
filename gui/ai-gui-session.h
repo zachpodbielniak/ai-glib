@@ -63,6 +63,17 @@ ai_gui_session_set_title(
 const gchar *
 ai_gui_session_get_provider_name(AiGuiSession *self);
 
+/**
+ * ai_gui_session_get_provider_id:
+ * @self: a session
+ *
+ * The factory's name for the provider, not the display name.
+ *
+ * Returns: (transfer none): e.g. `claude-code`, never "Claude Code"
+ */
+const gchar *
+ai_gui_session_get_provider_id(AiGuiSession *self);
+
 const gchar *
 ai_gui_session_get_model(AiGuiSession *self);
 
@@ -147,6 +158,75 @@ ai_gui_session_set_approve_all(
 
 AiGuiOptions *
 ai_gui_session_get_options(AiGuiSession *self);
+
+/**
+ * ai_gui_session_get_work:
+ * @self: a session
+ *
+ * The dashboard record for this session.
+ *
+ * %NULL until registration finishes: ai_work_session_new() runs git off
+ * the main thread, so a caller must handle its absence the way ai-tui
+ * does rather than assume it is there.
+ *
+ * Returns: (transfer none) (nullable): the record
+ */
+AiWorkSession *
+ai_gui_session_get_work(AiGuiSession *self);
+
+/**
+ * ai_gui_session_publish_work:
+ * @self: a session
+ *
+ * Writes this session's current state into the shared registry.
+ *
+ * Called on every state change and on a heartbeat, because a record
+ * whose heartbeat stops for fifteen seconds is shown as DISCONNECTED —
+ * which for a window that is merely idle would be a lie.
+ */
+void
+ai_gui_session_publish_work(AiGuiSession *self);
+
+/**
+ * ai_gui_session_release_work:
+ * @self: a session
+ *
+ * Records a normal exit: metadata is preserved, liveness is not.
+ */
+void
+ai_gui_session_release_work(AiGuiSession *self);
+
+/**
+ * ai_gui_session_set_work_directory:
+ * @self: a session
+ * @directory: (nullable): the registry, or %NULL for the default
+ *
+ * A test points this somewhere of its own; nothing else should.
+ */
+void
+ai_gui_session_set_work_directory(
+	AiGuiSession *self,
+	const gchar  *directory
+);
+
+/**
+ * ai_gui_session_adopt_work:
+ * @self: a session
+ * @work: (transfer none): a record read back from the registry
+ * @error: (out) (optional): where a refused claim goes
+ *
+ * Takes over a disconnected record rather than starting a new identity,
+ * so a resumed session keeps its links, title and history in the
+ * dashboard instead of appearing beside its own corpse.
+ *
+ * Returns: %TRUE when the advisory lock was granted
+ */
+gboolean
+ai_gui_session_adopt_work(
+	AiGuiSession  *self,
+	AiWorkSession *work,
+	GError       **error
+);
 
 gchar *
 ai_gui_session_export(
