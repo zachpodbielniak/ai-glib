@@ -110,7 +110,12 @@ static const gchar *APP_CSS =
 	".ai-status-done { color: @success_color; background: alpha(@success_color, 0.16); }\n"
 	".ai-status-stopped { opacity: 0.8; }\n"
 	".ai-status-idle { opacity: 0.6; }\n"
-	".ai-status-disconnected { opacity: 0.45; }\n";
+	".ai-status-disconnected { opacity: 0.45; }\n"
+	/* The quota indicator turns colour as the allowance runs down; the
+	 * palette's own warning and error entries, so it matches whichever
+	 * theme is loaded rather than naming colours here. */
+	".ai-quota-low { color: @warning_color; }\n"
+	".ai-quota-spent { color: @error_color; font-weight: bold; }\n";
 
 typedef struct
 {

@@ -17,6 +17,7 @@
 #include "ai-gui-dashboard.h"
 #include "ai-gui-composer.h"
 #include "ai-gui-prefs.h"
+#include "ai-gui-quota.h"
 #include "ai-gui-session-store.h"
 #include "ai-gui-settings.h"
 #include "ai-gui-sidebar.h"
@@ -44,6 +45,7 @@ struct _AiGuiWindow
 	GtkWidget *search_entry;
 	GtkWidget *banner;
 	GtkWidget *links_button;
+	GtkWidget *quota;
 	GtkWidget *links_popover;
 	GtkWidget *links_list;
 	GtkWidget *dashboard_button;
@@ -269,6 +271,10 @@ window_set_session(
 	}
 
 	ai_gui_window_refresh_links(self);
+
+	if (self->quota != NULL)
+		ai_gui_quota_set_session(AI_GUI_QUOTA(self->quota), session);
+
 	window_update_subtitle(self);
 }
 
@@ -1256,6 +1262,26 @@ on_search_changed(
  * Shutdown
  * ================================================================ */
 
+/*
+ * A report is a CLI subprocess. A window behind a browser has no
+ * business spawning one every minute, so polling follows the window the
+ * way ai-tui's follows the visible panel.
+ */
+static void
+on_active_changed(
+	GObject    *object,
+	GParamSpec *pspec,
+	gpointer    user_data
+){
+	AiGuiWindow *self = AI_GUI_WINDOW(object);
+
+	if (self->quota != NULL)
+	{
+		ai_gui_quota_set_active(AI_GUI_QUOTA(self->quota),
+			gtk_window_is_active(GTK_WINDOW(self)));
+	}
+}
+
 static gboolean
 on_close_request(
 	GtkWindow *window,
@@ -1268,6 +1294,13 @@ on_close_request(
 	 * the current one. Detaching first is what makes it write back.
 	 */
 	ai_gui_composer_set_session(AI_GUI_COMPOSER(self->composer), NULL);
+
+	/* Reporting work is cancelled and drained while the widget tree is
+	 * still whole; a drain iterates the main context and a half-torn
+	 * window is not somewhere to re-enter. */
+	if (self->quota != NULL)
+		ai_gui_quota_shutdown(AI_GUI_QUOTA(self->quota));
+
 	ai_gui_session_store_save_all(self->store);
 
 	return FALSE;
@@ -1393,6 +1426,15 @@ window_build_content(AiGuiWindow *self)
 	                            self->links_popover);
 	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->links_button);
 
+	/*
+	 * Account quota, where ai-tui puts it under the provider in its
+	 * session panel. The header bar is the window's equivalent of that
+	 * always-visible strip, and the indicator hides itself when the
+	 * provider has no account report to give.
+	 */
+	self->quota = ai_gui_quota_new();
+	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->quota);
+
 	gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button),
 	                              "open-menu-symbolic");
 	gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_button), menu);
@@ -1504,6 +1546,8 @@ ai_gui_window_new(
 	}
 
 	g_signal_connect(self, "close-request", G_CALLBACK(on_close_request),
+	                 NULL);
+	g_signal_connect(self, "notify::is-active", G_CALLBACK(on_active_changed),
 	                 NULL);
 
 	ai_gui_dashboard_set_store(AI_GUI_DASHBOARD(self->dashboard), self->store);
