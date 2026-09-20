@@ -358,6 +358,9 @@ work_tick(gpointer data)
 {
 	App *app = data;
 	work_publish(app);
+	if (usage_refresh(&app->usage, ai_conversation_get_provider(app->conversation),
+		app->running && app->details && !app->dashboard && COLS >= 110 && LINES >= 20))
+		app_schedule_redraw(app);
 	if (app->work_registered && app->link_pending == 0 &&
 		g_get_monotonic_time() - app->link_refreshed > 60 * G_USEC_PER_SEC)
 	{

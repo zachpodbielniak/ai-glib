@@ -71,6 +71,76 @@ test_panel_wrapping(void)
 	fclose(output);
 }
 
+static void
+test_usage_panel(void)
+{
+	FILE *input = tmpfile();
+	FILE *output = tmpfile();
+	SCREEN *screen;
+	AiTuiUsage usage = { 0 };
+	JsonArray *entries;
+	JsonObject *row;
+	gint next;
+
+	g_assert_nonnull(input);
+	g_assert_nonnull(output);
+	screen = newterm("xterm", output, input);
+	g_assert_nonnull(screen);
+	resize_term(24, 120);
+	erase();
+	usage.pending = TRUE;
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(3, 90, "ACCOUNT REMAINING");
+	assert_row(4, 90, "Loading...");
+	usage.pending = FALSE;
+	usage.failed = TRUE;
+	erase();
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(4, 90, "Unavailable");
+	usage.failed = FALSE;
+	usage.data = json_from_string(
+		"{\"availability\":\"partial\",\"entries\":["
+		"{\"label\":\"5-hour\",\"used_percent\":25,\"reset_text\":\"in 2h\"},"
+		"{\"label\":\"Weekly\",\"remaining_percent\":0},"
+		"{\"label\":\"Unknown\",\"percent\":70}]}", NULL);
+	erase();
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(3, 90, "REMAINING (partial)");
+	assert_row(4, 90, "5-hour");
+	assert_row(5, 90, "[########--] 75% remaining");
+	assert_row(6, 90, "Reset: in 2h");
+	assert_row(7, 90, "Weekly");
+	assert_row(8, 90, "[----------] 0% remaining");
+	assert_row(9, 90, "Unknown");
+	assert_row(10, 90, "Unavailable");
+	usage.failed = TRUE;
+	erase();
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(3, 90, "REMAINING (stale)");
+	entries = ai_json_get_array(usage_object(usage.data), "entries");
+	row = usage_object(json_array_get_element(entries, 0));
+	json_object_set_string_member(row, "label", "safe\n\033[2J very long native allowance name");
+	json_object_set_double_member(row, "used_percent", 0);
+	erase();
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(4, 90, "safe  [2J very long native a");
+	assert_row(5, 90, "[##########] 100% remaining");
+	/* Small screens and right-edge clipping never overwrite the footer. */
+	resize_term(20, 110);
+	erase();
+	mvaddstr(19, 80, "footer preserved");
+	next = panel_usage(14, 80, 28, &usage, A_BOLD, A_NORMAL);
+	g_assert_cmpint(next, <=, 19);
+	assert_row(19, 80, "footer preserved");
+	panel_usage_line(2, 104, 28, "中文中文", A_NORMAL);
+	assert_row(2, 104, "中文");
+	usage_clear(&usage);
+	endwin();
+	delscreen(screen);
+	fclose(input);
+	fclose(output);
+}
+
 /**
  * main:
  * @argc: argument count
@@ -84,5 +154,6 @@ main(gint argc, gchar **argv)
 	setlocale(LC_ALL, "C.UTF-8");
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/ai-glib/tui/panel-wrapping", test_panel_wrapping);
+	g_test_add_func("/ai-glib/tui/usage-panel", test_usage_panel);
 	return g_test_run();
 }

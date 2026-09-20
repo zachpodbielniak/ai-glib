@@ -782,7 +782,9 @@ Hidden panels and =--dump= do not start queries. Changing provider, model or
 working directory invalidates the snapshot and discards an old in-flight
 result. Shutdown cancels and drains pending reporting work.
 
-The panel names loading, unavailable, partial and stale results. A failed
+The panel names loading, refreshing, unavailable, partial and stale results.
+It shows up to three allowance entries, subject to terminal height; use
+=ai --usage -p PROVIDER= for the complete report. A failed
 refresh keeps the previous snapshot explicitly marked stale. Providers
 without native reporting show =Unavailable=, and only quota entries with
 known direction receive a bar. Long or control-bearing labels are sanitized
