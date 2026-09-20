@@ -51,6 +51,43 @@ ai_gui_work_compare(
 );
 
 /**
+ * ai_gui_work_project_label:
+ * @project: (nullable): a project identity, as #AiWorkSession records it
+ *
+ * The name a person would use for @project.
+ *
+ * #AiWorkSession identifies a project by its canonical Git *common*
+ * directory, so the path's own basename is `.git` and every project in
+ * the list would otherwise read "git". The directory holding it is the
+ * answer. A non-Git directory records its own path and is already right.
+ *
+ * One implementation because two views show it: the dashboard's group
+ * headings and the sidebar's. Two spellings of this would put one
+ * project under two names in one window.
+ *
+ * Returns: (transfer full): a display name, never %NULL and never empty
+ */
+gchar *
+ai_gui_work_project_label(const gchar *project);
+
+/**
+ * ai_gui_work_project_compare:
+ * @a: (nullable): a project identity
+ * @b: (nullable): a project identity
+ *
+ * Orders two projects by their labels, case-insensitively, falling back
+ * to the identity itself so two checkouts that share a name still have a
+ * stable order rather than swapping places between redraws.
+ *
+ * Returns: a qsort-style ordering
+ */
+gint
+ai_gui_work_project_compare(
+	const gchar *a,
+	const gchar *b
+);
+
+/**
  * ai_gui_work_list:
  * @directory: (nullable): the registry, or %NULL for the default
  * @error: (out) (optional): where a read failure goes

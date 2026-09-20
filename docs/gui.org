@@ -83,7 +83,7 @@ Sessions on the left, the conversation on the right, an
 
 | Element | What it is |
 |---------+------------|
-| Sidebar | Every session, newest first, pinned ones above. Search filters on title, provider and model. |
+| Sidebar | Every session, *grouped by project*. Within a group: pinned first, then newest. Search filters on title, provider, model and project. |
 | Header | The session title, with =provider · model= beneath it. |
 | Transcript | A =GtkListView= over the =AiTranscript=, one row per block. |
 | Status strip | Activity, elapsed seconds and the queue depth, while a turn is running. |
@@ -98,7 +98,8 @@ Sessions on the left, the conversation on the right, an
 | =Tab= | Complete the =/= or =@= at the cursor |
 | =Esc= | Stop the turn in flight |
 | =Ctrl+Up= / =Ctrl+Down= | Walk the prompts you have sent |
-| =Ctrl+N= | New session |
+| =Ctrl+N= | New session, in the project you are already in |
+| =Ctrl+Shift+O= | Open a folder as a project |
 | =Ctrl+F= | Find in this conversation |
 | =Ctrl+L= | Focus the composer |
 | =Ctrl+,= | Preferences |
@@ -111,6 +112,63 @@ Sessions on the left, the conversation on the right, an
 | =Ctrl+V= | Paste an image from the clipboard |
 | =Ctrl+Shift+V= | Paste an image even when text is on the clipboard too |
 | =Ctrl+?= | Every shortcut, in a window |
+
+** Projects
+
+A session is a conversation *in a directory*, and the sidebar is grouped
+by that directory rather than being one flat list. The heading is the
+project's name with its path beneath it; the count under "Sessions" says
+how many of each you have open.
+
+*** What a project is
+
+The library's answer, not this window's: =AiWorkSession= identifies a
+project by the canonicalised *Git common directory* of the working
+directory, falling back to the path itself when there is no repository.
+Two things follow, and both are the point:
+
+- *A linked worktree groups with its repository.* =trees/gui-projects=
+  and the checkout it was branched from share one common directory, so
+  they share one heading rather than reading as two unrelated projects.
+- *A subdirectory groups with its repository.* Chatting in =src/view/=
+  is chatting in the same project as chatting in the root.
+
+The name shown is =ai_gui_work_project_label()=, which is where the
+=.git= suffix is undone --- the common directory's own basename is
+=.git=, so taken literally every heading in the list would read "git".
+The dashboard's group headings call the same function, because one
+project appearing under two names in one window would be worse than no
+grouping at all.
+
+*** Opening another project
+
+=Ctrl+Shift+O=, the folder button beside the sidebar's =+=, *Open
+project…* in the menu, or =/project <directory>= in the composer. Any of
+them starts a session in that folder, which appears under its own
+heading. The dashboard's *Open project…* button does the same thing; it
+was there first, and this is the same call reached from the conversation
+somebody is already in.
+
+=Ctrl+N= inherits the current session's directory, so a new session
+lands in the project you are working in rather than in whatever ai-gui
+was launched from. With the list grouped, the alternative reads as the
+grouping being broken.
+
+*** When the answer arrives
+
+=ai_work_session_new()= runs =git rev-parse= twice, and its own
+documentation says to keep that off a UI thread --- so the sidebar
+cannot compute the group it is drawing. The project is therefore
+*asynchronous*, and until it lands the session's working directory
+stands in for it. That fallback groups correctly on its own, which is
+why it is a fallback rather than a blank.
+
+The resolved answer is saved with the session, so a reopened window
+groups correctly on the first frame instead of after one pair of
+subprocesses per restored row. A =/cwd= re-runs the registration: the row
+moves to the new directory immediately and to the new *project* when git
+answers, and the dashboard record moves with it rather than a second
+identity appearing beside it.
 
 ** Attachments
 
@@ -215,7 +273,8 @@ belong in the image build rather than in a transient overlay.
 | =gui/ai-gui-session.c= | One conversation plus its metadata; *no GTK* |
 | =gui/ai-gui-session-store.c= | The sessions on disk, as a =GListModel=; *no GTK* |
 | =gui/ai-gui-util.c= | Option copying, value parsing, formatting; *no GTK* |
-| =gui/ai-gui-sidebar.c= | The session list |
+| =gui/ai-gui-sidebar.c= | The session list, grouped into project sections |
+| =gui/ai-gui-work.c= | Project identity, the dashboard's data and its actions; *no GTK* |
 | =gui/ai-gui-chat.c= | The transcript view, filtering and following |
 | =gui/ai-gui-block-row.c= | One block, as a widget |
 | =gui/ai-gui-composer.c= | Input, attachments, completion |
@@ -465,6 +524,11 @@ Built-ins resolve in the library and are run here: =/help=, =/commands=,
 Their output goes into the transcript rather than a toast: =/help= and
 =/links= are output, and output that disappears after three seconds is
 output somebody has to ask for twice.
+
+=/project <directory>= opens that folder as a project here, the way the
+built-in opens a tmux window in ai-tui; with no argument it opens the
+dashboard. =/cwd <directory>= moves the session you are in, and its row
+moves to the matching group.
 
 =/model=, =/provider= and =/effort= report where the controls are instead
 of reimplementing a list you would then have to type an exact id into —

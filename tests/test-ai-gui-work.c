@@ -302,10 +302,16 @@ test_worktree(
 	g_autofree gchar *file = NULL;
 	AsyncResult out;
 
-	if (g_find_program_in_path("git") == NULL)
 	{
-		g_test_skip("git is not installed");
-		return;
+		/* g_autofree: transfer full, and an unfreed skip check is a
+		 * leak `make test ASAN=1` reports as loudly as a real one. */
+		g_autofree gchar *git = g_find_program_in_path("git");
+
+		if (git == NULL)
+		{
+			g_test_skip("git is not installed");
+			return;
+		}
 	}
 
 	g_assert_cmpint(g_mkdir_with_parents(repository, 0700), ==, 0);
@@ -358,10 +364,16 @@ test_worktree_refuses_a_plain_directory(
 	g_autofree gchar *plain = g_build_filename(fixture->root, "plain", NULL);
 	AsyncResult out;
 
-	if (g_find_program_in_path("git") == NULL)
 	{
-		g_test_skip("git is not installed");
-		return;
+		/* g_autofree: transfer full, and an unfreed skip check is a
+		 * leak `make test ASAN=1` reports as loudly as a real one. */
+		g_autofree gchar *git = g_find_program_in_path("git");
+
+		if (git == NULL)
+		{
+			g_test_skip("git is not installed");
+			return;
+		}
 	}
 
 	g_assert_cmpint(g_mkdir_with_parents(plain, 0700), ==, 0);
@@ -420,6 +432,72 @@ test_new_is_asynchronous(
 	g_main_loop_unref(out.loop);
 }
 
+/*
+ * The label is what a person calls a project.
+ *
+ * #AiWorkSession identifies a project by its Git *common* directory, so
+ * every row would read "git" if the basename were taken literally -- and
+ * a sidebar full of identical headings is worse than no grouping at all.
+ */
+static void
+test_project_label(void)
+{
+	struct { const gchar *project; const gchar *expected; } cases[] = {
+		{ "/home/z/source/ai-glib/.git",            "ai-glib" },
+		{ "/home/z/source/ai-glib/.git/",           "ai-glib" },
+		{ "/home/z/source/ai-glib",                 "ai-glib" },
+		{ "/home/z/source/ai-glib/",                "ai-glib" },
+		/* A linked worktree records the common directory it shares, so
+		 * both checkouts land under the one repository. */
+		{ "/home/z/source/ai-glib/.git",            "ai-glib" },
+		{ "/tmp/scratch",                           "scratch" },
+		{ "/",                                      "/" },
+		{ ".git",                                   ".git" },
+		{ "",                                       "Untitled" },
+		{ NULL,                                     "Untitled" }
+	};
+	gsize i;
+
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autofree gchar *label =
+			ai_gui_work_project_label(cases[i].project);
+
+		g_assert_cmpstr(label, ==, cases[i].expected);
+	}
+}
+
+/*
+ * Ordering projects by label, and never calling two different ones equal.
+ *
+ * A comparison that answered zero for two distinct projects would let
+ * their sections swap places between redraws, and #GtkSortListModel cuts
+ * its sections on exactly this answer.
+ */
+static void
+test_project_compare(void)
+{
+	g_assert_cmpint(ai_gui_work_project_compare("/x/alpha", "/x/beta"),
+	                <, 0);
+	g_assert_cmpint(ai_gui_work_project_compare("/x/beta", "/x/alpha"),
+	                >, 0);
+	g_assert_cmpint(ai_gui_work_project_compare("/x/alpha", "/x/alpha"),
+	                ==, 0);
+
+	/* Case-insensitively, so "Notes" and "ai-glib" sort as a reader
+	 * expects rather than as ASCII does. */
+	g_assert_cmpint(ai_gui_work_project_compare("/x/ZZ", "/x/aa"), >, 0);
+
+	/* Same label, different checkout: ordered, never equal. */
+	g_assert_cmpint(
+		ai_gui_work_project_compare("/one/ai-glib/.git", "/two/ai-glib/.git"),
+		!=, 0);
+
+	/* The `.git` suffix is invisible to the ordering. */
+	g_assert_cmpint(
+		ai_gui_work_project_compare("/x/alpha/.git", "/x/beta"), <, 0);
+}
+
 gint
 main(
 	gint   argc,
@@ -428,6 +506,8 @@ main(
 	g_test_init(&argc, &argv, NULL);
 
 	g_test_add_func("/ai-gui/work/priority-order", test_priority_order);
+	g_test_add_func("/ai-gui/work/project-label", test_project_label);
+	g_test_add_func("/ai-gui/work/project-compare", test_project_compare);
 
 	g_test_add("/ai-gui/work/compare-is-total", Fixture, NULL,
 	           fixture_set_up, test_compare_is_total, fixture_tear_down);

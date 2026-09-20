@@ -49,6 +49,7 @@ struct _AiGuiWindow
 	GtkWidget *links_popover;
 	GtkWidget *links_list;
 	GtkWidget *dashboard_button;
+	GtkWidget *sidebar_title;
 
 	gulong turn_id;
 	gulong approval_id;
@@ -281,11 +282,33 @@ window_set_session(
 static AiGuiSession *
 window_new_session(AiGuiWindow *self)
 {
+	g_autoptr(AiGuiOptions) options = ai_gui_options_copy(self->options);
 	g_autoptr(GError) error = NULL;
 	AiGuiSession *session;
 
-	session = ai_gui_session_new(self->options, self->options->provider,
-	                             self->options->model, &error);
+	/*
+	 * In the project somebody is already in, not the one ai-gui was
+	 * launched from.
+	 *
+	 * With the list grouped by project, a Ctrl+N that dropped a new row
+	 * into a different group than the one being worked in would read as
+	 * the grouping being wrong rather than as the directory being
+	 * inherited from the command line.
+	 */
+	if (self->session != NULL)
+	{
+		const gchar *directory =
+			ai_gui_session_get_working_directory(self->session);
+
+		if (directory != NULL && *directory != '\0')
+		{
+			g_clear_pointer(&options->working_directory, g_free);
+			options->working_directory = g_strdup(directory);
+		}
+	}
+
+	session = ai_gui_session_new(options, options->provider,
+	                             options->model, &error);
 
 	if (session == NULL)
 	{
@@ -639,6 +662,84 @@ ai_gui_window_open_project(
 	g_return_if_fail(AI_GUI_IS_WINDOW(self));
 
 	window_open_session(self, directory, NULL, NULL, NULL, NULL);
+}
+
+static void
+on_project_folder_chosen(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      user_data
+){
+	AiGuiWindow *self = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GFile) folder = gtk_file_dialog_select_folder_finish(
+		GTK_FILE_DIALOG(source), result, &error);
+	g_autofree gchar *path = NULL;
+
+	if (folder == NULL)
+	{
+		/*
+		 * g_debug, not a toast: the overwhelmingly common failure here
+		 * is somebody pressing Cancel, and a window that complained
+		 * about it would be complaining about being used correctly.
+		 */
+		g_debug("ai-gui: no project chosen: %s",
+		        error != NULL ? error->message : "dismissed");
+		g_object_unref(self);
+		return;
+	}
+
+	path = g_file_get_path(folder);
+
+	if (path == NULL)
+	{
+		ai_gui_window_toast(self,
+			"That folder is not on this machine's filesystem.");
+	}
+	else
+	{
+		ai_gui_window_open_project(self, path);
+	}
+
+	g_object_unref(self);
+}
+
+/*
+ * Open a folder as a project: a new session in it, in its own group.
+ *
+ * Reachable from the window rather than only from the dashboard, because
+ * "work on something else now" is a thing somebody does from the
+ * conversation they are already in.
+ */
+static void
+action_open_project(
+	GtkWidget   *widget,
+	const gchar *name,
+	GVariant    *parameter
+){
+	AiGuiWindow *self = AI_GUI_WINDOW(widget);
+	g_autoptr(GtkFileDialog) dialog = gtk_file_dialog_new();
+
+	gtk_file_dialog_set_title(dialog, "Open a project");
+
+	/* Start where the current session is, so the chooser opens beside
+	 * the work rather than in the home directory. */
+	if (self->session != NULL)
+	{
+		const gchar *directory =
+			ai_gui_session_get_working_directory(self->session);
+
+		if (directory != NULL && *directory != '\0')
+		{
+			g_autoptr(GFile) start = g_file_new_for_path(directory);
+
+			gtk_file_dialog_set_initial_folder(dialog, start);
+		}
+	}
+
+	gtk_file_dialog_select_folder(dialog, GTK_WINDOW(self), NULL,
+	                              on_project_folder_chosen,
+	                              g_object_ref(self));
 }
 
 static void
@@ -1278,7 +1379,8 @@ static const AiGuiShortcut SHORTCUTS[] = {
 	{ "Attachments",  "Click a thumbnail", "See it full size, and save a copy" },
 	{ "Attachments",  "Click a file name", "Preview the file the transcript is talking about" },
 
-	{ "Session",      "Ctrl+N",           "New session" },
+	{ "Session",      "Ctrl+N",           "New session, in the project you are in" },
+	{ "Session",      "Ctrl+Shift+O",     "Open a folder as a project" },
 	{ "Session",      "F9",               "Show or hide the session list" },
 	{ "Session",      "Ctrl+F",           "Find in this conversation" },
 	{ "Session",      "Ctrl+Shift+E",     "Export the transcript" },
@@ -1437,6 +1539,7 @@ window_build_menu(void)
 	GMenu *app = g_menu_new();
 
 	g_menu_append(session, "New session", "win.new-session");
+	g_menu_append(session, "Open project…", "win.open-project");
 	g_menu_append(session, "Rename…", "win.rename");
 	g_menu_append(session, "Pin or unpin", "win.pin");
 	g_menu_append(session, "Clear conversation", "win.clear");
@@ -1465,6 +1568,28 @@ window_build_menu(void)
 	return G_MENU_MODEL(menu);
 }
 
+/* "4 sessions · 2 projects", under the sidebar's own heading. */
+static void
+window_sync_sidebar_title(AiGuiWindow *self)
+{
+	g_autofree gchar *summary = NULL;
+
+	if (self->sidebar == NULL || self->sidebar_title == NULL)
+		return;
+
+	summary = ai_gui_sidebar_describe(AI_GUI_SIDEBAR(self->sidebar));
+	adw_window_title_set_subtitle(ADW_WINDOW_TITLE(self->sidebar_title),
+	                              summary);
+}
+
+static void
+on_sidebar_grouping_changed(
+	AiGuiSidebar *sidebar,
+	gpointer      user_data
+){
+	window_sync_sidebar_title(user_data);
+}
+
 static GtkWidget *
 window_build_sidebar(AiGuiWindow *self)
 {
@@ -1472,20 +1597,34 @@ window_build_sidebar(AiGuiWindow *self)
 	GtkWidget *header = adw_header_bar_new();
 	GtkWidget *new_button =
 		gtk_button_new_from_icon_name("tab-new-symbolic");
+	GtkWidget *project_button =
+		gtk_button_new_from_icon_name("folder-open-symbolic");
 
+	self->sidebar_title = adw_window_title_new("Sessions", NULL);
 	adw_header_bar_set_title_widget(ADW_HEADER_BAR(header),
-		adw_window_title_new("Sessions", NULL));
-	gtk_widget_set_tooltip_text(new_button, "New session (Ctrl+N)");
+	                                self->sidebar_title);
+	gtk_widget_set_tooltip_text(new_button,
+		"New session in this project (Ctrl+N)");
 	gtk_actionable_set_action_name(GTK_ACTIONABLE(new_button),
 	                               "win.new-session");
 	adw_header_bar_pack_start(ADW_HEADER_BAR(header), new_button);
+
+	gtk_widget_set_tooltip_text(project_button,
+		"Open another folder as a project (Ctrl+Shift+O)");
+	gtk_actionable_set_action_name(GTK_ACTIONABLE(project_button),
+	                               "win.open-project");
+	adw_header_bar_pack_end(ADW_HEADER_BAR(header), project_button);
 
 	adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
 
 	self->sidebar = ai_gui_sidebar_new(self->store);
 	g_signal_connect(self->sidebar, "session-selected",
 	                 G_CALLBACK(on_session_selected), self);
+	g_signal_connect(self->sidebar, "grouping-changed",
+	                 G_CALLBACK(on_sidebar_grouping_changed), self);
 	adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), self->sidebar);
+
+	window_sync_sidebar_title(self);
 
 	return toolbar;
 }
@@ -1720,6 +1859,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 
 	gtk_widget_class_install_action(widget_class, "win.new-session", NULL,
 	                                action_new_session);
+	gtk_widget_class_install_action(widget_class, "win.open-project", NULL,
+	                                action_open_project);
 	gtk_widget_class_install_action(widget_class, "win.stop", NULL,
 	                                action_stop);
 	gtk_widget_class_install_action(widget_class, "win.focus-composer", NULL,
@@ -1759,6 +1900,9 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_n,
 		GDK_CONTROL_MASK, "win.new-session", NULL);
+	/* Ctrl+Shift+O: plain Ctrl+O attaches files to the message. */
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_o,
+		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.open-project", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_f,
 		GDK_CONTROL_MASK, "win.search", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_l,

@@ -447,6 +447,74 @@ test_summarise_prompt(void)
 	g_assert_cmpint(g_utf8_strlen(wide, -1), ==, 61);
 }
 
+/*
+ * The project is answerable before the registration is.
+ *
+ * ai_work_session_new() runs two git subprocesses, so the sidebar cannot
+ * wait for it to know which group a row belongs in. The working
+ * directory stands in until the real answer arrives, and it groups
+ * correctly on its own -- which is the whole point of the fallback.
+ */
+static void
+test_session_project_falls_back(
+	Fixture       *fixture,
+	gconstpointer  data
+){
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGuiSession) session = NULL;
+	g_autofree gchar *elsewhere = NULL;
+
+	session = ai_gui_session_new(options, "ollama", NULL, &error);
+	g_assert_no_error(error);
+
+	g_assert_cmpstr(ai_gui_session_get_project(session), ==, fixture->cwd);
+
+	/* A /cd moves the row immediately rather than leaving it under the
+	 * project it has just left for as long as git takes to answer. */
+	elsewhere = g_build_filename(fixture->home, "other", NULL);
+	g_assert_cmpint(g_mkdir_with_parents(elsewhere, 0700), ==, 0);
+	ai_gui_session_set_working_directory(session, elsewhere);
+
+	g_assert_cmpstr(ai_gui_session_get_project(session), ==, elsewhere);
+}
+
+/* A saved session groups correctly on the first frame after a restart,
+ * without waiting for one git subprocess per restored row. */
+static void
+test_session_project_round_trips(
+	Fixture       *fixture,
+	gconstpointer  data
+){
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGuiSessionStore) store = NULL;
+	g_autoptr(AiGuiSessionStore) reloaded = NULL;
+	g_autoptr(AiGuiSession) session = NULL;
+	g_autoptr(JsonNode) node = NULL;
+	AiGuiSession *restored;
+
+	session = ai_gui_session_new(options, "ollama", NULL, &error);
+	g_assert_no_error(error);
+
+	node = ai_gui_session_to_json(session);
+	g_assert_nonnull(node);
+	g_assert_cmpstr(json_object_get_string_member(json_node_get_object(node),
+	                                              "project"), ==,
+	                fixture->cwd);
+
+	store = ai_gui_session_store_new(fixture->sessions);
+	ai_gui_session_store_add(store, session);
+	g_assert_cmpuint(ai_gui_session_store_save_all(store), ==, 1);
+
+	reloaded = ai_gui_session_store_new(fixture->sessions);
+	g_assert_cmpuint(ai_gui_session_store_load(reloaded, options), ==, 1);
+
+	restored = ai_gui_session_store_get(reloaded, 0);
+	g_assert_nonnull(restored);
+	g_assert_cmpstr(ai_gui_session_get_project(restored), ==, fixture->cwd);
+}
+
 gint
 main(
 	gint   argc,
@@ -470,6 +538,13 @@ main(
 	           fixture_set_up, test_store_is_a_list_model, fixture_tear_down);
 	g_test_add("/ai-gui/session/registers-with-the-dashboard", Fixture, NULL,
 	           fixture_set_up, test_session_registers_with_the_dashboard,
+	           fixture_tear_down);
+
+	g_test_add("/ai-gui/session/project-falls-back", Fixture, NULL,
+	           fixture_set_up, test_session_project_falls_back,
+	           fixture_tear_down);
+	g_test_add("/ai-gui/session/project-round-trips", Fixture, NULL,
+	           fixture_set_up, test_session_project_round_trips,
 	           fixture_tear_down);
 
 	g_test_add_func("/ai-gui/util/value-from-string", test_value_from_string);

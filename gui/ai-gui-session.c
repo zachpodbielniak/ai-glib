@@ -58,6 +58,7 @@ struct _AiGuiSession
 	gulong agent_id;
 
 	AiWorkSession *work;
+	gchar         *project;
 	gchar         *work_directory;
 	gchar         *work_outcome;
 	GSource       *heartbeat;
@@ -75,6 +76,7 @@ enum
 	PROP_PROVIDER_NAME,
 	PROP_MODEL,
 	PROP_WORKING_DIRECTORY,
+	PROP_PROJECT,
 	PROP_BUSY,
 	PROP_ACTIVITY,
 	PROP_QUEUED,
@@ -538,6 +540,30 @@ session_start_heartbeat(AiGuiSession *self)
 	g_source_attach(self->heartbeat, g_main_context_get_thread_default());
 }
 
+/*
+ * The project identity, with the notify the sidebar re-groups on.
+ *
+ * Every path that can change it goes through here so there is exactly
+ * one place that decides what "never NULL, never empty" means: a session
+ * whose group heading vanished would take its row out of the list.
+ */
+static void
+session_set_project(
+	AiGuiSession *self,
+	const gchar  *project
+){
+	const gchar *value = project != NULL && *project != '\0'
+		? project : self->working_directory;
+
+	if (g_strcmp0(self->project, value) == 0)
+		return;
+
+	g_free(self->project);
+	self->project = g_strdup(value != NULL ? value : "");
+
+	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PROJECT]);
+}
+
 static void
 on_work_ready(
 	GObject      *source,
@@ -564,8 +590,25 @@ on_work_ready(
 			ai_work_session_get_id(work), &claim_error);
 		self->work = g_steal_pointer(&work);
 		session_start_heartbeat(self);
-		ai_gui_session_publish_work(self);
 	}
+	else
+	{
+		/*
+		 * A second answer for a session that already has a record: the
+		 * directory changed under it, so the record moves rather than a
+		 * second identity appearing beside it. The id, the links and the
+		 * title somebody attached are all in the record being kept.
+		 */
+		g_object_set(self->work,
+			"directory", ai_work_session_get_field(work, "directory"),
+			"project", ai_work_session_get_field(work, "project"),
+			"branch", ai_work_session_get_field(work, "branch"),
+			NULL);
+	}
+
+	ai_gui_session_publish_work(self);
+	session_set_project(self,
+		ai_work_session_get_field(self->work, "project"));
 
 	g_object_unref(self);
 }
@@ -625,6 +668,8 @@ ai_gui_session_adopt_work(
 
 	session_start_heartbeat(self);
 	ai_gui_session_publish_work(self);
+	session_set_project(self,
+		ai_work_session_get_field(self->work, "project"));
 
 	return TRUE;
 }
@@ -665,6 +710,24 @@ session_build_harness(AiGuiSession *self)
 	                                      self->working_directory);
 }
 
+/*
+ * Ask for this directory's project identity, off the main thread.
+ *
+ * Run again whenever the working directory changes: ai_work_session_new()
+ * shells out to git twice and its own documentation says to keep that off
+ * a UI thread, which is the whole reason the sidebar cannot simply
+ * compute the group it is drawing.
+ *
+ * The reference is held for the call. A session closed while git is still
+ * answering must still have somewhere for the result to land.
+ */
+static void
+session_register_work(AiGuiSession *self)
+{
+	ai_gui_work_new_async(self->working_directory, self->work_cancellable,
+	                      on_work_ready, g_object_ref(self));
+}
+
 static void
 session_configure(AiGuiSession *self)
 {
@@ -687,13 +750,7 @@ session_configure(AiGuiSession *self)
 
 	session_connect_conversation(self);
 
-	/*
-	 * Registration is asynchronous and the reference is held for it.
-	 * A session closed while git is still answering must still have
-	 * somewhere for the result to land.
-	 */
-	ai_gui_work_new_async(self->working_directory, self->work_cancellable,
-	                      on_work_ready, g_object_ref(self));
+	session_register_work(self);
 }
 
 AiGuiSession *
@@ -842,6 +899,16 @@ ai_gui_session_to_json(AiGuiSession *self)
 	json_builder_add_string_value(builder, self->model != NULL ? self->model : "");
 	json_builder_set_member_name(builder, "working-directory");
 	json_builder_add_string_value(builder, self->working_directory);
+	/*
+	 * Saved so a reopened window groups the sidebar correctly on the
+	 * first frame. Deriving it instead would mean every restored session
+	 * sat under its own directory until two git subprocesses per session
+	 * had finished, which is exactly the moment somebody is looking for
+	 * the project they were last in.
+	 */
+	json_builder_set_member_name(builder, "project");
+	json_builder_add_string_value(builder,
+	                              ai_gui_session_get_project(self));
 	json_builder_set_member_name(builder, "created");
 	json_builder_add_int_value(builder, self->created_at);
 	json_builder_set_member_name(builder, "updated");
@@ -1036,6 +1103,12 @@ ai_gui_session_new_from_json(
 	self->pinned = ai_json_get_boolean(object, "pinned", FALSE);
 	self->title_is_automatic = ai_json_get_boolean(object, "automatic-title",
 	                                               FALSE);
+	/*
+	 * The saved answer, until the registration this session is about to
+	 * start replaces it. A file written before this key existed has none,
+	 * and the getter's fallback to the working directory covers it.
+	 */
+	self->project = g_strdup(ai_json_get_string(object, "project", NULL));
 
 	session_configure(self);
 
@@ -1428,6 +1501,17 @@ ai_gui_session_get_working_directory(AiGuiSession *self)
 	return self->working_directory;
 }
 
+const gchar *
+ai_gui_session_get_project(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+
+	if (self->project != NULL && *self->project != '\0')
+		return self->project;
+
+	return self->working_directory;
+}
+
 void
 ai_gui_session_set_working_directory(
 	AiGuiSession *self,
@@ -1449,6 +1533,14 @@ ai_gui_session_set_working_directory(
 
 	g_object_notify_by_pspec(G_OBJECT(self),
 	                         properties[PROP_WORKING_DIRECTORY]);
+
+	/*
+	 * The new directory is the project until git says otherwise, so the
+	 * row moves to a plausible group immediately rather than sitting
+	 * under the old project for as long as two subprocesses take.
+	 */
+	session_set_project(self, path);
+	session_register_work(self);
 }
 
 gint64
@@ -1592,6 +1684,9 @@ ai_gui_session_get_property(
 		case PROP_MODEL:
 			g_value_set_string(value, self->model);
 			break;
+		case PROP_PROJECT:
+			g_value_set_string(value, ai_gui_session_get_project(self));
+			break;
 		case PROP_WORKING_DIRECTORY:
 			g_value_set_string(value, self->working_directory);
 			break;
@@ -1698,6 +1793,7 @@ ai_gui_session_finalize(GObject *object)
 	g_free(self->provider_id);
 	g_free(self->model);
 	g_free(self->working_directory);
+	g_free(self->project);
 	g_free(self->work_directory);
 	g_free(self->work_outcome);
 
@@ -1723,6 +1819,8 @@ ai_gui_session_class_init(AiGuiSessionClass *klass)
 	properties[PROP_WORKING_DIRECTORY] = g_param_spec_string(
 		"working-directory", NULL, NULL, NULL,
 		G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+	properties[PROP_PROJECT] = g_param_spec_string("project", NULL, NULL,
+		NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 	properties[PROP_BUSY] = g_param_spec_boolean("busy", NULL, NULL, FALSE,
 		G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 	properties[PROP_ACTIVITY] = g_param_spec_string("activity", NULL, NULL,

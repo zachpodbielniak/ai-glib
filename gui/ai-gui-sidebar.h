@@ -33,4 +33,16 @@ ai_gui_sidebar_select(
 void
 ai_gui_sidebar_focus_search(AiGuiSidebar *self);
 
+/**
+ * ai_gui_sidebar_describe:
+ * @self: a sidebar
+ *
+ * A one-line count of what the list is showing, for the header above it:
+ * how many sessions, across how many projects.
+ *
+ * Returns: (transfer full): the summary
+ */
+gchar *
+ai_gui_sidebar_describe(AiGuiSidebar *self);
+
 G_END_DECLS

@@ -80,6 +80,24 @@ ai_gui_session_get_model(AiGuiSession *self);
 const gchar *
 ai_gui_session_get_working_directory(AiGuiSession *self);
 
+/**
+ * ai_gui_session_get_project:
+ * @self: a session
+ *
+ * The project this session is chatting in — the identity the sidebar
+ * groups by and the dashboard heads its rows with.
+ *
+ * Never %NULL and never empty. Until the asynchronous registration lands
+ * this is the working directory, which is what somebody typed and groups
+ * correctly on its own; once #AiWorkSession has answered it becomes the
+ * canonical Git common directory, so two worktrees of one repository
+ * collapse into one group instead of sitting apart.
+ *
+ * Returns: (transfer none): the project identity
+ */
+const gchar *
+ai_gui_session_get_project(AiGuiSession *self);
+
 gint64
 ai_gui_session_get_updated_at(AiGuiSession *self);
 

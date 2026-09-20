@@ -398,25 +398,9 @@ dashboard_build_header(const gchar *project)
 	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	GtkWidget *name;
 	GtkWidget *path;
-	g_autofree gchar *base = NULL;
-
-	/* The Git common directory is the project identity, so its own
-	 * basename is `.git`; the directory holding it is the name a person
-	 * would use. */
-	{
-		g_autofree gchar *leaf = g_path_get_basename(project);
-
-		if (g_strcmp0(leaf, ".git") == 0)
-		{
-			g_autofree gchar *parent = g_path_get_dirname(project);
-
-			base = g_path_get_basename(parent);
-		}
-		else
-		{
-			base = g_steal_pointer(&leaf);
-		}
-	}
+	/* Shared with the sidebar's own group headings: one project must not
+	 * appear under two names in one window. */
+	g_autofree gchar *base = ai_gui_work_project_label(project);
 
 	gtk_widget_set_margin_start(box, 10);
 	gtk_widget_set_margin_end(box, 10);

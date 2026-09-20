@@ -1353,6 +1353,51 @@ The query runs against a *separate* client built from the active one
 (executable, model, cwd, environment, timeout). Reporting is read-only work
 and has no business sharing the lifetime of the object a turn is using.
 
+### Projects and the grouped sidebar
+
+The sidebar is sectioned by project, which is the library's identity for
+one — `AiWorkSession`'s canonicalised **Git common directory**, or the
+path itself outside a repository. That is what makes a linked worktree
+and a subdirectory both group with their repository instead of reading
+as three unrelated things.
+
+Four rules:
+
+- **One function names a project**, `ai_gui_work_project_label()`. The
+  dashboard's group headings and the sidebar's both call it. The common
+  directory's own basename is `.git`, so a literal `g_path_get_basename()`
+  makes every heading in the list read "git" — there were two copies of
+  the undo for that, and the second one is how a project ends up under two
+  names in one window.
+- **The project is asynchronous and the working directory is the
+  fallback.** `ai_work_session_new()` shells out to `git rev-parse` twice
+  and its own documentation says to keep that off a UI thread, so the
+  sidebar cannot compute the group it is drawing. Until the answer lands,
+  `ai_gui_session_get_project()` returns the working directory — which
+  groups correctly on its own, so the fallback is an answer rather than a
+  blank. It is also persisted with the session, or every restored row
+  would sit under its own directory until one pair of subprocesses per row
+  had finished.
+- **A directory change moves the record, never forks it.** `on_work_ready`
+  runs again after a `/cwd`; when a record already exists it rewrites that
+  record's `directory`, `project` and `branch` rather than installing a
+  second identity. The id, the links and the title somebody attached are
+  all in the record being kept.
+- **Never invalidate a sorter or a filter from inside the underlying
+  model's `::items-changed`.** `GtkSortListModel` and `GtkFilterListModel`
+  place an inserted item themselves; calling `gtk_sorter_changed()` mid
+  update re-enters them and `GtkListView` draws the result — one session
+  rendered as two rows, which reads exactly like the store having
+  duplicated it. `sidebar_regroup()` is for property changes on a session
+  (`project`, `pinned`, `updated-at`, `title`); an insert or a removal only
+  needs the heading's own count told. Those four names are also why the
+  per-session `notify` handler filters on the pspec: `busy` and `activity`
+  fire many times a second while a turn streams.
+
+`Ctrl+N` inherits the current session's directory and `Ctrl+Shift+O`
+opens a folder as a project. Both are the same `window_open_session()`
+the dashboard's "Open project…" already used.
+
 ### The dashboard and the pickers
 
 `ai-gui` registers an `AiWorkSession` like `ai-tui` does, into the same
