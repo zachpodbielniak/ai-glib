@@ -1,0 +1,194 @@
+* The =ai-gui= desktop client
+=ai-gui= is a GTK4/libadwaita front-end over the same model
+[[file:tui.org][=ai-tui=]] draws in a terminal: one #AiConversation per session,
+[[file:transcript.org][the view layer]] deciding what a block is, and
+[[file:harness.org][the harness layer]] resolving =@= mentions and =/= commands.
+
+The split matters more than the toolkit. Everything about *what* a
+conversation is --- how tool calls group, how a summary reads, which run of
+bytes is a filename --- lives in the library. What lives in =gui/= is turning
+an =AiStyleTag= into a Pango attribute, putting widgets on a screen, and
+reading input. That is the same contract the ncurses front-end honours, which
+is why the two agree about a transcript without sharing a line of rendering
+code.
+
+Nothing in =LIB_SOURCES= links GTK, deliberately: a daemon, an Emacs module
+or a server has to be able to embed ai-glib without dragging in a toolkit.
+=gtk4= and =libadwaita-1= are pulled in by the =gui= target alone, and the
+binary is dropped --- loudly, once --- when they are absent, exactly as
+=ai-tui= is dropped without ncursesw.
+
+** Synopsis
+#+begin_src sh
+ai-gui [-p PROVIDER] [-m MODEL] [-s SYSTEM] [OPTIONS]
+#+end_src
+
+#+begin_src sh
+# Open on the saved ai-gui defaults
+ai-gui
+
+# A specific provider and model
+ai-gui -p claude-code -m claude-opus-5
+
+# Resume whatever the wrapped CLI was last doing
+ai-gui -p codex-cli --continue
+
+# An HTTP provider running this process's own tools, unattended
+ai-gui -p claude --local-tools --yes
+
+# Any provider property, the same names `ai --set` takes
+ai-gui -p grok-build --set reasoning-effort=high
+#+end_src
+
+Every option is the spelling =ai= and =ai-tui= already use. =--set PROP=VALUE=
+in particular needs no work here per provider knob: the preferences dialog
+builds its provider page by walking the provider's own writable
+=GParamSpec= list, so a property added to a client is reachable from the
+command line, from bindings and from this dialog the day it exists.
+
+** The window
+
+Sessions on the left, the conversation on the right, an
+=AdwOverlaySplitView= between them that collapses to an overlay below 720px.
+
+| Element | What it is |
+|---------+------------|
+| Sidebar | Every session, newest first, pinned ones above. Search filters on title, provider and model. |
+| Header | The session title, with =provider · model= beneath it. |
+| Transcript | A =GtkListView= over the =AiTranscript=, one row per block. |
+| Status strip | Activity, elapsed seconds and the queue depth, while a turn is running. |
+| Composer | Multi-line input, attachments, completion, and send/stop. |
+
+*** Keys
+
+| Key | Action |
+|-----+--------|
+| =Enter= | Send. During a turn, queue a follow-up. |
+| =Shift+Enter= | Newline |
+| =Tab= | Complete the =/= or =@= at the cursor |
+| =Esc= | Stop the turn in flight |
+| =Ctrl+Up= / =Ctrl+Down= | Walk the prompts you have sent |
+| =Ctrl+N= | New session |
+| =Ctrl+F= | Find in this conversation |
+| =Ctrl+L= | Focus the composer |
+| =Ctrl+,= | Preferences |
+| =F9= | Show or hide the session list |
+| =Ctrl+Shift+E= | Export the transcript |
+| =Ctrl+Shift+G= | Background agents |
+
+** Attachments
+
+Click the paperclip, or drop files onto the composer.
+
+An *image* becomes an attachment and is sent as image content. *Anything
+else* becomes an =@path= mention in the input line. That split is the
+library's, not a simplification: only images have a wire format of their own,
+and a text file reaches the model because the harness layer expands the
+mention --- which also means the model sees the path it was given rather than
+an anonymous blob.
+
+** Search
+
+=Ctrl+F= filters the transcript rather than highlighting inside it, and it
+matches against each block *expanded*. A block is the unit the library hands
+out and the unit a person reasons about; hiding the ones that do not match
+keeps the surviving ones whole, where highlighting a substring inside a
+collapsed tool group would point at text the row is not showing. Matching
+expanded is what lets somebody find a file name they know was edited without
+opening every group first.
+
+** Following
+
+The transcript follows new output only while you are at the bottom. Scroll up
+and it stops; scroll back down and it resumes. A streaming transcript that
+yanked the reader back down mid-paragraph is the single most annoying thing
+this kind of window can do.
+
+** Sessions on disk
+
+Sessions are written to =$XDG_DATA_HOME/ai-glib/gui/sessions/<id>.json=, one
+file each, at the end of every turn and again at shutdown. Saving per turn
+rather than only at shutdown is the point: a crash mid-session is exactly
+when somebody wants the transcript back, and exactly when the shutdown path
+does not run.
+
+Three things about what a restored session *is*:
+
+1. *A restored transcript is a record, not a resumption.* The portable
+   =AiMessage= history lives inside =AiConversation= and has no setter,
+   deliberately. Restored blocks show a person what happened without telling
+   the model it happened, and a status line says so rather than leaving it to
+   be discovered.
+2. *Where the provider keeps its own session, that session is resumed.* The
+   provider's =session-id= is saved and set back on reopen, so a wrapped CLI
+   brings its own history along --- the mechanism
+   [[file:native-session.org][native session import]] already describes. An
+   explicit saved id beats =--continue=: they are two answers to "which
+   session", and the explicit one is the one somebody clicked on.
+3. *The provider is saved by its canonical name*, never
+   =ai_provider_get_name()=. That returns a display name ("Claude Code") and
+   the factory wants =claude-code=; saving the display name works for the
+   providers whose two names coincide and silently stops matching for the
+   rest, with the symptom being a session that quietly comes back on the
+   default provider.
+
+A file that will not parse costs itself and nothing else. One session
+truncated by a crash must not hide the sixteen that survived it --- the same
+rule [[file:harness.org][the harness layer]] applies to resource files, and
+for the same reason.
+
+** Tool approval
+
+When an HTTP provider runs tools in this process (=--local-tools=), each call
+raises a dialog unless =--yes= or the preferences switch is set. The handler
+spins a nested =GMainLoop= on =g_main_context_get_thread_default()=, never the
+global default: the run it is answering for is driving a private context, and
+a loop on the wrong one would never dispatch the source that makes progress.
+
+Approval never fires for the CLI wrappers. They run their own tools in their
+own process, which is also why =AiConversation= refuses =local-tools= for
+them.
+
+** Background agents
+
+On by default (=--no-agents= opts out), capped at four concurrent. =Ctrl+Shift+G=
+shows what is running and offers to stop it.
+
+The panel reports that an agent finished, never what it said. Collecting a
+result is =ai_brigade_reap()=, and the model's own =agent_result= tool reaps
+too --- whichever asks first gets it, so a panel that displayed results would
+be taking them out of the model's hands to satisfy curiosity.
+
+** Building
+
+#+begin_src sh
+make gui                # just the client
+make                    # everything, including the client when GTK is present
+make install            # installs ai-gui and its .desktop file
+#+end_src
+
+Fedora packages: =gtk4-devel=, =libadwaita-devel=. On an immutable host these
+belong in the image build rather than in a transient overlay.
+
+** Layout
+
+| File | What it holds |
+|------+---------------|
+| =gui/main.c= | Options, the =AdwApplication= |
+| =gui/ai-gui-window.c= | The window, its actions and its accelerators |
+| =gui/ai-gui-session.c= | One conversation plus its metadata; *no GTK* |
+| =gui/ai-gui-session-store.c= | The sessions on disk, as a =GListModel=; *no GTK* |
+| =gui/ai-gui-util.c= | Option copying, value parsing, formatting; *no GTK* |
+| =gui/ai-gui-sidebar.c= | The session list |
+| =gui/ai-gui-chat.c= | The transcript view, filtering and following |
+| =gui/ai-gui-block-row.c= | One block, as a widget |
+| =gui/ai-gui-composer.c= | Input, attachments, completion |
+| =gui/ai-gui-prefs.c= | Preferences, including the generated provider page |
+| =gui/ai-gui-agents.c= | The background-agent panel |
+| =gui/ai-gui-approval.c= | The approval dialog and its nested loop |
+| =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; the stylesheet |
+
+The three files marked *no GTK* are the ones =tests/test-ai-gui-session.c=
+links directly. That is why they do not include a toolkit header: a suite that
+needed a display would pass or fail by whose machine ran it, exactly as one
+reading the developer's real =~/.claude= would.

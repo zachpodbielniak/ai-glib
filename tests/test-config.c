@@ -486,6 +486,7 @@ test_config_save_rejected(void)
 	const gchar *invalid[] = {
 		"broken: [\n", "- sequence\n", "scalar\n", "", "{}\n---\n{}\n",
 		"apps: []\n", "apps: {ai: null}\n", "apps: {ai-tui: []}\n",
+		"apps: {ai-gui: []}\n",
 		"apps: {ai: {default_provider: typo}}\n",
 		"apps: {ai: {default_model: []}}\n",
 		"apps: {ai: {}, ai: {}}\n",
@@ -536,7 +537,7 @@ test_config_save_rejected(void)
 static void
 test_config_resolve_defaults(void)
 {
-	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	const gchar *scopes[] = {NULL, "ai", "ai-tui", "ai-gui"};
 	const struct {
 		const gchar *provider;
 		const gchar *model;
@@ -561,7 +562,8 @@ test_config_resolve_defaults(void)
 	g_autofree gchar *path = write_temp_yaml(
 		"default_provider: ollama\ndefault_model: configured\n"
 		"apps:\n  ai: {default_provider: ollama, default_model: configured}\n"
-		"  ai-tui: {default_provider: ollama, default_model: configured}\n");
+		"  ai-tui: {default_provider: ollama, default_model: configured}\n"
+		"  ai-gui: {default_provider: ollama, default_model: configured}\n");
 	AiProviderType provider;
 	guint i;
 	guint j;
@@ -800,7 +802,7 @@ test_config_null_models(void)
 static void
 test_config_invalid_utf8_model(void)
 {
-	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	const gchar *scopes[] = {NULL, "ai", "ai-tui", "ai-gui"};
 	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
 	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
 	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);

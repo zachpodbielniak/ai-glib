@@ -120,10 +120,28 @@ $(OUTDIR)/bin/%: $(BINDIR)/%.c $(LIB_STATIC) | $(OUTDIR)/bin
 $(OUTDIR)/bin: | $(OUTDIR)
 	mkdir -p $@
 
+# GTK client objects.
+#
+# Compiled per-object rather than in one gcc invocation so the generated
+# .d files apply here too: gui/ has a dozen headers of its own, and the
+# whole point of DEPFLAGS is that editing one of them rebuilds what
+# included it. $(GTK_CFLAGS) is added here and nowhere else -- nothing in
+# LIB_SOURCES may see a toolkit header.
+$(OBJDIR)/gui/%.o: $(GUIDIR)/%.c $(BUILD_FLAGS_STAMP) | $(OBJDIR) $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) -I$(GUIDIR) $(DEPFLAGS) -c $< -o $@
+
+# Statically linked against ai-glib for the reason the `ai` rule gives:
+# the installed binary then has no runtime dependency on the shared
+# library, while the system libraries come in as usual.
+$(GUI_BINARY): $(GUI_OBJECTS) $(LIB_STATIC) | $(OUTDIR)/bin
+	@echo "Linking ai-gui..."
+	$(CC) $(GUI_OBJECTS) -o $@ $(LIB_STATIC) $(GTK_LIBS) $(LDFLAGS)
+
 # The generated dependency lists.  Included last and with a leading dash:
 # they do not exist on a clean tree, and make re-reads the makefile once
 # the first build has produced them.
--include $(LIB_DEPS) $(TEST_DEPS) $(EXAMPLE_DEPS) $(BIN_DEPS)
+-include $(LIB_DEPS) $(TEST_DEPS) $(EXAMPLE_DEPS) $(BIN_DEPS) $(GUI_DEPS)
 
 # Clean current build type and the bundled yaml-glib build
 .PHONY: clean
@@ -159,6 +177,7 @@ help:
 	@echo "  test-gir-clean - Assert g-ir-scanner emits zero warnings"
 	@echo "  examples     - Build example programs"
 	@echo "  binaries     - Build installable CLI binaries (the 'ai' front-end)"
+	@echo "  gui          - Build the ai-gui desktop client (needs gtk4 + libadwaita)"
 	@echo "  gir          - Generate GObject introspection data (requires GIR=1)"
 	@echo "  install      - Install library and headers"
 	@echo "  uninstall    - Uninstall library and headers"

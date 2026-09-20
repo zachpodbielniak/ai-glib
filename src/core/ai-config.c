@@ -159,11 +159,40 @@ config_yaml_acyclic(yaml_document_t *document, gint id, guint8 *state, guint dep
 	return TRUE;
 }
 
+/*
+ * The applications that get a defaults scope of their own.
+ *
+ * One table rather than a comparison written out at each of the six
+ * places that needed one. When `ai-gui` was added, five of those six
+ * were found by grep and the sixth -- the YAML validator's own list --
+ * was not, so a config naming the new app validated as an unknown key
+ * and was rejected on load. The index into this table is the index into
+ * app_providers and app_models, which is what keeps them in step.
+ */
+static const gchar *const AI_CONFIG_APPS[] = { "ai", "ai-tui", "ai-gui" };
+
+static gint
+config_app_index(const gchar *app)
+{
+	gsize i;
+
+	if (app == NULL)
+		return -1;
+
+	for (i = 0; i < G_N_ELEMENTS(AI_CONFIG_APPS); i++)
+	{
+		if (g_str_equal(app, AI_CONFIG_APPS[i]))
+			return (gint)i;
+	}
+
+	return -1;
+}
+
 /* Validate all scopes before either loading or rewriting any of their values. */
 static gboolean
 config_yaml_validate(yaml_document_t *document)
 {
-	const gchar *apps[] = {NULL, "ai", "ai-tui"};
+	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-gui"};
 	yaml_node_t *node;
 	gint apps_id;
 	guint i;
@@ -292,8 +321,8 @@ struct _AiConfig
     gboolean       default_provider_programmatic; /* TRUE if set via set_default_provider() */
     gchar         *default_model;
     gboolean       default_model_programmatic;  /* TRUE if set via set_default_model() */
-	AiProviderType app_providers[2];
-	gchar *app_models[2];
+	AiProviderType app_providers[G_N_ELEMENTS(AI_CONFIG_APPS)];
+	gchar *app_models[G_N_ELEMENTS(AI_CONFIG_APPS)];
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -337,8 +366,12 @@ ai_config_finalize(GObject *object)
     g_clear_pointer(&self->grok_base_url, g_free);
     g_clear_pointer(&self->ollama_base_url, g_free);
     g_clear_pointer(&self->default_model, g_free);
-	g_clear_pointer(&self->app_models[0], g_free);
-	g_clear_pointer(&self->app_models[1], g_free);
+	{
+		gsize i;
+
+		for (i = 0; i < G_N_ELEMENTS(self->app_models); i++)
+			g_clear_pointer(&self->app_models[i], g_free);
+	}
 
     G_OBJECT_CLASS(ai_config_parent_class)->finalize(object);
 }
@@ -430,8 +463,12 @@ ai_config_init(AiConfig *self)
 {
     self->timeout_seconds = AI_CONFIG_DEFAULT_TIMEOUT;
     self->max_retries = AI_CONFIG_DEFAULT_MAX_RETRIES;
-	self->app_providers[0] = AI_PROVIDER_CLAUDE;
-	self->app_providers[1] = AI_PROVIDER_CLAUDE;
+	{
+		gsize i;
+
+		for (i = 0; i < G_N_ELEMENTS(self->app_providers); i++)
+			self->app_providers[i] = AI_PROVIDER_CLAUDE;
+	}
 }
 
 /* Forward declaration for use in ai_config_new */
@@ -1053,7 +1090,7 @@ ai_config_load_from_file(
 	for (i = 0; i < G_N_ELEMENTS(self->app_providers); i++)
 	{
 		gint apps_id = config_yaml_member(document, 1, "apps");
-		gint app_id = config_yaml_member(document, apps_id, i == 0 ? "ai" : "ai-tui");
+		gint app_id = config_yaml_member(document, apps_id, AI_CONFIG_APPS[i]);
 		gint value_id = config_yaml_member(document, app_id, "default_provider");
 		yaml_node_t *value;
 
@@ -1302,7 +1339,7 @@ ai_config_set_default_model(
 /**
  * ai_config_get_app_provider:
  * @self: an #AiConfig
- * @app: application name, `ai` or `ai-tui`
+ * @app: application name: `ai`, `ai-tui` or `ai-gui`
  *
  * Reads only apps.@app.default_provider, never library or environment defaults.
  *
@@ -1311,15 +1348,18 @@ ai_config_set_default_model(
 AiProviderType
 ai_config_get_app_provider(AiConfig *self, const gchar *app)
 {
+	gint index;
+
 	g_return_val_if_fail(AI_IS_CONFIG(self), AI_PROVIDER_CLAUDE);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0, AI_PROVIDER_CLAUDE);
-	return self->app_providers[g_str_equal(app, "ai") ? 0 : 1];
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, AI_PROVIDER_CLAUDE);
+	return self->app_providers[index];
 }
 
 /**
  * ai_config_get_app_model:
  * @self: an #AiConfig
- * @app: application name, `ai` or `ai-tui`
+ * @app: application name: `ai`, `ai-tui` or `ai-gui`
  *
  * Reads only apps.@app.default_model, never library or environment defaults.
  *
@@ -1328,9 +1368,12 @@ ai_config_get_app_provider(AiConfig *self, const gchar *app)
 const gchar *
 ai_config_get_app_model(AiConfig *self, const gchar *app)
 {
+	gint index;
+
 	g_return_val_if_fail(AI_IS_CONFIG(self), NULL);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0, NULL);
-	return self->app_models[g_str_equal(app, "ai") ? 0 : 1];
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, NULL);
+	return self->app_models[index];
 }
 
 /* Copy each mapping on the edited path so YAML aliases outside it stay unchanged. */
@@ -1423,7 +1466,7 @@ ai_config_save_defaults(
 		                    "Model must be valid UTF-8");
 		return FALSE;
 	}
-	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui"))
+	if (app != NULL && config_app_index(app) < 0)
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Unknown app '%s'", app);
 		return FALSE;
@@ -1523,7 +1566,7 @@ ai_config_save_defaults(
 	}
 	else
 	{
-		i = g_str_equal(app, "ai") ? 0 : 1;
+		i = (guint)config_app_index(app);
 		self->app_providers[i] = provider;
 		g_free(self->app_models[i]);
 		self->app_models[i] = saved_model[0] != '\0' ? g_strdup(saved_model) : NULL;

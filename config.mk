@@ -57,6 +57,22 @@ NCURSES_LIBS := $(shell pkg-config --libs $(NCURSES_DEPS)) \
                 $(shell pkg-config --libs gio-unix-2.0)
 endif
 
+# gtk4 + libadwaita, for the `ai-gui` desktop client only.
+#
+# Optional for the same reason ncursesw is: the library itself has no
+# toolkit dependency, and a headless machine must still build everything
+# else. When they are missing, ai-gui is dropped with a notice rather
+# than failing the build. Nothing in LIB_SOURCES ever links these --
+# keeping the toolkit out of libai-glib is what lets a daemon, an Emacs
+# module or a server embed the library.
+GTK_PKG_DEPS = gtk4 libadwaita-1
+HAVE_GTK := $(shell pkg-config --exists $(GTK_PKG_DEPS) && echo 1 || echo 0)
+
+ifeq ($(HAVE_GTK),1)
+GTK_CFLAGS := $(shell pkg-config --cflags $(GTK_PKG_DEPS))
+GTK_LIBS   := $(shell pkg-config --libs $(GTK_PKG_DEPS))
+endif
+
 MCP_GLIB_DIR = deps/mcp-glib
 MCP_GLIB_STATIC = $(MCP_GLIB_DIR)/build/libmcp-glib-1.0.a
 MCP_GLIB_CFLAGS = -I$(MCP_GLIB_DIR)/src
@@ -104,6 +120,8 @@ SRCDIR = src
 TESTDIR = tests
 EXAMPLEDIR = examples
 BINDIR = bin
+GUIDIR = gui
+DATADIR = data
 DOCSDIR = docs
 
 # Combined flags. -I$(OUTDIR) picks up the per-build-type generated headers

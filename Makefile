@@ -252,6 +252,32 @@ endif
 
 BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
 
+# The GTK4 desktop client.
+#
+# Dropped -- loudly, once -- when gtk4/libadwaita are absent, the same
+# way ai-tui is dropped without ncursesw. Everything else here is
+# headless and still useful on a machine with no desktop toolkit.
+GUI_SOURCES = $(wildcard $(GUIDIR)/*.c)
+GUI_HEADERS = $(wildcard $(GUIDIR)/*.h)
+GUI_OBJECTS = $(patsubst $(GUIDIR)/%.c,$(OBJDIR)/gui/%.o,$(GUI_SOURCES))
+GUI_DEPS    = $(GUI_OBJECTS:.o=.d)
+GUI_BINARY  = $(OUTDIR)/bin/ai-gui
+
+# The GTK-free half of gui/: the session model, its store and the
+# helpers. tests/test-ai-gui-session.c links these directly, which is
+# only possible because none of them includes a toolkit header -- and is
+# the reason none of them does. A test that needed a display would pass
+# or fail by whose machine ran it.
+GUI_MODEL_SOURCES = \
+	$(GUIDIR)/ai-gui-session.c \
+	$(GUIDIR)/ai-gui-session-store.c \
+	$(GUIDIR)/ai-gui-util.c
+
+ifneq ($(HAVE_GTK),1)
+GUI_BINARY :=
+$(info Note: gtk4/libadwaita not found, skipping ai-gui. Fedora: layer gtk4-devel and libadwaita-devel into the image.)
+endif
+
 # Target-specific, so only the one binary that needs a terminal library
 # links against one.
 $(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
@@ -284,7 +310,7 @@ $(YAML_GLIB_STATIC):
 
 # Default target
 .PHONY: all
-all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries
+all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries gui
 
 # Generate config.h from template
 $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
@@ -389,6 +415,13 @@ check-headers:
 tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
 
+# Compiled with the model sources rather than through the generic test
+# rule, which only knows about one translation unit.
+$(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
@@ -460,6 +493,22 @@ examples: $(EXAMPLE_BINARIES)
 .PHONY: binaries
 binaries: $(BIN_BINARIES)
 
+# The GTK4 desktop client. Built as part of `all` when the toolkit is
+# present, and a notice rather than a failure when it is not.
+.PHONY: gui
+ifeq ($(HAVE_GTK),1)
+gui: $(GUI_BINARY)
+else
+gui:
+	@echo "Skipping ai-gui: $(GTK_PKG_DEPS) not found by pkg-config."
+	@echo "  Fedora: layer gtk4-devel and libadwaita-devel into the image."
+endif
+
+# Editing a gui/ header rebuilds everything in gui/ that included it.
+# The generated .d files cover this once a build has run; this covers
+# the first one, on a clean tree.
+$(GUI_OBJECTS): $(GUI_HEADERS)
+
 # GObject introspection (opt-in: pass GIR=1).  Defaults off so hosts that
 # lack gobject-introspection-devel can build without setting any flags.
 ifeq ($(GIR),1)
@@ -526,10 +575,15 @@ pkgconfig:
 install: all install-gir pkgconfig
 	@echo "Installing to $(PREFIX)..."
 	install -d $(DESTDIR)$(PREFIX)/bin
-	@for b in $(BIN_BINARIES); do \
+	@for b in $(BIN_BINARIES) $(GUI_BINARY); do \
 		echo "  install $$b"; \
 		install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/; \
 	done
+ifeq ($(HAVE_GTK),1)
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	install -m 644 $(DATADIR)/org.copyleft.AiGlib.Gui.desktop \
+		$(DESTDIR)$(PREFIX)/share/applications/
+endif
 	install -d $(DESTDIR)$(LIBDIR)
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	install -d $(DESTDIR)$(PKGCONFIGDIR)
@@ -566,6 +620,8 @@ uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(LIB_NAME).a
 	rm -rf $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	rm -f $(DESTDIR)$(PKGCONFIGDIR)/$(PROJECT_NAME)-1.0.pc
+	rm -f $(DESTDIR)$(PREFIX)/bin/ai-gui
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/org.copyleft.AiGlib.Gui.desktop
 	rm -f $(DESTDIR)$(LIBDIR)/girepository-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).typelib
 	rm -f $(DESTDIR)$(PREFIX)/share/gir-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).gir
 	@echo "Uninstallation complete!"
