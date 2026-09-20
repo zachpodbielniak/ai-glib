@@ -273,6 +273,7 @@ GUI_BINARY  = $(OUTDIR)/bin/ai-gui
 GUI_MODEL_SOURCES = \
 	$(GUIDIR)/ai-gui-session.c \
 	$(GUIDIR)/ai-gui-session-store.c \
+	$(GUIDIR)/ai-gui-work.c \
 	$(GUIDIR)/ai-gui-util.c
 
 ifneq ($(HAVE_GTK),1)
@@ -422,6 +423,11 @@ tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
 	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
 		$(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-work: $(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)

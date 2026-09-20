@@ -30,6 +30,8 @@ static gboolean  opt_local_tools = FALSE;
 static gboolean  opt_yes = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
+static gboolean  opt_dashboard = FALSE;
+static gboolean  opt_no_dashboard = FALSE;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 
@@ -65,6 +67,11 @@ static const GOptionEntry option_entries[] = {
 	  "Send input verbatim: no @ mentions, no / commands", NULL },
 	{ "no-agents", 0, 0, G_OPTION_ARG_NONE, &opt_no_agents,
 	  "Do not let the model start background agents", NULL },
+	{ "dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_dashboard,
+	  "Open the project dashboard instead of a conversation", NULL },
+	{ "no-dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_no_dashboard,
+	  "Open a conversation even when the saved preference says otherwise",
+	  NULL },
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
 	  "Print the version and exit", NULL },
 	{ "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
@@ -89,6 +96,9 @@ static const gchar *description_text =
 	"\n"
 	"  # Any provider property, the same names `ai --set` takes\n"
 	"  ai-gui -p grok-build --set reasoning-effort=high\n"
+	"\n"
+	"  # Every ai-gui and ai-tui session on this machine, at a glance\n"
+	"  ai-gui --dashboard\n"
 	"\n"
 	"Sessions are kept under $XDG_DATA_HOME/ai-glib/gui/sessions and\n"
 	"restored on the next start. A restored transcript is a record to\n"
@@ -187,6 +197,33 @@ main(
 	options->approve_all = opt_yes;
 	options->expand = !opt_no_expand;
 	options->agents = !opt_no_agents;
+
+	/*
+	 * The saved preference applies only to a bare launch.
+	 *
+	 * --continue or an explicit `--set session-id=` means somebody has
+	 * already said which conversation they want, and opening a list of
+	 * all of them instead would be answering a question they did not
+	 * ask. --dashboard says it outright and wins either way.
+	 */
+	{
+		g_autoptr(AiConfig) config = ai_config_new();
+		gboolean explicit_session = opt_continue;
+		gsize i;
+
+		for (i = 0; opt_set != NULL && opt_set[i] != NULL; i++)
+		{
+			if (g_str_has_prefix(opt_set[i], "session-id=") ||
+			    g_str_has_prefix(opt_set[i], "continue-session"))
+			{
+				explicit_session = TRUE;
+			}
+		}
+
+		options->dashboard = opt_dashboard ||
+			(ai_config_get_app_dashboard(config, "ai-gui") &&
+			 !opt_no_dashboard && !explicit_session);
+	}
 
 	app = adw_application_new(AI_GUI_APP_ID, G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect(app, "activate", G_CALLBACK(on_activate), options);

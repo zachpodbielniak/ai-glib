@@ -78,7 +78,27 @@ static const gchar *APP_CSS =
 	".ai-attachment { padding: 2px 6px; }\n"
 	".ai-monospace { font-family: monospace; }\n"
 	".ai-session-subtitle { font-size: 0.82em; opacity: 0.7; }\n"
-	".ai-activity { font-size: 0.85em; opacity: 0.8; }\n";
+	".ai-activity { font-size: 0.85em; opacity: 0.8; }\n"
+	/*
+	 * Dashboard status pills. One class per state, because the state is
+	 * a role and what it looks like is this file's decision -- the same
+	 * split AiStyleTag draws between the library and the frontend.
+	 */
+	".ai-status {\n"
+	"  font-size: 0.78em;\n"
+	"  font-weight: bold;\n"
+	"  letter-spacing: 0.06em;\n"
+	"  padding: 3px 8px;\n"
+	"  border-radius: 6px;\n"
+	"  background: alpha(currentColor, 0.10);\n"
+	"}\n"
+	".ai-status-input { color: @warning_color; background: alpha(@warning_color, 0.16); }\n"
+	".ai-status-error { color: @error_color; background: alpha(@error_color, 0.16); }\n"
+	".ai-status-work { color: @accent_color; background: alpha(@accent_color, 0.16); }\n"
+	".ai-status-done { color: @success_color; background: alpha(@success_color, 0.16); }\n"
+	".ai-status-stopped { opacity: 0.8; }\n"
+	".ai-status-idle { opacity: 0.6; }\n"
+	".ai-status-disconnected { opacity: 0.45; }\n";
 
 static gboolean style_dark = TRUE;
 

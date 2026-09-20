@@ -46,6 +46,36 @@ builds its provider page by walking the provider's own writable
 =GParamSpec= list, so a property added to a client is reachable from the
 command line, from bindings and from this dialog the day it exists.
 
+** Provider and model, per question
+
+Two menus sit under the message box. They choose where the *next*
+question goes, and nothing switches while you are using them: the
+provider is changed immediately before the message is sent, because a
+switch mid-turn would move the conversation out from under a reply that
+is still arriving.
+
+The provider list comes off the =AiProviderType= enum, so a provider
+added to the library appears without an edit here. The model list is
+fetched from the provider itself through
+=ai_provider_list_models_async()= and is searchable — a provider can
+advertise a hundred models. Three things follow from that:
+
+- A provider that cannot list its models (no key, no CLI installed, no
+  network) still offers the one this session is on. The menu degrades;
+  it does not empty.
+- A model the provider does not advertise — one set with
+  =--set model==, say — stays selectable. Dropping it would quietly move
+  the next question somewhere else.
+- =claude-tmux= implements no listing at all, and asking a provider that
+  does not would raise a critical. The interface is checked before the
+  call rather than after.
+
+Switching carries context across, exactly as the preferences dialog's
+switch does: see [[file:provider-switching.org][provider switching]] and
+[[file:native-session.org][native session import]]. While a turn is running the pickers are not
+applied — the follow-up is queued against the current provider and the
+window says so rather than pretending otherwise.
+
 ** The window
 
 Sessions on the left, the conversation on the right, an
@@ -75,6 +105,7 @@ Sessions on the left, the conversation on the right, an
 | =F9= | Show or hide the session list |
 | =Ctrl+Shift+E= | Export the transcript |
 | =Ctrl+Shift+G= | Background agents |
+| =Ctrl+backslash= | Project dashboard, and back again |
 
 ** Attachments
 
@@ -192,3 +223,102 @@ The three files marked *no GTK* are the ones =tests/test-ai-gui-session.c=
 links directly. That is why they do not include a toolkit header: a suite that
 needed a display would pass or fail by whose machine ran it, exactly as one
 reading the developer's real =~/.claude= would.
+
+** The project dashboard
+
+=Ctrl+backslash=, the toolbar's grid button, =/dashboard=, or
+=ai-gui --dashboard= at startup. The same key returns to the
+conversation with its draft intact; the turn keeps running behind it.
+
+*The registry is shared with ai-tui.* Every ai-glib front-end on this
+machine writes the same records under =$XDG_STATE_HOME/ai-glib/sessions=,
+so this window lists terminal sessions as well as its own — and can put
+one in front of you. See [[file:dashboard.org][the dashboard]] for what a record contains and
+how it expires.
+
+Rows are ordered by attention: INPUT, ERROR, WORK, DONE, STOPPED, IDLE,
+then DISCONNECTED, and grouped under the project they belong to. That
+ordering is reimplemented here to the letter rather than approximated,
+because two dashboards reading one registry must not disagree about
+which row is first. There is no percentage: a finished model turn does
+not prove an issue is resolved.
+
+| Action | What it does |
+|--------+--------------|
+| Open | This window's own session: switch to it. Anything else: focus its tmux pane |
+| Worktree | Branch =ai/<uuid>= into an adjacent =.ai-worktrees/= checkout and open a session there |
+| Resume | Start a session on a disconnected record's native provider session, adopting the record |
+| Link | Open a linked issue or PR with =xdg-open= |
+| Open project… | Start a conversation in another directory |
+
+Four things are deliberate:
+
+1. *Opening a foreign row goes through tmux, and checks first.* A pane
+   id is reused when a pane closes, so the pane's published
+   =@ai_session= is compared against the record's id before switching.
+   Without that check the action opens whatever unrelated work took the
+   number.
+2. *A new project is a session in this window*, not a new window. ai-tui
+   opens a tmux window because it is a terminal program; this keeps every
+   conversation one click apart instead of scattered across panes.
+3. *Resume adopts the record* rather than starting a second identity
+   beside it, so the links and the title already attached survive — and
+   it takes the same advisory lock ai-tui does, so two front-ends cannot
+   both drive one record.
+4. *A worktree is kept whatever happens next.* Uncommitted changes in the
+   source checkout are not copied, because =git worktree add= does not
+   carry them. Cleanup is Git's usual worktree commands once your work is
+   committed.
+
+*** Opening on the dashboard
+
+#+begin_src yaml
+apps:
+  ai-gui:
+    open-dashboard-on-load: true
+#+end_src
+
+The default is false, and the preference applies only to a bare launch:
+=--continue= or an explicit =--set session-id== means you have already
+said which conversation you want. =--dashboard= says it outright;
+=--no-dashboard= opts out for one run. This is the same key ai-tui uses
+under its own name, and both are read through
+=ai_config_get_app_dashboard()=.
+
+** Linked issues and pull requests
+
+#+begin_example
+/issue link https://git.example.org/team/project/issues/42
+/pr link https://github.com/team/project/pull/81
+/links
+/issue unlink https://git.example.org/team/project/issues/42
+/work https://git.example.org/team/project/issues/42
+#+end_example
+
+Linking records an association. It never posts a comment, closes an
+issue, or changes a remote assignee. =/work= fetches the title, state and
+body and queues *that* as an explicit assignment; a failed fetch submits
+nothing, because sending the model "here is your task:" with nothing
+after it is worse than saying the fetch did not work.
+
+Links appear as a globe in the header bar whenever the session has any.
+Each row reads number, cached remote state, then title — the order
+ai-tui uses, so one link reads the same way in both. The state is
+cached: a stale =open= sits *beside* the number rather than replacing it.
+GitHub metadata needs an authenticated =gh=, Forgejo/Gitea needs =tea=.
+
+** Slash commands
+
+Built-ins resolve in the library and are run here: =/help=, =/commands=,
+=/skills=, =/agents=, =/tools=, =/todos=, =/running=, =/kill=, =/clear=,
+=/reset=, =/reload=, =/cwd=, =/context=, =/expand=, =/save=, =/export=,
+=/links=, =/issue=, =/pr=, =/work=, =/project=, =/dashboard=, =/quit=.
+
+Their output goes into the transcript rather than a toast: =/help= and
+=/links= are output, and output that disappears after three seconds is
+output somebody has to ask for twice.
+
+=/model=, =/provider= and =/effort= report where the controls are instead
+of reimplementing a list you would then have to type an exact id into —
+the two menus under the message box and the preferences dialog. =/btw= is
+an ai-tui feature; open a second session instead.

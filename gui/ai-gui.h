@@ -53,4 +53,60 @@ ai_gui_window_toast(
 	...
 ) G_GNUC_PRINTF(2, 3);
 
+/**
+ * ai_gui_window_show_dashboard:
+ * @self: a window
+ * @show: whether to show the dashboard instead of the conversation
+ *
+ * The conversation keeps running behind it, draft and all: this swaps
+ * which page is visible and nothing else.
+ */
+void
+ai_gui_window_show_dashboard(
+	AiGuiWindow *self,
+	gboolean     show
+);
+
+gboolean
+ai_gui_window_get_dashboard(AiGuiWindow *self);
+
+/**
+ * ai_gui_window_open_project:
+ * @self: a window
+ * @directory: an existing directory
+ *
+ * Starts a conversation there and switches to it.
+ *
+ * ai-tui opens a tmux window because it is a terminal program; a session
+ * in this window is the desktop equivalent, and it keeps every open
+ * conversation one click apart instead of scattered across panes.
+ */
+void
+ai_gui_window_open_project(
+	AiGuiWindow *self,
+	const gchar *directory
+);
+
+/**
+ * ai_gui_window_refresh_links:
+ * @self: a window
+ *
+ * Re-reads the current session's linked work into the header button.
+ */
+void
+ai_gui_window_refresh_links(AiGuiWindow *self);
+
+/**
+ * ai_gui_window_export:
+ * @self: a window
+ * @arguments: (nullable): `[text|markdown|org] [path]`, as `/export` takes
+ *
+ * With a path, writes it; without one, opens the file chooser.
+ */
+void
+ai_gui_window_export(
+	AiGuiWindow *self,
+	const gchar *arguments
+);
+
 G_END_DECLS

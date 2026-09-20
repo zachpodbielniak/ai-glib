@@ -9,9 +9,12 @@
 
 #include <string.h>
 
+#include <glib/gstdio.h>
+
 #include "core/ai-json-util.h"
 
 #include "ai-gui-session.h"
+#include "ai-gui-work.h"
 
 /*
  * Nothing in this file touches GTK, on purpose.
@@ -52,6 +55,14 @@ struct _AiGuiSession
 	gulong activity_id;
 	gulong approval_id;
 	gulong agent_id;
+
+	AiWorkSession *work;
+	gchar         *work_directory;
+	gchar         *work_outcome;
+	GSource       *heartbeat;
+	GCancellable  *work_cancellable;
+	gint           work_lock;
+	gboolean       awaiting_approval;
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiSession, ai_gui_session, G_TYPE_OBJECT)
@@ -78,6 +89,7 @@ enum
 	SIGNAL_APPROVAL_REQUESTED,
 	SIGNAL_TURN_FINISHED,
 	SIGNAL_AGENT_FINISHED,
+	SIGNAL_BUILTIN,
 	N_SIGNALS
 };
 
@@ -318,8 +330,21 @@ on_approval_requested(
 	if (self->approve_all || self->options->skip_permissions)
 		return AI_TOOL_APPROVAL_ALLOW;
 
+	/*
+	 * INPUT on the dashboard, for as long as somebody is being asked.
+	 *
+	 * Published before the handler runs because the handler blocks on a
+	 * dialog: waiting until it returned would raise the flag only after
+	 * the question had already been answered.
+	 */
+	self->awaiting_approval = TRUE;
+	ai_gui_session_publish_work(self);
+
 	g_signal_emit(self, signals[SIGNAL_APPROVAL_REQUESTED], 0, tool_use,
 	              &answer);
+
+	self->awaiting_approval = FALSE;
+	ai_gui_session_publish_work(self);
 
 	return (AiToolApproval)answer;
 }
@@ -342,6 +367,7 @@ on_busy_notify(
 	gpointer    user_data
 ){
 	g_object_notify_by_pspec(user_data, properties[PROP_BUSY]);
+	ai_gui_session_publish_work(user_data);
 }
 
 static void
@@ -351,6 +377,7 @@ on_activity_notify(
 	gpointer    user_data
 ){
 	g_object_notify_by_pspec(user_data, properties[PROP_ACTIVITY]);
+	ai_gui_session_publish_work(user_data);
 }
 
 static void
@@ -364,6 +391,241 @@ session_connect_conversation(AiGuiSession *self)
 		G_CALLBACK(on_busy_notify), self);
 	self->activity_id = g_signal_connect(self->conversation, "notify::activity",
 		G_CALLBACK(on_activity_notify), self);
+}
+
+/* ================================================================
+ * The dashboard record
+ * ================================================================ */
+
+/*
+ * What this session looks like from the dashboard.
+ *
+ * Every field the registry keeps is derived here rather than cached as
+ * it changes: the sources of truth are the conversation, the executor
+ * and the brigade, and a second copy kept in step by hand is a second
+ * copy that eventually is not.
+ */
+void
+ai_gui_session_publish_work(AiGuiSession *self)
+{
+	GObject *provider;
+	AiToolExecutor *executor;
+	AiBrigade *brigade;
+	g_autoptr(GList) agents = NULL;
+	g_autofree gchar *native = NULL;
+	g_autofree gchar *activity = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *label;
+	GList *iter;
+	guint active = 0;
+	guint completed = 0;
+	guint total;
+	guint i;
+	gboolean attention;
+
+	g_return_if_fail(AI_GUI_IS_SESSION(self));
+
+	if (self->work == NULL)
+		return;
+
+	provider = ai_conversation_get_provider(self->conversation);
+	executor = ai_conversation_get_executor(self->conversation);
+	brigade = ai_conversation_get_brigade(self->conversation);
+	attention = self->awaiting_approval;
+
+	if (brigade != NULL)
+		agents = ai_brigade_list(brigade);
+
+	for (iter = agents; iter != NULL; iter = iter->next)
+	{
+		AiAgentState state = ai_agent_get_state(iter->data);
+
+		if (state >= AI_AGENT_STATE_QUEUED && state <= AI_AGENT_STATE_BLOCKED)
+			active++;
+
+		if (state == AI_AGENT_STATE_WAITING_INPUT)
+			attention = TRUE;
+	}
+
+	total = ai_tool_executor_get_n_todos(executor);
+
+	for (i = 0; i < total; i++)
+	{
+		AiTodoState state;
+
+		ai_tool_executor_get_todo_fields(executor, i, NULL, &state);
+
+		if (state == AI_TODO_COMPLETED)
+			completed++;
+	}
+
+	if (provider != NULL &&
+	    g_object_class_find_property(G_OBJECT_GET_CLASS(provider),
+	                                 "session-id") != NULL)
+	{
+		g_object_get(provider, "session-id", &native, NULL);
+	}
+
+	label = ai_conversation_get_activity(self->conversation);
+	activity = g_strdup_printf("%s / %u background / %u/%u todos / %"
+		G_GINT64_FORMAT "s",
+		label != NULL && *label != '\0' ? label : "Ready", active,
+		completed, total,
+		ai_conversation_get_activity_elapsed(self->conversation)
+			/ G_USEC_PER_SEC);
+
+	g_object_set(self->work,
+		"provider", self->provider_id != NULL ? self->provider_id : "",
+		"model", self->model != NULL ? self->model : "",
+		"provider-session", native != NULL ? native : "",
+		"activity", activity,
+		"title", self->title != NULL ? self->title : "",
+		NULL);
+
+	ai_work_session_update(self->work,
+		self->sending || ai_conversation_get_busy(self->conversation) ||
+			ai_prompt_queue_get_length(self->queue) != 0,
+		attention, active, self->work_outcome);
+
+	if (!ai_work_session_save(self->work, self->work_directory, TRUE, &error))
+	{
+		/*
+		 * g_debug: a state directory that will not take a write is the
+		 * machine, not a bug here, and the dashboard degrades to showing
+		 * this session as disconnected rather than failing a turn.
+		 */
+		g_debug("ai-gui: cannot publish the dashboard record: %s",
+		        error->message);
+	}
+}
+
+void
+ai_gui_session_release_work(AiGuiSession *self)
+{
+	g_return_if_fail(AI_GUI_IS_SESSION(self));
+
+	if (self->work == NULL)
+		return;
+
+	/* Metadata is kept, liveness is not: the row stays visible and
+	 * resumable rather than vanishing when a window closes. */
+	ai_work_session_save(self->work, self->work_directory, FALSE, NULL);
+}
+
+static gboolean
+on_heartbeat(gpointer user_data)
+{
+	ai_gui_session_publish_work(user_data);
+	return G_SOURCE_CONTINUE;
+}
+
+static void
+session_start_heartbeat(AiGuiSession *self)
+{
+	if (self->heartbeat != NULL)
+		return;
+
+	/*
+	 * Three seconds, against the registry's fifteen-second expiry.
+	 *
+	 * Held as a #GSource and destroyed with g_source_destroy(), never by
+	 * id — see the main-context note in AGENTS.md for why an id from one
+	 * context names a different source in another.
+	 */
+	self->heartbeat = g_timeout_source_new_seconds(3);
+	g_source_set_callback(self->heartbeat, on_heartbeat, self, NULL);
+	g_source_attach(self->heartbeat, g_main_context_get_thread_default());
+}
+
+static void
+on_work_ready(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      user_data
+){
+	AiGuiSession *self = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiWorkSession) work = ai_gui_work_new_finish(result, &error);
+
+	if (work == NULL)
+	{
+		g_debug("ai-gui: no dashboard record for this session: %s",
+		        error != NULL ? error->message : "cancelled");
+		g_object_unref(self);
+		return;
+	}
+
+	if (self->work == NULL)
+	{
+		g_autoptr(GError) claim_error = NULL;
+
+		self->work_lock = ai_gui_work_claim(self->work_directory,
+			ai_work_session_get_id(work), &claim_error);
+		self->work = g_steal_pointer(&work);
+		session_start_heartbeat(self);
+		ai_gui_session_publish_work(self);
+	}
+
+	g_object_unref(self);
+}
+
+void
+ai_gui_session_set_work_directory(
+	AiGuiSession *self,
+	const gchar  *directory
+){
+	g_return_if_fail(AI_GUI_IS_SESSION(self));
+
+	g_free(self->work_directory);
+	self->work_directory = directory != NULL ? g_strdup(directory)
+		: ai_work_session_default_directory();
+}
+
+AiWorkSession *
+ai_gui_session_get_work(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+	return self->work;
+}
+
+gboolean
+ai_gui_session_adopt_work(
+	AiGuiSession  *self,
+	AiWorkSession *work,
+	GError       **error
+){
+	gint lock;
+
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), FALSE);
+	g_return_val_if_fail(AI_IS_WORK_SESSION(work), FALSE);
+
+	lock = ai_gui_work_claim(self->work_directory,
+	                         ai_work_session_get_id(work), error);
+
+	if (lock < 0)
+		return FALSE;
+
+	/*
+	 * The adopted record replaces whatever registration was in flight.
+	 * Cancelling it first is what stops the worker from installing a
+	 * second identity a moment later and orphaning this one.
+	 */
+	g_cancellable_cancel(self->work_cancellable);
+
+	if (self->work_lock >= 0)
+		g_close(self->work_lock, NULL);
+
+	self->work_lock = lock;
+	g_set_object(&self->work, work);
+
+	/* A recovered record must never keep a previous terminal's target:
+	 * this session is a window, not that pane. */
+	g_object_set(self->work, "socket", "", "pane", "", NULL);
+
+	session_start_heartbeat(self);
+	ai_gui_session_publish_work(self);
+
+	return TRUE;
 }
 
 /* ================================================================
@@ -423,6 +685,14 @@ session_configure(AiGuiSession *self)
 		                                         AI_GUI_AGENT_MAX);
 
 	session_connect_conversation(self);
+
+	/*
+	 * Registration is asynchronous and the reference is held for it.
+	 * A session closed while git is still answering must still have
+	 * somewhere for the result to land.
+	 */
+	ai_gui_work_new_async(self->working_directory, self->work_cancellable,
+	                      on_work_ready, g_object_ref(self));
 }
 
 AiGuiSession *
@@ -831,6 +1101,22 @@ on_send_ready(
 	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BUSY]);
 
 	/*
+	 * DONE means this turn finished, never that the task is finished.
+	 * A cancelled turn is STOPPED rather than ERROR: the person who
+	 * pressed stop did not hit a failure.
+	 */
+	if (command == NULL)
+	{
+		/*
+		 * Only a real turn sets an outcome. A /help that reported DONE
+		 * would tell the dashboard a model had just finished work.
+		 */
+		g_free(self->work_outcome);
+		self->work_outcome = g_strdup(ok ? "DONE"
+			: (error != NULL ? "ERROR" : "STOPPED"));
+	}
+
+	/*
 	 * A cancelled turn is not a failure worth a dialog: the person who
 	 * pressed stop already knows. Everything else is reported.
 	 */
@@ -838,8 +1124,20 @@ on_send_ready(
 		g_clear_error(&error);
 
 	session_touch(self);
-	g_signal_emit(self, signals[SIGNAL_TURN_FINISHED], 0, ok,
-	              error != NULL ? error->message : NULL);
+
+	/*
+	 * A built-in resolved instead of a turn.
+	 *
+	 * ai_conversation_send_input_images_finish() hands back a command
+	 * and sends nothing, so a frontend that only looked at the boolean
+	 * would swallow every /help in silence -- which is exactly what this
+	 * one did before the signal existed.
+	 */
+	if (command != NULL)
+		g_signal_emit(self, signals[SIGNAL_BUILTIN], 0, command);
+	else
+		g_signal_emit(self, signals[SIGNAL_TURN_FINISHED], 0, ok,
+		              error != NULL ? error->message : NULL);
 
 	/*
 	 * Pump before dropping the turn's reference: the queue entry takes a
@@ -862,7 +1160,15 @@ session_dispatch(
 	self->sending = TRUE;
 	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BUSY]);
 
-	if (self->title_is_automatic || self->title == NULL)
+	/*
+	 * A `/command` never becomes the title.
+	 *
+	 * It is not what the conversation is about -- and the first thing
+	 * somebody does in a new session is often /help, which would then
+	 * name it for as long as it lives. ai-tui applies the same rule.
+	 */
+	if ((self->title_is_automatic || self->title == NULL) &&
+	    text != NULL && text[0] != '/')
 	{
 		g_free(self->title);
 		self->title = ai_gui_summarise_prompt(text);
@@ -1064,6 +1370,13 @@ ai_gui_session_get_provider_name(AiGuiSession *self)
 {
 	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
 	return self->provider_name;
+}
+
+const gchar *
+ai_gui_session_get_provider_id(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+	return self->provider_id;
 }
 
 const gchar *
@@ -1307,6 +1620,27 @@ ai_gui_session_dispose(GObject *object)
 	if (self->registry != NULL)
 		ai_resource_registry_set_watching(self->registry, FALSE);
 
+	if (self->heartbeat != NULL)
+	{
+		g_source_destroy(self->heartbeat);
+		g_clear_pointer(&self->heartbeat, g_source_unref);
+	}
+
+	if (self->work_cancellable != NULL)
+		g_cancellable_cancel(self->work_cancellable);
+
+	if (self->work != NULL)
+		ai_gui_session_release_work(self);
+
+	if (self->work_lock >= 0)
+	{
+		g_close(self->work_lock, NULL);
+		self->work_lock = -1;
+	}
+
+	g_clear_object(&self->work);
+	g_clear_object(&self->work_cancellable);
+
 	g_clear_object(&self->cancellable);
 	g_clear_object(&self->completion);
 	g_clear_object(&self->commands);
@@ -1329,6 +1663,8 @@ ai_gui_session_finalize(GObject *object)
 	g_free(self->provider_id);
 	g_free(self->model);
 	g_free(self->working_directory);
+	g_free(self->work_directory);
+	g_free(self->work_outcome);
 
 	G_OBJECT_CLASS(ai_gui_session_parent_class)->finalize(object);
 }
@@ -1405,6 +1741,19 @@ ai_gui_session_class_init(AiGuiSessionClass *klass)
 		g_signal_new("agent-finished", G_TYPE_FROM_CLASS(klass),
 		             G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
 		             G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_INT);
+
+	/**
+	 * AiGuiSession::builtin-command:
+	 * @self: the session
+	 * @command: the resolved built-in
+	 *
+	 * The line was a `/command` this frontend has to run itself.
+	 * Nothing was sent to the provider.
+	 */
+	signals[SIGNAL_BUILTIN] =
+		g_signal_new("builtin-command", G_TYPE_FROM_CLASS(klass),
+		             G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+		             G_TYPE_NONE, 1, AI_TYPE_COMMAND_RESULT);
 }
 
 static void
@@ -1414,4 +1763,7 @@ ai_gui_session_init(AiGuiSession *self)
 	self->title = g_strdup("New session");
 	self->title_is_automatic = TRUE;
 	self->queue = ai_prompt_queue_new();
+	self->work_lock = -1;
+	self->work_cancellable = g_cancellable_new();
+	self->work_directory = ai_work_session_default_directory();
 }
