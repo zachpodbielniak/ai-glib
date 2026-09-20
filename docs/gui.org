@@ -226,6 +226,7 @@ belong in the image build rather than in a transient overlay.
 | =gui/ai-gui-settings.c= | Theme and light/dark, remembered; *no GTK* |
 | =gui/ai-gui-content.c= | Attachments, previewable files, fenced code, clicked spans; *no GTK* |
 | =gui/ai-gui-preview.c= | The image and document viewers |
+| =gui/ai-gui-quota.c= | The account-allowance indicator and its popover |
 
 The files marked *no GTK* are the ones =tests/test-ai-gui-session.c=,
 =tests/test-ai-gui-work.c=, =tests/test-ai-gui-theme.c= and
@@ -331,6 +332,45 @@ collapsed tool group would put "Ran 3 commands" on the clipboard, which
 is the one thing nobody wants to paste. An assistant answer is already
 Markdown; everything else goes in a fence rather than being pasted into
 a document as prose.
+** Account quota
+
+The header bar shows how much of the account allowance is left, beside
+the search and menu buttons. It is the same figure [[file:tui.org][ai-tui]] prints under
+the provider in its session panel, from the same report and the same
+direction rule --- see [[file:cli-reporting.org][CLI reporting]] for which providers can answer and
+what authentication they need.
+
+The indicator shows *the lowest* allowance, not the first: a provider
+that reports a five-hour window and a weekly one usually has plenty of
+the second and none of the first, and the one about to stop the
+conversation is the one worth a single number. It turns amber below 25%
+and red below 10%, using the palette's own warning and error colours so
+it matches whichever theme is loaded. Click it for every allowance, each
+with its own bar and the provider's own words for when it refills.
+
+Four things follow from a report being a CLI subprocess rather than a
+field on a response:
+
+1. *It is hidden when there is nothing to report.* An HTTP provider has
+   no account report at all, and a permanently blank indicator beside one
+   would teach you to ignore the place the number appears.
+2. *Polling follows the window.* A window behind a browser has no
+   business spawning a CLI every minute, so queries stop when the window
+   is not active and resume when it comes forward --- the same rule
+   ai-tui applies to a hidden panel.
+3. *A refresh is at most once a minute*, failures included. Backing off a
+   failing provider at the same rate as a working one is what stops a
+   broken CLI from becoming a subprocess per redraw.
+4. *Switching session, model or working directory drops the snapshot.* An
+   allowance is scoped to all three, and relabelling the previous one
+   would attribute somebody else's quota to this conversation.
+
+A failed refresh keeps the last figure, dimmed, under a =REMAINING
+(stale)= heading rather than blanking it: the last thing that was true is
+more use than nothing, as long as it does not look current. A row whose
+direction the provider never stated gets no bar at all --- an empty bar
+would claim you have none left, which is a different statement from "we
+do not know".
 
 ** The project dashboard
 

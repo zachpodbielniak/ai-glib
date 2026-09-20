@@ -1309,6 +1309,50 @@ is validated by the library and read by `ai` and `ai-tui` too, so a key
 there would have to mean something to all three. A `--theme` on the command
 line is deliberately *not* written back.
 
+### Account quota
+
+**One cache, two front-ends**, `src/core/ai-quota.h` — the same pattern as
+`AI_THEMES` and for the same reason. `AiCliReport` gives each allowance in
+whatever direction its provider stated (Codex says `used_percent`, a Claude
+panel says remaining, some give a count against a limit), and turning that
+into a number a person acts on is a *decision*. A terminal saying 75%
+remaining while a window says 25% for one account is worse than either
+saying nothing.
+
+It is a private header of `static inline` functions — nothing exported,
+nothing introspected — holding the direction rule, the display rounding,
+the "worst allowance" pick, the heading vocabulary *and* the refresh
+policy. `bin/ai-tui-usage.h` was the first copy and was folded into it when
+ai-gui needed the second.
+
+Five rules:
+
+- **Never infer a direction.** An unlabeled `percent`, a missing
+  denominator or an out-of-range value is unavailable. A number that might
+  mean either direction is worth less than no number.
+- **Rounding must not invent an exhausted allowance.** `%.0f` prints 0.4%
+  as `0%`, which reads as "you are out" when you are not — the same
+  invented zero the report layer refuses to produce from missing data.
+  `ai_quota_format_percent()` answers `<1%` and `>99%` at the two ends, and
+  `tests/test-quota.c` names every boundary.
+- **Identity is provider *and* model *and* working directory.** A report is
+  scoped to all three; relabelling the previous snapshot would attribute
+  somebody else's quota to this session. The generation counter is what
+  discards an in-flight answer that no longer applies.
+- **Visibility is the whole throttle.** A query is a CLI subprocess. ai-tui
+  asks only while the panel is drawn; ai-gui only while the window is
+  active. Failures back off at the same one minute as successes, or a
+  broken CLI becomes a subprocess per redraw.
+- **Teardown is stop, drain, clear, in that order.** `ai_quota_ready()`
+  clears `pending` *before* it checks `stopped`, so the drain always
+  terminates — including when the cancel it just fired is what completed
+  the query. `ai_quota_clear()` asserts `!pending` because skipping the
+  drain leaves a callback pointing at freed memory.
+
+The query runs against a *separate* client built from the active one
+(executable, model, cwd, environment, timeout). Reporting is read-only work
+and has no business sharing the lifetime of the object a turn is using.
+
 ### The dashboard and the pickers
 
 `ai-gui` registers an `AiWorkSession` like `ai-tui` does, into the same

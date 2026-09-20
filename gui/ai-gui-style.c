@@ -130,7 +130,12 @@ static const gchar *APP_CSS =
 	"  padding: 4px 6px;\n"
 	"}\n"
 	".ai-thumbnail { border-radius: 8px; }\n"
-	".ai-thumbnail-button { padding: 0; border-radius: 8px; }\n";
+	".ai-thumbnail-button { padding: 0; border-radius: 8px; }\n"
+	/* The quota indicator turns colour as the allowance runs down; the
+	 * palette's own warning and error entries, so it matches whichever
+	 * theme is loaded rather than naming colours here. */
+	".ai-quota-low { color: @warning_color; }\n"
+	".ai-quota-spent { color: @error_color; font-weight: bold; }\n";
 
 typedef struct
 {

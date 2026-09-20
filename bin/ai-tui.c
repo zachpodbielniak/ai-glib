@@ -31,6 +31,7 @@
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
+#include "core/ai-quota.h"
 #include "ai-tui-panel.h"
 #include "ai-tui-images.h"
 
@@ -358,6 +359,7 @@ typedef struct
     WINDOW         *status_win;
     WINDOW         *input_win;
 	gboolean details;
+	AiQuota usage;
 	gboolean tiny;
 	gint content_width;
 	gint input_first;
@@ -474,6 +476,12 @@ typedef struct
 } App;
 
 static void app_schedule_redraw(App *app);
+static void
+on_usage_changed(gpointer data)
+{
+	app_schedule_redraw(data);
+}
+
 static gboolean app_flush_send_queue(App *app);
 static void chrome_text(gint y, gint x, gint width, const gchar *text, attr_t attr);
 #include <termios.h>
@@ -1645,6 +1653,9 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+	ai_quota_refresh(&app->usage, provider, app->running && !app->dashboard);
+	y = panel_usage(y + 1, x, 28, &app->usage,
+		theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, theme_attr(PAIR_SURFACE));
     app->link_first_row = app->link_last_row = -1;
     if (app->work != NULL)
     {
@@ -6185,6 +6196,8 @@ main(int argc, char *argv[])
      */
     g_unix_signal_add(SIGINT, on_sigint, &app);
 
+    app.usage.changed = on_usage_changed;
+    app.usage.user_data = &app;
     app.work_timer = g_timeout_add_seconds(3, work_tick, &app);
     {
         struct termios keys;
@@ -6201,6 +6214,9 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	ai_quota_stop(&app.usage);
+	ai_quota_drain(&app.usage);
+	ai_quota_clear(&app.usage);
 	ai_conversation_cancel(app.conversation);
 	while (app.sending || ai_conversation_get_busy(app.conversation)) g_main_context_iteration(NULL, TRUE);
 	{

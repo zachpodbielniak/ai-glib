@@ -761,3 +761,61 @@ command barriers, cancellation, context isolation and the library APIs.
 =Ctrl+\= toggles the dashboard; =--dashboard= opens it at startup.
 See [[file:dashboard.org][Projects, dashboard and linked work]] for the startup
 preference, tmux status names, issue/PR side-panel links and task recovery.
+
+** Account quota in the session panel
+
+The side panel (=C-p=; visible at 110 columns and 20 rows or larger)
+shows =ACCOUNT REMAINING= beneath the current provider and model. Each
+bar is the percentage of an allowance still available: a full bar means
+100% remaining and an empty bar means 0% remaining. This convention is
+identical across providers, including Codex. Explicit remaining percentages
+are used directly; used percentages are subtracted from 100. A known
+remaining/limit or used/limit pair can also supply the percentage. An
+unlabeled percentage, missing denominator, or invalid value is unavailable,
+never an invented zero.
+
+The direction rule, the display rounding and the refresh policy live in
+=src/core/ai-quota.h= and are shared with [[file:gui.org][ai-gui]], which shows the same
+allowances in its header bar. A terminal saying 75% remaining while a
+window says 25% for one account would be worse than either saying
+nothing, so neither front-end decides this for itself.
+
+This uses the same native account report as =ai --usage -p PROVIDER=.
+Allowances are account-wide or named model pools, not this conversation's
+token count. Source labels and reset information are retained; reports
+without a model association are not guessed to belong only to the current
+model. The existing latest-turn token usage remains a separate section.
+See [[file:cli-reporting.org][CLI reporting]] for provider support and authentication limits.
+
+Queries run in the background on an independent client with the active
+provider's executable, working directory and environment. Opening the panel
+fetches a snapshot; while visible, it refreshes at most once per minute.
+Hidden panels and =--dump= do not start queries. Changing provider, model or
+working directory invalidates the snapshot and discards an old in-flight
+result. Shutdown cancels and drains pending reporting work.
+
+The panel names loading, refreshing, unavailable, partial and stale results.
+It shows up to three allowance entries, subject to terminal height; use
+=ai --usage -p PROVIDER= for the complete report. A failed
+refresh keeps the previous snapshot explicitly marked stale. Providers
+without native reporting show =Unavailable=, and only quota entries with
+known direction receive a bar. Long or control-bearing labels are sanitized
+and clipped to the panel; the terminal footer remains reserved.
+
+*** Quota regression tests
+
+=tests/test-quota.c= checks percentage direction (including Codex),
+unknown/invalid values, independent client snapshots, caching, failed
+refreshes, provider/model/directory changes and cancellation.
+=tests/test-ai-tui-panel.c= inspects real curses cells for bars, partial/stale
+states, hostile labels, Unicode clipping and footer preservation.
+The =/ai-glib/ai-tui/keys/usage-sidebar= case in =tests/test-ai-tui.c= uses
+a tmux PTY and a local Python reporting fixture to verify the complete
+sidebar wiring, hidden/dump behavior, cache reuse, and responsive typing
+and shutdown during a stalled query. That case skips when tmux or Python 3
+is unavailable; it never contacts an external provider.
+
+Run =make test= for the complete suite and GIR warning gate. For focused
+leak and lifetime coverage, build the two first test binaries with
+=DEBUG=1 ASAN=1= and run them from =build/debug/tests/= with
+=ASAN_OPTIONS=detect_leaks=1=.
