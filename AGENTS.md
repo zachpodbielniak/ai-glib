@@ -1215,6 +1215,56 @@ The approval dialog spins its nested `GMainLoop` on
 is held as a `GSource *` and torn down with `g_source_destroy()` — both for
 the reasons the main-context section above gives.
 
+### Themes
+
+**The palettes are one table**, `AI_THEMES` in `src/core/ai-theme.h`, read
+by `bin/ai-tui-theme.h` and `gui/ai-gui-style.c` alike. It is a private
+header of `static` data and `static inline` functions — the `ai-json-util.h`
+pattern — so nothing new is exported and nothing new is introspected.
+
+That file settles one question and no more: *given* that a frontend has
+chosen one of these named palettes, which entry does each style tag use.
+The library still has no opinion about what a tag looks like; a frontend
+with a palette of its own ignores the header entirely. There were two
+answers before, written at different times from the same intent, and they
+had drifted — the terminal drew a link muted and the window drew it
+accented, so one person running both saw two programs disagreeing about
+their own theme.
+
+Four rules:
+
+- **`ai_theme_role_for_tag()` and `ai_theme_emphasis_for_tag()` are the
+  mapping.** Changing one changes both front-ends, which is the point.
+  `tests/test-ai-gui-theme.c` asserts the whole table by name and counts it
+  against `AI_STYLE_N_TAGS`, so a tag added to the library cannot be
+  forgotten here silently.
+- **Colour and weight are shared; font family and slant are not.** A
+  terminal can be bold and underlined and cannot be monospace or italic, so
+  those stay in `gui/`'s own small `TYPEFACES` table. Putting them in the
+  shared header would have been stating something one frontend cannot honour.
+- **`terminal` and `monochrome` name no colours** — every field is zero.
+  `ai_theme_is_native()` is the guard before reading one; ai-tui falls back
+  to the sixteen the user configured and ai-gui to GNOME's palette.
+- **A named palette is applied by redefining libadwaita's own colours**
+  (`window_bg_color`, `accent_color`, …), not by styling widgets. Styling
+  the transcript alone produces catppuccin text inside Adwaita-blue chrome.
+  A palette also forces the matching light/dark: a near-black page with
+  light-theme widget internals reads as a bug, not a choice.
+
+**A theme change must restyle the transcript.** A span's colour is a
+`PangoAttribute` baked into a label when the block was last rendered, and
+nothing invalidates it — so recolouring the chrome alone leaves
+light-lavender prose on a latte page. `ai_gui_style_add_changed()` is the
+hook and `ai_gui_chat_view_restyle()` the response; it also covers the
+change nobody initiates, the desktop going dark at sunset while `terminal`
+is active.
+
+Appearance is remembered in `$XDG_DATA_HOME/ai-glib/gui/settings.json`
+(`gui/ai-gui-settings.c`, GTK-free) rather than in `config.yaml`: that file
+is validated by the library and read by `ai` and `ai-tui` too, so a key
+there would have to mean something to all three. A `--theme` on the command
+line is deliberately *not* written back.
+
 ### The dashboard and the pickers
 
 `ai-gui` registers an `AiWorkSession` like `ai-tui` does, into the same

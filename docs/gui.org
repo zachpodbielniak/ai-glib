@@ -106,6 +106,7 @@ Sessions on the left, the conversation on the right, an
 | =Ctrl+Shift+E= | Export the transcript |
 | =Ctrl+Shift+G= | Background agents |
 | =Ctrl+backslash= | Project dashboard, and back again |
+| =Ctrl+T= | Next theme |
 
 ** Attachments
 
@@ -217,12 +218,73 @@ belong in the image build rather than in a transient overlay.
 | =gui/ai-gui-prefs.c= | Preferences, including the generated provider page |
 | =gui/ai-gui-agents.c= | The background-agent panel |
 | =gui/ai-gui-approval.c= | The approval dialog and its nested loop |
-| =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; the stylesheet |
+| =gui/ai-gui-style.c= | =AiStyleTag= to Pango attributes; palettes and the stylesheet |
+| =gui/ai-gui-settings.c= | Theme and light/dark, remembered; *no GTK* |
 
-The three files marked *no GTK* are the ones =tests/test-ai-gui-session.c=
-links directly. That is why they do not include a toolkit header: a suite that
+The files marked *no GTK* are the ones =tests/test-ai-gui-session.c=,
+=tests/test-ai-gui-work.c= and =tests/test-ai-gui-theme.c= link
+directly. That is why they do not include a toolkit header: a suite that
 needed a display would pass or fail by whose machine ran it, exactly as one
 reading the developer's real =~/.claude= would.
+
+** Appearance
+
+ai-gui draws the same palettes [[file:tui.org][ai-tui]] does, from the same table, and
+defaults to Catppuccin Mocha exactly as ai-tui does.
+
+| Theme | What it is |
+|-------+------------|
+| =catppuccin-mocha= | The default. Dark. |
+| =catppuccin-latte= | Light. |
+| =nord= | Dark. |
+| =terminal= | The desktop's own colours, following your light/dark preference. Also spelled =system=. |
+| =monochrome= | No colour at all: weight, underline and the label's own foreground. |
+
+#+begin_src sh
+ai-gui --list-themes
+ai-gui --theme nord
+ai-gui --theme terminal --color-scheme dark
+AI_GUI_THEME=catppuccin-latte ai-gui
+#+end_src
+
+=Ctrl+T= cycles them in a running window, the same key ai-tui uses, and
+the Appearance page in Preferences has both controls. A choice made in
+the window is remembered in
+=$XDG_DATA_HOME/ai-glib/gui/settings.json=; a =--theme= on the command
+line is for that run only, because a one-off look at nord should not
+become the permanent setting.
+
+Selection order is =--theme=, then =AI_GUI_THEME=, then the saved
+choice, then Catppuccin Mocha. =NO_COLOR= selects =monochrome= only when
+none of those three spoke: naming a theme explicitly is asking for
+colour. An unknown name is a message on stderr and the window still
+opens.
+
+*** Light and dark
+
+=--color-scheme system|light|dark= is the ordinary GTK preference, and
+it applies to =terminal= and =monochrome=. The three named palettes
+carry their own: selecting Catppuccin Latte forces the light variant of
+every widget, because a light page inside dark chrome is not a theme,
+it is a bug. Switch to =terminal= to get the preference back.
+
+*** How a palette reaches the window
+
+A named palette is applied by redefining libadwaita's own colours ---
+=window_bg_color=, =headerbar_bg_color=, =accent_color=, =error_color=
+and the rest --- so the header bar, the popovers, the dialogs and the
+scrollbars are part of the theme rather than Adwaita blue around a
+themed transcript. Which palette entry each style tag draws in is
+decided once, in =src/core/ai-theme.h=, and both front-ends read it:
+that is what makes a tool target the same colour in the window as in the
+terminal.
+
+Under =terminal=, nothing is redefined --- the GTK stylesheet shows
+through, including a high-contrast or third-party one --- and the spans
+are coloured from GNOME's own palette. Under =monochrome= nothing is
+coloured at all, and the faint tags are the only ones that look
+different, which is the same rule ai-tui follows when it has no colours
+to use.
 
 ** The project dashboard
 

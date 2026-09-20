@@ -97,6 +97,34 @@ void
 ai_gui_window_refresh_links(AiGuiWindow *self);
 
 /**
+ * ai_gui_window_set_theme:
+ * @self: a window
+ * @name: a palette name, as `--theme` spells it
+ *
+ * Applies a palette and remembers it for the next run.
+ *
+ * Only a choice made *in* the application is remembered. A `--theme` on
+ * the command line is for that run: writing it back would make a one-off
+ * look at nord the new permanent setting.
+ */
+void
+ai_gui_window_set_theme(
+	AiGuiWindow *self,
+	const gchar *name
+);
+
+/**
+ * ai_gui_window_set_color_scheme:
+ * @self: a window
+ * @name: `system`, `light` or `dark`
+ */
+void
+ai_gui_window_set_color_scheme(
+	AiGuiWindow *self,
+	const gchar *name
+);
+
+/**
  * ai_gui_window_export:
  * @self: a window
  * @arguments: (nullable): `[text|markdown|org] [path]`, as `/export` takes

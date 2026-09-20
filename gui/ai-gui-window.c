@@ -18,6 +18,7 @@
 #include "ai-gui-composer.h"
 #include "ai-gui-prefs.h"
 #include "ai-gui-session-store.h"
+#include "ai-gui-settings.h"
 #include "ai-gui-sidebar.h"
 #include "ai-gui-style.h"
 #include "ai-gui-work.h"
@@ -27,6 +28,7 @@ struct _AiGuiWindow
 	AdwApplicationWindow parent_instance;
 
 	AiGuiOptions      *options;
+	AiGuiSettings     *settings;
 	AiGuiSessionStore *store;
 	AiGuiSession      *session;
 
@@ -425,6 +427,71 @@ on_composer_stop(
 }
 
 /* ================================================================
+ * Appearance
+ * ================================================================ */
+
+/*
+ * The chrome follows the stylesheet by itself; the transcript does not.
+ * Registered once for the window's lifetime so it also covers the change
+ * nobody here initiated -- the desktop going dark at sunset.
+ */
+static void
+on_appearance_changed(gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+
+	if (self->chat != NULL)
+		ai_gui_chat_view_restyle(AI_GUI_CHAT_VIEW(self->chat));
+}
+
+static void
+window_remember_appearance(AiGuiWindow *self)
+{
+	g_autoptr(GError) error = NULL;
+
+	if (!ai_gui_settings_save(self->settings, NULL, &error))
+	{
+		/*
+		 * g_debug: a data directory that will not take a write is the
+		 * machine, not a bug here, and the only consequence is that the
+		 * choice does not survive the next start.
+		 */
+		g_debug("ai-gui: could not save appearance: %s", error->message);
+	}
+}
+
+void
+ai_gui_window_set_theme(
+	AiGuiWindow *self,
+	const gchar *name
+){
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	if (!ai_gui_style_set_theme(name))
+	{
+		ai_gui_window_toast(self, "No theme called '%s'.", name);
+		return;
+	}
+
+	ai_gui_settings_set_theme(self->settings, name);
+	window_remember_appearance(self);
+}
+
+void
+ai_gui_window_set_color_scheme(
+	AiGuiWindow *self,
+	const gchar *name
+){
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	if (!ai_gui_style_set_color_scheme(name))
+		return;
+
+	ai_gui_settings_set_color_scheme(self->settings, name);
+	window_remember_appearance(self);
+}
+
+/* ================================================================
  * The dashboard
  * ================================================================ */
 
@@ -796,6 +863,20 @@ action_dashboard(
 	AiGuiWindow *self = AI_GUI_WINDOW(widget);
 
 	ai_gui_window_show_dashboard(self, !ai_gui_window_get_dashboard(self));
+}
+
+static void
+action_cycle_theme(
+	GtkWidget   *widget,
+	const gchar *name,
+	GVariant    *parameter
+){
+	AiGuiWindow *self = AI_GUI_WINDOW(widget);
+	const gchar *next = ai_gui_style_cycle_theme();
+
+	ai_gui_settings_set_theme(self->settings, next);
+	window_remember_appearance(self);
+	ai_gui_window_toast(self, "Theme: %s", next);
 }
 
 static void
@@ -1214,6 +1295,7 @@ window_build_menu(void)
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(session));
 
 	g_menu_append(view, "Project dashboard", "win.dashboard");
+	g_menu_append(view, "Next theme", "win.cycle-theme");
 	g_menu_append(view, "Find in conversation", "win.search");
 	g_menu_append(view, "Expand everything", "win.expand-all");
 	g_menu_append(view, "Collapse everything", "win.collapse-all");
@@ -1384,6 +1466,8 @@ ai_gui_window_new(
 
 	self = g_object_new(AI_GUI_TYPE_WINDOW, "application", app, NULL);
 	self->options = ai_gui_options_copy(options);
+	self->settings = ai_gui_settings_load(NULL);
+	ai_gui_style_add_changed(on_appearance_changed, self);
 	self->store = ai_gui_session_store_new(NULL);
 
 	self->split = adw_overlay_split_view_new();
@@ -1451,9 +1535,11 @@ ai_gui_window_dispose(GObject *object)
 {
 	AiGuiWindow *self = AI_GUI_WINDOW(object);
 
+	ai_gui_style_remove_changed(on_appearance_changed, self);
 	window_disconnect_session(self);
 	g_clear_object(&self->session);
 	g_clear_object(&self->store);
+	g_clear_pointer(&self->settings, ai_gui_settings_free);
 	g_clear_pointer(&self->options, ai_gui_options_free);
 
 	G_OBJECT_CLASS(ai_gui_window_parent_class)->dispose(object);
@@ -1479,6 +1565,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 	                                action_search);
 	gtk_widget_class_install_action(widget_class, "win.dashboard", NULL,
 	                                action_dashboard);
+	gtk_widget_class_install_action(widget_class, "win.cycle-theme", NULL,
+	                                action_cycle_theme);
 	gtk_widget_class_install_action(widget_class, "win.expand-all", NULL,
 	                                action_expand_all);
 	gtk_widget_class_install_action(widget_class, "win.collapse-all", NULL,
@@ -1512,9 +1600,11 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK, "win.preferences", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_F9,
 		0, "win.toggle-sidebar", NULL);
-	/* The key ai-tui uses, so one habit covers both front-ends. */
+	/* The keys ai-tui uses, so one habit covers both front-ends. */
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_backslash,
 		GDK_CONTROL_MASK, "win.dashboard", NULL);
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_t,
+		GDK_CONTROL_MASK, "win.cycle-theme", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_e,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.export", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_g,
