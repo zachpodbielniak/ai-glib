@@ -106,6 +106,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	g_autoptr(GError) error = NULL;
 	g_auto(GStrv) envp = NULL;
 	g_autofree gchar *config = g_build_filename(dir, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(dir, ".local", "state", NULL);
 	gsize i;
 
 	g_ptr_array_add(argv, g_strdup(tui_binary));
@@ -120,6 +121,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", dir, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_unsetenv(envp, "ANTHROPIC_API_KEY");
 	envp = g_environ_unsetenv(envp, "OPENAI_API_KEY");
 
@@ -514,8 +516,8 @@ tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
 
 	command = g_strdup_printf(
 		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
-		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' %s '%s' -p grok-build %s",
-		libs, grok, stub_dir, stub_dir,
+		"XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' EDITOR='%s' %s '%s' -p grok-build %s",
+		libs, grok, stub_dir, stub_dir, stub_dir,
 		editor != NULL ? editor : "true", environment != NULL ? environment : "",
 		tui_binary, options != NULL ? options : "");
 
@@ -566,8 +568,9 @@ tmux_start_tui_piped(const gchar *session, const gchar *stub_dir,
 	command = g_strdup_printf(
 		"printf '%%s\\n' %s | exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME "
 		"TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' "
-		"HOME='%s' XDG_CONFIG_HOME='%s/.config' EDITOR=true '%s' -p grok-build",
-		quoted, libs, grok, stub_dir, stub_dir, tui_binary);
+		"HOME='%s' XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' "
+		"EDITOR=true '%s' -p grok-build",
+		quoted, libs, grok, stub_dir, stub_dir, stub_dir, tui_binary);
 
 	args[14] = command;
 	out = tmux_run(args);
@@ -1629,6 +1632,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	g_auto(GStrv) envp = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *config = g_build_filename(box, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(box, ".local", "state", NULL);
 	gsize i;
 
 	sandbox_write(box, "hello.c", "SHOULD_NOT_BE_INLINED\n");
@@ -1648,6 +1652,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", box, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_setenv(envp, "GROK_PATH", stub->stub, TRUE);
 
 	g_spawn_sync(box, (gchar **)argv->pdata, envp, G_SPAWN_DEFAULT, NULL,
