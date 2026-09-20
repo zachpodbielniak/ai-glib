@@ -789,3 +789,21 @@ refresh keeps the previous snapshot explicitly marked stale. Providers
 without native reporting show =Unavailable=, and only quota entries with
 known direction receive a bar. Long or control-bearing labels are sanitized
 and clipped to the panel; the terminal footer remains reserved.
+
+*** Quota regression tests
+
+=tests/test-tui-usage.c= checks percentage direction (including Codex),
+unknown/invalid values, independent client snapshots, caching, failed
+refreshes, provider/model/directory changes and cancellation.
+=tests/test-ai-tui-panel.c= inspects real curses cells for bars, partial/stale
+states, hostile labels, Unicode clipping and footer preservation.
+The =/ai-glib/ai-tui/keys/usage-sidebar= case in =tests/test-ai-tui.c= uses
+a tmux PTY and a local Python reporting fixture to verify the complete
+sidebar wiring, hidden/dump behavior, cache reuse, and responsive typing
+and shutdown during a stalled query. That case skips when tmux or Python 3
+is unavailable; it never contacts an external provider.
+
+Run =make test= for the complete suite and GIR warning gate. For focused
+leak and lifetime coverage, build the two first test binaries with
+=DEBUG=1 ASAN=1= and run them from =build/debug/tests/= with
+=ASAN_OPTIONS=detect_leaks=1=.
