@@ -29,17 +29,22 @@ G_DECLARE_FINAL_TYPE(AiGrokBuildClient, ai_grok_build_client, AI, GROK_BUILD_CLI
  *
  * The default model for Grok Build clients.
  */
-#define AI_GROK_BUILD_DEFAULT_MODEL "grok-4.6"
+#define AI_GROK_BUILD_DEFAULT_MODEL "grok-4.7"
 
 /*
  * Model IDs accepted by the `grok` CLI's --model argument.
  *
  * These are the agentic build models, not the raw xAI API model IDs --
  * see AI_GROK_MODEL_* in ai-grok-client.h for those. Run `grok models`
- * to see what the installed CLI actually offers.
+ * to see what the installed CLI actually offers. As of 2026-09-21 that
+ * list is grok-4.7 (the CLI default), grok-4.7-build-fast, grok-4.6
+ * and grok-4.5. build-fast is the same model on faster infrastructure
+ * and is not an xAI HTTP API id.
  */
-#define AI_GROK_BUILD_MODEL_GROK_4_6    "grok-4.6"
-#define AI_GROK_BUILD_MODEL_GROK_4_5    "grok-4.5"
+#define AI_GROK_BUILD_MODEL_GROK_4_7             "grok-4.7"
+#define AI_GROK_BUILD_MODEL_GROK_4_7_BUILD_FAST  "grok-4.7-build-fast"
+#define AI_GROK_BUILD_MODEL_GROK_4_6             "grok-4.6"
+#define AI_GROK_BUILD_MODEL_GROK_4_5             "grok-4.5"
 
 /*
  * Floating alias for the newest build model.
@@ -47,7 +52,7 @@ G_DECLARE_FINAL_TYPE(AiGrokBuildClient, ai_grok_build_client, AI, GROK_BUILD_CLI
 /* Virtual media-tool model; the coordinating agent uses the chat model. */
 #define AI_GROK_BUILD_MODEL_MEDIA "grok-build-media"
 
-#define AI_GROK_BUILD_MODEL_LATEST      AI_GROK_BUILD_MODEL_GROK_4_6
+#define AI_GROK_BUILD_MODEL_LATEST      AI_GROK_BUILD_MODEL_GROK_4_7
 
 
 AiGrokBuildClient *

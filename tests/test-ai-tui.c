@@ -1466,6 +1466,8 @@ test_model_command_reports(void)
 	g_assert_nonnull(strstr(run->stdout_data, "Model:"));
 	g_assert_cmpint(run->status, ==, 0);
 	g_assert_nonnull(strstr(run->stdout_data, "Available models for Grok Build:"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4.7"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4.7-build-fast"));
 	g_assert_nonnull(strstr(run->stdout_data, "grok-4.6"));
 	g_assert_nonnull(strstr(run->stdout_data, "/model MODEL_ID"));
 	run_free(run);

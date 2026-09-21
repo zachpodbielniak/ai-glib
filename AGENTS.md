@@ -448,7 +448,7 @@ ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_DEEPSEEK_R1_14B);
 
 /* Grok Build (CLI) — note the AI_GROK_BUILD_ prefix; the AI_GROK_MODEL_*
    defines above are xAI API ids and are NOT valid `grok --model` values */
-ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_6);
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_7);
 
 /* Antigravity (CLI) — `agy --model` ids, not Gemini HTTP ids */
 ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH);

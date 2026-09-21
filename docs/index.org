@@ -11,7 +11,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/claude.org][Claude]] | Anthropic's Claude models | claude-sonnet-5          |
 | [[file:providers/openai.org][OpenAI]] | OpenAI GPT models         | gpt-5.5                  |
 | [[file:providers/gemini.org][Gemini]] | Google's Gemini models    | gemini-3.5-flash         |
-| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4.3                 |
+| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4.7                 |
 | [[file:providers/ollama.org][Ollama]] | Local models via Ollama   | gpt-oss:20b              |
 
 *** CLI Wrappers
@@ -20,7 +20,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/claude-code.org][Claude Code]]      | Anthropic's Claude Code CLI (=--print=)        | sonnet                             |
 | [[file:providers/claude-code-tmux.org][Claude Code (tmux)]] | Claude Code CLI via an interactive tmux session | sonnet                          |
 | [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-5          |
-| [[file:providers/grok-build.org][Grok Build]]        | xAI's =grok= coding agent CLI (headless)       | grok-4.6                           |
+| [[file:providers/grok-build.org][Grok Build]]        | xAI's =grok= coding agent CLI (headless)       | grok-4.7                           |
 | [[file:providers/antigravity.org][Antigravity]]      | Google's =agy= coding agent CLI (headless)     | gemini-3.7-flash-high              |
 | [[file:providers/cursor.org][Cursor]]            | Cursor's =cursor-agent= CLI (headless)         | auto                               |
 | [[file:providers/codex-cli.org][Codex CLI]] | OpenAI =codex exec= CLI (headless) | gpt-6-astra |

@@ -495,7 +495,7 @@ is a braille spinner, a progress bar or a mode-line string is a decision
 only the frontend can make. =ai-tui= draws
 
 #+begin_example
-  Grok Build / grok-4.6   ⠹ Running make test… (5s · ^C to stop)
+  Grok Build / grok-4.7   ⠹ Running make test… (5s · ^C to stop)
 #+end_example
 
 with a 110 ms timer that runs only while =busy= is true --- driven from

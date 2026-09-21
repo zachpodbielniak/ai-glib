@@ -160,8 +160,8 @@ tmux -L ai-glib new-session -d -s ai-glib-dry-run -c <cwd> -- ollama launch clau
 $ ai -p claude-code -m sonnet --dry-run "hi"
 /path/to/claude --print --output-format json --model sonnet ...
 
-$ ai -p grok-build -m grok-4.6 --effort low --dry-run "hi"
-/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 --verbatim --reasoning-effort low
+$ ai -p grok-build -m grok-4.7 --effort low --dry-run "hi"
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.7 --verbatim --reasoning-effort low
 
 $ ai -p agy --dry-run "hi"
 /path/to/agy --input-format stream-json --output-format stream-json --print-timeout 30m --model gemini-3.7-flash-high --disable-slash-commands --effort medium
@@ -245,7 +245,7 @@ Pair it with =--dry-run= to confirm what a setting actually produces:
 
 #+begin_example
 $ ai -p grok-build --set sandbox=workspace --set max-turns=20 --dry-run "hi"
-/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.7 \
   --sandbox workspace --max-turns 20 --verbatim --reasoning-effort medium
 #+end_example
 
@@ -487,7 +487,7 @@ To use a single image as conditioning rather than as the starting frame, explici
 
 ** Models and execution
 
-Saved chat model defaults do not become media model defaults. For Grok HTTP, =-m= selects an Imagine media model. Grok Build advertises =grok-build-media= because its four tools have no model parameter; =-m grok-build-media= is valid, and =--set model=grok-4.6= separately selects the agent's chat model. Grok Build configuration chooses the underlying media model. Text-to-video in Grok Build orchestrates =image_gen= followed by =image_to_video= because it has no standalone text-to-video tool.
+Saved chat model defaults do not become media model defaults. For Grok HTTP, =-m= selects an Imagine media model. Grok Build advertises =grok-build-media= because its four tools have no model parameter; =-m grok-build-media= is valid, and =--set model=grok-4.7= separately selects the agent's chat model. Grok Build configuration chooses the underlying media model. Text-to-video in Grok Build orchestrates =image_gen= followed by =image_to_video= because it has no standalone text-to-video tool.
 
 Grok Build calls run in an isolated session with only the necessary tools enabled. Results must contain a successful structured media tool result with an artifact path or URL; a prose claim of success is an error. Requests are agent-mediated: exact tool arguments depend on the wrapped CLI agent following the supplied structured instruction. Neither provider is tested by spending real generation credits in the normal test suite.
 

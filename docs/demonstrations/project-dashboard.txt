@@ -9,7 +9,7 @@ TAP version 14
 #
 #                                                                                                               SESSION
 #                                                                                                               Grok Build
-#                                                                                                               grok-4.6
+#                                                                                                               grok-4.7
 #
 #                                                                                                               LINKED WORK / ^] open
 #                                                                                                               /issue link URL or /pr link
@@ -34,7 +34,7 @@ TAP version 14
 #
 #
 #
-#  Grok Build / grok-4.6   ready
+#  Grok Build / grok-4.7   ready
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ unsent draft                                                                                           │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
@@ -47,7 +47,7 @@ TAP version 14
 #    ○ Linked https://example.invalid/owner/repo/issues/42/
 #                                                                                                               SESSION
 #    ○ Linked https://example.invalid/owner/repo/pulls/81                                                       Grok Build
-#                                                                                                               grok-4.6
+#                                                                                                               grok-4.7
 #
 #                                                                                                               LINKED WORK / ^] open
 #                                                                                                               ISSUE #42 unfetched https:/…
@@ -72,7 +72,7 @@ TAP version 14
 #
 #
 #
-#  Grok Build / grok-4.6   ready
+#  Grok Build / grok-4.7   ready
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ Ask, build, investigate...  / commands  @ files                                                        │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
@@ -240,7 +240,7 @@ ok 2 /dashboard/startup
 #    ○ Loading assignment; your draft is preserved.
 #                                                                                                               SESSION
 #     YOU                                                                                                       Grok Build
-#  │ > Assigned work: Fix assigned parser                                                                       grok-4.6
+#  │ > Assigned work: Fix assigned parser                                                                       grok-4.7
 #  │ Source: https://github.com/example/project/issues/12
 #  │ State: OPEN                                                                                                LINKED WORK / ^] open
 #                                                                                                               ISSUE #12 OPEN Fix assigned…
@@ -265,7 +265,7 @@ ok 2 /dashboard/startup
 #
 #
 #
-#  Turn complete  |  grok-4.6
+#  Turn complete  |  grok-4.7
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ keep my next draft                                                                                     │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
@@ -295,7 +295,7 @@ ok 3 /dashboard/assignment
 #
 #
 #
-#  Grok Build / grok-4.6   your turn · type to reply
+#  Grok Build / grok-4.7   your turn · type to reply
 #  ╭─ YOUR TURN ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ Your turn · type a reply, or / commands  @ files                                                                                       │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
@@ -315,7 +315,7 @@ ok 3 /dashboard/assignment
 #     /running   Check background agents
 #
 #     Ctrl-T change the mood.  Ctrl-G open your editor.
-#  Grok Build / grok-4.6   ready
+#  Grok Build / grok-4.7   ready
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ Ask, build, investigate...  / commands  @ files                                                                                        │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
@@ -330,7 +330,7 @@ ok 4 /dashboard/window-aggregation
 #
 #                                                                                                               SESSION
 #                                                                                                               Grok Build
-#                                                                                                               grok-4.6
+#                                                                                                               grok-4.7
 #
 #                                                                                                               LINKED WORK / ^] open
 #                                                                                                               ISSUE #18 unfetched https:/…
@@ -355,7 +355,7 @@ ok 4 /dashboard/window-aggregation
 #
 #
 #
-#  Grok Build / grok-4.6   ready
+#  Grok Build / grok-4.7   ready
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
 #  │ Ask, build, investigate...  / commands  @ files                                                        │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯

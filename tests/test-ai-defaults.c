@@ -335,8 +335,12 @@ test_update(Box *box, gconstpointer data)
 {
 	(void)data;
 	box_write(box, CONFIG_FILE, SAVED_CONFIG);
-	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_GROK_BUILD, "4\ny\n"), ==, 0);
-	g_assert_nonnull(strstr(box->out, "4. " AI_GROK_BUILD_MODEL_GROK_4_5));
+	/*
+	 * 1 native, 2 manual, then the static catalog newest-first:
+	 * grok-4.7, grok-4.7-build-fast, grok-4.6, grok-4.5.
+	 */
+	g_assert_cmpint(setup_scope(box, 1, AI_PROVIDER_GROK_BUILD, "6\ny\n"), ==, 0);
+	g_assert_nonnull(strstr(box->out, "6. " AI_GROK_BUILD_MODEL_GROK_4_5));
 	assert_saved(box, "apps/ai/default_model", AI_GROK_BUILD_MODEL_GROK_4_5);
 	assert_saved(box, "apps/ai-tui/default_model", "tui-saved");
 	assert_saved(box, "default_model", "library-only");

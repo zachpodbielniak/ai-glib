@@ -25,10 +25,19 @@ g_autoptr(AiGrokClient) client = ai_grok_client_new_with_config(config);
 ** Available Models
 xAI changed its naming convention from dash-separated (=grok-4-1=) to dot-separated (=grok-4.3=) starting with the 4.20 generation.
 
-*** Grok 4.3 Models (Latest)
+*** Grok 4.7 Models (Latest)
+Flagship as of 2026-09-21. =grok-4.7-build-fast= is a Grok Build CLI id, not an API id.
+
+| Define              | Model ID | Description                    |
+|---------------------+----------+--------------------------------|
+| =AI_GROK_MODEL_4_7= | grok-4.7 | Latest flagship (default)      |
+| =AI_GROK_MODEL_4_6= | grok-4.6 | Previous flagship              |
+| =AI_GROK_MODEL_4_5= | grok-4.5 | Earlier 4.x release            |
+
+*** Grok 4.3 Models
 | Define              | Model ID | Description               |
 |---------------------+----------+---------------------------|
-| =AI_GROK_MODEL_4_3= | grok-4.3 | Latest flagship (default) |
+| =AI_GROK_MODEL_4_3= | grok-4.3 | Previous generation       |
 
 *** Grok 4.20 Models
 | Define                             | Model ID                     | Description                |
@@ -83,7 +92,7 @@ Retired upstream.
 *** Convenience Aliases
 | Define                 | Points To                          | Description   |
 |------------------------+------------------------------------+---------------|
-| =AI_GROK_MODEL_LATEST= | =AI_GROK_MODEL_4_3=                | Latest model  |
+| =AI_GROK_MODEL_LATEST= | =AI_GROK_MODEL_4_7=                | Latest model  |
 | =AI_GROK_MODEL_FAST=   | =AI_GROK_MODEL_4_20_NON_REASONING= | Fastest model |
 | =AI_GROK_MODEL_CODE=   | =AI_GROK_MODEL_BUILD_0_1=          | Code model    |
 
@@ -91,8 +100,8 @@ Retired upstream.
 #+begin_src C
 g_autoptr(AiGrokClient) client = ai_grok_client_new();
 
-/* Use Grok 4.3 for best performance */
-ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_4_3);
+/* Use Grok 4.7 for best performance */
+ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_4_7);
 
 /* Or use the fast non-reasoning model */
 ai_client_set_model(AI_CLIENT(client), AI_GROK_MODEL_FAST);

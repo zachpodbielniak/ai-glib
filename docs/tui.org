@@ -117,7 +117,7 @@ The interface uses Catppuccin Mocha by default: a high-contrast identity badge, 
 
    Created 2 files  +5-0
 
- Grok Build / grok-4.6   your turn · type to reply
+ Grok Build / grok-4.7   your turn · type to reply
  ╭─ YOUR TURN ─────────────────────────────────────────────────────╮
  │ Your turn · type a reply, or / commands  @ files                │
  ╰───────────────────────────────────────────────────────── 1/1 ───╯
@@ -636,7 +636,7 @@ The status bar shows what the turn is doing, with a spinner and the time
 so far:
 
 #+begin_example
-  Grok Build / grok-4.6   ⠹ Running make test… (5s · ^C to stop)
+  Grok Build / grok-4.7   ⠹ Running make test… (5s · ^C to stop)
 #+end_example
 
 The phrase tracks the turn --- =Waiting for the model=, =Thinking=,

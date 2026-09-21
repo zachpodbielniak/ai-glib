@@ -91,7 +91,9 @@ test_grok_build_client_default_model(void)
 	g_autoptr(AiGrokBuildClient) client = ai_grok_build_client_new();
 
 	g_assert_cmpstr(ai_cli_client_get_model(AI_CLI_CLIENT(client)),
-	                ==, AI_GROK_BUILD_DEFAULT_MODEL);
+	                ==, "grok-4.7");
+	g_assert_cmpstr(AI_GROK_BUILD_DEFAULT_MODEL, ==, "grok-4.7");
+	g_assert_cmpstr(AI_GROK_BUILD_MODEL_LATEST, ==, "grok-4.7");
 }
 
 static void

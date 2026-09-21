@@ -2168,6 +2168,9 @@ ai_grok_build_client_list_models_async(
      */
     task = g_task_new(provider, NULL, callback, user_data);
 
+    models = g_list_append(models, g_strdup(AI_GROK_BUILD_MODEL_GROK_4_7));
+    models = g_list_append(models,
+                           g_strdup(AI_GROK_BUILD_MODEL_GROK_4_7_BUILD_FAST));
     models = g_list_append(models, g_strdup(AI_GROK_BUILD_MODEL_GROK_4_6));
     models = g_list_append(models, g_strdup(AI_GROK_BUILD_MODEL_GROK_4_5));
 

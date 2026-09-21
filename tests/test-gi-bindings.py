@@ -160,7 +160,7 @@ def main():
     grok = AiGlib.GrokBuildClient.new()
     assert isinstance(grok, AiGlib.GrokBuildClient)
     assert isinstance(grok, AiGlib.CliClient)  # inheritance visible
-    assert grok.props.model == "grok-4.6"
+    assert grok.props.model == "grok-4.7"
 
     grok.props.model = "grok-4.5"
     grok.props.effort_level = "xhigh"
@@ -185,7 +185,7 @@ def main():
     assert grok.get_provider_type() == AiGlib.ProviderType.GROK_BUILD
     assert grok.get_name() == "Grok Build"
     # ImageGenerator also defines get_default_model; select the chat interface.
-    assert AiGlib.Provider.get_default_model(grok) == "grok-4.6"
+    assert AiGlib.Provider.get_default_model(grok) == "grok-4.7"
 
     # Provider name round-trip, including the one that must not collide
     # with the HTTP "grok" provider

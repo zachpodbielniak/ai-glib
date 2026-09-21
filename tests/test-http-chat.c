@@ -512,6 +512,7 @@ test_grok_chat_round_trip(void)
 	g_autofree gchar *text = NULL;
 	g_autofree gchar *path = NULL;
 	g_autofree gchar *auth = NULL;
+	g_autofree gchar *body = NULL;
 
 	tserver_set_response(ts, SOUP_STATUS_OK, grok_ok_body);
 	client = make_grok(ts);
@@ -527,6 +528,11 @@ test_grok_chat_round_trip(void)
 
 	auth = tserver_dup_header(ts, "Authorization");
 	g_assert_cmpstr(auth, ==, "Bearer test-key");
+
+	/* The unset model is the flagship, not a leftover 4.3/4.6 id. */
+	body = tserver_dup_last_body(ts);
+	g_assert_nonnull(body);
+	g_assert_nonnull(strstr(body, "grok-4.7"));
 
 	turn_free(turn);
 	tserver_free(ts);
