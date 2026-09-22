@@ -162,6 +162,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/view/ai-tool-style.c \
 	$(SRCDIR)/view/ai-view-block.c \
 	$(SRCDIR)/view/ai-view-blocks.c \
+	$(SRCDIR)/view/ai-markup.c \
+	$(SRCDIR)/view/ai-lsp.c \
 	$(SRCDIR)/view/ai-view-tool-block.c \
 	$(SRCDIR)/view/ai-tool-preview.c \
 	$(SRCDIR)/view/ai-transcript.c \

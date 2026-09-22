@@ -570,6 +570,19 @@ The name is not validated here, because no wrapped CLI offers a validating
 lookup. An id the provider will reject fails on the *next* turn, which is
 why the change is reported rather than applied silently.
 
+*** How an answer is drawn
+Assistant prose is rendered. Markdown and Org markers are not left on
+screen: a heading is a heading, =**bold**= is bold, inline code and fenced
+code are code, and a list marker becomes a bullet. The stored text is
+unchanged, so =/export markdown= and =/export org= still write the source.
+
+A fenced block is coloured by a small lexer immediately. Once the turn
+has finished, and =AI_LSP= is not =off=, a language server on =PATH=
+(clangd, pylsp, rust-analyzer, gopls, typescript-language-server) is asked
+for semantic tokens and the fence is recoloured when the answer arrives.
+=AI_LSP=auto= is the default in ai-tui. =AI_LSP=off= keeps the lexer.
+=AI_LSP=python=/path/to/server,c=/path/to/server= pins the executables.
+
 See [[file:provider-switching.org][Provider switching]] for the exact
 migration table and limits, and [[file:native-session.org][Native session
 import]] for what the carried history contains.

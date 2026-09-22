@@ -6410,6 +6410,8 @@ main(int argc, char *argv[])
             tcsetattr(STDIN_FILENO, TCSANOW, &keys);
         }
     }
+    if (g_getenv("AI_LSP") == NULL)
+        g_setenv("AI_LSP", "auto", FALSE);
     app_redraw(&app);
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);

@@ -10,6 +10,8 @@
 #include "config.h"
 
 #include "view/ai-view-blocks.h"
+#include "view/ai-markup.h"
+#include "view/ai-lsp.h"
 
 /* The agent block reads state out of live #AiAgent objects. The view
  * layer already reaches into the agent layer through #AiConversation,
@@ -121,9 +123,102 @@ struct _AiViewTextBlock
 {
     AiViewBlock parent_instance;
     GString    *text;
+    GArray     *tokens;
+    guint       lsp_generation;
+    gboolean    lsp_started;
 };
 
 G_DEFINE_TYPE(AiViewTextBlock, ai_view_text_block, AI_TYPE_VIEW_BLOCK)
+
+typedef struct
+{
+	guint  generation;
+	gchar *text;
+} LspJob;
+
+static void
+lsp_job_free(gpointer data)
+{
+	LspJob *job = data;
+
+	g_free(job->text);
+	g_free(job);
+}
+
+static void
+lsp_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancellable)
+{
+	LspJob *job = data;
+	GArray *tokens;
+
+	(void)source;
+	(void)cancellable;
+	tokens = ai_lsp_semantic_tokens(job->text, NULL);
+	if (tokens == NULL)
+		tokens = g_array_new(FALSE, TRUE, sizeof(AiMarkupToken));
+	g_task_return_pointer(task, tokens, (GDestroyNotify)g_array_unref);
+}
+
+static void
+lsp_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	AiViewTextBlock *self = AI_VIEW_TEXT_BLOCK(source);
+	LspJob *job = g_task_get_task_data(G_TASK(result));
+	GArray *tokens = g_task_propagate_pointer(G_TASK(result), NULL);
+
+	(void)user_data;
+
+	if (job->generation == self->lsp_generation && tokens != NULL)
+	{
+		if (self->tokens != NULL)
+			g_array_unref(self->tokens);
+		self->tokens = tokens;
+		ai_view_block_changed(AI_VIEW_BLOCK(self));
+	}
+	else if (tokens != NULL)
+		g_array_unref(tokens);
+}
+
+static gboolean
+lsp_wanted(const gchar *text)
+{
+	g_autoptr(GArray) fences = NULL;
+	guint i;
+	const gchar *env = g_getenv("AI_LSP");
+
+	if (env == NULL || g_ascii_strcasecmp(env, "off") == 0 || g_strcmp0(env, "0") == 0)
+		return FALSE;
+	fences = ai_markup_fences(text);
+	for (i = 0; i < fences->len; i++)
+	{
+		AiMarkupFence *fence = &g_array_index(fences, AiMarkupFence, i);
+
+		if (ai_lsp_command_for_language(fence->language) != NULL)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static void
+lsp_start(AiViewTextBlock *self)
+{
+	GTask *task;
+	LspJob *job;
+
+	if (!ai_view_block_get_complete(AI_VIEW_BLOCK(self)) || self->lsp_started)
+		return;
+	if (!lsp_wanted(self->text->str))
+		return;
+	self->lsp_started = TRUE;
+	self->lsp_generation++;
+	job = g_new0(LspJob, 1);
+	job->generation = self->lsp_generation;
+	job->text = g_strdup(self->text->str);
+	task = g_task_new(self, NULL, lsp_done, NULL);
+	g_task_set_task_data(task, job, lsp_job_free);
+	g_task_run_in_thread(task, lsp_thread);
+	g_object_unref(task);
+}
 
 static AiViewBlockKind
 text_get_kind(AiViewBlock *block)
@@ -136,11 +231,9 @@ static AiRenderedText *
 text_render(AiViewBlock *block)
 {
     AiViewTextBlock *self = AI_VIEW_TEXT_BLOCK(block);
-    AiRenderedText *out = ai_rendered_text_new();
 
-    ai_rendered_text_append(out, self->text->str, AI_STYLE_DEFAULT);
-
-    return out;
+    lsp_start(self);
+    return ai_markup_render(self->text->str, self->tokens);
 }
 
 static void
@@ -149,6 +242,8 @@ ai_view_text_block_finalize(GObject *object)
     AiViewTextBlock *self = AI_VIEW_TEXT_BLOCK(object);
 
     g_string_free(self->text, TRUE);
+    if (self->tokens != NULL)
+        g_array_unref(self->tokens);
 
     G_OBJECT_CLASS(ai_view_text_block_parent_class)->finalize(object);
 }
@@ -207,6 +302,13 @@ ai_view_text_block_append(
     }
 
     g_string_append(self->text, text);
+    self->lsp_generation++;
+    self->lsp_started = FALSE;
+    if (self->tokens != NULL)
+    {
+        g_array_unref(self->tokens);
+        self->tokens = NULL;
+    }
     ai_view_block_changed(AI_VIEW_BLOCK(self));
 }
 
