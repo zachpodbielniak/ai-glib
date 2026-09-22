@@ -42,13 +42,15 @@ G_DECLARE_FINAL_TYPE(AiClaudeCodeClient, ai_claude_code_client, AI, CLAUDE_CODE_
 #define AI_CLAUDE_CODE_MODEL_HAIKU      "haiku"
 
 /*
- * Claude 5 model IDs, also valid --model arguments.
+ * Claude 5 and 5.5 model IDs, also valid --model arguments.
  *
  * Use these to pin a generation instead of floating with the aliases above.
  * 1M context is the default and the maximum for this generation, so no
- * "[1m]"/"-1m" suffix exists or is accepted.
+ * "[1m]"/"-1m" suffix exists or is accepted. Opus 5.5's CLI id is
+ * "claude-opus-5-5" (hyphen, not a dot).
  */
 #define AI_CLAUDE_CODE_MODEL_FABLE_5    "claude-fable-5"
+#define AI_CLAUDE_CODE_MODEL_OPUS_5_5   "claude-opus-5-5"
 #define AI_CLAUDE_CODE_MODEL_OPUS_5     "claude-opus-5"
 #define AI_CLAUDE_CODE_MODEL_SONNET_5   "claude-sonnet-5"
 

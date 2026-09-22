@@ -3035,6 +3035,7 @@ ai_claude_tmux_client_list_models_async(
     models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_SONNET));
     models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_HAIKU));
     models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_FABLE_5));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_OPUS_5_5));
     models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_OPUS_5));
     models = g_list_append(models, g_strdup(AI_CLAUDE_TMUX_MODEL_SONNET_5));
     g_task_return_pointer(task, models, NULL);

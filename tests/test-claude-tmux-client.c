@@ -332,6 +332,36 @@ test_default_model(void)
 }
 
 static void
+tmux_models_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+    const gchar *expected[] = {
+        "fable", "opus", "sonnet", "haiku",
+        "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"
+    };
+    g_autoptr(GError) error = NULL;
+    GList *models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
+    GList *item;
+    guint i = 0;
+
+    g_assert_no_error(error);
+    g_assert_cmpuint(g_list_length(models), ==, G_N_ELEMENTS(expected));
+    for (item = models; item != NULL; item = item->next)
+        g_assert_cmpstr(item->data, ==, expected[i++]);
+    g_list_free_full(models, g_free);
+    g_main_loop_quit(data);
+}
+
+static void
+test_lists_opus_5_5(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+    ai_provider_list_models_async(AI_PROVIDER(client), NULL, tmux_models_done, loop);
+    g_main_loop_run(loop);
+}
+
+static void
 test_provider_interface(void)
 {
     g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
@@ -1978,6 +2008,7 @@ main(int argc, char *argv[])
     g_test_add_func("/claude-tmux/new", test_new);
     g_test_add_func("/claude-tmux/new-with-config", test_new_with_config);
     g_test_add_func("/claude-tmux/default-model", test_default_model);
+    g_test_add_func("/claude-tmux/lists-opus-5-5", test_lists_opus_5_5);
     g_test_add_func("/claude-tmux/provider-interface", test_provider_interface);
     g_test_add_func("/claude-tmux/cancel/precancelled-no-spawn",
                     test_chat_precancelled_returns_cancelled);

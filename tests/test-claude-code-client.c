@@ -244,6 +244,40 @@ test_claude_code_client_model(void)
 	ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_CODE_MODEL_OPUS);
 	model = ai_cli_client_get_model(AI_CLI_CLIENT(client));
 	g_assert_cmpstr(model, ==, AI_CLAUDE_CODE_MODEL_OPUS);
+
+	ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_CLAUDE_CODE_MODEL_OPUS_5_5);
+	model = ai_cli_client_get_model(AI_CLI_CLIENT(client));
+	g_assert_cmpstr(model, ==, "claude-opus-5-5");
+}
+
+static void
+claude_code_models_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+	const gchar *expected[] = {
+		"fable", "opus", "sonnet", "haiku",
+		"claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"
+	};
+	g_autoptr(GError) error = NULL;
+	GList *models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
+	GList *item;
+	guint i = 0;
+
+	g_assert_no_error(error);
+	g_assert_cmpuint(g_list_length(models), ==, G_N_ELEMENTS(expected));
+	for (item = models; item != NULL; item = item->next)
+		g_assert_cmpstr(item->data, ==, expected[i++]);
+	g_list_free_full(models, g_free);
+	g_main_loop_quit(data);
+}
+
+static void
+test_claude_code_client_lists_opus_5_5(void)
+{
+	g_autoptr(AiClaudeCodeClient) client = ai_claude_code_client_new();
+	g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+	ai_provider_list_models_async(AI_PROVIDER(client), NULL, claude_code_models_done, loop);
+	g_main_loop_run(loop);
 }
 
 /*
@@ -1465,6 +1499,7 @@ main(
 	g_test_add_func("/ai-glib/claude-code-client/provider-interface", test_claude_code_client_provider_interface);
 	g_test_add_func("/ai-glib/claude-code-client/streamable-interface", test_claude_code_client_streamable_interface);
 	g_test_add_func("/ai-glib/claude-code-client/model", test_claude_code_client_model);
+	g_test_add_func("/ai-glib/claude-code-client/lists-opus-5-5", test_claude_code_client_lists_opus_5_5);
 	g_test_add_func("/ai-glib/claude-code-client/session-management", test_claude_code_client_session_management);
 	g_test_add_func("/ai-glib/claude-code-client/executable-path", test_claude_code_client_executable_path);
 	g_test_add_func("/ai-glib/claude-code-client/total-cost", test_claude_code_client_total_cost);

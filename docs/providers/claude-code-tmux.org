@@ -43,11 +43,12 @@ exists or is accepted.
 | Define                          | Model ID            |
 |---------------------------------+---------------------|
 | =AI_CLAUDE_TMUX_MODEL_FABLE_5=  | ="claude-fable-5"=  |
+| =AI_CLAUDE_TMUX_MODEL_OPUS_5_5= | ="claude-opus-5-5"= |
 | =AI_CLAUDE_TMUX_MODEL_OPUS_5=   | ="claude-opus-5"=   |
 | =AI_CLAUDE_TMUX_MODEL_SONNET_5= | ="claude-sonnet-5"= |
 
-=ai_provider_list_models()= reports all seven: the four aliases followed by
-the three pinned Claude 5 IDs.
+=ai_provider_list_models()= reports all eight: the four aliases followed by
+the pinned Claude 5 and Opus 5.5 IDs. Opus 5.5's id is =claude-opus-5-5=.
 
 ** Dedicated tmux socket (=-L=)
 Every tmux command this client runs is pinned to its own server socket via
