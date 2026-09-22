@@ -272,8 +272,12 @@ decode_tokens(GArray *out, const gchar *body, guint base, JsonArray *data, JsonA
 		col = delta_line > 0 ? delta_col : col + delta_col;
 		if (tag == AI_STYLE_DEFAULT || length == 0)
 			continue;
-		token.start = base + offset_at(body, line, col);
-		token.length = length;
+		{
+			guint rel = offset_at(body, line, col);
+
+			token.start = base + rel;
+			token.length = offset_at(body + rel, 0, length);
+		}
 		token.tag = tag;
 		g_array_append_val(out, token);
 	}
@@ -373,10 +377,7 @@ ai_lsp_semantic_tokens(const gchar *text, GError **error)
 		launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
 		proc = g_subprocess_launcher_spawn(launcher, &local, command, NULL);
 		if (proc == NULL)
-		{
-			g_propagate_error(error, g_steal_pointer(&local));
-			return NULL;
-		}
+			continue;
 		init = g_strdup("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"rootUri\":null,\"capabilities\":{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":true},\"tokenTypes\":[\"keyword\",\"string\",\"comment\",\"number\",\"type\",\"function\"],\"tokenModifiers\":[]}}}}}");
 		if (!write_message(g_subprocess_get_stdin_pipe(proc), init, &local))
 			continue;
@@ -403,6 +404,8 @@ ai_lsp_semantic_tokens(const gchar *text, GError **error)
 		              "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\",\"params\":null}", NULL);
 		write_message(g_subprocess_get_stdin_pipe(proc),
 		              "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":{}}", NULL);
+		g_output_stream_close(g_subprocess_get_stdin_pipe(proc), NULL, NULL);
+		g_subprocess_force_exit(proc);
 		g_subprocess_wait(proc, NULL, NULL);
 	}
 	g_array_set_clear_func(fences, ai_markup_fence_free);
