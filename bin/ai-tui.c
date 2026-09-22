@@ -423,6 +423,13 @@ typedef struct
      * reappear on the very next keystroke and Escape would do nothing. */
     gboolean             completion_dismissed;
 
+    /* /model with no argument. NULL while the picker is closed. */
+    gchar              **picker_models;
+    guint                picker_count;
+    guint                picker_index;
+    guint                picker_first;
+    guint                model_generation;
+
     /* One-shot re-read, so a lone Escape is not stuck behind the next
      * keystroke. See on_key_settle(). */
     guint                settle_id;
@@ -530,6 +537,7 @@ static void selection_clear(App *app);
 static void tui_mouse_enable(void);
 static GPtrArray *build_rows(App *app, gint width);
 static void draw_completion(App *app);
+static void draw_model_picker(App *app);
 static void completion_advance(App *app);
 static void completion_refresh(App *app);
 static gboolean completion_select(App *app, gint delta);
@@ -1847,6 +1855,7 @@ app_redraw(App *app)
 
     wnoutrefresh(app->transcript_win);
     draw_completion(app);
+    draw_model_picker(app);
     draw_status(app);
     draw_input(app);
 	/* Modal layers are always painted last, including timer-driven redraws. */
@@ -2225,7 +2234,113 @@ typedef struct
 	AiTranscript *transcript;
 	GMainLoop *dump_loop;
 	gchar *provider_name;
+	App *app;
+	guint generation;
 } ModelListing;
+
+static void picker_close(App *app);
+static void picker_open(App *app, GList *models);
+
+static const gchar *
+current_model_id(GObject *provider)
+{
+	if (AI_IS_CLIENT(provider))
+		return ai_client_get_model(AI_CLIENT(provider));
+	return ai_cli_client_get_model(AI_CLI_CLIENT(provider));
+}
+
+static void
+apply_model(App *app, const gchar *requested)
+{
+	GObject *provider = ai_conversation_get_provider(app->conversation);
+	const gchar *current = current_model_id(provider);
+	g_autofree gchar *previous = g_strdup(current);
+
+	if (requested == NULL || requested[0] == '\0')
+		return;
+	if (ai_conversation_get_busy(app->conversation))
+	{
+		say(app, "Model unchanged: a turn is in flight.");
+		return;
+	}
+	if (g_strcmp0(previous, requested) == 0)
+	{
+		say(app, "Model: %s", requested);
+		return;
+	}
+	if (AI_IS_CLIENT(provider))
+		ai_client_set_model(AI_CLIENT(provider), requested);
+	else
+		ai_cli_client_set_model(AI_CLI_CLIENT(provider), requested);
+	/*
+	 * A model id the provider will reject is not detectable here. The
+	 * report is what makes the next turn's failure explicable.
+	 */
+	say(app, "Model switched from %s to %s. Context preserved.",
+	    previous != NULL ? previous : "the default", requested);
+}
+
+static void
+picker_close(App *app)
+{
+	g_clear_pointer(&app->picker_models, g_strfreev);
+	app->picker_count = 0;
+	app->picker_index = 0;
+	app->picker_first = 0;
+}
+
+static void
+picker_move(App *app, gint delta)
+{
+	gint next;
+
+	if (app->picker_count == 0)
+		return;
+	next = (gint)app->picker_index + delta;
+	if (next < 0)
+		next = 0;
+	if (next >= (gint)app->picker_count)
+		next = (gint)app->picker_count - 1;
+	app->picker_index = (guint)next;
+}
+
+static void
+picker_open(App *app, GList *models)
+{
+	GPtrArray *ids = g_ptr_array_new();
+	GList *item;
+	GObject *provider = ai_conversation_get_provider(app->conversation);
+	const gchar *current = current_model_id(provider);
+	guint i;
+
+	picker_close(app);
+	completion_close(app);
+	app->searching = FALSE;
+	for (item = models; item != NULL; item = item->next)
+	{
+		if (item->data != NULL)
+			g_ptr_array_add(ids, g_strdup((gchar *)item->data));
+	}
+	app->picker_count = ids->len;
+	if (app->picker_count == 0)
+	{
+		g_ptr_array_unref(ids);
+		say(app, "No models reported by this provider.");
+		return;
+	}
+	g_ptr_array_add(ids, NULL);
+	app->picker_models = (gchar **)g_ptr_array_free(ids, FALSE);
+	app->picker_index = 0;
+	for (i = 0; i < app->picker_count; i++)
+	{
+		if (current != NULL && g_strcmp0(app->picker_models[i], current) == 0)
+		{
+			app->picker_index = i;
+			break;
+		}
+	}
+	app_schedule_redraw(app);
+}
 
 /* Publish discovery failures and empty catalogs without hiding manual entry. */
 static void
@@ -2239,16 +2354,24 @@ models_listed(GObject *source, GAsyncResult *result, gpointer user_data)
 	GList *item;
 
 	models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
-	g_string_append_printf(out, "Available models for %s:\n", listing->provider_name);
-	if (error != NULL)
-		g_string_append_printf(out, "  Could not list models: %s\n", error->message);
-	else if (models == NULL)
-		g_string_append(out, "  No models reported by this provider.\n");
-	for (item = models; item != NULL; item = item->next)
-		g_string_append_printf(out, "  %s\n", (const gchar *)item->data);
-	g_string_append(out, "To switch, type /model MODEL_ID (manual IDs are accepted).");
-	block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, out->str);
-	ai_transcript_append(listing->transcript, block);
+	if (listing->app != NULL && listing->generation == listing->app->model_generation &&
+	    error == NULL && models != NULL)
+	{
+		picker_open(listing->app, models);
+	}
+	else if (listing->app == NULL || listing->generation == listing->app->model_generation)
+	{
+		g_string_append_printf(out, "Available models for %s:\n", listing->provider_name);
+		if (error != NULL)
+			g_string_append_printf(out, "  Could not list models: %s\n", error->message);
+		else if (models == NULL)
+			g_string_append(out, "  No models reported by this provider.\n");
+		for (item = models; item != NULL; item = item->next)
+			g_string_append_printf(out, "  %s\n", (const gchar *)item->data);
+		g_string_append(out, "To switch, type /model MODEL_ID (manual IDs are accepted).");
+		block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, out->str);
+		ai_transcript_append(listing->transcript, block);
+	}
 	g_list_free_full(models, g_free);
 	if (listing->dump_loop != NULL)
 	{
@@ -2268,6 +2391,10 @@ show_models(App *app, GObject *provider)
 
 	listing->transcript = g_object_ref(ai_conversation_get_transcript(app->conversation));
 	listing->provider_name = g_strdup(ai_provider_get_name(AI_PROVIDER(provider)));
+	app->model_generation++;
+	listing->generation = app->model_generation;
+	if (app->dump_loop == NULL)
+		listing->app = app;
 	if (app->dump_loop != NULL)
 	{
 		listing->dump_loop = g_main_loop_ref(app->dump_loop);
@@ -2452,6 +2579,7 @@ show_help(App *app)
                     "  ^C           stop the turn, then clear the line,\n"
                     "               then drop queued prompts, then quit\n"
                     "  ^D           quit, on an empty line\n"
+                    "  /model       Up/Down, Enter switches, Esc closes\n"
                     "  Tab          complete /command or @path\n"
                     "  ^N           cycle tool and thinking blocks\n"
                     "  ^B           expand or collapse the selected block\n"
@@ -3002,7 +3130,6 @@ handle_builtin(App *app, AiCommandResult *result)
             ? ai_client_get_model(AI_CLIENT(provider))
             : ai_cli_client_get_model(AI_CLI_CLIENT(provider));
         g_autofree gchar *requested = NULL;
-        g_autofree gchar *previous = g_strdup(current);
 
         if (arguments != NULL)
         {
@@ -3015,40 +3142,8 @@ handle_builtin(App *app, AiCommandResult *result)
             say(app, "Model: %s", current != NULL ? current : "(default)");
 			show_models(app, provider);
         }
-        else if (ai_conversation_get_busy(app->conversation))
-        {
-            /*
-             * Same rule as /provider, and for the same reason: half a
-             * turn answered by one model and half by another is not a
-             * transcript anybody can reason about afterwards.
-             */
-            say(app, "Model unchanged: a turn is in flight.");
-        }
-        else if (g_strcmp0(previous, requested) == 0)
-        {
-            say(app, "Model: %s", requested);
-        }
         else
-        {
-            if (AI_IS_CLIENT(provider))
-            {
-                ai_client_set_model(AI_CLIENT(provider), requested);
-            }
-            else
-            {
-                ai_cli_client_set_model(AI_CLI_CLIENT(provider), requested);
-            }
-
-            /*
-             * Say it out loud.  A model id that the provider will reject
-             * is not detectable here --- no wrapped CLI offers a
-             * validating lookup --- so the error arrives on the next
-             * turn, and by then the only thing that makes it explicable
-             * is having seen the change reported.
-             */
-            say(app, "Model switched from %s to %s. Context preserved.",
-                previous != NULL ? previous : "the default", requested);
-        }
+            apply_model(app, requested);
     }
     else if (g_strcmp0(name, "effort") == 0)
     {
@@ -3850,6 +3945,49 @@ drain_keys(App *app)
 		/* Do not submit or edit a draft while it cannot be seen. */
 		if (app->tiny && !((kind == OK && ch == 4) ||
 			(kind == KEY_CODE_YES && ch == KEY_RESIZE))) continue;
+		if (app->picker_models != NULL && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
+			(kind == OK && (ch == 3 || ch == 4 || ch == 12 || ch == 15 || ch == 16 || ch == 20))))
+		{
+			if (kind == KEY_CODE_YES && ch == KEY_UP)
+				picker_move(app, -1);
+			else if (kind == KEY_CODE_YES && ch == KEY_DOWN)
+				picker_move(app, 1);
+			else if (kind == KEY_CODE_YES && ch == KEY_PPAGE)
+				picker_move(app, -MENU_MAX_ROWS);
+			else if (kind == KEY_CODE_YES && ch == KEY_NPAGE)
+				picker_move(app, MENU_MAX_ROWS);
+			else if ((kind == OK && (ch == '\n' || ch == '\r')) ||
+			         (kind == KEY_CODE_YES && ch == KEY_ENTER))
+			{
+				g_autofree gchar *chosen = NULL;
+
+				if (app->picker_index < app->picker_count)
+					chosen = g_strdup(app->picker_models[app->picker_index]);
+				picker_close(app);
+				if (chosen != NULL)
+					apply_model(app, chosen);
+			}
+			else if (kind == OK && ch == 27)
+			{
+				wint_t next = 0;
+				gint next_kind;
+
+				wtimeout(app->input_win, ESCAPE_SETTLE_MS);
+				next_kind = wget_wch(app->input_win, &next);
+				nodelay(app->input_win, TRUE);
+				if (!((next_kind == OK && (next == '\r' || next == '\n')) ||
+				      (next_kind == KEY_CODE_YES && next == KEY_ENTER)))
+				{
+					if (next_kind == KEY_CODE_YES)
+						ungetch((gint)next);
+					else if (next_kind != ERR)
+						unget_wch(next);
+					picker_close(app);
+				}
+			}
+			app_schedule_redraw(app);
+			continue;
+		}
 		if (app->searching && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
 			(kind == OK && (ch == 12 || ch == 15 || ch == 16 || ch == 20))))
 		{
@@ -4626,7 +4764,7 @@ draw_completion(App *app)
     gint  origin_width;
     gint  i;
 
-    if (app->candidates == NULL)
+    if (app->picker_models != NULL || app->candidates == NULL)
     {
         return;
     }
@@ -4769,6 +4907,71 @@ draw_completion(App *app)
 
     wattrset(app->transcript_win, A_NORMAL);
     wnoutrefresh(app->transcript_win);
+}
+
+static void
+draw_model_picker(App *app)
+{
+	gint height;
+	gint width;
+	gint rows;
+	gint first;
+	gint i;
+	guint n;
+	GObject *provider;
+	const gchar *current;
+
+	if (app->picker_models == NULL || app->transcript_win == NULL)
+		return;
+	n = app->picker_count;
+	if (n == 0)
+		return;
+	getmaxyx(app->transcript_win, height, width);
+	rows = MIN((gint)n, MIN(MENU_MAX_ROWS, height - 1));
+	if (rows < 1 || width < 8)
+		return;
+	first = (gint)app->picker_first;
+	if ((gint)app->picker_index < first)
+		first = (gint)app->picker_index;
+	else if ((gint)app->picker_index >= first + rows)
+		first = (gint)app->picker_index - rows + 1;
+	first = CLAMP(first, 0, MAX(0, (gint)n - rows));
+	app->picker_first = (guint)first;
+	provider = ai_conversation_get_provider(app->conversation);
+	current = current_model_id(provider);
+	{
+		gint y = height - rows - 1;
+		gint x;
+		g_autofree gchar *count = g_strdup_printf(" %u/%u ", app->picker_index + 1, n);
+		gint at = MAX(0, width - (gint)strlen(count) - 2);
+
+		wattrset(app->transcript_win, theme_attr(PAIR_ACCENT));
+		for (x = 0; x < width; x++)
+			mvwaddstr(app->transcript_win, y, x, g_get_charset(NULL) ? "─" : "-");
+		if (at > 18)
+			mvwaddstr(app->transcript_win, y, 2, " MODELS  Enter Esc ");
+		mvwaddstr(app->transcript_win, y, at, count);
+	}
+	for (i = 0; i < rows; i++)
+	{
+		guint index = (guint)(first + i);
+		gboolean selected = index == app->picker_index;
+		gboolean active = current != NULL && g_strcmp0(app->picker_models[index], current) == 0;
+		gint y = height - rows + i;
+		g_autofree gchar *label = g_strdup_printf("%s%s", app->picker_models[index],
+		                                          active ? "  current" : "");
+		g_autofree gchar *fitted = fit_to_width(label, width - 4);
+
+		wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE));
+		mvwhline(app->transcript_win, y, 0, ' ', width);
+		if (selected)
+			mvwaddstr(app->transcript_win, y, 0, g_get_charset(NULL) ? "›" : ">");
+		wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE) |
+		         (active ? A_BOLD : A_NORMAL));
+		mvwaddstr(app->transcript_win, y, 2, fitted);
+	}
+	wattrset(app->transcript_win, A_NORMAL);
+	wnoutrefresh(app->transcript_win);
 }
 
 /* Local commands must remain usable with an unsupported provider and images
@@ -6211,6 +6414,8 @@ main(int argc, char *argv[])
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
     g_main_loop_run(app.loop);
+	app.model_generation++;
+	picker_close(&app);
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;

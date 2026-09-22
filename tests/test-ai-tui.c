@@ -1716,6 +1716,48 @@ test_no_expand_leaves_a_command_alone(void)
 	"\"delta\":{\"type\":\"text_delta\",\"text\":\"the reply\"}}}\n" \
 	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
 
+/* /model with no argument opens a picker. Arrows move, Enter switches,
+ * Escape dismisses without changing the model. */
+static void
+test_model_picker_selects(void)
+{
+	Stub *stub;
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL,
+	                            "-m grok-4.6 --no-animation");
+	tmux_send(TUI_SESSION, "/model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "grok-4.7"));
+	tmux_send(TUI_SESSION, "Escape");
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+
+		while (g_get_monotonic_time() < deadline)
+		{
+			g_clear_pointer(&pane, g_free);
+			pane = tmux_capture(TUI_SESSION);
+			if (pane != NULL && strstr(pane, "grok-4.7") == NULL)
+				break;
+			g_usleep(100 * 1000);
+		}
+	}
+	g_assert_nonnull(pane);
+	g_assert_null(strstr(pane, "grok-4.7"));
+	g_assert_null(strstr(pane, "Model switched"));
+	tmux_send(TUI_SESSION, "/model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "grok-4.7"));
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Model switched from grok-4.6 to grok-4.7"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 /**
  * test_switch_command_enter:
  * @data: the complete command to submit
@@ -3848,6 +3890,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/transcript-drag-select", test_transcript_drag_select);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
 	                     test_switch_command_enter);
+	g_test_add_func("/ai-glib/ai-tui/keys/model-picker", test_model_picker_selects);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/effort-enter", "/effort",

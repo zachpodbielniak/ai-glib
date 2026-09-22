@@ -54,7 +54,7 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "reset",    "Start a fresh session and return to the splash screen", NULL },
     { "quit",     "Leave",                                      NULL },
     { "exit",     "Leave, same as /quit",                       NULL },
-    { "model",    "List models or switch with /model MODEL_ID", "[model]" },
+    { "model",    "Open the model picker, or switch with /model MODEL_ID", "[model]" },
     { "provider", "List providers or switch with /provider NAME", "[provider]" },
     { "effort",   "List effort levels or switch with /effort LEVEL", "[level]" },
     { "tools",    "List the tools the model can call",          NULL },

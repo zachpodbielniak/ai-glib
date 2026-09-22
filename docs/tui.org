@@ -435,7 +435,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/reset=            | Start a fresh session and return to the splash screen |
 | =/quit=             | Exit                                              |
 | =/exit=             | Exit, same as =/quit=                             |
-| =/model [NAME]=     | Show or switch the model without restarting       |
+| =/model [NAME]=     | Pick a model, or switch with =/model NAME=        |
 | =/provider [NAME]=  | Show or switch the provider, preserving context   |
 | =/effort [LEVEL]=   | Show or switch reasoning effort (CLI providers)   |
 | =/tools=            | The tools the model can call                      |
@@ -552,8 +552,10 @@ Dropping it is worth doing when the import is large and no longer relevant:
 it is sent with *every* turn, not just the first.
 
 *** Changing the model
-=/model= with no argument reports the current model; with one it changes it
-for the next turn and keeps everything else:
+=/model= with no argument reports the current model and opens a picker.
+Up and Down move through the provider's list, Enter switches, and Escape
+closes the picker without changing anything. =/model NAME= still changes
+the model directly and keeps everything else:
 
 #+begin_example
 > /model claude-opus-5
