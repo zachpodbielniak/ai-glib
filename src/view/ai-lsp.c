@@ -1,8 +1,13 @@
 /* Semantic tokens from a language server, falling back to nothing. */
 #include "config.h"
 
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <gio/gunixinputstream.h>
+#include <poll.h>
 
 #include <json-glib/json-glib.h>
 
@@ -94,21 +99,91 @@ ai_lsp_command_for_language(const gchar *language)
 	}
 }
 
+static void
+setpgid_child(gpointer data)
+{
+	(void)data;
+	setpgid(0, 0);
+}
+
 static gboolean
-write_message(GOutputStream *out, const gchar *json, GError **error)
+write_message(GOutputStream *out, const gchar *json, volatile gint *cancelled, GError **error)
 {
 	g_autofree gchar *frame = g_strdup_printf("Content-Length: %zu\r\n\r\n%s", strlen(json), json);
+	gsize len = strlen(frame);
+	gsize sent = 0;
 
-	return g_output_stream_write_all(out, frame, strlen(frame), NULL, NULL, error);
+	/* A full pipe must not block the worker past a cancel. The read
+	 * side already polls; this is the same bound on the way in. */
+	while (sent < len)
+	{
+		gssize n;
+
+		if (cancelled != NULL && g_atomic_int_get(cancelled))
+		{
+			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "language server cancelled");
+			return FALSE;
+		}
+		n = g_pollable_output_stream_write_nonblocking(G_POLLABLE_OUTPUT_STREAM(out),
+		                                               frame + sent, len - sent, NULL, error);
+		if (n > 0)
+			sent += (gsize)n;
+		else if (n < 0 && g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+		{
+			g_clear_error(error);
+			g_usleep(5 * 1000);
+		}
+		else
+			return FALSE;
+	}
+	return TRUE;
+}
+
+static gboolean
+cancelled_or_late(volatile gint *cancelled, gint64 deadline)
+{
+	return (cancelled != NULL && g_atomic_int_get(cancelled)) || g_get_monotonic_time() >= deadline;
+}
+
+/* Block until the pipe is readable, the query is cancelled, or the
+ * deadline passes. Sleeping here is what made a freed block wait out
+ * the whole three seconds. */
+/* Short waits, rechecking the flag. A blocking poll cannot see a flag
+ * written by another thread, and GTask's cancellable is not visible here. */
+static gboolean
+wait_readable(GInputStream *in, volatile gint *cancelled, gint64 deadline)
+{
+	GPollFD fd;
+	gint timeout;
+	gint slice;
+
+	if (cancelled_or_late(cancelled, deadline))
+		return FALSE;
+	timeout = (gint)MIN(G_MAXINT, (deadline - g_get_monotonic_time()) / 1000);
+	slice = MIN(timeout, 5);
+	fd.fd = g_unix_input_stream_get_fd(G_UNIX_INPUT_STREAM(in));
+	fd.events = G_IO_IN | G_IO_HUP | G_IO_ERR;
+	fd.revents = 0;
+	/* One quiet slice is not the end. A slow server still has the
+	 * rest of the deadline; only the flag or the clock ends it. */
+	while (!cancelled_or_late(cancelled, deadline))
+	{
+		timeout = (gint)MIN(G_MAXINT, (deadline - g_get_monotonic_time()) / 1000);
+		slice = MIN(MAX(timeout, 0), 5);
+		fd.revents = 0;
+		if (g_poll(&fd, 1, slice) > 0 && fd.revents != 0)
+			return !cancelled_or_late(cancelled, deadline);
+	}
+	return FALSE;
 }
 
 static gchar *
-read_message(GPollableInputStream *in, gint64 deadline, GError **error)
+read_message(GPollableInputStream *in, volatile gint *cancelled, gint64 deadline, GError **error)
 {
 	GString *header = g_string_new(NULL);
 	gint length = -1;
 
-	while (g_get_monotonic_time() < deadline)
+	while (!cancelled_or_late(cancelled, deadline))
 	{
 		gssize n;
 		gchar ch;
@@ -125,7 +200,8 @@ read_message(GPollableInputStream *in, gint64 deadline, GError **error)
 			if (g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
 			{
 				g_clear_error(error);
-				g_usleep(10 * 1000);
+				if (!wait_readable(G_INPUT_STREAM(in), cancelled, deadline))
+					break;
 				continue;
 			}
 			g_string_free(header, TRUE);
@@ -142,6 +218,11 @@ read_message(GPollableInputStream *in, gint64 deadline, GError **error)
 		}
 	}
 	g_string_free(header, TRUE);
+	if (cancelled != NULL && g_atomic_int_get(cancelled))
+	{
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "language server cancelled");
+		return NULL;
+	}
 	if (length < 0 || g_get_monotonic_time() >= deadline)
 	{
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "language server timed out");
@@ -151,7 +232,7 @@ read_message(GPollableInputStream *in, gint64 deadline, GError **error)
 		g_autofree gchar *body = g_malloc((gsize)length + 1);
 		gsize got = 0;
 
-		while (got < (gsize)length && g_get_monotonic_time() < deadline)
+		while (got < (gsize)length && !cancelled_or_late(cancelled, deadline))
 		{
 			gssize n = g_pollable_input_stream_read_nonblocking(in, body + got, (gsize)length - got, NULL, error);
 
@@ -160,14 +241,18 @@ read_message(GPollableInputStream *in, gint64 deadline, GError **error)
 			else if (n < 0 && g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
 			{
 				g_clear_error(error);
-				g_usleep(10 * 1000);
+				if (!wait_readable(G_INPUT_STREAM(in), cancelled, deadline))
+					break;
 			}
 			else
 				return NULL;
 		}
 		if (got < (gsize)length)
 		{
-			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "language server timed out");
+			if (cancelled != NULL && g_atomic_int_get(cancelled))
+				g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "language server cancelled");
+			else
+				g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "language server timed out");
 			return NULL;
 		}
 		body[length] = '\0';
@@ -294,10 +379,31 @@ legend_types(JsonObject *init)
 	return ai_json_get_array(legend, "tokenTypes");
 }
 
+/* Every path out of a spawn has to reap. A continue that skipped the
+ * wait left the server running after the block that asked for it was gone. */
+static void
+reap_server(GSubprocess *proc, GOutputStream *out)
+{
+	if (proc == NULL)
+		return;
+	if (out != NULL)
+	{
+		write_message(out, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\",\"params\":null}", NULL, NULL);
+		write_message(out, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":{}}", NULL, NULL);
+		g_output_stream_close(out, NULL, NULL);
+	}
+	/* The child is its own process group. SIGKILL that group: a server
+	 * that has forked, or that is ignoring the default SIGTERM, would
+	 * otherwise outlive the block that started it. */
+	kill(-atoi(g_subprocess_get_identifier(proc)), SIGKILL);
+	g_subprocess_wait(proc, NULL, NULL);
+}
+
 static gboolean
 highlight_fence(GSubprocess *proc, GPollableInputStream *in, GOutputStream *out,
                 const gchar *language_id, const gchar *body, guint base,
-                JsonArray *types, GArray *tokens, gint64 deadline, guint *next_id, GError **error)
+                JsonArray *types, GArray *tokens, volatile gint *cancelled,
+                gint64 deadline, guint *next_id, GError **error)
 {
 	g_autofree gchar *open = NULL;
 	g_autofree gchar *request = NULL;
@@ -319,18 +425,18 @@ highlight_fence(GSubprocess *proc, GPollableInputStream *in, GOutputStream *out,
 			uri, language_id, encoded);
 	}
 	(void)escaped;
-	if (!write_message(out, open, error))
+	if (!write_message(out, open, cancelled, error))
 		return FALSE;
 	request = g_strdup_printf(
 		"{\"jsonrpc\":\"2.0\",\"id\":%u,\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"%s\"}}}",
 		*next_id, uri);
 	(*next_id)++;
-	if (!write_message(out, request, error))
+	if (!write_message(out, request, cancelled, error))
 		return FALSE;
 	do
 	{
 		g_free(reply);
-		reply = read_message(in, deadline, error);
+		reply = read_message(in, cancelled, deadline, error);
 		if (reply == NULL)
 			return FALSE;
 	} while (strstr(reply, "semanticTokens") == NULL && strstr(reply, "\"result\"") == NULL);
@@ -347,7 +453,7 @@ highlight_fence(GSubprocess *proc, GPollableInputStream *in, GOutputStream *out,
 }
 
 GArray *
-ai_lsp_semantic_tokens(const gchar *text, GError **error)
+ai_lsp_semantic_tokens(const gchar *text, volatile gint *cancelled, GError **error)
 {
 	g_autoptr(GArray) fences = NULL;
 	g_autoptr(GArray) tokens = NULL;
@@ -371,19 +477,26 @@ ai_lsp_semantic_tokens(const gchar *text, GError **error)
 		gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
 		guint next_id = 2;
 
+		if (cancelled != NULL && g_atomic_int_get(cancelled))
+			break;
 		if (command == NULL || command[0] == '\0' || fence->length == 0)
 			continue;
 		body = g_strndup(text + fence->body, fence->length);
 		launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+		/* Own process group, so teardown can signal the server and
+		 * anything it has already forked. */
+		g_subprocess_launcher_set_child_setup(launcher, (GSpawnChildSetupFunc)setpgid_child, NULL, NULL);
 		proc = g_subprocess_launcher_spawn(launcher, &local, command, NULL);
 		if (proc == NULL)
 			continue;
 		init = g_strdup("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"rootUri\":null,\"capabilities\":{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":true},\"tokenTypes\":[\"keyword\",\"string\",\"comment\",\"number\",\"type\",\"function\"],\"tokenModifiers\":[]}}}}}");
-		if (!write_message(g_subprocess_get_stdin_pipe(proc), init, &local))
+		if (!write_message(g_subprocess_get_stdin_pipe(proc), init, cancelled, &local) ||
+		    (ready = read_message(G_POLLABLE_INPUT_STREAM(g_subprocess_get_stdout_pipe(proc)),
+		                          cancelled, deadline, &local)) == NULL)
+		{
+			reap_server(proc, g_subprocess_get_stdin_pipe(proc));
 			continue;
-		ready = read_message(G_POLLABLE_INPUT_STREAM(g_subprocess_get_stdout_pipe(proc)), deadline, &local);
-		if (ready == NULL)
-			continue;
+		}
 		parser = json_parser_new();
 		if (json_parser_load_from_data(parser, ready, -1, NULL))
 		{
@@ -393,20 +506,16 @@ ai_lsp_semantic_tokens(const gchar *text, GError **error)
 				types = legend_types(json_node_get_object(root));
 		}
 		if (!write_message(g_subprocess_get_stdin_pipe(proc),
-		                   "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", &local))
-			continue;
-		if (!highlight_fence(proc, G_POLLABLE_INPUT_STREAM(g_subprocess_get_stdout_pipe(proc)),
+		                   "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", cancelled, &local) ||
+		    !highlight_fence(proc, G_POLLABLE_INPUT_STREAM(g_subprocess_get_stdout_pipe(proc)),
 		                     g_subprocess_get_stdin_pipe(proc),
 		                     server != NULL ? server->language_id : fence->language,
-		                     body, fence->body, types, tokens, deadline, &next_id, &local))
+		                     body, fence->body, types, tokens, cancelled, deadline, &next_id, &local))
+		{
+			reap_server(proc, g_subprocess_get_stdin_pipe(proc));
 			continue;
-		write_message(g_subprocess_get_stdin_pipe(proc),
-		              "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\",\"params\":null}", NULL);
-		write_message(g_subprocess_get_stdin_pipe(proc),
-		              "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":{}}", NULL);
-		g_output_stream_close(g_subprocess_get_stdin_pipe(proc), NULL, NULL);
-		g_subprocess_force_exit(proc);
-		g_subprocess_wait(proc, NULL, NULL);
+		}
+		reap_server(proc, g_subprocess_get_stdin_pipe(proc));
 	}
 	g_array_set_clear_func(fences, ai_markup_fence_free);
 	return g_steal_pointer(&tokens);

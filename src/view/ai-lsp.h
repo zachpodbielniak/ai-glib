@@ -11,4 +11,4 @@ const gchar *
 ai_lsp_command_for_language(const gchar *language);
 
 GArray *
-ai_lsp_semantic_tokens(const gchar *text, GError **error);
+ai_lsp_semantic_tokens(const gchar *text, volatile gint *cancelled, GError **error);
