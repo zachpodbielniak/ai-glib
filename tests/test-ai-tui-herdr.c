@@ -656,7 +656,9 @@ test_application_resume_target(void)
 	g_autofree gchar *directory = g_build_filename(peer->directory, "ai-glib", "sessions", NULL);
 	g_autofree gchar *stub = g_build_filename(peer->directory, "grok", NULL);
 	g_autofree gchar *option = g_strconcat("--workspace-session=", ai_work_session_get_id(work), NULL);
-	const gchar *args[] = {option, NULL};
+	/* Resume overrides both options; ASAN verifies their previous values
+	 * are freed rather than lost when the saved identity replaces them. */
+	const gchar *args[] = {"-m", "overridden-model", option, NULL};
 	g_autoptr(GSubprocess) process = NULL;
 	g_autolist(AiWorkSession) rows = NULL;
 	g_autofree gchar *source = NULL;
@@ -685,7 +687,20 @@ test_application_resume_target(void)
 	g_subprocess_send_signal(process, SIGTERM);
 	g_clear_pointer(&source, g_free);
 	source = peer_expect(peer, NULL);
-	g_assert_true(g_subprocess_wait_check(process, NULL, NULL));
+	{
+		gboolean success = g_subprocess_wait_check(process, NULL, NULL);
+		if (!success)
+		{
+			gchar buffer[8192];
+			ssize_t count;
+			while ((count = read(master, buffer, sizeof(buffer) - 1)) > 0)
+			{
+				buffer[count] = '\0';
+				g_test_message("child output: %s", buffer);
+			}
+		}
+		g_assert_true(success);
+	}
 	close(master);
 	g_assert_cmpint(g_unlink(stub), ==, 0);
 	peer_free(peer);
