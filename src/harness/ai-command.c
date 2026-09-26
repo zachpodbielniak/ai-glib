@@ -22,6 +22,15 @@
 /* How much of a shell substitution's output is kept. */
 #define SHELL_OUTPUT_MAX (64 * 1024)
 
+/*
+ * A skill that shares a built-in's name is listed and invoked as
+ * "name (skill)". The bare name stays the built-in. The marker is a
+ * whole argument, so "/help (skill) review" runs the skill and
+ * "/help (skilful)" stays the built-in.
+ */
+#define AI_COMMAND_SKILL_ALIAS_MARK   "(skill)"
+#define AI_COMMAND_SKILL_ALIAS_SUFFIX " " AI_COMMAND_SKILL_ALIAS_MARK
+
 /* ================================================================
  * The built-in commands
  * ================================================================ */
@@ -1048,6 +1057,145 @@ ai_command_set_get_shell_policy(AiCommandSet *self)
 }
 
 /*
+ * Wrap @resource under an invocation name that is not its file name.
+ *
+ * Used when a skill has to stay reachable without taking the built-in's
+ * spelling. The resource itself is unchanged, so anything that keys on
+ * ai_resource_get_name() still sees the name on disk.
+ */
+static AiCommand *
+command_for_resource_named(
+    AiResource  *resource,
+    const gchar *name
+){
+    AiCommand *command;
+
+    command = ai_command_new_for_resource(resource);
+    g_free(command->name);
+    command->name = g_strdup(name);
+
+    return command;
+}
+
+/* TRUE when @name is "<builtin> (skill)". @base is the part before the
+ * suffix, transfer full, and only set on success. */
+static gboolean
+command_skill_alias_base(
+    const gchar *name,
+    gchar      **base
+){
+    gsize suffix_len;
+    gsize len;
+
+    if (base != NULL)
+    {
+        *base = NULL;
+    }
+
+    if (name == NULL)
+    {
+        return FALSE;
+    }
+
+    suffix_len = strlen(AI_COMMAND_SKILL_ALIAS_SUFFIX);
+    len = strlen(name);
+
+    if (len <= suffix_len ||
+        strcmp(name + (len - suffix_len), AI_COMMAND_SKILL_ALIAS_SUFFIX) != 0)
+    {
+        return FALSE;
+    }
+
+    if (base != NULL)
+    {
+        *base = g_strndup(name, len - suffix_len);
+    }
+
+    return TRUE;
+}
+
+/*
+ * The skill hidden behind a built-in, addressed by its alias spelling.
+ *
+ * Only a built-in collision produces this name. A skill that already
+ * owns its bare name is looked up as that name, and a file that happens
+ * to be called "foo (skill)" is left to the ordinary search.
+ */
+static AiCommand *
+lookup_builtin_skill_alias(
+    AiCommandSet *self,
+    const gchar  *name
+){
+    g_autofree gchar *base = NULL;
+    g_autofree gchar *alias = NULL;
+    AiResource       *resource;
+
+    if (!command_skill_alias_base(name, &base))
+    {
+        return NULL;
+    }
+
+    if (!g_hash_table_contains(self->builtins, base) || self->registry == NULL)
+    {
+        return NULL;
+    }
+
+    resource = ai_resource_registry_lookup(self->registry, AI_RESOURCE_SKILL,
+                                           base);
+
+    if (resource == NULL)
+    {
+        return NULL;
+    }
+
+    alias = g_strdup_printf("%s%s", base, AI_COMMAND_SKILL_ALIAS_SUFFIX);
+
+    return command_for_resource_named(resource, alias);
+}
+
+/*
+ * Arguments that follow a "(skill)" marker, or NULL when @rest is not
+ * that marker.
+ *
+ * The marker is one whitespace-delimited word. What follows it, leading
+ * whitespace included, is the skill's own arguments.
+ */
+static const gchar *
+skill_alias_arguments(const gchar *rest)
+{
+    const gchar *p;
+    gsize        mark_len;
+
+    if (rest == NULL)
+    {
+        return NULL;
+    }
+
+    p = rest;
+
+    while (*p == ' ' || *p == '\t')
+    {
+        p++;
+    }
+
+    mark_len = strlen(AI_COMMAND_SKILL_ALIAS_MARK);
+
+    if (strncmp(p, AI_COMMAND_SKILL_ALIAS_MARK, mark_len) != 0)
+    {
+        return NULL;
+    }
+
+    p += mark_len;
+
+    if (*p != '\0' && *p != ' ' && *p != '\t')
+    {
+        return NULL;
+    }
+
+    return p;
+}
+
+/*
  * The resource behind a name, looking at commands before skills.
  *
  * Agents are deliberately last: an agent is normally reached through the
@@ -1093,7 +1241,8 @@ lookup_resource(AiCommandSet *self, const gchar *name)
  *
  * A built-in always wins over a file of the same name. That is not
  * politeness --- a stray `quit.md` in a scanned directory must not be
- * able to take away the way out of the program.
+ * able to take away the way out of the program. A skill of that name is
+ * still reachable as `name (skill)`.
  *
  * Returns: (transfer full) (nullable): the command, or %NULL
  */
@@ -1103,6 +1252,7 @@ ai_command_set_lookup(
     const gchar  *name
 ){
     AiCommand  *builtin;
+    AiCommand  *aliased;
     AiResource *resource;
 
     g_return_val_if_fail(AI_IS_COMMAND_SET(self), NULL);
@@ -1113,6 +1263,13 @@ ai_command_set_lookup(
     if (builtin != NULL)
     {
         return g_object_ref(builtin);
+    }
+
+    aliased = lookup_builtin_skill_alias(self, name);
+
+    if (aliased != NULL)
+    {
+        return aliased;
     }
 
     resource = lookup_resource(self, name);
@@ -1138,9 +1295,11 @@ compare_commands(gconstpointer a, gconstpointer b)
  *
  * Every command, built-in and file-backed, sorted by name.
  *
- * One entry per name. A file shadowed by a built-in is omitted, and so
- * is a skill whose name a command already took --- this list answers
- * "what can I type", and typing it reaches exactly one of them.
+ * One entry per thing the user can type. A file shadowed by a built-in
+ * is omitted, and so is a skill whose name a file-backed command already
+ * took. A skill that collides with a built-in is the exception: it is
+ * listed again as `name (skill)`, because dropping it would hide the
+ * skill and keeping the bare name would let the skill take the built-in.
  *
  * Returns: (transfer full) (element-type AiCommand): the commands
  */
@@ -1170,9 +1329,9 @@ ai_command_set_list(AiCommandSet *self)
 
         /*
          * Kinds are walked in the same order ai_command_set_lookup()
-         * searches them, so the entry that appears is the one that would
-         * run. Listing a skill and a command with the same name would
-         * promise a choice the user does not have.
+         * searches them, so a file-backed command hides a skill of the
+         * same name. A built-in does not: the skill is listed separately
+         * as "name (skill)" and that spelling is what runs it.
          */
         for (k = 0; k < G_N_ELEMENTS(kinds); k++)
         {
@@ -1184,9 +1343,34 @@ ai_command_set_list(AiCommandSet *self)
             {
                 const gchar *name = ai_resource_get_name(iter_r->data);
 
-                if (name == NULL ||
-                    g_hash_table_contains(self->builtins, name) ||
-                    g_hash_table_contains(taken, name))
+                if (name == NULL)
+                {
+                    continue;
+                }
+
+                /*
+                 * The bare name belongs to the built-in. A skill is
+                 * offered beside it under "name (skill)"; a command
+                 * file or an agent of that name is not, because either
+                 * one could replace /quit.
+                 */
+                if (g_hash_table_contains(self->builtins, name))
+                {
+                    if (kinds[k] == AI_RESOURCE_SKILL)
+                    {
+                        g_autofree gchar *alias =
+                            g_strdup_printf("%s%s", name,
+                                            AI_COMMAND_SKILL_ALIAS_SUFFIX);
+
+                        out = g_list_prepend(
+                            out, command_for_resource_named(iter_r->data,
+                                                            alias));
+                    }
+
+                    continue;
+                }
+
+                if (g_hash_table_contains(taken, name))
                 {
                     continue;
                 }
@@ -1385,6 +1569,34 @@ ai_command_set_resolve(
     rest = line + 1 + name_len;
 
     command = ai_command_set_lookup(self, name);
+
+    /*
+     * "/help (skill)" is the skill, not the built-in with an argument
+     * of "(skill)". The marker is only special when a skill of that
+     * name actually exists; otherwise the built-in keeps the text.
+     */
+    if (command != NULL &&
+        ai_command_get_kind(command) == AI_COMMAND_BUILTIN)
+    {
+        const gchar *alias_arguments = skill_alias_arguments(rest);
+
+        if (alias_arguments != NULL)
+        {
+            g_autofree gchar     *alias_name = NULL;
+            g_autoptr(AiCommand)  skill = NULL;
+
+            alias_name = g_strdup_printf("%s%s", name,
+                                         AI_COMMAND_SKILL_ALIAS_SUFFIX);
+            skill = ai_command_set_lookup(self, alias_name);
+
+            if (skill != NULL)
+            {
+                g_clear_object(&command);
+                command = (AiCommand *)g_steal_pointer(&skill);
+                rest = alias_arguments;
+            }
+        }
+    }
 
     if (command == NULL)
     {

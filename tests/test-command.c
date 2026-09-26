@@ -869,6 +869,9 @@ test_command_wins_over_skill_of_the_same_name(void)
 	g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new();
 	g_autoptr(AiCommandSet)       set = NULL;
 	g_autoptr(AiCommand)          found = NULL;
+	GList                        *list;
+	GList                        *iter;
+	guint                         hits = 0;
 
 	{
 		g_autoptr(AiResource) as_skill =
@@ -888,6 +891,146 @@ test_command_wins_over_skill_of_the_same_name(void)
 	found = ai_command_set_lookup(set, "dual");
 
 	g_assert_cmpstr(ai_command_get_description(found), ==, "command");
+
+	/* A file-backed command still hides the skill. The "(skill)"
+	 * spelling is only for a built-in collision. */
+	list = ai_command_set_list(set);
+
+	for (iter = list; iter != NULL; iter = iter->next)
+	{
+		const gchar *name = ai_command_get_name(iter->data);
+
+		if (g_strcmp0(name, "dual") == 0 ||
+		    g_strcmp0(name, "dual (skill)") == 0)
+		{
+			hits++;
+			g_assert_cmpstr(name, ==, "dual");
+			g_assert_cmpstr(ai_command_get_description(iter->data), ==,
+			                "command");
+		}
+	}
+
+	g_assert_cmpuint(hits, ==, 1);
+	g_list_free_full(list, g_object_unref);
+}
+
+static gboolean
+list_has_name(GList *list, const gchar *name)
+{
+	GList *iter;
+
+	for (iter = list; iter != NULL; iter = iter->next)
+	{
+		if (g_strcmp0(ai_command_get_name(iter->data), name) == 0)
+		{
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+/*
+ * A skill must not take a built-in's name. /help stays the built-in,
+ * and the skill is a second entry, /help (skill).
+ */
+static void
+test_skill_does_not_trump_a_builtin(void)
+{
+	g_autoptr(AiResourceRegistry) registry = ai_resource_registry_new();
+	g_autoptr(AiCommandSet)       set = NULL;
+	g_autoptr(AiCommand)          bare = NULL;
+	g_autoptr(AiCommand)          aliased = NULL;
+	g_autoptr(AiCommandResult)    result = NULL;
+	g_autofree gchar             *prompt = NULL;
+	GList                        *list;
+	GError                       *error = NULL;
+
+	{
+		g_autoptr(AiResource) skill =
+			ai_resource_new_from_data("---\ndescription: the skill\n---\n"
+			                          "SKILL-BODY\n",
+			                          -1, "help", AI_RESOURCE_SKILL, "claude",
+			                          AI_RESOURCE_SCOPE_USER, NULL);
+		g_autoptr(AiResource) agent =
+			ai_resource_new_from_data("agent body\n", -1, "help",
+			                          AI_RESOURCE_AGENT, "claude",
+			                          AI_RESOURCE_SCOPE_USER, NULL);
+		g_autoptr(AiResource) other =
+			ai_resource_new_from_data("plain skill\n", -1, "plain-skill",
+			                          AI_RESOURCE_SKILL, "claude",
+			                          AI_RESOURCE_SCOPE_USER, NULL);
+
+		ai_resource_registry_add(registry, skill);
+		ai_resource_registry_add(registry, agent);
+		ai_resource_registry_add(registry, other);
+	}
+
+	set = ai_command_set_new(registry);
+
+	bare = ai_command_set_lookup(set, "help");
+	g_assert_cmpint(ai_command_get_kind(bare), ==, AI_COMMAND_BUILTIN);
+
+	aliased = ai_command_set_lookup(set, "help (skill)");
+	g_assert_nonnull(aliased);
+	g_assert_cmpint(ai_command_get_kind(aliased), ==, AI_COMMAND_PROMPT);
+	g_assert_cmpstr(ai_command_get_name(aliased), ==, "help (skill)");
+	g_assert_cmpstr(ai_command_get_description(aliased), ==, "the skill");
+	g_assert_cmpstr(ai_resource_get_name(ai_command_get_resource(aliased)),
+	                ==, "help");
+
+	list = ai_command_set_list(set);
+	g_assert_true(list_has_name(list, "help"));
+	g_assert_true(list_has_name(list, "help (skill)"));
+	g_assert_true(list_has_name(list, "plain-skill"));
+	g_assert_false(list_has_name(list, "plain-skill (skill)"));
+	/* An agent of the built-in's name stays off the slash list. */
+	g_assert_false(list_has_name(list, "help (agent)"));
+	g_list_free_full(list, g_object_unref);
+
+	result = ai_command_set_resolve(set, "/help", NULL, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_BUILTIN);
+	g_assert_cmpstr(ai_command_result_get_name(result), ==, "help");
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "");
+	g_clear_object(&result);
+
+	prompt = resolve_prompt(set, "/help (skill)");
+	g_assert_cmpstr(prompt, ==, "SKILL-BODY\n");
+	g_clear_pointer(&prompt, g_free);
+
+	result = ai_command_set_resolve(set, "/help (skill) review this",
+	                                NULL, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_PROMPT);
+	g_assert_cmpstr(ai_command_result_get_name(result), ==, "help (skill)");
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==,
+	                "review this");
+	g_assert_nonnull(strstr(ai_command_result_get_prompt(result),
+	                        "SKILL-BODY\n"));
+	g_assert_nonnull(strstr(ai_command_result_get_prompt(result),
+	                        "review this"));
+	g_assert_null(strstr(ai_command_result_get_prompt(result), "(skill)"));
+	g_clear_object(&result);
+
+	/* No colliding skill: the marker is an ordinary argument. */
+	result = ai_command_set_resolve(set, "/quit (skill)", NULL, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_BUILTIN);
+	g_assert_cmpstr(ai_command_result_get_name(result), ==, "quit");
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "(skill)");
+	g_clear_object(&result);
+
+	/* A longer word that merely starts with the marker is not it. */
+	result = ai_command_set_resolve(set, "/help (skilful)", NULL, NULL,
+	                                &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_command_result_get_outcome(result), ==,
+	                AI_COMMAND_OUTCOME_BUILTIN);
+	g_assert_cmpstr(ai_command_result_get_arguments(result), ==, "(skilful)");
 }
 
 static void
@@ -1000,6 +1143,8 @@ main(int argc, char *argv[])
 	                test_list_includes_every_kind);
 	g_test_add_func("/ai-glib/command/command-beats-skill",
 	                test_command_wins_over_skill_of_the_same_name);
+	g_test_add_func("/ai-glib/command/skill-does-not-trump-builtin",
+	                test_skill_does_not_trump_a_builtin);
 	g_test_add_func("/ai-glib/command/properties", test_properties);
 
 	status = g_test_run();

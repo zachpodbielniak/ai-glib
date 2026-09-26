@@ -305,6 +305,50 @@ test_command_fuzzy_finds_a_hyphenated_skill(void)
 	g_assert_true(has_item(r, "git"));
 }
 
+/*
+ * A skill named help must not become the /help candidate. The built-in
+ * stays first, and the skill is the next entry, "help (skill)".
+ */
+static void
+test_skill_alias_is_a_second_candidate(void)
+{
+	g_autoptr(AiResourceRegistry)  registry = ai_resource_registry_new();
+	g_autoptr(AiCommandSet)        set = NULL;
+	g_autoptr(AiCompletionContext) ctx = NULL;
+	g_autoptr(AiCompletionResult)  exact = NULL;
+	g_autoptr(AiCompletionResult)  prefix = NULL;
+	const AiCompletionItem        *first;
+	const AiCompletionItem        *second;
+
+	{
+		g_autoptr(AiResource) skill =
+			ai_resource_new_from_data("---\ndescription: the skill\n---\nbody\n",
+			                          -1, "help", AI_RESOURCE_SKILL, "claude",
+			                          AI_RESOURCE_SCOPE_USER, NULL);
+
+		ai_resource_registry_add(registry, skill);
+	}
+
+	set = ai_command_set_new(registry);
+	ctx = ai_completion_context_new(set, sandbox);
+	exact = ai_completion_context_query(ctx, "/help", 5);
+
+	g_assert_cmpuint(ai_completion_result_get_n_items(exact), >=, 2);
+	first = ai_completion_result_get_item(exact, 0);
+	second = ai_completion_result_get_item(exact, 1);
+	g_assert_cmpstr(first->text, ==, "help");
+	g_assert_cmpstr(first->display, ==, "help");
+	g_assert_cmpstr(second->text, ==, "help (skill)");
+	g_assert_cmpstr(second->display, ==, "help (skill)");
+	g_assert_cmpstr(second->description, ==, "the skill");
+
+	prefix = ai_completion_context_query(ctx, "/hel", 4);
+	g_assert_true(has_item(prefix, "help"));
+	g_assert_true(has_item(prefix, "help (skill)"));
+	first = ai_completion_result_get_item(prefix, 0);
+	g_assert_cmpstr(first->text, ==, "help");
+}
+
 /**
  * test_command_fuzzy_ranks_exact_first:
  *
@@ -750,6 +794,8 @@ main(int argc, char *argv[])
 	                test_command_fuzzy_finds_a_hyphenated_skill);
 	g_test_add_func("/ai-glib/completion/fuzzy-ranks-exact",
 	                test_command_fuzzy_ranks_exact_first);
+	g_test_add_func("/ai-glib/completion/skill-alias-second",
+	                test_skill_alias_is_a_second_candidate);
 	g_test_add_func("/ai-glib/completion/fuzzy-subsequence",
 	                test_command_fuzzy_subsequence);
 	g_test_add_func("/ai-glib/completion/no-command-set",

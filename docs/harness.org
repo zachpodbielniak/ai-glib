@@ -311,7 +311,9 @@ before a single file has been read.
 
 A built-in always beats a file of the same name. That is not politeness:
 a stray =quit.md= or =exit.md= in a scanned directory must not be able to
-take away the way out of the program.
+take away the way out of the program. A skill of the same name is listed
+beside it as =/name (skill)= and is invoked with that spelling; the bare
+name stays the built-in.
 
 *** Placeholders
 | In the body   | Becomes                                          |

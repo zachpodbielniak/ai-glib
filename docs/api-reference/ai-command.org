@@ -26,11 +26,12 @@ const gchar   *ai_command_get_origin        (AiCommand *self);
 AiCommandSet       *ai_command_set_new          (AiResourceRegistry *registry);
 AiResourceRegistry *ai_command_set_get_registry (AiCommandSet *self);
 
-/* A built-in always wins. A stray quit.md must not take away /quit,
-   and a stray exit.md must not take away /exit. */
+/* A built-in always wins the bare name. A stray quit.md must not take
+   away /quit. A skill of that name is "name (skill)". */
 AiCommand *ai_command_set_lookup (AiCommandSet *self, const gchar *name);
 
-/* Every command, one entry per name, sorted. (transfer full) */
+/* Every invocable name, sorted. A skill colliding with a built-in is
+   listed as "name (skill)". (transfer full) */
 GList *ai_command_set_list (AiCommandSet *self);
 
 /* FALSE for a lone "/", for "/usr/bin/thing", and for ordinary prose. */
