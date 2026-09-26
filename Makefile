@@ -133,7 +133,8 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/harness/ai-resource-registry.h \
 	$(SRCDIR)/harness/ai-mention.h \
 	$(SRCDIR)/harness/ai-command.h \
-	$(SRCDIR)/harness/ai-completion.h
+	$(SRCDIR)/harness/ai-completion.h \
+	$(SRCDIR)/harness/ai-loop.h
 
 # Library source files
 LIB_SOURCES = \
@@ -240,7 +241,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-resource-registry.c \
 	$(SRCDIR)/harness/ai-mention.c \
 	$(SRCDIR)/harness/ai-command.c \
-	$(SRCDIR)/harness/ai-completion.c
+	$(SRCDIR)/harness/ai-completion.c \
+	$(SRCDIR)/harness/ai-loop.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))

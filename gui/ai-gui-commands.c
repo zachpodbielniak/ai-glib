@@ -634,6 +634,11 @@ ai_gui_commands_handle(
 			"/btw is an ai-tui feature. Open a second session (Ctrl+N) to "
 			"ask something alongside this one.");
 	}
+	else if (g_strcmp0(name, "loop") == 0)
+	{
+		ai_gui_commands_say(session,
+			"/loop schedules a prompt in ai-tui. It needs that session to stay open.");
+	}
 	else
 	{
 		ai_gui_commands_say(session, "/%s is not available here yet.", name);

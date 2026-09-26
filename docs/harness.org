@@ -634,6 +634,9 @@ Either may be =NULL=. Nothing else in the library needs to change: the
 layouts, the precedence, the completion and the =/help= listing all come
 from the table.
 
+** Scheduled prompts (=/loop=)
+=AiLoopSchedule= (=src/harness/ai-loop.h=) is the session-scoped schedule behind ai-tui's =/loop=. The library parses the interval, stores the tasks, computes the next local cron time, and reads =loop.md=. The frontend owns the timer and only calls in while the session is idle, because a source in here would fire during a turn the UI still has on screen. Fixed tasks can be saved and loaded; self-paced ones cannot. =AI_LOOP_DISABLE= turns scheduling off. The behaviour a person sees is documented in [[file:tui.org][ai-tui]].
+
 ** See also
 - [[file:provider-switching.org][Provider switching]] --- how context and input policy move
 - [[file:commands.org][Authoring commands, skills and agents]] --- the file formats, with worked examples

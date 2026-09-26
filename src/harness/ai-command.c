@@ -83,6 +83,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "save",     "Write the transcript to a file",             "<path>" },
     { "export",   "Write the transcript as markdown or org",
       "<text|markdown|org> [path]" },
+    { "loop",     "Run a prompt on a schedule while this session is open",
+      "[list|stop|cancel <id|all>] [INTERVAL] [PROMPT]" },
     { NULL, NULL, NULL }
 };
 

@@ -450,6 +450,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/expand LINE=      | What a line would send, without sending it        |
 | =/save PATH=        | Write the transcript to a file                    |
 | =/export FMT [PATH]= | Write it as =text=, =markdown= or =org=         |
+| =/loop=             | Run a prompt on a schedule while the session is open |
 
 *** Command paths
 
@@ -472,6 +473,36 @@ The process directory is unchanged so background work is not redirected. The con
 Anything else is a command file: =/deploy staging= runs
 =~/.claude/commands/deploy.md= with =staging= as =$1=. See
 [[file:commands.org][authoring them]].
+
+*** Scheduling a prompt with =/loop=
+
+=/loop= repeats a prompt while this session stays open. It follows the same shape as Claude Code's scheduled tasks: a fixed interval, a delay chosen after each pass, or a maintenance prompt when you do not give one. The scheduler checks once a second and sends at most one due prompt, and only while nothing else is in flight — a running turn, a queued draft, an approval, a decision, the dashboard, or search. A slot that comes due during a turn fires once when the session is idle, not once for every missed interval. Set =AI_LOOP_DISABLE= to =1= (anything other than =0=, =false=, =no=, or =off=) and =/loop= refuses to schedule.
+
+| You type | What happens |
+|----------+--------------|
+| =/loop 5m check the deploy= | Fixed schedule. =5m= is =*/5 * * * *=. Seconds round up to a minute. Intervals cron cannot express exactly, such as =7m= or =90m=, are rounded to the nearest step it can, and the confirmation says what was picked. =every 2 hours= at the end is the same kind of interval. |
+| =/loop check the deploy= | Self-paced. The first pass starts as soon as the session is idle. The prompt asks the model to end with =LOOP_NEXT: 5m why= or =LOOP_STOP: why=. The delay is clamped to 1–60 minutes. With no such line, the loop waits 20 minutes once, then stops if the next reply also omits it. |
+| =/loop= or =/loop 15m= | The maintenance prompt: finish work already started, then the current branch's pull request, then one small cleanup. It does not start a new initiative. |
+| =/loop list= | Ids, cadence, and the next local time. |
+| =/loop cancel ID= or =/loop cancel all= | Drop fixed and self-paced tasks. =/loop list the deploys= is a prompt, not the list. |
+| =/loop stop=, or Esc on an empty composer | Stop self-paced loops. A turn already running is allowed to finish and does not schedule another. Fixed intervals keep going. |
+
+A fixed loop's clock is local. Recurring tasks expire seven days after they were created: the session fires one last time, then drops the task. Up to 50 tasks can be stored. Each confirmation includes an 8-character id.
+
+The per-task offset that keeps fixed fires from landing on the same wall-clock second is derived from that id: up to half the interval when the loop is more frequent than hourly, otherwise up to 30 minutes. Self-paced delays are exact.
+
+The maintenance prompt is replaced by the first of these files that exists, re-read on every fire so an edit applies to the next pass. Past 25000 bytes the file is cut on a UTF-8 boundary.
+
+| Path | Scope |
+|------+-------|
+| =.ai-glib/loop.md= | This project. Wins. |
+| =.claude/loop.md= | This project, the Claude Code file. |
+| =~/.config/ai-glib/loop.md= | Your user config. |
+| =~/.claude/loop.md= | Your home directory, the Claude Code file. |
+
+Fixed tasks are written under =$XDG_STATE_HOME/ai-glib/sessions/loops/= and restored when the session is resumed with =--workspace-session=, =-c= / =--continue=, or =--set session-id==. A self-paced loop is not restored; start it again. =/reset= clears the schedule. A fresh launch does not load the previous session's loops. The file is mode 0600 and is refused when it or its parent directory is a symlink.
+
+A scheduled line that is one of ai-glib's own built-ins is sent to the model as text. =/clear= inside a loop does not clear the session. A skill or command file is expanded the same way typing it would.
 
 =/clear= empties the *local* view. A provider holding a session of its own
 --- the CLI wrappers do --- is not affected; clearing the transcript does

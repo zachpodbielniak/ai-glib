@@ -515,7 +515,7 @@ tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
 	tmux_kill(session);
 
 	command = g_strdup_printf(
-		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
+		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME -u AI_LOOP_DISABLE TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
 		"XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' EDITOR='%s' %s '%s' -p grok-build %s",
 		libs, grok, stub_dir, stub_dir, stub_dir,
 		editor != NULL ? editor : "true", environment != NULL ? environment : "",
@@ -3131,7 +3131,8 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "kill", "/kill needs an agent id" },
 	{ "expand", "/expand needs something to expand." },
 	{ "save", "/save needs a path." },
-	{ "export", "/export needs a format" }
+	{ "export", "/export needs a format" },
+	{ "loop", "No scheduled loops." }
 };
 
 /**
@@ -3162,7 +3163,9 @@ test_builtin_enter(gconstpointer data)
 	 * Audit the text command without leaving a modal over the next /save. */
 	command = g_str_equal(test_case->name, "model")
 		? g_strdup("/model grok-4.7")
-		: g_strconcat("/", test_case->name, NULL);
+		: g_str_equal(test_case->name, "loop")
+			? g_strdup("/loop list")
+			: g_strconcat("/", test_case->name, NULL);
 	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
@@ -3193,6 +3196,43 @@ test_builtin_enter(gconstpointer data)
 				stub->dir : test_case->notice));
 		}
 	}
+	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/**
+ * test_loop_schedule:
+ *
+ * A fixed interval must be confirmed in the transcript and must not ask
+ * the provider. An hour-long slot cannot come due during this test.
+ */
+static void
+test_loop_schedule(void)
+{
+	Stub             *stub;
+	g_autofree gchar *saved_path = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *saved = NULL;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	saved_path = g_build_filename(stub->dir, "loop-audit.txt", NULL);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_command("/loop 60m ping the build", "every hour");
+	tmux_command("/loop list", "ping the build");
+	tmux_command("/loop cancel all", "Cancelled 1 scheduled loop");
+	tmux_command("/loop list", "No scheduled loops.");
+	tmux_command("/save loop-audit.txt", "Wrote");
+	g_assert_true(g_file_get_contents(saved_path, &saved, NULL, NULL));
+	g_assert_nonnull(strstr(saved, "every hour"));
+	g_assert_nonnull(strstr(saved, "0 * * * *"));
 	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
@@ -3846,6 +3886,7 @@ main(int argc, char *argv[])
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-home-end", cursor_keys, test_command_cursor_completion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-control-a-e", control_keys, test_command_cursor_completion);
 	g_test_add_func("/ai-glib/ai-tui/builtins/catalog", test_builtin_catalog);
+	g_test_add_func("/ai-glib/ai-tui/builtins/loop-schedule", test_loop_schedule);
 	for (i = 0; i < G_N_ELEMENTS(COMMAND_CASES); i++)
 	{
 		g_autofree gchar *path = g_strconcat("/ai-glib/ai-tui/builtins/", COMMAND_CASES[i].name, NULL);
