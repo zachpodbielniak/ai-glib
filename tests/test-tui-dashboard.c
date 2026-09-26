@@ -226,6 +226,18 @@ test_assignment(void)
 	g_assert_true(g_file_get_contents(input, &received, NULL, NULL));
 	g_assert_nonnull(strstr(received, "Preserve UTF-8 and reject truncated input"));
 	g_assert_null(strstr(received, "keep my next draft"));
+	/* Reset replaces the conversation but keeps the workspace associations. */
+	key("assignment", "C-u");
+	send("assignment", "/reset"); key("assignment", "Enter");
+	g_assert_true(wait_text("assignment", "MAKE SOMETHING WORTH SHIPPING."));
+	send("assignment", "Review the linked work after reset"); key("assignment", "Enter");
+	g_assert_true(wait_text("assignment", "Dashboard test complete"));
+	g_clear_pointer(&received, g_free);
+	g_assert_true(g_file_get_contents(input, &received, NULL, NULL));
+	g_assert_nonnull(strstr(received, "Review the linked work after reset"));
+	g_assert_nonnull(strstr(received, "https://github.com/example/project/issues/12"));
+	g_assert_nonnull(strstr(received, "Preserve UTF-8 and reject truncated input"));
+
 	demonstrate("assignment", "Issue assignment reaches provider; metadata and next draft retained");
 	if (g_getenv("AI_TUI_DEMONSTRATE") != NULL) g_test_message("PROVIDER STDIN:\n%s", received);
 	teardown();

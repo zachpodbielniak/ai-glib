@@ -857,8 +857,6 @@ on_work_context(GObject *source, GAsyncResult *result, gpointer data)
     }
     if (!g_str_equal(context, "[]"))
     {
-        for (l = self->messages; l != NULL; l = l->next)
-            self->request_messages = g_list_append(self->request_messages, g_object_ref(l->data));
         last = g_list_last(self->request_messages);
         copy = ai_message_new_user("");
         for (l = ai_message_get_content_blocks(last->data); l != NULL; l = l->next)
@@ -998,6 +996,13 @@ ai_conversation_send_images_async(
     self->cancellable = cancellable != NULL
         ? g_object_ref(cancellable)
         : g_cancellable_new();
+
+    /* Retrieval completes later; history may be cleared in the meantime. */
+    if (self->work_session != NULL)
+    {
+        for (l = self->messages; l != NULL; l = l->next)
+            self->request_messages = g_list_append(self->request_messages, g_object_ref(l->data));
+    }
 
     self->busy = TRUE;
     self->activity_started_us = g_get_monotonic_time();

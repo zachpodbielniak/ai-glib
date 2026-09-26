@@ -39,10 +39,11 @@ saved references before the first provider request, even while asynchronous
 Git/project registration is still pending.
 
 Every turn fetches fresh material instead of relying on remembered conversation
-text. History clear, native provider compaction and provider switches therefore
+text. History clear, TUI =/reset=, native provider compaction and provider switches therefore
 do not remove access to linked work. A branched conversation retains the work
 association. Removing a link takes effect on the next turn; an in-flight turn
-uses the snapshot taken when it began. Fetch failures never reuse stale bodies
+uses the snapshot taken when it began. Clearing history during retrieval does
+not invalidate that in-flight request. Fetch failures never reuse stale bodies
 as though they were current.
 
 * Connectors and limits

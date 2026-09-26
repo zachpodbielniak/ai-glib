@@ -5462,6 +5462,7 @@ app_reset(App *app)
 	/* Prepare and bind before discarding any live application state. A
 	 * failed config write must leave /new and its MCP clients unchanged. */
 	replacement = ai_conversation_new(provider);
+	g_object_set(replacement, "work-session", app->work, NULL);
 	ai_conversation_set_system_prompt(replacement, ai_conversation_get_system_prompt(previous));
 	ai_conversation_set_working_directory(replacement, ai_conversation_get_working_directory(previous));
 	ai_conversation_set_max_tokens(replacement, ai_conversation_get_max_tokens(previous));

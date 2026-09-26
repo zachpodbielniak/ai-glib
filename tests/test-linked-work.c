@@ -38,6 +38,27 @@ test_provider_context(void)
 	g_assert_null(ai_mock_provider_get_last_system_prompt(provider));
 }
 
+static void
+test_clear_during_fetch(void)
+{
+	g_autoptr(AiMockProvider) provider = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(AiWorkSession) work = g_object_new(AI_TYPE_WORK_SESSION, NULL);
+	g_autofree gchar *text = NULL;
+
+	g_assert_true(ai_work_session_add_link(work, "https://github.com/team/project/issues/9", NULL));
+	g_object_set(conversation, "work-session", work, "stream", FALSE, "local-tools", FALSE, NULL);
+	done = FALSE;
+	ai_conversation_send_async(conversation, "Read before clearing", NULL, sent, NULL);
+	ai_conversation_clear(conversation);
+	while (!done) g_main_context_iteration(NULL, TRUE);
+	g_assert_no_error(send_error);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(provider), ==, 1);
+	text = ai_message_get_text(g_list_last(ai_mock_provider_get_last_messages(provider))->data);
+	g_assert_nonnull(strstr(text, "Read before clearing"));
+	g_assert_nonnull(strstr(text, "Issue description from forge"));
+}
+
 static gchar *context_result;
 static GError *context_error;
 static void
@@ -319,6 +340,7 @@ main(int argc, char **argv)
 	g_test_add_func("/linked-work/unavailable-connector", test_unavailable_connector);
 	g_test_add_func("/linked-work/comment-failure", test_comment_failure);
 	g_test_add_func("/linked-work/provider-context", test_provider_context);
+	g_test_add_func("/linked-work/clear-during-fetch", test_clear_during_fetch);
 	g_test_add_func("/linked-work/deadline", test_deadline);
 	g_test_add_func("/linked-work/branch-executor", test_branch_and_executor);
 	return g_test_run();
