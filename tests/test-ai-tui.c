@@ -3145,7 +3145,11 @@ test_builtin_enter(gconstpointer data)
 	stub = stub_new(STUB_REPLY);
 	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
 	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
-	command = g_strconcat("/", test_case->name, NULL);
+	/* The no-argument model command opens a picker (covered separately).
+	 * Audit the text command without leaving a modal over the next /save. */
+	command = g_str_equal(test_case->name, "model")
+		? g_strdup("/model grok-4.7")
+		: g_strconcat("/", test_case->name, NULL);
 	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
