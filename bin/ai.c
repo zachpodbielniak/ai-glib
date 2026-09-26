@@ -723,6 +723,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 		g_autoptr(GError) error = NULL;
 		g_autoptr(GPtrArray) argv = NULL;
 		g_autofree gchar *claude_exe = NULL;
+		g_autofree gchar *permission_mode = NULL;
 		g_autofree gchar *cwd = g_get_current_dir();
 		const gchar *tmux_bin = g_getenv("TMUX_PATH");
 
@@ -738,6 +739,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 			tmux_bin = "tmux";
 
 		/* Representative session: a fresh session-id, sample paths. */
+		g_object_get(provider, "permission-mode", &permission_mode, NULL);
 		argv = ai_claude_tmux_client_build_session_argv(
 			tmux_bin,
 			ai_claude_tmux_client_get_socket_name(
@@ -746,7 +748,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 			/* resuming */ FALSE, "<session-id>", "<settings.json>",
 			opt_model, opt_effort, opt_skip_perms,
 			ai_claude_tmux_client_get_mcp_config_path(
-				AI_CLAUDE_TMUX_CLIENT(provider)));
+				AI_CLAUDE_TMUX_CLIENT(provider)), permission_mode);
 		print_argv((gchar **) argv->pdata);
 		return 0;
 	}

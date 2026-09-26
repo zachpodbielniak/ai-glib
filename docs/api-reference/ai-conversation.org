@@ -241,3 +241,16 @@ conversation.
 
 See [[file:../message-queue.org][Queued follow-ups and side questions]] for
 the TUI queue, =/btw=, and [[file:ai-prompt-queue.org][AiPromptQueue]].
+
+* Planning
+=plan-mode= is a boolean GObject property, also exposed by
+=ai_conversation_get_plan_mode()= and =ai_conversation_set_plan_mode()=.
+The setter returns an error if a turn is busy, background agents are still live,
+or an unknown CLI cannot provide the native mode. Property writes that cannot
+be applied leave the previous value unchanged; use the setter to get the error.
+
+Planning instructions are added to the effective prompt without modifying
+=system-prompt=. Local tool approval allows inspection only, before frontend
+approval handlers run. Native CLI settings are overlaid temporarily and restored
+on exit, provider replacement, or destruction. Provider switches and forks retain
+planning intent. See [[file:../tui.org][the TUI guide]] for native mappings and limits.
