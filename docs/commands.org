@@ -257,11 +257,17 @@ Two rules, in order:
    then opencode, then grok.
 
 A built-in always beats a file, so a =quit.md= will not take away
-=/quit=, and an =exit.md= will not take away =/exit=.
+=/quit=, and an =exit.md= will not take away =/exit=. A skill of the
+built-in's name does not take it either. Typing =/help= still runs the
+built-in, and the skill is a second entry, =/help (skill)=. The
+=(skill)= marker is one word: =/help (skill) review this= runs the skill
+with =review this= as its request, and =/help (skilful)= stays the
+built-in. With no skill of that name, =/help (skill)= is the built-in
+with that argument.
 
-A skill and a command may share a name --- they are looked up separately
---- but only one of them appears in =/help=, because typing the name
-reaches exactly one of them (the command).
+A file-backed command and a skill may share a name --- they are looked
+up separately --- but only the command appears in =/help=, because
+typing the name reaches the command.
 
 ** Why is my file not showing up
 In order of likelihood:
