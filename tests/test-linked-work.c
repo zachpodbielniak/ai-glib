@@ -188,6 +188,21 @@ test_canonical_and_bounds(void)
 	text = read_context(work);
 	g_assert_nonnull(strstr(text, "\"truncated\":true"));
 	g_assert_cmpuint(strlen(text), <, 34000);
+	{
+		g_autofree gchar *directory = g_build_filename(sandbox, "legacy-registry", NULL);
+		g_autofree gchar *path = g_build_filename(directory, ai_work_session_get_id(work), NULL);
+		g_autoptr(GKeyFile) file_data = g_key_file_new();
+		g_autolist(AiWorkSession) restored = NULL;
+		const gchar *legacy[] = {"https://GITHUB.COM:443/team/project/issues/777/"};
+		g_assert_true(ai_work_session_save(work, directory, FALSE, NULL));
+		g_assert_true(g_key_file_load_from_file(file_data, path, G_KEY_FILE_NONE, NULL));
+		g_key_file_set_string_list(file_data, "session", "links", legacy, 1);
+		g_assert_true(g_key_file_save_to_file(file_data, path, NULL));
+		restored = ai_work_session_list(directory, NULL);
+		g_assert_cmpuint(g_list_length(restored), ==, 1);
+		g_assert_cmpstr(ai_work_session_get_link_title(restored->data, links[0]), ==, "LARGE");
+		g_assert_cmpstr(ai_work_session_get_link_state(restored->data, links[0]), ==, "open");
+	}
 	g_assert_true(ai_work_session_remove_link(work, "https://GITHUB.COM:443/team/project/issues/777/"));
 	g_assert_false(ai_work_session_add_link(work, "https://github.com/team/../repo/issues/1", NULL));
 }
@@ -216,6 +231,43 @@ test_comment_failure(void)
 	g_assert_nonnull(strstr(text, "Comments unavailable"));
 	g_assert_nonnull(strstr(text, "authorization failed"));
 	g_assert_nonnull(strstr(text, "\"status\":\"available\""));
+}
+
+
+static void
+test_branch_and_executor(void)
+{
+	g_autoptr(AiMockProvider) original = ai_mock_provider_new();
+	g_autoptr(AiMockProvider) replacement = ai_mock_provider_new();
+	g_autoptr(AiMockProvider) fork_provider = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(original));
+	g_autoptr(AiConversation) branch = NULL;
+	g_autoptr(AiWorkSession) work = g_object_new(AI_TYPE_WORK_SESSION, NULL);
+	g_autoptr(AiWorkSession) inherited = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *text = NULL;
+	g_assert_true(ai_work_session_add_link(work, "https://github.com/team/project/issues/9", NULL));
+	g_object_set(conversation, "work-session", work, "stream", FALSE, "local-tools", TRUE, NULL);
+	g_assert_true(ai_conversation_set_provider(conversation, G_OBJECT(replacement), &error));
+	g_assert_no_error(error);
+	branch = ai_conversation_fork(conversation, G_OBJECT(fork_provider), &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(branch);
+	g_object_get(branch, "work-session", &inherited, NULL);
+	g_assert_true(inherited == work);
+	/* Branches deliberately require hosts to opt back into local tools. */
+	ai_conversation_set_local_tools(branch, TRUE);
+	g_assert_true(ai_conversation_get_local_tools(branch));
+	done = FALSE;
+	ai_conversation_send_async(branch, "Inspect the linked work", NULL, sent, NULL);
+	while (!done) g_main_context_iteration(NULL, TRUE);
+	g_assert_no_error(send_error);
+	text = ai_message_get_text(g_list_last(ai_mock_provider_get_last_messages(fork_provider))->data);
+	g_assert_nonnull(strstr(text, "Issue description from forge"));
+	g_assert_nonnull(strstr(text, "Comment from maintainer"));
+	g_clear_pointer(&text, g_free);
+	text = ai_message_get_text(ai_conversation_get_messages(branch)->data);
+	g_assert_cmpstr(text, ==, "Inspect the linked work");
 }
 
 static void
@@ -268,5 +320,6 @@ main(int argc, char **argv)
 	g_test_add_func("/linked-work/comment-failure", test_comment_failure);
 	g_test_add_func("/linked-work/provider-context", test_provider_context);
 	g_test_add_func("/linked-work/deadline", test_deadline);
+	g_test_add_func("/linked-work/branch-executor", test_branch_and_executor);
 	return g_test_run();
 }
