@@ -197,3 +197,39 @@ Wire format and rounding were checked against upstream commit
 - [[https://github.com/NandhaKishorM/laya/blob/4066d5d5fbf08b66c6757ddeedbd797bd7655bc0/laya/serve.py][Packaged server]].
 - [[https://github.com/NandhaKishorM/laya/blob/4066d5d5fbf08b66c6757ddeedbd797bd7655bc0/laya/agent.py][Answer construction]].
 - [[https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhuboffline][Hugging Face offline behavior]].
+
+** Live inference verification
+The implementation at =dbe781b= was also exercised against real downloaded
+weights, separately provisioned at the user's request. This does not add a
+runtime or download step to ai-glib's build, install or ordinary test suite.
+
+The run used Laya source =4066d5d5fbf08b66c6757ddeedbd797bd7655bc0=,
+Hugging Face bundle revision =55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851=,
+Python 3.12.12, CPU PyTorch 2.14.0, transformers 5.17.0 and
+huggingface-hub 1.33.0. All three checkpoints were preloaded with four CPU
+threads. Both =HF_HUB_OFFLINE=1= and =TRANSFORMERS_OFFLINE=1= were set before
+starting the server. The downloaded model cache occupied approximately
+2.3 GiB and remained separate from the repository.
+
+Boolean, three-category choice and three-level score questions passed for
+=english=, =multilingual= and =typed-decisions=. Parsed answer objects from
+=ai decide --json= exactly matched separate direct HTTP responses, including
+probabilities, confidence fields and action metadata. English and Spanish
+requests also selected the expected checkpoint without an explicit model.
+CLI stdin, the compiled =decide-spam= C example, TUI dump and interactive
+=/decide= all returned real predictions. Invalid authentication returned
+HTTP 401 with exit 1; a 1 ms deadline returned a timeout with exit 1, and a
+subsequent request succeeded.
+
+For the English text "I was billed twice. Please refund the duplicate charge
+today.", the English checkpoint returned refund probability =0.9081=,
+billing probability =0.9385= and urgency score =1.2550= on the zero-based
+three-level scale. These are observed smoke-test results, not an accuracy
+benchmark or required outputs for future checkpoint versions.
+
+The upstream loader emitted a calibration warning for the =choice:11+=
+bucket: temperature =0.10058280825614929= was clamped to =0.5=, with affected
+confidence considered uncalibrated. These tests used three categories and
+do not validate that bucket. No ai-glib code changes were needed for the
+live integration run. The PR contains the verbatim transcript and an
+interactive TUI recording.
