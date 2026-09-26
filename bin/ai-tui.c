@@ -5462,6 +5462,7 @@ app_reset(App *app)
 	/* Prepare and bind before discarding any live application state. A
 	 * failed config write must leave /new and its MCP clients unchanged. */
 	replacement = ai_conversation_new(provider);
+	g_object_set(replacement, "work-session", app->work, NULL);
 	ai_conversation_set_system_prompt(replacement, ai_conversation_get_system_prompt(previous));
 	ai_conversation_set_working_directory(replacement, ai_conversation_get_working_directory(previous));
 	ai_conversation_set_max_tokens(replacement, ai_conversation_get_max_tokens(previous));
@@ -6230,6 +6231,18 @@ main(int argc, char *argv[])
 	g_signal_connect_swapped(app.conversation, "notify::busy",
 		G_CALLBACK(app_sync_herdr), &app);
 
+    app.work_directory = ai_work_session_default_directory();
+    if (opt_workspace_session != NULL)
+    {
+        g_autoptr(GPtrArray) saved = work_list(app.work_directory, NULL);
+        guint index;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
+                app.work = g_object_ref(g_ptr_array_index(saved, index));
+    }
+    if (app.work == NULL) app.work = ai_work_session_new(ai_conversation_get_working_directory(app.conversation));
+    g_object_set(app.conversation, "work-session", app.work, NULL);
+
     /*
      * One-shot: --dump, or a prompt given without a terminal.
      *
@@ -6279,6 +6292,8 @@ main(int argc, char *argv[])
 
             g_print("%s", text);
 
+            g_clear_object(&app.work);
+            g_clear_pointer(&app.work_directory, g_free);
             g_clear_object(&app.completion);
             g_clear_object(&app.commands);
             g_clear_object(&app.registry);
@@ -6297,6 +6312,8 @@ main(int argc, char *argv[])
     {
         g_printerr("ai-tui: stdin is not a terminal; pass a prompt as an "
                    "argument, pipe it on stdin, or use --dump PROMPT\n");
+        g_clear_object(&app.work);
+        g_clear_pointer(&app.work_directory, g_free);
         g_clear_object(&app.completion);
         g_clear_object(&app.commands);
         g_clear_object(&app.registry);
@@ -6309,16 +6326,6 @@ main(int argc, char *argv[])
         return 1;
     }
 
-    app.work_directory = ai_work_session_default_directory();
-    if (opt_workspace_session != NULL)
-    {
-        g_autoptr(GPtrArray) saved = work_list(app.work_directory, NULL);
-        guint index;
-        for (index = 0; saved != NULL && index < saved->len; index++)
-            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
-                app.work = g_object_ref(g_ptr_array_index(saved, index));
-    }
-    if (app.work == NULL) app.work = ai_work_session_new(ai_conversation_get_working_directory(app.conversation));
     /* A recovered record must never retain a previous terminal's target. */
     g_object_set(app.work, "socket", "", "pane", "", NULL);
     {

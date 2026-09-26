@@ -23,4 +23,11 @@ void ai_work_session_refresh_link_async(AiWorkSession *self, const gchar *url,
 gchar *ai_work_session_refresh_link_finish(AiWorkSession *self, GAsyncResult *result, GError **error);
 const gchar *ai_work_session_get_link_title(AiWorkSession *self, const gchar *url);
 const gchar *ai_work_session_get_link_state(AiWorkSession *self, const gchar *url);
+gboolean ai_work_session_add_link_full(AiWorkSession *self, const gchar *url,
+	const gchar *relationship, GError **error);
+const gchar *ai_work_session_get_link_relationship(AiWorkSession *self, const gchar *url);
+gchar *ai_work_session_dup_link_manifest(AiWorkSession *self);
+void ai_work_session_read_context_async(AiWorkSession *self, GCancellable *cancellable,
+	GAsyncReadyCallback callback, gpointer user_data);
+gchar *ai_work_session_read_context_finish(AiWorkSession *self, GAsyncResult *result, GError **error);
 G_END_DECLS

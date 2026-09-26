@@ -1,0 +1,149 @@
+#+title: Linked work available to the model
+
+* User behavior
+Link an issue or pull request once, then refer to it naturally:
+
+#+begin_example
+/issue link https://git.example.org/team/project/issues/42
+/pr link https://github.com/other-team/other-project/pull/81
+Review the linked work and explain what needs to change.
+#+end_example
+
+Linking records the association; it does not start a model turn or change a
+remote assignment. Before each subsequent turn, =AiConversation= reads every
+stored link through authenticated forge CLIs. The newest user message sent to
+the provider includes a JSON list of references, descriptions, comments and
+per-item failures. Both ai-tui and ai-gui attach their =AiWorkSession= to the
+conversation. TUI =--workspace-session= also does so in =--dump= mode.
+
+Each record names its canonical URL, host, repository, item identifier, kind
+and relationship. Ordinary links have relationship =related=. A hosting
+application can supply labels such as =assigned= or =blocks= using
+=ai_work_session_add_link_full()=. Relationship labels carry no permissions.
+Host casing, default ports and trailing slashes are normalized; repository path
+case is kept.
+Up to 32 links are retained, including links to different hosts and repositories.
+
+The model receives linked content as explicitly labelled external data in a
+user message. It is never installed as a system prompt, parsed as harness
+commands, or granted tool privileges. The user's displayed prompt and stored
+chat history stay unchanged. This separation also means retrieved private work
+is sent to the selected model provider when a turn is submitted; linking a work
+item should be deliberate.
+
+* Persistence and compaction
+The work-session registry persists URLs and relationship labels, independently
+of chat history. GUI conversation snapshots now also store =work-links=;
+older snapshots without that field remain valid. Restoration attaches the
+saved references before the first provider request, even while asynchronous
+Git/project registration is still pending.
+
+Every turn fetches fresh material instead of relying on remembered conversation
+text. History clear, TUI =/reset=, native provider compaction and provider switches therefore
+do not remove access to linked work. A branched conversation retains the work
+association. Removing a link takes effect on the next turn; an in-flight turn
+uses the snapshot taken when it began. Clearing history during retrieval does
+not invalidate that in-flight request. Fetch failures never reuse stale bodies
+as though they were current.
+
+* Connectors and limits
+| Link form | Connector | Retrieved material |
+|-----------+-----------+--------------------|
+| =github.com/.../issues/N= or =pull/N= | =gh issue/pr view --json= | Description and comments |
+| Forgejo/Gitea =.../issues/N= or =pulls/N= | =tea api= | Issue/PR plus issue-comments endpoint |
+| GitLab =.../-/issues/N= or =.../-/merge_requests/N= | =glab api --hostname= | Description and notes |
+
+The connectors use their existing authentication. =tea= requires exactly one
+configured login matching scheme, host and port; ai-glib never chooses an
+unrelated default account. API paths name the linked repository explicitly,
+including GitLab subgroups. Commands are argv arrays, never shell expansions.
+No token is stored in a work record or included in model-visible diagnostics.
+Other hosts remain linkable but require a supported connector to fetch them.
+GitHub Enterprise and arbitrary non-forge work-item APIs have no adapter here.
+
+Each connector subprocess has a 15 second deadline. The group has a 30 second
+retrieval budget; cancellation and deadline teardown use the calling thread's
+main context. Subprocess termination/draining can add a short cleanup delay.
+One slow or inaccessible link does not erase completed results. Cancelling the
+user's turn cancels retrieval and prevents the provider request entirely.
+
+Each connector response is accepted only up to 1 MiB. At most 100 comments are
+included per link (the first page for Forgejo/Gitea, newest notes for GitLab);
+reaching that count produces an explicit notice that more may exist. A failed
+comments request preserves the description and reports the comments failure.
+Provider context is capped at 32 KiB of UTF-8 material per link, with a
+=truncated= flag. These bounds keep every reference discoverable even when its
+full content cannot fit. A model may use other available tools to retrieve
+additional pages; this integration does not silently claim completeness.
+
+* Failure reporting
+Every link retains its reference even if retrieval fails:
+
+| Status | Meaning |
+|--------+---------|
+| =available= | Description retrieved; inspect comments notice and truncation flag |
+| =connector-unavailable= | Executable missing, unsupported host, or no unambiguous matching tea login |
+| =authorization-failed= | Connector reported authentication/permission rejection |
+| =not-found-or-inaccessible= | Item absent or hidden from this account (forges may use 404 for either) |
+| =network-error= | Connector reported DNS, connection or TLS failure |
+| =timeout= | Connector or group retrieval deadline elapsed |
+| =invalid-response= | Response was malformed or exceeded the accepted size |
+| =fetch-failed= | Other connector failure; no guessed network/auth diagnosis |
+
+Classification uses connector diagnostics; unfamiliar failures remain generic.
+Missing host-supplied context is different: no work session or an empty link
+list means no references were supplied, not that authentication failed. Manual
+content is a fallback for unavailable retrieval, never a reason to ask the user
+for a URL already present in the manifest.
+
+* Embedding and hosting applications
+#+begin_src c
+g_autoptr(AiWorkSession) work = g_object_new(AI_TYPE_WORK_SESSION, NULL);
+g_autoptr(GError) error = NULL;
+
+if (!ai_work_session_add_link_full(work,
+        "https://github.com/team/project/issues/42", "assigned", &error))
+    return;
+g_object_set(conversation, "work-session", work, NULL);
+/* The next ai_conversation_send_*_async() carries the linked context. */
+#+end_src
+
+=AiConversation:work-session= is a read/write GObject property, also accessible
+through GIR bindings. The conversation holds a reference. Setting NULL disables
+this integration; attaching an empty session performs no connector I/O.
+
+For custom orchestration, =ai_work_session_dup_link_manifest()= serializes the
+references without I/O. =ai_work_session_read_context_async()= and its matching
+=finish()= return JSON with material and per-link statuses; cancellation uses
+=G_IO_ERROR_CANCELLED=. Existing =refresh_link_async/finish= still fetch one
+associated URL and cache its title/state for the UI.
+
+A host that owns task relationships must populate the work session before
+starting the turn and persist or restore that association. ai-glib cannot
+discover relationships kept only in an external application's private state.
+No hosting application was identified by issue #10, so this change supplies the
+library boundary and wires both in-repository frontends; external hosts must
+use that boundary. It does not infer links from repository issue lists, crawl
+URLs found inside issue bodies, or modify external assignments.
+
+* Verification
+The initial regression in =tests/test-linked-work.c= failed because
+=AiConversation= had no =work-session= property. The green regression traces a
+stored issue to the provider's actual message snapshot while the user's prompt
+contains no URL. It also covers connector routing and comments, cross-repository
+links, relationship persistence, history clear, cancellation on a private
+context, real subprocess deadlines, malformed responses, canonical URLs,
+truncation and partial failures.
+
+=tests/test-linked-work-tui.c= starts the built TUI with a persisted workspace
+session and checks the wrapped provider's stdin for the URL, body and comments.
+=tests/test-ai-gui-session.c= round-trips a GUI snapshot and sends through the
+restored conversation, checking the provider request before project discovery
+is required to finish. Existing work-session and conversation-input tests
+remain in the suite. Normal tests use isolated connector scripts, no network
+or personal credentials.
+
+The baseline full suite stopped at the existing TUI =/model= command audit,
+which expected a text notice from a command that opens a picker. Its previously
+verified repair is retained in a separate Conventional Commit. See the PR for
+final suite, sanitizer and demonstration results.
