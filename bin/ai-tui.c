@@ -26,6 +26,7 @@
 #include <glib-unix.h>
 
 #include <ai-glib.h>
+#include "ai-decide-options.h"
 #include "ai-launch.h"
 #include "ai-mcp-options.h"
 #include "ai-tui-theme.h"
@@ -423,6 +424,10 @@ typedef struct
      * reappear on the very next keystroke and Escape would do nothing. */
     gboolean             completion_dismissed;
 
+	GCancellable *decision_cancel;
+	gboolean decision_pending;
+	guint decision_generation;
+
     /* /model with no argument. NULL while the picker is closed. */
     gchar              **picker_models;
     guint                picker_count;
@@ -515,6 +520,7 @@ on_shutdown(gpointer data)
 
 	app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
 	app->running = FALSE;
+	if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
 	ai_conversation_cancel(app->conversation);
 	if (app->loop != NULL) g_main_loop_quit(app->loop);
 	return G_SOURCE_CONTINUE;
@@ -2970,6 +2976,66 @@ show_expansion(App *app, const gchar *line)
  * means; this file only knows what to do about it. Growing the set is a
  * struct literal there plus a case here, and nothing in between.
  */
+
+/* App owns cancellation and drains completion before teardown. The generation
+ * check keeps a result from being appended to a replacement session. */
+typedef struct { App *app; guint generation; gboolean json; } DecisionJob;
+static void
+on_decision_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	g_autofree DecisionJob *job = user_data;
+	App *app = job->app;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiDecisionResponse) response = ai_decider_decide_finish(AI_DECIDER(source), result, &error);
+	g_autofree gchar *text = NULL;
+	app->decision_pending = FALSE;
+	g_clear_object(&app->decision_cancel);
+	if (job->generation == app->decision_generation)
+	{
+		if (response != NULL)
+		{
+			text = job->json ? ai_decision_response_dup_json(response) : ai_decision_response_format(response);
+			say(app, "Decision result:\n%s", text);
+		}
+		else say(app, "Decision failed: %s", error->message);
+	}
+	app_schedule_redraw(app);
+	if (app->dump_loop != NULL && !app->sending && !app->dump_waiting_models && !app->decision_pending)
+		g_main_loop_quit(app->dump_loop);
+}
+static void
+start_decision(App *app, const gchar *arguments)
+{
+	DecideOptions options = { NULL, NULL, NULL, FALSE };
+	g_auto(GStrv) argv = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *line = g_strconcat("decide ", arguments != NULL ? arguments : "", NULL);
+	DecisionJob *job;
+	gint argc;
+	if (app->decision_pending) { say(app, "A decision is running; Ctrl+C cancels it."); return; }
+	if (!g_shell_parse_argv(line, &argc, &argv, &error) ||
+		!decide_options_parse(&options, argv, FALSE, ai_conversation_get_working_directory(app->conversation), &error))
+	{
+		say(app, "Decision: %s", error->message);
+		decide_options_clear(&options);
+		return;
+	}
+	if (options.help != NULL)
+	{
+		say(app, "%s", options.help);
+		decide_options_clear(&options);
+		return;
+	}
+	job = g_new0(DecisionJob, 1);
+	job->app = app; job->generation = ++app->decision_generation; job->json = options.json;
+	app->decision_cancel = g_cancellable_new();
+	app->decision_pending = TRUE;
+	say(app, "Requesting decision from Laya...");
+	ai_decider_decide_async(AI_DECIDER(options.client), options.request,
+		app->decision_cancel, on_decision_done, job);
+	decide_options_clear(&options);
+}
+
 static void app_reset(App *app);
 
 static void
@@ -2992,12 +3058,18 @@ handle_builtin(App *app, AiCommandResult *result)
         return;
     }
 
-    if (g_strcmp0(name, "btw") == 0)
+    if (g_strcmp0(name, "decide") == 0)
+    {
+        start_decision(app, arguments);
+    }
+    else if (g_strcmp0(name, "btw") == 0)
 	{
 		say(app, "/btw is available in the interactive composer");
 	}
     else if (g_strcmp0(name, "clear") == 0)
     {
+        app->decision_generation++;
+        if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
         ai_conversation_clear(app->conversation);
         app->selected = -1;
         app->follow = TRUE;
@@ -3551,6 +3623,11 @@ interrupt_arm(App *app)
 static gboolean
 handle_interrupt(App *app)
 {
+	if (app->decision_pending)
+	{
+		g_cancellable_cancel(app->decision_cancel);
+		return FALSE;
+	}
 	app->pasting = FALSE;
 	if (app->clipboard_pending)
 	{
@@ -4415,7 +4492,7 @@ app_finish_send(
 
 	app_schedule_redraw(app);
 
-	if (app->dump_loop != NULL && !app->dump_waiting_models)
+	if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending)
 		g_main_loop_quit(app->dump_loop);
 }
 
@@ -4461,7 +4538,7 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 		if (app->running && app_flush_send_queue(app))
 			return;
 		app_schedule_redraw(app);
-		if (app->dump_loop != NULL && !app->dump_waiting_models)
+		if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending)
 			g_main_loop_quit(app->dump_loop);
     }
 	else
@@ -5419,6 +5496,8 @@ app_reset(App *app)
 			g_object_set(provider, "continue-session", FALSE, NULL);
 	}
 
+    if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
+    app->decision_generation++;
     app->link_generation++;
     app->work_outcome = NULL;
 	/* A new executor also forgets tool approvals, todos and agent results. */
@@ -5924,7 +6003,9 @@ main(int argc, char *argv[])
             g_printerr("ai-tui: session is missing, active, or has no native resume ID\n");
             return 2;
         }
+        g_free(opt_provider);
         opt_provider = g_strdup(work_field(selected, "provider"));
+        g_free(opt_model);
         opt_model = g_strdup(work_field(selected, "model"));
         if (g_chdir(work_field(selected, "directory")) != 0)
         {
@@ -6186,6 +6267,8 @@ main(int argc, char *argv[])
             }
 
             g_main_loop_run(loop);
+            if (app.decision_cancel != NULL) g_cancellable_cancel(app.decision_cancel);
+            while (app.decision_pending) g_main_context_iteration(NULL, TRUE);
             app.dump_loop = NULL;
 			/* Cancellation callbacks still reference App and its conversation. */
 			if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
@@ -6440,6 +6523,8 @@ main(int argc, char *argv[])
 		g_cancellable_cancel(app.clipboard_cancel);
 		while (app.clipboard_pending) g_main_context_iteration(NULL, TRUE);
 	}
+	if (app.decision_cancel != NULL) g_cancellable_cancel(app.decision_cancel);
+	while (app.decision_pending) g_main_context_iteration(NULL, TRUE);
 	g_clear_list(&app.images, g_object_unref);
 	app_clear_send_queue(&app);
 	if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);

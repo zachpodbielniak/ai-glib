@@ -2,6 +2,7 @@
 A GLib/GObject-based C library for interacting with AI providers.
 
 ** Features
+- *Typed decisions*: Laya classification through =AiDecider=, =ai decide= and TUI =/decide=; no bundled weights (see [[file:docs/laya-integration.org][guide]])
 - *Multiple Providers*: Claude, OpenAI, Gemini, Grok, Ollama, Claude Code (CLI + tmux), OpenCode, Grok Build, Antigravity (=agy=), Cursor (=cursor-agent=), [[file:docs/providers/codex-cli.org][Codex CLI]] (=codex exec=)
 - *Ollama transport*: route the Claude Code providers through =ollama launch claude= with an =ollama/<model>= model id
 - *GObject-based*: Full GObject type system integration

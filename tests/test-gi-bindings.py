@@ -37,6 +37,27 @@ def main():
     from gi.repository import AiGlib, Gio  # noqa: E402
     gi_home  # keep the directory until process exit
 
+    # Decision types, array annotations and interface dispatch need no weights.
+    import json
+    laya = AiGlib.LayaClient.new()
+    laya.props.base_url = "http://127.0.0.1:8000"
+    laya.props.timeout_ms = 1000
+    assert isinstance(laya, AiGlib.Decider)
+    request = AiGlib.DecisionRequest.new("Refund please")
+    assert request.add_boolean("refund", "Is a refund requested?")
+    assert request.add_choice("route", "Which team?", ["billing", "other"], ["Invoices", "Other"])
+    assert request.add_score("urgency", "How urgent?", ["low", "high"])
+    mock = AiGlib.MockDecider.new(json.dumps({"model": "fixture", "answers": {
+        "refund": {"type": "noul", "noul": 0.93},
+        "route": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.8, "other": 0.2}},
+        "urgency": {"type": "score", "score": 0.6, "probabilities": {"0": 0.4, "1": 0.6}}
+    }}))
+    response = mock.decide(request, None)
+    assert response.get_probability("refund", None) == 0.93
+    assert response.get_choice("route") == "billing"
+    assert response.get_score("urgency") == 0.6
+    assert json.loads(response.dup_json())["model"] == "fixture"
+
     # OpenCode options remain usable through GIR, including exact file paths.
     opencode: AiGlib.OpenCodeClient = AiGlib.OpenCodeClient.new()
     opencode.props.command = "test"

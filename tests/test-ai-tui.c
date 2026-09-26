@@ -2284,7 +2284,19 @@ test_transcript_drag_select(void)
 		tmux_send_literal(TUI_SESSION, drag);
 		tmux_send_literal(TUI_SESSION, release);
 		tmux_send(TUI_SESSION, "C-y");
-		g_assert_true(tmux_wait_for(TUI_SESSION, token));
+		/* The transcript already contains the token: wait for the paste. */
+		{
+			gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+			do
+			{
+				g_clear_pointer(&pane, g_free);
+				pane = tmux_capture(TUI_SESSION);
+				if (pane != NULL && count_needle(pane, token) >= 2)
+					break;
+				g_usleep(100 * 1000);
+			} while (g_get_monotonic_time() < deadline);
+		}
 		g_clear_pointer(&pane, g_free);
 		pane = tmux_capture(TUI_SESSION);
 		g_assert_cmpuint(count_needle(pane, token), >=, 2);
@@ -3091,6 +3103,7 @@ typedef struct
 } CommandCase;
 
 static const CommandCase COMMAND_CASES[] = {
+	{ "decide", "Never downloads weights" },
 	{ "dashboard", NULL },
 	{ "project", NULL },
 	{ "links", "No links." },
@@ -3145,7 +3158,11 @@ test_builtin_enter(gconstpointer data)
 	stub = stub_new(STUB_REPLY);
 	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
 	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
-	command = g_strconcat("/", test_case->name, NULL);
+	/* The no-argument model command opens a picker (covered separately).
+	 * Audit the text command without leaving a modal over the next /save. */
+	command = g_str_equal(test_case->name, "model")
+		? g_strdup("/model grok-4.7")
+		: g_strconcat("/", test_case->name, NULL);
 	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
@@ -3738,6 +3755,43 @@ test_inline_tool_previews(void)
 	stub_free(stub);
 }
 
+#include "test-server.h"
+
+static void
+test_decision_interactive(void)
+{
+	TServer *server;
+	Stub *stub;
+	g_autofree gchar *environment = NULL;
+	g_autofree gchar *saved = NULL;
+	g_autofree gchar *path = NULL;
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	server = tserver_new();
+	stub = stub_new(STUB_REPLY);
+	environment = g_strdup_printf("LAYA_BASE_URL=%s LAYA_API_KEY=", server->base_url);
+	tserver_set_response(server, 200, "{\"model\":\"fixture\",\"answers\":{\"answer\":{\"type\":\"noul\",\"noul\":0.93}}}");
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, environment, NULL);
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "answer: 0.9300");
+	tserver_set_delay(server, 1000);
+	tmux_command("/clear", "Ask, build, investigate...");
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "Requesting decision");
+	tmux_send(TUI_SESSION, "C-c");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Decision failed:"));
+	/* Reset must not receive a result belonging to its predecessor. */
+	tmux_command("/clear", "Ask, build, investigate...");
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "Requesting decision");
+	tmux_send(TUI_SESSION, "/reset"); tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "MAKE SOMETHING WORTH SHIPPING."));
+	tmux_command("/save decision-reset.txt", "Wrote");
+	path = g_build_filename(stub->dir, "decision-reset.txt", NULL);
+	g_assert_true(g_file_get_contents(path, &saved, NULL, NULL));
+	g_assert_null(strstr(saved, "Decision result"));
+	g_assert_null(strstr(saved, "Decision failed"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	tserver_free(server);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -3749,6 +3803,7 @@ main(int argc, char *argv[])
 	/* Spawned fixtures must never register in the developer's real herdr pane. */
 	g_unsetenv("HERDR_ENV");
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/ai-glib/ai-tui/decision/interactive", test_decision_interactive);
 	/* Never inherit the developer's tmux options or touch their sessions. */
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
 	g_test_add_func("/ai-glib/tui/reset-session", test_reset_session);

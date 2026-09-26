@@ -837,3 +837,7 @@ Run =make test= for the complete suite and GIR warning gate. For focused
 leak and lifetime coverage, build the two first test binaries with
 =DEBUG=1 ASAN=1= and run them from =build/debug/tests/= with
 =ASAN_OPTIONS=detect_leaks=1=.
+
+** Typed decisions
+See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
+including question syntax, request files, cancellation and server configuration.
