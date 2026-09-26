@@ -317,10 +317,27 @@ test_interface_and_mock_errors(void)
 	g_assert_nonnull(response);
 }
 
+static void
+test_empty_http_response(void)
+{
+	TServer *server = tserver_new();
+	g_autoptr(AiLayaClient) client = ai_laya_client_new();
+	g_autoptr(AiDecisionRequest) request = request_new();
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	tserver_set_response(server, 200, "");
+	g_object_set(client, "base-url", server->base_url, NULL);
+	response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE);
+	tserver_free(server);
+}
+
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/decision/wire", test_wire);
+	g_test_add_func("/decision/empty-http-response", test_empty_http_response);
 	g_test_add_func("/decision/interface-mock-errors", test_interface_and_mock_errors);
 	g_test_add_func("/decision/configuration-redirect", test_configuration_and_redirect);
 	g_test_add_func("/decision/distribution-rejection", test_distribution_rejection);

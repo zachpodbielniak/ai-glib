@@ -81,7 +81,7 @@ on_reply(GObject *source, GAsyncResult *result, gpointer user_data)
 		return;
 	}
 	data = g_bytes_get_data(bytes, &size);
-	if (size > 4 * 1024 * 1024 || memchr(data, '\0', size) != NULL || !g_utf8_validate(data, size, NULL))
+	if (size == 0 || size > 4 * 1024 * 1024 || memchr(data, '\0', size) != NULL || !g_utf8_validate(data, size, NULL))
 	{
 		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_RESPONSE, "Invalid Laya response encoding or size");
 		return;
