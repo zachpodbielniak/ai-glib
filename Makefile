@@ -45,6 +45,10 @@ include config.mk
 # Public headers (to be installed)
 PUBLIC_HEADERS = \
 	$(SRCDIR)/ai-glib.h \
+	$(SRCDIR)/core/ai-decider.h \
+	$(SRCDIR)/model/ai-decision.h \
+	$(SRCDIR)/providers/ai-laya-client.h \
+	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/ai-types.h \
 	$(SRCDIR)/core/ai-error.h \
@@ -133,6 +137,10 @@ PUBLIC_HEADERS = \
 
 # Library source files
 LIB_SOURCES = \
+	$(SRCDIR)/core/ai-decider.c \
+	$(SRCDIR)/model/ai-decision.c \
+	$(SRCDIR)/providers/ai-laya-client.c \
+	$(SRCDIR)/agent/ai-mock-decider.c \
 	$(SRCDIR)/harness/ai-work-session.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
 	$(SRCDIR)/core/ai-error.c \
