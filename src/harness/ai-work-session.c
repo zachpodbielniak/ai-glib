@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "ai-work-session.h"
 #include "core/ai-subprocess-util.h"
+#include "core/ai-error.h"
 #include "core/ai-json-util.h"
 #include <json-glib/json-glib.h>
 #include <glib/gstdio.h>
@@ -18,6 +19,7 @@ struct _AiWorkSession
 	GPtrArray *links;
 	GHashTable *titles;
 	GHashTable *states;
+	GHashTable *relationships;
 };
 G_DEFINE_TYPE(AiWorkSession, ai_work_session, G_TYPE_OBJECT)
 
@@ -76,6 +78,7 @@ finalize(GObject *object)
 	g_ptr_array_unref(self->links);
 	g_hash_table_unref(self->titles);
 	g_hash_table_unref(self->states);
+	g_hash_table_unref(self->relationships);
 	G_OBJECT_CLASS(ai_work_session_parent_class)->finalize(object);
 }
 
@@ -101,6 +104,7 @@ ai_work_session_init(AiWorkSession *self)
 	self->links = g_ptr_array_new_with_free_func(g_free);
 	self->titles = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	self->states = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	self->relationships = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	for (i = 0; i < G_N_ELEMENTS(field_names); i++) self->fields[i] = g_strdup("");
 }
 
@@ -194,6 +198,25 @@ ai_work_session_update(AiWorkSession *self, gboolean busy, gboolean attention,
 	g_object_set(self, "status", status, NULL);
 }
 
+/* URI parsing handles escaped path segments; serialization produces one
+ * stable spelling for host casing and an optional trailing slash. */
+static gchar *
+canonical_link(const gchar *url)
+{
+	g_autoptr(GUri) uri = url != NULL ? g_uri_parse(url, G_URI_FLAGS_NONE, NULL) : NULL;
+	g_autofree gchar *host = NULL, *path = NULL;
+	gint port;
+	if (uri == NULL || g_uri_get_host(uri) == NULL) return g_strdup(url);
+	host = g_ascii_strdown(g_uri_get_host(uri), -1);
+	path = g_strdup(g_uri_get_path(uri));
+	if (g_str_has_suffix(path, "/")) path[strlen(path) - 1] = '\0';
+	port = g_uri_get_port(uri);
+	if ((port == 443 && g_strcmp0(g_uri_get_scheme(uri), "https") == 0) ||
+		(port == 80 && g_strcmp0(g_uri_get_scheme(uri), "http") == 0)) port = -1;
+	return g_uri_join(G_URI_FLAGS_NONE, g_uri_get_scheme(uri), g_uri_get_userinfo(uri),
+		host, port, path, g_uri_get_query(uri), g_uri_get_fragment(uri));
+}
+
 /**
  * ai_work_session_add_link:
  * @self: a session
@@ -209,6 +232,8 @@ ai_work_session_add_link(AiWorkSession *self, const gchar *url, GError **error)
 {
 	g_autoptr(GUri) uri = NULL;
 	g_autoptr(GRegex) pattern = NULL;
+	g_autofree gchar *canonical = NULL;
+	g_auto(GStrv) segments = NULL;
 	guint i;
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), FALSE);
 	if (url == NULL || strlen(url) > 4096 || !g_utf8_validate(url, -1, NULL)) goto invalid;
@@ -220,10 +245,19 @@ ai_work_session_add_link(AiWorkSession *self, const gchar *url, GError **error)
 		g_uri_get_fragment(uri) != NULL) goto invalid;
 	pattern = g_regex_new("^/[^/]+/.+/(issues|pull|pulls|merge_requests)/[1-9][0-9]*/?$", 0, 0, NULL);
 	if (!g_regex_match(pattern, g_uri_get_path(uri), 0, NULL)) goto invalid;
+	segments = g_strsplit(g_uri_get_path(uri), "/", -1);
+	for (i = 0; segments[i] != NULL; i++)
+	{
+		const gchar *p;
+		if (g_str_equal(segments[i], ".") || g_str_equal(segments[i], "..")) goto invalid;
+		for (p = segments[i]; *p; p++) if ((guchar)*p < 32 || *p == 127) goto invalid;
+	}
+	canonical = canonical_link(url); url = canonical;
 	for (i = 0; i < self->links->len; i++)
 		if (g_str_equal(url, g_ptr_array_index(self->links, i))) return TRUE;
 	if (self->links->len >= 32) goto invalid;
 	g_ptr_array_add(self->links, g_strdup(url));
+	g_hash_table_replace(self->relationships, g_strdup(url), g_strdup("related"));
 	return TRUE;
 invalid:
 	g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -240,11 +274,14 @@ invalid:
 gboolean
 ai_work_session_remove_link(AiWorkSession *self, const gchar *url)
 {
+	g_autofree gchar *canonical = canonical_link(url);
+
 	guint i;
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), FALSE);
 	for (i = 0; i < self->links->len; i++)
-		if (g_strcmp0(url, g_ptr_array_index(self->links, i)) == 0)
-			{ g_ptr_array_remove_index(self->links, i); return TRUE; }
+		if (g_strcmp0(canonical, g_ptr_array_index(self->links, i)) == 0)
+			{ g_hash_table_remove(self->relationships, canonical); g_hash_table_remove(self->titles, canonical);
+			  g_hash_table_remove(self->states, canonical); g_ptr_array_remove_index(self->links, i); return TRUE; }
 	return FALSE;
 }
 
@@ -310,6 +347,7 @@ ai_work_session_save(AiWorkSession *self, const gchar *directory, gboolean live,
 		g_autofree gchar *group = g_strdup_printf("link-%u", i);
 		const gchar *title = g_hash_table_lookup(self->titles, links[i]);
 		const gchar *state = g_hash_table_lookup(self->states, links[i]);
+		g_key_file_set_string(file, group, "relationship", ai_work_session_get_link_relationship(self, links[i]));
 		if (title != NULL) g_key_file_set_string(file, group, "title", title);
 		if (state != NULL) g_key_file_set_string(file, group, "state", state);
 	}
@@ -382,8 +420,10 @@ ai_work_session_list(const gchar *directory, GError **error)
 			g_autofree gchar *group = g_strdup_printf("link-%u", i);
 			g_autofree gchar *title = g_key_file_get_string(file, group, "title", NULL);
 			g_autofree gchar *state = g_key_file_get_string(file, group, "state", NULL);
-			if (title != NULL) g_hash_table_replace(item->titles, g_strdup(links[i]), clean_label(title));
-			if (state != NULL) g_hash_table_replace(item->states, g_strdup(links[i]), clean_label(state));
+			g_autofree gchar *relationship = g_key_file_get_string(file, group, "relationship", NULL);
+			if (relationship != NULL) ai_work_session_add_link_full(item, links[i], relationship, NULL);
+			if (title != NULL) g_hash_table_replace(item->titles, canonical_link(links[i]), clean_label(title));
+			if (state != NULL) g_hash_table_replace(item->states, canonical_link(links[i]), clean_label(state));
 		}
 		age = g_get_real_time() - g_key_file_get_int64(file, "session", "heartbeat", NULL);
 		if (age < 0 || age > 15 * G_USEC_PER_SEC || !g_key_file_get_boolean(file, "session", "live", NULL))
@@ -410,35 +450,38 @@ link_fetch_free(LinkFetch *fetch)
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(LinkFetch, link_fetch_free)
 
+static gchar *link_command(const gchar *const *argv, GCancellable *cancel, GError **error);
+
 static gchar *
 link_tea_login(GUri *uri, GCancellable *cancel, GError **error)
 {
-	g_autoptr(GSubprocess) child = NULL;
 	g_autoptr(JsonParser) parser = json_parser_new();
 	g_autofree gchar *output = NULL;
 	g_autofree gchar *match = NULL;
 	JsonNode *root;
 	JsonArray *accounts;
 	guint i;
-	child = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-		error, "tea", "login", "list", "--output", "json", NULL);
-	if (child == NULL || !ai_subprocess_communicate_utf8_bounded(child, NULL, 5000, cancel, &output, NULL, error)) return NULL;
-	if (!g_subprocess_get_successful(child) || !json_parser_load_from_data(parser, output, -1, NULL)) goto invalid;
+	{
+		const gchar *argv[] = {"tea", "login", "list", "--output", "json", NULL};
+		output = link_command(argv, cancel, error);
+	}
+	if (output == NULL) return NULL;
+	if (!json_parser_load_from_data(parser, output, -1, NULL)) goto invalid;
 	root = json_parser_get_root(parser);
 	if (root == NULL || !JSON_NODE_HOLDS_ARRAY(root)) goto invalid;
 	accounts = json_node_get_array(root);
 	for (i = 0; i < json_array_get_length(accounts); i++)
 	{
-		JsonNode *node = json_array_get_element(accounts, i);
-		JsonObject *account;
+		JsonObject *account = ai_json_array_get_object(accounts, i);
 		const gchar *url, *name;
 		g_autoptr(GUri) host = NULL;
-		if (!JSON_NODE_HOLDS_OBJECT(node)) continue;
-		account = json_node_get_object(node);
+		g_autofree gchar *canonical = NULL;
+		if (account == NULL) continue;
 		url = ai_json_get_string(account, "url", NULL);
 		name = ai_json_get_string(account, "name", NULL);
 		if (url == NULL || name == NULL) continue;
-		host = g_uri_parse(url, G_URI_FLAGS_NONE, NULL);
+		canonical = canonical_link(url);
+		host = g_uri_parse(canonical, G_URI_FLAGS_NONE, NULL);
 		if (host == NULL || g_strcmp0(g_uri_get_host(host), g_uri_get_host(uri)) != 0 ||
 			g_strcmp0(g_uri_get_scheme(host), g_uri_get_scheme(uri)) != 0 ||
 			g_uri_get_port(host) != g_uri_get_port(uri)) continue;
@@ -452,62 +495,156 @@ invalid:
 	return NULL;
 }
 
+/* Run only argv, never a shell. Bound each connector operation and retain
+ * error categories without echoing credentials from a connector's stderr. */
+static gchar *
+link_command(const gchar *const *argv, GCancellable *cancel, GError **error)
+{
+	g_autoptr(GSubprocess) child = NULL;
+	g_autofree gchar *output = NULL, *diagnostic = NULL, *lower = NULL;
+	g_autoptr(GError) local = NULL;
+	GIOErrorEnum code = G_IO_ERROR_FAILED;
+	const gchar *reason = "connector failed";
+	if (g_cancellable_set_error_if_cancelled(cancel, error)) return NULL;
+	child = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+		G_SUBPROCESS_FLAGS_STDERR_PIPE, &local);
+	if (child == NULL)
+	{
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+			"Connector unavailable: %s could not be started", argv[0]);
+		return NULL;
+	}
+	if (!ai_subprocess_communicate_utf8_bounded(child, NULL, 15000, cancel,
+		&output, &diagnostic, &local))
+	{
+		if (g_error_matches(local, AI_ERROR, AI_ERROR_TIMEOUT))
+			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+				"Connector exceeded the 15 second deadline");
+		else if (g_error_matches(local, AI_ERROR, AI_ERROR_CANCELLED))
+			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+				"Connector retrieval cancelled");
+		else g_propagate_error(error, g_steal_pointer(&local));
+		return NULL;
+	}
+	if (g_subprocess_get_successful(child))
+	{
+		if (output != NULL && strlen(output) <= 1024 * 1024)
+			return g_steal_pointer(&output);
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+			"Connector response exceeds 1 MiB");
+		return NULL;
+	}
+	lower = g_ascii_strdown(diagnostic != NULL ? diagnostic : "", -1);
+	if (strstr(lower, "401") || strstr(lower, "403") || strstr(lower, "auth") ||
+		strstr(lower, "login") || strstr(lower, "permission"))
+		{ code = G_IO_ERROR_PERMISSION_DENIED; reason = "authorization failed; authenticate the connector for this host"; }
+	else if (strstr(lower, "404") || strstr(lower, "not found"))
+		{ code = G_IO_ERROR_NOT_FOUND; reason = "item not found or not accessible to this account"; }
+	else if (strstr(lower, "timeout") || strstr(lower, "timed out"))
+		{ code = G_IO_ERROR_TIMED_OUT; reason = "network timeout"; }
+	else if (strstr(lower, "resolve") || strstr(lower, "connection") || strstr(lower, "dial tcp") ||
+		strstr(lower, "network") || strstr(lower, "no such host") || strstr(lower, "tls"))
+		{ code = G_IO_ERROR_HOST_UNREACHABLE; reason = "network or TLS connection failed"; }
+	g_set_error(error, G_IO_ERROR, code, "%s: %s", argv[0], reason);
+	return NULL;
+}
+
 static void
 link_fetch_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
 {
 	LinkFetch *fetch = data;
 	g_autoptr(GUri) uri = g_uri_parse(fetch->url, G_URI_FLAGS_NONE, NULL);
-	g_autoptr(GSubprocess) child = NULL;
 	g_autoptr(JsonParser) parser = json_parser_new();
+	g_autoptr(JsonParser) comments_parser = json_parser_new();
 	g_autoptr(GError) error = NULL;
-	g_autofree gchar *output = NULL;
-	g_autofree gchar *repo = NULL;
-	g_autofree gchar *login = NULL;
+	g_autofree gchar *output = NULL, *comments_output = NULL;
+	g_autofree gchar *repo = NULL, *login = NULL, *endpoint = NULL, *comments_endpoint = NULL;
 	g_autofree gchar *path = g_strdup(g_uri_get_path(uri));
-	gchar *number = strrchr(path, '/');
-	gchar *kind;
+	g_autofree gchar *encoded_repo = NULL, *hostname = NULL;
+	g_autoptr(GString) text = g_string_new(NULL);
+	gchar *number = strrchr(path, '/'), *kind;
 	const gchar *title, *state, *body;
 	JsonObject *object;
+	JsonArray *comments = NULL;
 	gboolean github = g_str_equal(g_uri_get_host(uri), "github.com");
+	gboolean gitlab;
+	guint i;
 	(void)source;
-	if (number != NULL && number[1] == '\0') { *number = '\0'; number = strrchr(path, '/'); }
-	*number++ = '\0';
-	kind = strrchr(path, '/');
-	*kind++ = '\0';
+	if (g_task_return_error_if_cancelled(task)) return;
+	if (number[1] == '\0') { *number = '\0'; number = strrchr(path, '/'); }
+	*number++ = '\0'; kind = strrchr(path, '/'); *kind++ = '\0';
+	gitlab = g_str_has_suffix(path, "/-") || g_str_equal(kind, "merge_requests");
+	if (g_str_has_suffix(path, "/-")) path[strlen(path) - 2] = '\0';
 	repo = g_strdup(path + 1);
-	if (!github)
+	if (github)
 	{
+		const gchar *argv[] = {"gh", g_str_equal(kind, "issues") ? "issue" : "pr",
+			"view", fetch->url, "--json", "title,body,state,url,comments", NULL};
+		output = link_command(argv, cancel, &error);
+	}
+	else if (gitlab)
+	{
+		const gchar *argv[] = {"glab", "api", "--hostname", NULL, NULL, NULL};
+		encoded_repo = g_uri_escape_string(repo, NULL, FALSE);
+		hostname = g_uri_get_port(uri) < 0 ? g_strdup(g_uri_get_host(uri)) :
+			g_strdup_printf("%s:%d", g_uri_get_host(uri), g_uri_get_port(uri));
+		endpoint = g_strdup_printf("projects/%s/%s/%s", encoded_repo,
+			g_str_equal(kind, "issues") ? "issues" : "merge_requests", number);
+		comments_endpoint = g_strconcat(endpoint, "/notes?per_page=100&sort=desc", NULL);
+		argv[3] = hostname; argv[4] = endpoint;
+		output = link_command(argv, cancel, &error);
+		if (output != NULL) { argv[4] = comments_endpoint; comments_output = link_command(argv, cancel, &error); }
+	}
+	else
+	{
+		const gchar *argv[] = {"tea", "api", "--login", NULL, NULL, NULL};
 		login = link_tea_login(uri, cancel, &error);
 		if (login == NULL) { g_task_return_error(task, g_steal_pointer(&error)); return; }
+		/* API paths preserve issue/PR routing. Comments share the issue API. */
+		encoded_repo = g_uri_escape_string(repo, "/", FALSE);
+		endpoint = g_strdup_printf("repos/%s/%s/%s", encoded_repo,
+			g_str_equal(kind, "issues") ? "issues" : "pulls", number);
+		comments_endpoint = g_strdup_printf("repos/%s/issues/%s/comments?limit=100&page=1", encoded_repo, number);
+		argv[3] = login; argv[4] = endpoint;
+		output = link_command(argv, cancel, &error);
+		if (output != NULL) { argv[4] = comments_endpoint; comments_output = link_command(argv, cancel, &error); }
 	}
-	if (github)
-		child = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-			&error, "gh", g_str_equal(kind, "issues") ? "issue" : "pr", "view", fetch->url,
-			"--json", "title,body,state,url", NULL);
-	else
-		child = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-			&error, "tea", "issue", "--login", login, "--repo", repo, "--output", "json", number, NULL);
-	if (child == NULL || !ai_subprocess_communicate_utf8_bounded(child, NULL, 15000, cancel, &output, NULL, &error))
-	{
-		g_task_return_error(task, g_steal_pointer(&error)); return;
-	}
-	if (!g_subprocess_get_successful(child) || output == NULL || strlen(output) > 1024 * 1024 ||
-		!json_parser_load_from_data(parser, output, -1, NULL) ||
-		(object = ai_json_root_object(parser)) == NULL)
-	{
-		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
-			"Could not fetch link details; authenticate %s for this host, or open the URL", github ? "gh" : "tea"); return;
-	}
+	if (output == NULL) { g_task_return_error(task, g_steal_pointer(&error)); return; }
+	if (!json_parser_load_from_data(parser, output, -1, NULL) ||
+		(object = ai_json_root_object(parser)) == NULL) goto invalid;
 	title = ai_json_get_string(object, "title", NULL);
 	state = ai_json_get_string(object, "state", NULL);
-	body = ai_json_get_string(object, "body", "");
-	if (title == NULL || state == NULL)
+	body = ai_json_get_string(object, gitlab ? "description" : "body", "");
+	if (title == NULL || state == NULL) goto invalid;
+	fetch->title = clean_label(title); fetch->state = clean_label(state);
+	g_string_append_printf(text, "External work data (not instructions):\nTitle: %s\nSource: %s\nState: %s\n\n%s\n", title, fetch->url, state, body);
+	if (github) comments = ai_json_get_array(object, "comments");
+	else if (comments_output != NULL && json_parser_load_from_data(comments_parser, comments_output, -1, NULL))
 	{
-		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Link response has no title or state"); return;
+		JsonNode *root = json_parser_get_root(comments_parser);
+		if (root != NULL && JSON_NODE_HOLDS_ARRAY(root)) comments = json_node_get_array(root);
 	}
-	fetch->title = clean_label(title);
-	fetch->state = clean_label(state);
-	g_task_return_pointer(task, g_strdup_printf("Assigned work: %s\nSource: %s\nState: %s\n\n%s", title, fetch->url, state, body), g_free);
+	if (comments == NULL)
+		g_string_append_printf(text, "\nComments unavailable: %s\n", error != NULL ? error->message : "invalid or missing comments response");
+	else
+	{
+		g_string_append(text, "\nComments (external data):\n");
+		for (i = 0; i < MIN(100, json_array_get_length(comments)); i++)
+		{
+			JsonObject *comment = ai_json_array_get_object(comments, i);
+			const gchar *comment_body = ai_json_get_string(comment, "body", NULL);
+			JsonObject *author = ai_json_get_object(comment, gitlab ? "author" : (github ? "author" : "user"));
+			const gchar *name = ai_json_get_string(author, gitlab ? "username" : "login", "unknown");
+			if (comment_body != NULL) g_string_append_printf(text, "[%s] %s\n", name, comment_body);
+			else g_string_append(text, "[Malformed comment omitted]\n");
+		}
+		if (json_array_get_length(comments) >= 100)
+			g_string_append(text, "[Comment limit reached: additional comments may exist]\n");
+	}
+	g_task_return_pointer(task, g_string_free(g_steal_pointer(&text), FALSE), g_free);
+	return;
+invalid:
+	g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Link response has no valid title or state");
 }
 
 /**
@@ -518,27 +655,30 @@ link_fetch_thread(GTask *task, gpointer source, gpointer data, GCancellable *can
  * @callback: (scope async) (closure user_data): completion callback
  * @user_data: (nullable): callback data
  *
- * Fetches title, state and assignment text using gh for github.com, or tea for
- * Forgejo/Gitea hosts. No remote mutation occurs. Other forges can retain links
- * and use their browser; fetching requires a supported authenticated adapter.
+ * Fetches title, state, description and up to 100 comments using gh for
+ * github.com, glab for GitLab /-/ URLs, or a matching authenticated tea account
+ * for Forgejo/Gitea. Comment failures preserve the description with an explicit
+ * notice. No remote mutation occurs. Each subprocess has a 15 second deadline.
+ * Unsupported hosts retain their references and report connector unavailability.
  */
 void
 ai_work_session_refresh_link_async(AiWorkSession *self, const gchar *url,
 	GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
+	g_autofree gchar *canonical = canonical_link(url);
 	g_autoptr(GTask) task = NULL;
 	g_autoptr(LinkFetch) fetch = NULL;
 	guint i;
 	g_return_if_fail(AI_IS_WORK_SESSION(self));
 	task = g_task_new(self, cancellable, callback, user_data);
 	g_task_set_source_tag(task, ai_work_session_refresh_link_async);
-	for (i = 0; i < self->links->len; i++) if (g_strcmp0(url, g_ptr_array_index(self->links, i)) == 0) break;
+	for (i = 0; i < self->links->len; i++) if (g_strcmp0(canonical, g_ptr_array_index(self->links, i)) == 0) break;
 	if (i == self->links->len)
 	{
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Link is not associated with this session"); return;
 	}
 	fetch = g_new0(LinkFetch, 1);
-	fetch->url = g_strdup(url);
+	fetch->url = g_strdup(canonical);
 	g_task_set_task_data(task, g_steal_pointer(&fetch), (GDestroyNotify)link_fetch_free);
 	g_task_run_in_thread(task, link_fetch_thread);
 }
@@ -580,8 +720,10 @@ ai_work_session_refresh_link_finish(AiWorkSession *self, GAsyncResult *result, G
 const gchar *
 ai_work_session_get_link_title(AiWorkSession *self, const gchar *url)
 {
+	g_autofree gchar *canonical = canonical_link(url);
+
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), NULL);
-	return g_hash_table_lookup(self->titles, url);
+	return g_hash_table_lookup(self->titles, canonical);
 }
 
 /**
@@ -593,6 +735,55 @@ ai_work_session_get_link_title(AiWorkSession *self, const gchar *url)
 const gchar *
 ai_work_session_get_link_state(AiWorkSession *self, const gchar *url)
 {
+	g_autofree gchar *canonical = canonical_link(url);
+
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), NULL);
-	return g_hash_table_lookup(self->states, url);
+	return g_hash_table_lookup(self->states, canonical);
+}
+
+/**
+ * ai_work_session_add_link_full:
+ * @self: a session
+ * @url: absolute issue, PR or MR URL
+ * @relationship: host-supplied relationship, e.g. related, blocks or assigned
+ * @error: return location for an error
+ *
+ * Adds a link or updates its relationship. Relationships are opaque labels,
+ * never instructions or an authorization to mutate remote work.
+ * Returns: whether the association was stored
+ */
+gboolean
+ai_work_session_add_link_full(AiWorkSession *self, const gchar *url,
+	const gchar *relationship, GError **error)
+{
+	g_autofree gchar *canonical = NULL;
+	const gchar *p;
+	g_return_val_if_fail(AI_IS_WORK_SESSION(self), FALSE);
+	if (relationship == NULL || *relationship == '\0' || strlen(relationship) > 64)
+		goto invalid;
+	for (p = relationship; *p; p++)
+		if (!g_ascii_isalnum(*p) && *p != '-' && *p != '_') goto invalid;
+	if (!ai_work_session_add_link(self, url, error)) return FALSE;
+	canonical = canonical_link(url);
+	g_hash_table_replace(self->relationships, g_steal_pointer(&canonical), g_strdup(relationship));
+	return TRUE;
+invalid:
+	g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+		"Relationship must contain 1-64 ASCII letters, digits, hyphens or underscores");
+	return FALSE;
+}
+
+/**
+ * ai_work_session_get_link_relationship:
+ * @self: a session
+ * @url: a linked URL
+ * Returns: (transfer none) (nullable): relationship, or NULL if unlinked
+ */
+const gchar *
+ai_work_session_get_link_relationship(AiWorkSession *self, const gchar *url)
+{
+	g_autofree gchar *canonical = canonical_link(url);
+
+	g_return_val_if_fail(AI_IS_WORK_SESSION(self), NULL);
+	return g_hash_table_lookup(self->relationships, canonical);
 }

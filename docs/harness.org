@@ -638,3 +638,6 @@ from the table.
 - [[file:tools.org][The built-in tools]] --- including =task= and =skill=, which reach the same registry
 - [[file:tui.org][ai-tui]] --- the frontend this was built for
 - [[file:transcript.org][The transcript]] --- the other half of the Emacs story, and the rendering recipe
+
+See [[file:linked-work.org][Linked work available to the model]] for automatic issue/PR
+retrieval, connector errors and host integration.

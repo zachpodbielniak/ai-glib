@@ -589,6 +589,7 @@ on_work_ready(
 		self->work_lock = ai_gui_work_claim(self->work_directory,
 			ai_work_session_get_id(work), &claim_error);
 		self->work = g_steal_pointer(&work);
+		g_object_set(self->conversation, "work-session", self->work, NULL);
 		session_start_heartbeat(self);
 	}
 	else
@@ -604,6 +605,13 @@ on_work_ready(
 			"project", ai_work_session_get_field(work, "project"),
 			"branch", ai_work_session_get_field(work, "branch"),
 			NULL);
+	}
+
+	if (self->work_lock < 0)
+	{
+		self->work_lock = ai_gui_work_claim(self->work_directory,
+			ai_work_session_get_id(self->work), NULL);
+		session_start_heartbeat(self);
 	}
 
 	ai_gui_session_publish_work(self);
@@ -661,6 +669,7 @@ ai_gui_session_adopt_work(
 
 	self->work_lock = lock;
 	g_set_object(&self->work, work);
+	g_object_set(self->conversation, "work-session", self->work, NULL);
 
 	/* A recovered record must never keep a previous terminal's target:
 	 * this session is a window, not that pane. */
@@ -942,6 +951,16 @@ ai_gui_session_to_json(AiGuiSession *self)
 		                              session_id != NULL ? session_id : "");
 	}
 
+	/* Persist associations separately from the transcript and fetched text. */
+	if (self->work != NULL)
+	{
+		g_autofree gchar *manifest = ai_work_session_dup_link_manifest(self->work);
+		g_autoptr(JsonParser) parser = json_parser_new();
+		json_parser_load_from_data(parser, manifest, -1, NULL);
+		json_builder_set_member_name(builder, "work-links");
+		json_builder_add_value(builder, json_node_copy(json_parser_get_root(parser)));
+	}
+
 	json_builder_set_member_name(builder, "blocks");
 	json_builder_begin_array(builder);
 
@@ -1109,6 +1128,25 @@ ai_gui_session_new_from_json(
 	 * and the getter's fallback to the working directory covers it.
 	 */
 	self->project = g_strdup(ai_json_get_string(object, "project", NULL));
+
+	/* Install persisted references synchronously, before a resumed turn can
+	 * start. Git/project registration remains asynchronous. */
+	{
+		JsonArray *links = ai_json_get_array(object, "work-links");
+		guint i;
+		if (links != NULL)
+		{
+			self->work = g_object_new(AI_TYPE_WORK_SESSION, "directory", self->working_directory,
+				"project", ai_gui_session_get_project(self), NULL);
+			for (i = 0; i < MIN(32, json_array_get_length(links)); i++)
+			{
+				JsonObject *link = ai_json_array_get_object(links, i);
+				ai_work_session_add_link_full(self->work, ai_json_get_string(link, "url", NULL),
+					ai_json_get_string(link, "relationship", "related"), NULL);
+			}
+			g_object_set(self->conversation, "work-session", self->work, NULL);
+		}
+	}
 
 	session_configure(self);
 

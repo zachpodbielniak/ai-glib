@@ -162,7 +162,7 @@ test_toggle(void)
 		gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
 		while (!g_file_get_contents(path, &opened, NULL, NULL) && g_get_monotonic_time() < deadline) g_usleep(20000);
 	}
-	g_assert_cmpstr(opened, ==, "https://example.invalid/owner/repo/issues/42/");
+	g_assert_cmpstr(opened, ==, "https://example.invalid/owner/repo/issues/42");
 	write_file("delay", "yes");
 	send("toggle", "run tests"); key("toggle", "Enter");
 	key("toggle", "C-\\");

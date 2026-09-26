@@ -15,6 +15,7 @@ Run via `make test-gi`, or directly:
 Requires python3-gobject (Fedora) / python3-gi (Debian).
 """
 import os
+import json
 import sys
 import tempfile
 
@@ -542,6 +543,15 @@ def main():
     conversation.props.native_context_limit = 4096
     assert conversation.get_native_context_limit() == 4096
     conversation.clear_carried_context()
+
+    work = AiGlib.WorkSession()
+    work.add_link_full("https://github.com/team/repo/issues/9", "assigned")
+    conversation.props.work_session = work
+    manifest = json.loads(conversation.props.work_session.dup_link_manifest())
+    assert manifest[0]["repository"] == "team/repo"
+    assert manifest[0]["relationship"] == "assigned"
+    assert manifest[0]["id"] == "9"
+    conversation.props.work_session = None
 
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"

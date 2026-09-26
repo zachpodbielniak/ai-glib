@@ -73,7 +73,9 @@ The preference is also the boolean =AiConfig:open-dashboard-on-load= property.
 #+end_example
 
 Linking records an association without sending a new agent prompt or changing
-remote assignees. =/work= fetches the title, state and body, then queues that
+remote assignees. On subsequent turns the model automatically receives linked
+references, descriptions and comments; see [[file:linked-work.org][linked-work context]].
+=/work= fetches the title, state and body, then queues that
 material as an explicit assignment. An unsent draft is preserved. A failed
 fetch does not submit an empty assignment. Reset or exit suppresses late
 assignment results. External issue text remains external task context and does
@@ -90,8 +92,8 @@ GitHub metadata uses an authenticated =gh=. Forgejo/Gitea metadata uses =tea=,
 selecting exactly one account matching the URL's scheme, hostname and port.
 Multiple matching accounts or an unsupported host leave the association usable
 and report the metadata error. No credentials are copied into session records.
-GitLab merge-request URLs can be linked and opened; fetching them is not yet a
-supported adapter. Metadata reads are asynchronous and bounded. Each live
+GitLab =/-/issues/= and =/-/merge_requests/= URLs use authenticated =glab api=,
+including nested repository groups. Metadata reads are asynchronous and bounded. Each live
 session refreshes one link per minute, rotating through its links. Displayed
 remote state is cached; a refresh failure retains the last known value. The
 initial implementation reports review state, not CI check or review-approval

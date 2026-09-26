@@ -134,6 +134,7 @@ PUBLIC_HEADERS = \
 # Library source files
 LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-work-session.c \
+	$(SRCDIR)/harness/ai-work-context.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \

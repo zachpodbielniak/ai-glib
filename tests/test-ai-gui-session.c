@@ -515,12 +515,64 @@ test_session_project_round_trips(
 	g_assert_cmpstr(ai_gui_session_get_project(restored), ==, fixture->cwd);
 }
 
+static void
+test_linked_work_round_trip(Fixture *fixture, gconstpointer data)
+{
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(AiGuiSession) session = ai_gui_session_new(options, "ollama", NULL, NULL);
+	g_autoptr(AiGuiSession) restored = NULL;
+	g_autoptr(AiWorkSession) attached = NULL;
+	g_autoptr(AiMockProvider) provider = ai_mock_provider_new();
+	g_autoptr(JsonNode) json = NULL;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *stub = g_build_filename(fixture->home, "gh", NULL);
+	g_autofree gchar *old_path = g_strdup(g_getenv("PATH"));
+	g_autofree gchar *path = g_strconcat(fixture->home, ":", old_path, NULL);
+	g_autoptr(GError) error = NULL;
+	AiWorkSession *work;
+	gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	(void)data;
+	ai_gui_session_set_work_directory(session, fixture->registry);
+	while (ai_gui_session_get_work(session) == NULL && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+	work = ai_gui_session_get_work(session);
+	g_assert_nonnull(work);
+	g_assert_true(ai_work_session_add_link_full(work, "https://github.com/team/project/issues/9", "assigned", NULL));
+	json = ai_gui_session_to_json(session);
+	restored = ai_gui_session_new_from_json(json_node_get_object(json), options, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(restored);
+	ai_gui_session_set_work_directory(restored, fixture->registry);
+	/* Available even before asynchronous project registration completes. */
+	g_object_get(ai_gui_session_get_conversation(restored), "work-session", &attached, NULL);
+	g_assert_nonnull(attached);
+	g_assert_cmpstr(ai_work_session_get_link_relationship(attached,
+		"https://github.com/team/project/issues/9"), ==, "assigned");
+	g_assert_true(g_file_set_contents(stub, "#!/bin/sh\nprintf '%s' '{\"title\":\"GUI_LINK_RESTORED\",\"state\":\"open\",\"body\":\"Linked description\",\"comments\":[]}'\n", -1, NULL));
+	g_chmod(stub, 0700); g_setenv("PATH", path, TRUE);
+	g_assert_true(ai_conversation_set_provider(ai_gui_session_get_conversation(restored), G_OBJECT(provider), &error));
+	g_assert_no_error(error);
+	g_assert_true(ai_gui_session_send(restored, "Read the linked issue", NULL, &error));
+	g_assert_no_error(error);
+	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	while (ai_gui_session_get_busy(restored) && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+	g_assert_false(ai_gui_session_get_busy(restored));
+	g_assert_cmpuint(ai_mock_provider_get_call_count(provider), ==, 1);
+	text = ai_message_get_text(g_list_last(ai_mock_provider_get_last_messages(provider))->data);
+	g_assert_nonnull(strstr(text, "GUI_LINK_RESTORED"));
+	g_assert_nonnull(strstr(text, "https://github.com/team/project/issues/9"));
+	g_setenv("PATH", old_path, TRUE);
+}
+
 gint
 main(
 	gint   argc,
 	gchar *argv[]
 ){
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/ai-gui/session/linked-work-round-trip", Fixture, NULL,
+		fixture_set_up, test_linked_work_round_trip, fixture_tear_down);
 
 	g_test_add("/ai-gui/session/basics", Fixture, NULL,
 	           fixture_set_up, test_session_basics, fixture_tear_down);
