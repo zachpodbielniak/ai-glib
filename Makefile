@@ -457,6 +457,7 @@ $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-decision-cli: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."

@@ -130,7 +130,9 @@ prediction. =dup_json()= preserves server metadata such as usage and routing
 repository. Elapsed time measures the complete HTTP operation; it is not
 reported as server inference time. Laya's timing headers are not exposed.
 Every expected answer is checked for its kind, labels, finite values and
-probability bounds. Distribution sums allow only the rounding error from
+probability bounds. Typed getters and human output use only fields belonging
+to the validated answer kind; unrelated metadata remains available in JSON.
+Distribution sums allow only the rounding error from
 Laya's four-decimal output; values are never renormalised.
 
 The client exposes =base-url=, =model=, =api-key= and =timeout-ms= as GObject

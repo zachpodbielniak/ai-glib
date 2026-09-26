@@ -375,8 +375,11 @@ const gchar *ai_decision_response_get_checkpoint(AiDecisionResponse *self)
  */
 const gchar *ai_decision_response_get_choice(AiDecisionResponse *self, const gchar *id)
 {
+	JsonObject *answer;
 	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), NULL);
-	return ai_json_get_string(answer_for(self, id), "choice", NULL);
+	answer = answer_for(self, id);
+	if (g_strcmp0(ai_json_get_string(answer, "type", NULL), "choice") != 0) return NULL;
+	return ai_json_get_string(answer, "choice", NULL);
 }
 /**
  * ai_decision_response_get_probability:
@@ -391,6 +394,12 @@ gdouble ai_decision_response_get_probability(AiDecisionResponse *self, const gch
 	gdouble value;
 	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), -1);
 	answer = answer_for(self, id);
+	if (label == NULL)
+	{
+		if (g_strcmp0(ai_json_get_string(answer, "type", NULL), "noul") != 0) return -1;
+	}
+	else if (g_strcmp0(ai_json_get_string(answer, "type", NULL), "choice") != 0 &&
+		g_strcmp0(ai_json_get_string(answer, "type", NULL), "score") != 0) return -1;
 	return number(label != NULL ? ai_json_get_object(answer, "probabilities") : answer,
 		label != NULL ? label : "noul", 1, &value) ? value : -1;
 }
@@ -402,9 +411,12 @@ gdouble ai_decision_response_get_probability(AiDecisionResponse *self, const gch
  */
 gdouble ai_decision_response_get_score(AiDecisionResponse *self, const gchar *id)
 {
+	JsonObject *answer;
 	gdouble value;
 	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), -1);
-	return number(answer_for(self, id), "score", G_MAXDOUBLE, &value) ? value : -1;
+	answer = answer_for(self, id);
+	if (g_strcmp0(ai_json_get_string(answer, "type", NULL), "score") != 0) return -1;
+	return number(answer, "score", G_MAXDOUBLE, &value) ? value : -1;
 }
 /**
  * ai_decision_response_get_elapsed_ms:
@@ -443,8 +455,9 @@ gchar *ai_decision_response_format(AiDecisionResponse *self)
 	for (iter = ids; iter != NULL; iter = iter->next)
 	{
 		JsonObject *answer = ai_json_get_object(answers, iter->data);
-		JsonObject *probabilities = ai_json_get_object(answer, "probabilities");
-		const gchar *choice = ai_json_get_string(answer, "choice", NULL);
+		const gchar *kind = ai_json_get_string(answer, "type", "");
+		JsonObject *probabilities = g_str_equal(kind, "noul") ? NULL : ai_json_get_object(answer, "probabilities");
+		const gchar *choice = ai_decision_response_get_choice(self, iter->data);
 		gdouble value;
 		if (choice != NULL) g_string_append_printf(text, "%s: %s\n", (gchar *)iter->data, choice);
 		else

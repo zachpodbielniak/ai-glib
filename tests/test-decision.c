@@ -123,8 +123,8 @@ test_choices_and_scores(void)
 	const gchar *descriptions[] = { "Invoices", "Everything else", NULL };
 	const gchar *levels[] = { "low", "medium", "high", NULL };
 	const gchar *json = "{\"model\":\"test\",\"answers\":{"
-		"\"route\":{\"type\":\"choice\",\"choice\":\"billing\",\"probabilities\":{\"billing\":0.8234,\"other\":0.1766}},"
-		"\"urgency\":{\"type\":\"score\",\"score\":1.5,\"probabilities\":{\"0\":0.1,\"1\":0.3,\"2\":0.6}}}}";
+		"\"route\":{\"type\":\"choice\",\"choice\":\"billing\",\"noul\":0.7,\"score\":9,\"probabilities\":{\"billing\":0.8234,\"other\":0.1766}},"
+		"\"urgency\":{\"type\":\"score\",\"score\":1.5,\"choice\":\"injected\",\"noul\":0.8,\"probabilities\":{\"0\":0.1,\"1\":0.3,\"2\":0.6}}}}";
 	g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Refund please");
 	g_autoptr(AiDecisionResponse) response = NULL;
 	g_autoptr(GError) error = NULL;
@@ -139,6 +139,12 @@ test_choices_and_scores(void)
 	g_assert_cmpfloat(ai_decision_response_get_probability(response, "urgency", "2"), ==, 0.6);
 	text = ai_decision_response_format(response);
 	g_assert_nonnull(strstr(text, "billing: 0.8234"));
+	g_assert_nonnull(strstr(text, "urgency: 1.5000"));
+	g_assert_null(strstr(text, "injected"));
+	g_assert_null(ai_decision_response_get_choice(response, "urgency"));
+	g_assert_cmpfloat(ai_decision_response_get_probability(response, "route", NULL), ==, -1);
+	g_assert_cmpfloat(ai_decision_response_get_probability(response, "urgency", NULL), ==, -1);
+	g_assert_cmpfloat(ai_decision_response_get_score(response, "route"), ==, -1);
 }
 
 static void
@@ -333,9 +339,38 @@ test_empty_http_response(void)
 	tserver_free(server);
 }
 
+/* Unknown metadata must not masquerade as another typed answer. */
+static void
+test_typed_metadata(void)
+{
+	const gchar *json = "{\"model\":\"test\",\"answers\":{\"spam\":{"
+		"\"type\":\"noul\",\"noul\":0.93,\"choice\":\"injected\","
+		"\"score\":12,\"probabilities\":{\"invalid\":\"text\",\"extra\":0.5}}}}";
+	g_autoptr(AiDecisionRequest) request = request_new();
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *encoded = NULL;
+
+	response = ai_decision_response_new_from_json(request, json, 0, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(response);
+	g_assert_null(ai_decision_response_get_choice(response, "spam"));
+	g_assert_cmpfloat(ai_decision_response_get_score(response, "spam"), ==, -1);
+	g_assert_cmpfloat(ai_decision_response_get_probability(response, "spam", "invalid"), ==, -1);
+	g_assert_cmpfloat(ai_decision_response_get_probability(response, "spam", "extra"), ==, -1);
+	text = ai_decision_response_format(response);
+	g_assert_nonnull(strstr(text, "spam: 0.9300"));
+	g_assert_null(strstr(text, "injected"));
+	g_assert_null(strstr(text, "invalid"));
+	encoded = ai_decision_response_dup_json(response);
+	g_assert_nonnull(strstr(encoded, "injected"));
+}
+
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/decision/typed-metadata", test_typed_metadata);
 	g_test_add_func("/decision/wire", test_wire);
 	g_test_add_func("/decision/empty-http-response", test_empty_http_response);
 	g_test_add_func("/decision/interface-mock-errors", test_interface_and_mock_errors);
