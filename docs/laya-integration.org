@@ -1,0 +1,237 @@
+#+TITLE: Typed decisions with Laya
+
+* What is included
+=AiDecider= answers typed questions about text. =AiLayaClient= sends them to
+an independently managed Laya HTTP server. =AiMockDecider= supplies canned
+responses or errors for applications' tests. Both implement the same async
+and synchronous API.
+
+Building, installing, constructing and testing these objects downloads no
+weights and requires no Python, PyTorch or ONNX runtime. ai-glib never starts
+Laya or provisions models. Only an explicit decision request contacts the
+configured endpoint. A local or remote inference server must already exist
+when you want real predictions. Server failures return errors, never a fake
+zero probability.
+
+* Command line
+#+begin_src sh
+ai decide --id spam --question 'Is this message spam?' 'Claim a free prize!'
+cat message.txt | ai decide --id spam --question 'Is this spam?' --json
+ai decide --request triage.json --model english
+ai decide --base-url http://127.0.0.1:8000 --timeout-ms 5000 \
+  --question 'Is a refund requested?' 'Please refund the duplicate charge.'
+ai decide --help
+#+end_src
+
+The default provider is =laya=. =--question= creates one boolean question with
+identifier =answer= unless =--id= is supplied. Text comes from one argument
+or piped stdin. =--request FILE= accepts a full JSON request; =--request -=
+reads that JSON from stdin. It cannot be combined with =--question=, =--id=
+or positional text. Request input is limited to 2 MiB, 50000 text characters,
+64 questions and 512 total criteria.
+
+=--json= writes the validated server JSON, preserving metadata and original
+probabilities. Human output also includes elapsed request time. Exit 0 means
+inference completed, regardless of the predicted probability. Exit 2 means
+command/input parsing failed; exit 1 means inference or response validation
+failed. Errors go to stderr.
+
+=LAYA_BASE_URL= supplies a server URL when =--base-url= is absent.
+=LAYA_API_KEY= supplies an optional bearer token. The default endpoint is
+=http://127.0.0.1:8000= and the default deadline is 30000 ms. There are no
+implicit retries or redirects. =--model= supplies a default checkpoint;
+a model explicitly in a request file takes precedence.
+
+* TUI
+The same options are available as a local command:
+
+#+begin_example
+/decide --id spam --question "Is this spam?" "Claim a free prize!"
+/decide --request triage.json --model english
+/decide --help
+#+end_example
+
+=/decide= with no arguments displays usage. This is a command interface,
+not a modal form. Quote questions and text containing spaces. Request-file
+paths resolve against the conversation's working directory. The TUI does not
+read decision input from stdin; supply text or a file.
+
+The request runs asynchronously and the result appears as a local transcript
+note with each answer and its distribution. Your chat provider stays selected.
+One decision may be in flight at a time. Ctrl+C cancels it; clear/reset cancels
+it and discards its late result, and shutdown drains cancellation before
+freeing the UI. Decision notes do not silently become chat messages.
+
+For noninteractive rendering:
+#+begin_src sh
+ai-tui -p ollama --dump '/decide --question "Is this spam?" "Win a prize"'
+#+end_src
+
+* Typed requests
+A request contains text in =state= and an object of uniquely identified
+questions. For example, =triage.json=:
+
+#+begin_src json
+{
+  "state": "I was billed twice; please refund the extra charge today.",
+  "model": "english",
+  "questions": {
+    "refund": {"type": "noul", "instructions": "Is a refund requested?"},
+    "department": {
+      "type": "choice", "instructions": "Which department should handle this?",
+      "criteria": {"billing": "Invoices and payments", "other": "Everything else"}
+    },
+    "urgency": {
+      "type": "score", "instructions": "How urgent is the request?",
+      "criteria": ["Not urgent", "Soon", "Critical"]
+    }
+  }
+}
+#+end_src
+
+=noul= is Laya's boolean kind, returning P(true). Choice answers contain a
+selected label and a probability for every supplied label. Score answers
+contain an expected zero-based ordinal value and probabilities keyed by
+index strings (=0=, =1=, ...). Scores are not themselves probabilities.
+
+Model constants are =AI_LAYA_MODEL_ENGLISH=, =AI_LAYA_MODEL_MULTILINGUAL= and
+=AI_LAYA_MODEL_TYPED_DECISIONS=. An unset model lets the server route.
+Unknown explicit checkpoint names are errors, preventing Laya's otherwise
+silent fallback to automatic routing.
+
+* Library API
+#+begin_src c
+/* All errors must be checked by the application. */
+g_autoptr(AiLayaClient) client = ai_laya_client_new();
+g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Claim a prize!");
+g_autoptr(AiDecisionResponse) response = NULL;
+g_autoptr(GError) error = NULL;
+
+g_object_set(client, "model", AI_LAYA_MODEL_ENGLISH, "timeout-ms", 5000u, NULL);
+if (ai_decision_request_add_boolean(request, "spam", "Is this spam?", &error))
+    response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+if (response != NULL)
+    g_print("%.4f\n", ai_decision_response_get_probability(response, "spam", NULL));
+#+end_src
+
+Use =ai_decider_decide_async()= / =ai_decider_decide_finish()= in a UI or
+server main loop. Requests are validated and copied before dispatch, so later
+caller mutations do not alter the operation. The synchronous wrapper drives
+a private context; a mock HTTP server must run on a different thread.
+
+=ai_decision_request_add_choice()= takes parallel arrays of labels and
+instructions. =ai_decision_request_add_score()= takes an ordered array of
+level descriptions. =ai_decision_request_new_from_json()= is the shared
+file-input path used by both frontends.
+
+=AiDecisionResponse= exposes probability, choice, score, model, checkpoint
+and elapsed-time getters. Missing lookups return NULL or -1, not an invented
+prediction. =dup_json()= preserves server metadata such as usage and routing
+repository. Elapsed time measures the complete HTTP operation; it is not
+reported as server inference time. Laya's timing headers are not exposed.
+Every expected answer is checked for its kind, labels, finite values and
+probability bounds. Typed getters and human output use only fields belonging
+to the validated answer kind; unrelated metadata remains available in JSON.
+Distribution sums allow only the rounding error from
+Laya's four-decimal output; values are never renormalised.
+
+The client exposes =base-url=, =model=, =api-key= and =timeout-ms= as GObject
+properties. Library objects do not implicitly read environment settings;
+CLI/TUI and the example apply the environment variables described above.
+Timeout returns =AI_ERROR_TIMEOUT=; cancellation uses =G_IO_ERROR_CANCELLED=.
+HTTP failures use the existing ai-glib status mapping and transport failures
+retain their GIO error. Malformed responses use =AI_ERROR_INVALID_RESPONSE=.
+
+=AiMockDecider= takes response JSON and validates it against each request.
+=ai_mock_decider_set_error()= copies a supplied error, or clears it with NULL.
+It does no I/O and respects cancellation.
+
+* Optional server provisioning
+This is an operator step, never an ai-glib dependency or test target. To set
+up a server deliberately, use a separate environment:
+
+#+begin_src sh
+python3 -m venv .venv-laya
+.venv-laya/bin/python -m pip install 'laya[serve]'
+LAYA_HOST=127.0.0.1 LAYA_MODELS=english .venv-laya/bin/laya-serve
+#+end_src
+
+That first server start may download weights if absent. Checkpoint and runtime
+downloads can occupy gigabytes; they are not part of the ai-glib package.
+=LAYA_MODELS= limits startup preload, not subsequent routing: explicitly
+select =english= in requests if that is the only provisioned checkpoint.
+
+When the cache is already provisioned, prevent Hugging Face downloads:
+#+begin_src sh
+HF_HUB_OFFLINE=1 LAYA_HOST=127.0.0.1 LAYA_PRELOAD=1 LAYA_MODELS=english \
+  .venv-laya/bin/laya-serve
+#+end_src
+
+Missing cached files then cause an error. =LAYA_PRELOAD=0= alone only delays
+loading until inference; it does not prohibit downloads. Set loopback
+explicitly because the packaged server defaults to =0.0.0.0=. A separately
+operated remote server is also supported: only its host needs weights.
+ai-glib cannot enforce the download policy of that external process.
+
+The packaged server uses =POST /v1/systemone=. Its example playground's
+=/predict= endpoint is a different API surface and is not this client's target.
+
+Build the optional C example with =make build/release/examples/decide-spam=,
+then run it against an existing endpoint:
+#+begin_src sh
+LAYA_BASE_URL=http://127.0.0.1:8000 build/release/examples/decide-spam 'Win a prize!'
+#+end_src
+
+Choose thresholds using labelled examples from your application. A high spam
+probability is a model prediction, not proof; false-positive costs and desired
+recall determine whether to reject, flag or accept. Decide explicitly what to
+do on service errors, such as queueing or accepting with a later review.
+
+* Verification and sources
+=tests/test-decision.c= exercises the library against the threaded loopback
+server and mock. =tests/test-decision-cli.c= exercises the built CLI and TUI
+without Laya or weights. The first test build failed with unknown type
+=AiDecisionRequest= before implementation. The GIR clean gate covers the
+new public APIs.
+
+Wire format and rounding were checked against upstream commit
+=4066d5d5fbf08b66c6757ddeedbd797bd7655bc0=:
+- [[https://github.com/NandhaKishorM/laya/blob/4066d5d5fbf08b66c6757ddeedbd797bd7655bc0/laya/serve.py][Packaged server]].
+- [[https://github.com/NandhaKishorM/laya/blob/4066d5d5fbf08b66c6757ddeedbd797bd7655bc0/laya/agent.py][Answer construction]].
+- [[https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhuboffline][Hugging Face offline behavior]].
+
+** Live inference verification
+The implementation at =dbe781b= was also exercised against real downloaded
+weights, separately provisioned at the user's request. This does not add a
+runtime or download step to ai-glib's build, install or ordinary test suite.
+
+The run used Laya source =4066d5d5fbf08b66c6757ddeedbd797bd7655bc0=,
+Hugging Face bundle revision =55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851=,
+Python 3.12.12, CPU PyTorch 2.14.0, transformers 5.17.0 and
+huggingface-hub 1.33.0. All three checkpoints were preloaded with four CPU
+threads. Both =HF_HUB_OFFLINE=1= and =TRANSFORMERS_OFFLINE=1= were set before
+starting the server. The downloaded model cache occupied approximately
+2.3 GiB and remained separate from the repository.
+
+Boolean, three-category choice and three-level score questions passed for
+=english=, =multilingual= and =typed-decisions=. Parsed answer objects from
+=ai decide --json= exactly matched separate direct HTTP responses, including
+probabilities, confidence fields and action metadata. English and Spanish
+requests also selected the expected checkpoint without an explicit model.
+CLI stdin, the compiled =decide-spam= C example, TUI dump and interactive
+=/decide= all returned real predictions. Invalid authentication returned
+HTTP 401 with exit 1; a 1 ms deadline returned a timeout with exit 1, and a
+subsequent request succeeded.
+
+For the English text "I was billed twice. Please refund the duplicate charge
+today.", the English checkpoint returned refund probability =0.9081=,
+billing probability =0.9385= and urgency score =1.2550= on the zero-based
+three-level scale. These are observed smoke-test results, not an accuracy
+benchmark or required outputs for future checkpoint versions.
+
+The upstream loader emitted a calibration warning for the =choice:11+=
+bucket: temperature =0.10058280825614929= was clamped to =0.5=, with affected
+confidence considered uncalibrated. These tests used three categories and
+do not validate that bucket. No ai-glib code changes were needed for the
+live integration run. The PR contains the verbatim transcript and an
+interactive TUI recording.

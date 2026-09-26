@@ -115,6 +115,7 @@ typedef struct
     GTask              *task;
     guint               attempt;
     guint               max_retries;
+    SoupMessageFlags    flags;
 } AiImageSendData;
 
 static void
@@ -145,6 +146,7 @@ ai_image_shared_new_message (AiImageSendData *data)
 {
     SoupMessage *msg = soup_message_new_from_uri (data->method, data->uri);
 
+    soup_message_set_flags (msg, data->flags);
     soup_message_headers_foreach (data->headers, ai_image_copy_header,
                                   soup_message_get_request_headers (msg));
 
@@ -328,6 +330,7 @@ ai_image_shared_send_async (
     data->max_retries = max_retries;
 
     /* Snapshot everything needed to rebuild the message on a retry. */
+    data->flags = soup_message_get_flags (msg);
     data->method = g_strdup (soup_message_get_method (msg));
     data->uri = g_uri_ref (soup_message_get_uri (msg));
     data->headers = soup_message_headers_new (SOUP_MESSAGE_HEADERS_REQUEST);

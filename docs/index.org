@@ -31,6 +31,7 @@ see their provider pages.
 
 ** Documentation
 *** Getting Started
+- [[file:laya-integration.org][Typed decisions with Laya]] - Library, CLI and TUI classification without bundled weights
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy

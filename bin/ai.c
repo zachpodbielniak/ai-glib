@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "ai-glib.h"
+#include "ai-decide-options.h"
 #include "ai-setup.h"
 #include "ai-launch.h"
 #include "ai-mcp-options.h"
@@ -1459,6 +1460,7 @@ failed:
 	return 1;
 }
 
+
 int
 main(int argc, char *argv[])
 {
@@ -1473,11 +1475,15 @@ main(int argc, char *argv[])
 	GList                    *messages = NULL;
 	int                       status = 0;
 
+	if (argc > 1 && g_str_equal(argv[1], "decide"))
+		return decide_cli_main(argv + 1);
+
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);
 	g_option_context_add_main_entries(ctx, mcp_option_entries, NULL);
 	g_option_context_set_summary(
 		ctx,
+		"Use ai decide --help for probability-based classification.\n"
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "
