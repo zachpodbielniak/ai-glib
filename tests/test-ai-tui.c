@@ -2284,7 +2284,19 @@ test_transcript_drag_select(void)
 		tmux_send_literal(TUI_SESSION, drag);
 		tmux_send_literal(TUI_SESSION, release);
 		tmux_send(TUI_SESSION, "C-y");
-		g_assert_true(tmux_wait_for(TUI_SESSION, token));
+		/* The transcript already contains the token: wait for the paste. */
+		{
+			gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+			do
+			{
+				g_clear_pointer(&pane, g_free);
+				pane = tmux_capture(TUI_SESSION);
+				if (pane != NULL && count_needle(pane, token) >= 2)
+					break;
+				g_usleep(100 * 1000);
+			} while (g_get_monotonic_time() < deadline);
+		}
 		g_clear_pointer(&pane, g_free);
 		pane = tmux_capture(TUI_SESSION);
 		g_assert_cmpuint(count_needle(pane, token), >=, 2);
