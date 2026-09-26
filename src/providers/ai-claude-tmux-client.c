@@ -52,6 +52,7 @@ struct _AiClaudeTmuxClient
     gchar    *claude_project_dir;   /* override for ~/.claude/projects */
     gint      turn_timeout_ms;      /* default 10 min */
     gint      startup_timeout_ms;   /* default 30 sec */
+    gchar    *permission_mode;
     gboolean  skip_permissions;     /* --dangerously-skip-permissions */
     gchar    *mcp_config_path;      /* nullable: --mcp-config <path> */
     gchar    *saved_mcp_config_path;
@@ -103,6 +104,7 @@ enum
     PROP_STARTUP_TIMEOUT_MS,
     PROP_SANDBOX,
     PROP_SKIP_PERMISSIONS,
+    PROP_PERMISSION_MODE,
     PROP_MCP_CONFIG_PATH,
     PROP_KEEP_ARTIFACTS,
     PROP_DEBUG_PRESERVE_TMUX,
@@ -1348,6 +1350,9 @@ ai_claude_tmux_client_get_property(
         case PROP_SANDBOX:
             g_value_set_string(value, self->sandbox);
             break;
+        case PROP_PERMISSION_MODE:
+            g_value_set_string(value, self->permission_mode);
+            break;
         case PROP_SKIP_PERMISSIONS:
             g_value_set_boolean(value, self->skip_permissions);
             break;
@@ -1422,6 +1427,10 @@ ai_claude_tmux_client_set_property(
             g_free(self->sandbox);
             self->sandbox = g_value_dup_string(value);
             break;
+        case PROP_PERMISSION_MODE:
+            g_free(self->permission_mode);
+            self->permission_mode = g_value_dup_string(value);
+            break;
         case PROP_SKIP_PERMISSIONS:
             self->skip_permissions = g_value_get_boolean(value);
             break;
@@ -1467,6 +1476,7 @@ ai_claude_tmux_client_finalize(GObject *object)
     AiClaudeTmuxClient *self = AI_CLAUDE_TMUX_CLIENT(object);
 
     g_free(self->sandbox);
+    g_free(self->permission_mode);
     g_free(self->tmux_path);
     g_free(self->socket_name);
     g_free(self->claude_project_dir);
@@ -1607,6 +1617,16 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 
     properties[PROP_SANDBOX] = g_param_spec_string(
         "sandbox", "Sandbox", "Native Bash sandbox: enabled or disabled; NULL inherits settings",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeTmuxClient:permission-mode:
+     *
+     * Claude's native permission mode, including plan. Omitted when
+     * skip-permissions is enabled.
+     */
+    properties[PROP_PERMISSION_MODE] = g_param_spec_string(
+        "permission-mode", "Permission Mode", "Claude permission mode",
         NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_SKIP_PERMISSIONS] = g_param_spec_boolean(
@@ -1972,7 +1992,8 @@ ai_claude_tmux_client_build_session_argv(
     const gchar *model,
     const gchar *effort,
     gboolean     skip_permissions,
-    const gchar *mcp_config_path
+    const gchar *mcp_config_path,
+    const gchar *permission_mode
 ){
     GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
     g_autofree gchar *program = NULL;
@@ -2040,6 +2061,11 @@ ai_claude_tmux_client_build_session_argv(
     if (skip_permissions)
     {
         g_ptr_array_add(argv, g_strdup("--dangerously-skip-permissions"));
+    }
+    else if (permission_mode != NULL && permission_mode[0] != '\0')
+    {
+        g_ptr_array_add(argv, g_strdup("--permission-mode"));
+        g_ptr_array_add(argv, g_strdup(permission_mode));
     }
     /* Additive, like the claude-code client: no --strict-mcp-config, so
      * the workspace's own servers survive. */
@@ -2334,7 +2360,7 @@ ai_claude_tmux_client_chat_sync_real(
             ai_cli_client_get_model(AI_CLI_CLIENT(self)),
             ai_cli_client_get_effort_level(AI_CLI_CLIENT(self)),
             self->skip_permissions,
-            self->mcp_config_path);
+            self->mcp_config_path, self->permission_mode);
 
         ok = run_command_sync(
             (const gchar * const *)argv->pdata, NULL,

@@ -184,6 +184,13 @@ def main():
     assert isinstance(grok, AiGlib.CliClient)  # inheritance visible
     assert grok.props.model == "grok-4.7"
 
+    plan_conversation = AiGlib.Conversation.new(grok)
+    plan_conversation.props.plan_mode = True
+    assert plan_conversation.get_plan_mode()
+    assert grok.props.permission_mode == "plan"
+    assert plan_conversation.set_plan_mode(False)
+    assert grok.props.permission_mode is None
+
     grok.props.model = "grok-4.5"
     grok.props.effort_level = "xhigh"
     grok.props.skip_permissions = True

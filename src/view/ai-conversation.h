@@ -291,4 +291,14 @@ ai_conversation_fork(
     GError         **error
 );
 
+gboolean
+ai_conversation_get_plan_mode(AiConversation *self);
+
+gboolean
+ai_conversation_set_plan_mode(
+	AiConversation *self,
+	gboolean        enabled,
+	GError        **error
+);
+
 G_END_DECLS

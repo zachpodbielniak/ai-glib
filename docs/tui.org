@@ -140,10 +140,10 @@ The frame also breathes for about 2.5 seconds as the turn is handed over: the bo
 
 The state is derived rather than remembered, so it always describes what is actually true: it ends the moment there is anything in the composer, and it returns if you clear the line again without sending. A search or approval overlay is its own, louder request for input and owns the frame while it is up. Terminals without color show the waiting frame in bold, since a state nobody can see is not a state.
 
-*** Permission modes
-The composer's lower border shows =read-only= in the theme's green or =skip-permissions= in its yellow, with =S-TAB= as the switching hint. =Shift-Tab= toggles the mode without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
+*** Permission and plan modes
+The composer's lower border shows =read-only=, =plan=, or =skip-permissions=, with =S-TAB= as the switching hint. =Shift-Tab= cycles through those three modes without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
 
-The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four switch in both directions, including sessions started with =--skip-permissions=.
+The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four cycle through all three states, including sessions started with =--skip-permissions=.
 
 These encodings must reach ai-tui. Older gst builds generate =ESC [ 1 ; 2 Z= for XKB's =ISO_Left_Tab= with Shift; herdr 0.8.2 discards that sequence, even though ai-tui accepts it directly. The correction belongs in gst's legacy encoder, which must emit canonical =ESC [ Z= and advertise it as terminfo =kcbt=. Rebuild and restart gst with that correction. A standalone tmux test that sends bytes directly to ai-tui bypasses herdr's parser and cannot verify this nested-terminal failure.
 
@@ -161,9 +161,41 @@ tmux unbind-key -n User100
 tmux set-option -su 'user-keys[100]'
 #+end_src
 
-Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. For wrapped CLIs, a change affects subsequent invocations, including resumed turns; already-running tools and background agents retain their existing permissions. Search, approval dialogs and bracketed paste retain their own input handling.
+Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. Mode changes require an idle turn. Entering plan mode also requires background agents to finish, because an existing process cannot be made read-only retroactively. Search, approval dialogs and bracketed paste retain their own input handling.
 
-=read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. CLIs without a =skip-permissions= property report that switching is unsupported.
+=read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. Unrecognized CLI implementations report that plan mode is unsupported.
+
+=--plan= starts directly in plan mode, taking precedence over startup bypass
+settings. Plan mode asks the model to inspect the request, clarify unresolved
+requirements, and return an actionable plan in the conversation. It does not
+automatically start implementation. Review the plan, press =Shift-Tab= to leave
+plan mode, then send the instruction to implement it. History is preserved.
+
+| Provider | Plan-mode mechanism |
+|----------+---------------------|
+| Claude Code, Claude tmux, Grok Build | =--permission-mode plan= |
+| OpenCode | =--agent plan= with =--auto= disabled |
+| Antigravity, Cursor | =--mode plan= with bypass disabled |
+| Codex CLI | =--sandbox read-only= plus planning instructions |
+| HTTP providers with local tools | Planning instructions and a read-only tool allowlist |
+
+Native mode settings are temporary: leaving plan mode restores the provider's
+prior agent, mode, and sandbox; the selected TUI permission state controls bypass.
+Switching providers restores all outgoing settings, and the new provider inherits
+plan mode. Codex's exec transport has no native plan selector here; its read-only
+sandbox supplies the execution restriction.
+
+Local tools in plan mode allow =read=, =ls=, =glob=, =grep=, =web_fetch= and
+=web_search=. Writes, shell commands, skills, delegation and unknown tools are
+denied even with =--yes=. Local command shell substitutions are disabled.
+ai-tui's MCP host also rejects mutating calls during planning. Provider-native
+tools remain governed by the native harness's plan policy (including any native
+plan-file exception); this is not a new operating-system sandbox. The restrictions
+are removed on leaving plan mode. Side conversations inherit planning intent.
+
+Native mappings follow the [[https://code.claude.com/docs/en/cli-reference][Claude CLI reference]],
+[[https://opencode.ai/docs/agents][OpenCode agent documentation]], and
+[[https://cursor.com/docs/cli/reference/parameters][Cursor CLI parameters]], as well as the wrapped CLIs' accepted settings.
 
 *** Motion and feedback
 A brief startup sweep introduces the composer. While a turn runs, a small two-tone highlight travels along the composer's top border alongside the existing activity spinner. It never covers the prompt, shifts the layout, or delays text and keyboard input. Search and approval overlays suppress the border sweep. Once the turn finishes, the border briefly indicates success, failure, or cancellation, and the status strip names the outcome. Theme and panel changes also give short status feedback without adding messages to the transcript or model context.
@@ -201,6 +233,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--max-tokens=        | Cap per response, default 4096                           |
 | =--no-stream=         | Wait for each whole turn instead of streaming it         |
 | =-c=, =--continue=    | Continue the provider's most recent session              |
+| =--plan= | Start in plan mode; review before implementing |
 | =--skip-permissions=  | Start in bypass mode; =Shift-Tab= switches it at runtime |
 | =--local-tools=       | Run tools in this process (HTTP providers only)          |
 | =-y=, =--yes=         | Approve every local tool call without asking             |
@@ -243,7 +276,7 @@ one that refuses to start.
 | Mouse wheel               | Scroll three rows over the transcript |
 | Mouse drag                | Highlight transcript text and copy it |
 | =Tab=                      | Take a completion, or step to the next            |
-| =Shift-Tab=                | Toggle read-only / skip-permissions               |
+| =Shift-Tab=                | Cycle read-only / plan / skip-permissions               |
 | =Escape=                   | Dismiss the completion menu                       |
 | =C-n=                      | Select the next tool or reasoning block           |
 | =C-b=                      | Expand or collapse the selected block             |
@@ -388,7 +421,7 @@ an =@= anywhere lists paths.
 | =Up= / =Down=      | Move the highlight, wrapping at both ends       |
 | =PgUp= / =PgDn=    | Move it a page at a time                        |
 | =Tab=              | Take what is on offer, or step to the next      |
-| =Shift-Tab=        | Toggle permission mode and dismiss the menu     |
+| =Shift-Tab=        | Cycle mode and dismiss the menu     |
 | =Enter=            | Submit an exact command, otherwise accept the candidate |
 | =Escape=           | Dismiss, until the line changes again           |
 

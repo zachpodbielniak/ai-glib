@@ -51,6 +51,7 @@ static gint      opt_width = 0;
 static gboolean  opt_no_stream = FALSE;
 static gboolean  opt_continue = FALSE;
 static gboolean  opt_skip_permissions = FALSE;
+static gboolean  opt_plan = FALSE;
 static gboolean  opt_local_tools = FALSE;
 static gboolean  opt_yes = FALSE;
 static gboolean  opt_dry_run = FALSE;
@@ -103,6 +104,8 @@ static const GOptionEntry option_entries[] = {
       "Wait for each whole turn instead of streaming it", NULL },
     { "continue", 'c', 0, G_OPTION_ARG_NONE, &opt_continue,
       "Continue the provider's most recent session", NULL },
+    { "plan", 0, 0, G_OPTION_ARG_NONE, &opt_plan,
+      "Start in plan mode: research without implementing", NULL },
     { "skip-permissions", 0, 0, G_OPTION_ARG_NONE, &opt_skip_permissions,
       "Let a wrapped CLI run its tools without asking", NULL },
     { "local-tools", 0, 0, G_OPTION_ARG_NONE, &opt_local_tools,
@@ -1555,7 +1558,8 @@ draw_input(App *app)
 	 * activity sweep and row counter. Narrow panes retain the full mode. */
 	{
 		g_autofree gchar *mode = g_strdup_printf(" %s%s ",
-			app->skip_permissions ? "skip-permissions" : "read-only",
+			ai_conversation_get_plan_mode(app->conversation) ? "plan" :
+			(app->skip_permissions ? "skip-permissions" : "read-only"),
 			width >= 54 ? " | S-TAB" : "");
 		wattrset(app->input_win, attr_for_tag(app->skip_permissions
 			? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK) | A_BOLD);
@@ -1748,7 +1752,7 @@ draw_chrome(App *app)
 			y = panel_text(y + 1, x, 28, "TOOLS", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 			y = panel_text(y, x, 28, tools, theme_attr(PAIR_SURFACE), FALSE);
 			if (local)
-				y = panel_text(y, x, 28, app->approve_all || app->skip_permissions ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE), FALSE);
+				y = panel_text(y, x, 28, ai_conversation_get_plan_mode(app->conversation) ? "Plan: inspection only" : (app->approve_all || app->skip_permissions ? "Approval: automatic" : "Approval: ask before running"), theme_attr(PAIR_SURFACE), FALSE);
 		}
 	}
 }
@@ -2568,7 +2572,7 @@ show_help(App *app)
     g_string_append(out,
                     "\nKeys\n"
 					"  ^O help / ^T cycle theme / ^P panel / ^L latest\n"
-					"  Shift-Tab    toggle read-only / skip-permissions\n"
+					"  Shift-Tab    cycle read-only / plan / skip-permissions\n"
 					"  ^F search transcript (case-sensitive matching rows)\n"
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
@@ -4263,31 +4267,30 @@ drain_keys(App *app)
             case KEY_BTAB:  /* Shift-Tab */
             {
 				GObject *provider = ai_conversation_get_provider(app->conversation);
-				GParamSpec *property = g_object_class_find_property(
-					G_OBJECT_GET_CLASS(provider), "skip-permissions");
-				gboolean busy = app->sending || ai_conversation_get_busy(app->conversation);
+				gboolean was_plan = ai_conversation_get_plan_mode(app->conversation);
+				gboolean next_plan = !was_plan && !app->skip_permissions;
+				g_autoptr(GError) error = NULL;
 				g_autofree gchar *notice = NULL;
 
-				/* Wrapped tools belong to the child. Changing its property
-				 * affects the next invocation, never an existing process. */
-				if (AI_IS_CLI_CLIENT(provider) && property == NULL)
+				if (app->sending || ai_conversation_get_busy(app->conversation))
 				{
-					ui_feedback(app, "This provider does not support permission switching", AI_STYLE_ERROR);
+					ui_feedback(app, "Wait for the current turn to finish before changing mode", AI_STYLE_ERROR);
 					break;
 				}
-				app->skip_permissions = !app->skip_permissions;
-				if (property != NULL)
+				if (!ai_conversation_set_plan_mode(app->conversation, next_plan, &error))
+				{
+					ui_feedback(app, error->message, AI_STYLE_ERROR);
+					break;
+				}
+				app->skip_permissions = was_plan;
+				if (!next_plan && g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "skip-permissions") != NULL)
 					g_object_set(provider, "skip-permissions", app->skip_permissions, NULL);
-				/* Provider replacement inherits the live choice, not argv's
-				 * original value. Session reset reuses the same provider. */
 				opt_skip_permissions = app->skip_permissions;
 				completion_close(app);
 				app->completion_dismissed = TRUE;
-				notice = g_strdup_printf("Mode: %s%s",
-					app->skip_permissions ? "skip-permissions" : "read-only",
-					busy && AI_IS_CLI_CLIENT(provider) ? " (next turn; running tools unchanged)" : "");
-				ui_feedback(app, notice, app->skip_permissions
-					? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK);
+				notice = g_strdup_printf("Mode: %s", next_plan ? "plan" :
+					(app->skip_permissions ? "skip-permissions" : "read-only"));
+				ui_feedback(app, notice, AI_STYLE_TOOL_OK);
                 break;
             }
 
@@ -5501,6 +5504,11 @@ app_reset(App *app)
     app->decision_generation++;
     app->link_generation++;
     app->work_outcome = NULL;
+	if (ai_conversation_get_plan_mode(previous))
+	{
+		ai_conversation_set_plan_mode(previous, FALSE, NULL);
+		ai_conversation_set_plan_mode(replacement, TRUE, NULL);
+	}
 	/* A new executor also forgets tool approvals, todos and agent results. */
 	g_set_object(&app->conversation, replacement);
 	if (!opt_no_agents)
@@ -5982,6 +5990,11 @@ main(int argc, char *argv[])
 		}
 	}
 
+	if (opt_plan && (opt_launch || opt_launch_cmd || opt_launch_cmd_print || opt_mcp_server))
+	{
+		g_printerr("--plan requires an ai-tui conversation; it cannot be combined with native launch or --mcp-server\n");
+		return 1;
+	}
 	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
 	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
 	     (opt_dump != NULL || opt_dry_run || opt_local_tools || opt_yes)))
@@ -6055,6 +6068,11 @@ main(int argc, char *argv[])
 
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);
+	if (opt_plan && !ai_conversation_set_plan_mode(app.conversation, TRUE, &error))
+	{
+		g_printerr("Cannot enable plan mode: %s\n", error->message);
+		return 1;
+	}
 	/* --set remains authoritative at startup; show the effective flag. */
 	app.skip_permissions = opt_skip_permissions;
 	if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "skip-permissions") != NULL)

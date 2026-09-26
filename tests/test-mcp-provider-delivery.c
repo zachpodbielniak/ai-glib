@@ -291,7 +291,7 @@ test_claude_host_permissions(void)
 		g_assert_true(g_strv_contains((const gchar * const *)argv, "Bash"));
 		g_assert_false(g_strv_contains((const gchar * const *)argv, "--dangerously-skip-permissions"));
 		tmux = ai_claude_tmux_client_build_session_argv("tmux", "test", "test", "/tmp", "/usr/bin/claude",
-			i != 0, "session", "/tmp/settings", "sonnet", NULL, FALSE, path);
+			i != 0, "session", "/tmp/settings", "sonnet", NULL, FALSE, path, NULL);
 		g_assert_true(g_strv_contains((const gchar * const *)tmux->pdata, "mcp__ai_host__*"));
 		g_assert_false(g_strv_contains((const gchar * const *)tmux->pdata, "--dangerously-skip-permissions"));
 	}

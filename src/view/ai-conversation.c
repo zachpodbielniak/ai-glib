@@ -31,6 +31,7 @@
 #include "core/ai-cli-client-private.h"
 #include "core/ai-client.h"
 #include "core/ai-error.h"
+#include "core/ai-plan-policy.h"
 #include "core/ai-event-source.h"
 #include "core/ai-native-session.h"
 #include "core/ai-streamable.h"
@@ -68,6 +69,10 @@ struct _AiConversation
     gint            max_tokens;
     gboolean        stream;
     gboolean        local_tools;
+	gboolean        plan_mode;
+	const gchar    *plan_property;
+	gchar          *plan_previous;
+	gboolean        plan_previous_skip;
     gboolean        busy;
 	guint           turn_history_length;
 
@@ -143,6 +148,7 @@ enum
     PROP_NATIVE_CONTEXT_LIMIT,
     PROP_CARRIED_CONTEXT,
     PROP_WORK_SESSION,
+	PROP_PLAN_MODE,
     N_PROPS
 };
 
@@ -161,6 +167,122 @@ static void conversation_finish_turn(AiConversation *self, GError *error);
 static void push_working_directory_to_provider(AiConversation *self,
                                                const gchar    *path,
                                                gboolean        moved);
+
+/* Native settings are a temporary overlay owned by this conversation. */
+static const gchar *
+conversation_plan_property(GObject *provider, const gchar **value)
+{
+	static const struct {
+		const gchar *type;
+		const gchar *property;
+		const gchar *value;
+	} modes[] = {
+		{ "AiClaudeCodeClient", "permission-mode", "plan" },
+		{ "AiClaudeTmuxClient", "permission-mode", "plan" },
+		{ "AiGrokBuildClient", "permission-mode", "plan" },
+		{ "AiOpenCodeClient", "agent", "plan" },
+		{ "AiAntigravityClient", "mode", "plan" },
+		{ "AiCursorClient", "mode", "plan" },
+		{ "AiCodexCliClient", "sandbox", "read-only" }
+	};
+	guint i;
+
+	for (i = 0; i < G_N_ELEMENTS(modes); i++)
+	{
+		if (g_strcmp0(G_OBJECT_TYPE_NAME(provider), modes[i].type) == 0)
+		{
+			*value = modes[i].value;
+			return modes[i].property;
+		}
+	}
+	return NULL;
+}
+
+static void
+conversation_plan_overlay(AiConversation *self, gboolean enable)
+{
+	const gchar *value = NULL;
+
+	if (self->provider == NULL) return;
+	if (!enable)
+	{
+		if (self->plan_property != NULL)
+		{
+			g_object_set(self->provider, self->plan_property, self->plan_previous,
+				"skip-permissions", self->plan_previous_skip, NULL);
+			self->plan_property = NULL;
+			g_clear_pointer(&self->plan_previous, g_free);
+		}
+		return;
+	}
+	self->plan_property = conversation_plan_property(self->provider, &value);
+	if (self->plan_property != NULL)
+	{
+		g_object_get(self->provider, self->plan_property, &self->plan_previous,
+			"skip-permissions", &self->plan_previous_skip, NULL);
+		g_object_set(self->provider, "skip-permissions", FALSE,
+			self->plan_property, value, NULL);
+	}
+}
+
+/**
+ * ai_conversation_get_plan_mode:
+ * @self: an #AiConversation
+ *
+ * Returns: whether the conversation is planning rather than implementing
+ */
+gboolean
+ai_conversation_get_plan_mode(AiConversation *self)
+{
+	g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+	return self->plan_mode;
+}
+
+/**
+ * ai_conversation_set_plan_mode:
+ * @self: an #AiConversation
+ * @enabled: whether to plan without implementing
+ * @error: (nullable): return location for an error
+ *
+ * Changes mode only while idle. Adds planning instructions without changing
+ * :system-prompt, restricts local tool approval to inspection tools, and
+ * overlays native CLI settings where supported. Leaving plan mode restores
+ * those settings. Unknown CLI implementations are refused.
+ *
+ * Returns: whether the mode was applied
+ */
+gboolean
+ai_conversation_set_plan_mode(
+	AiConversation *self,
+	gboolean        enabled,
+	GError        **error
+){
+	g_return_val_if_fail(AI_IS_CONVERSATION(self), FALSE);
+	enabled = !!enabled;
+	if (enabled == self->plan_mode) return TRUE;
+	if (self->busy)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"Wait for the current turn to finish before changing mode");
+		return FALSE;
+	}
+	if (enabled && self->brigade != NULL && ai_brigade_count_live(self->brigade) > 0)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"Wait for background agents to finish before entering plan mode");
+		return FALSE;
+	}
+	conversation_plan_overlay(self, enabled);
+	if (enabled && AI_IS_CLI_CLIENT(self->provider) && self->plan_property == NULL)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+			"This CLI provider does not support plan mode");
+		return FALSE;
+	}
+	self->plan_mode = enabled;
+	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PLAN_MODE]);
+	return TRUE;
+}
 
 /* ================================================================
  * Folding events into blocks
@@ -777,18 +899,33 @@ ai_conversation_get_activity_elapsed(AiConversation *self)
 static gchar *
 effective_system_prompt(AiConversation *self)
 {
-    if (self->carried_context == NULL)
-    {
-        return g_strdup(self->system_prompt);
-    }
+	g_autofree gchar *base = NULL;
+	const gchar *prompt = self->system_prompt;
 
-    if (self->system_prompt == NULL || self->system_prompt[0] == '\0')
-    {
-        return g_strdup(self->carried_context);
-    }
+	/* A non-NULL effective prompt overrides a provider's own default.
+	 * Preserve that default when planning is the only added instruction. */
+	if (self->plan_mode && prompt == NULL)
+	{
+		if (AI_IS_CLIENT(self->provider))
+			prompt = ai_client_get_system_prompt(AI_CLIENT(self->provider));
+		else if (AI_IS_CLI_CLIENT(self->provider))
+			prompt = ai_cli_client_get_system_prompt(AI_CLI_CLIENT(self->provider));
+	}
 
-    return g_strconcat(self->carried_context, "\n", self->system_prompt,
-                       NULL);
+	if (self->carried_context == NULL)
+		base = g_strdup(prompt);
+	else if (prompt == NULL || prompt[0] == '\0')
+		base = g_strdup(self->carried_context);
+	else
+		base = g_strconcat(self->carried_context, "\n", prompt, NULL);
+	if (self->plan_mode)
+		return g_strconcat(base != NULL ? base : "",
+			"\n[Plan mode]\nResearch the request and produce an actionable implementation plan. "
+			"Ask clarifying questions when needed. Do not implement, edit project files, "
+			"run commands that change state, or delegate implementation. "
+			"Present the plan in your reply and wait for the user to leave plan mode "
+			"before implementing. Read-only inspection tools are available.\n", NULL);
+	return g_steal_pointer(&base);
 }
 
 static void
@@ -1166,6 +1303,13 @@ on_executor_approval(
 
     (void)executor;
 
+	if (self->plan_mode)
+	{
+		const gchar *name = ai_tool_use_get_name(tool_use);
+		return ai_plan_tool_is_read_only(name)
+			? AI_TOOL_APPROVAL_ALLOW : AI_TOOL_APPROVAL_DENY;
+	}
+
     /*
      * Forwarded so a frontend connects to one object. The accumulator on
      * the far side means an unanswered request still falls through to the
@@ -1400,6 +1544,7 @@ ai_conversation_finalize(GObject *object)
     }
 
     g_clear_object(&self->brigade);
+	conversation_plan_overlay(self, FALSE);
     g_clear_object(&self->provider);
     g_clear_object(&self->transcript);
     g_clear_object(&self->executor);
@@ -1433,6 +1578,9 @@ ai_conversation_get_property(
             break;
         case PROP_WORK_SESSION:
             g_value_set_object(value, self->work_session);
+            break;
+        case PROP_PLAN_MODE:
+            g_value_set_boolean(value, self->plan_mode);
             break;
         case PROP_SYSTEM_PROMPT:
             g_value_set_string(value, self->system_prompt);
@@ -1497,6 +1645,13 @@ ai_conversation_set_property(
         case PROP_WORK_SESSION:
             g_set_object(&self->work_session, g_value_get_object(value));
             break;
+        case PROP_PLAN_MODE:
+        {
+            g_autoptr(GError) error = NULL;
+            if (!ai_conversation_set_plan_mode(self, g_value_get_boolean(value), &error))
+                g_debug("%s", error->message);
+            break;
+        }
         case PROP_SYSTEM_PROMPT:
             ai_conversation_set_system_prompt(self, g_value_get_string(value));
             break;
@@ -1593,6 +1748,16 @@ ai_conversation_class_init(AiConversationClass *klass)
     properties[PROP_WORK_SESSION] = g_param_spec_object("work-session", "Work Session",
         "Linked work exposed to the provider", AI_TYPE_WORK_SESSION,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/**
+	 * AiConversation:plan-mode:
+	 *
+	 * Research and plan without implementing. Changes while busy are ignored;
+	 * use ai_conversation_set_plan_mode() to receive an error.
+	 */
+	properties[PROP_PLAN_MODE] = g_param_spec_boolean("plan-mode", "Plan Mode",
+		"Research and plan without implementing", FALSE,
+		G_PARAM_READWRITE | G_PARAM_EXPLICIT_NOTIFY | G_PARAM_STATIC_STRINGS);
 
     properties[PROP_SYSTEM_PROMPT] =
         g_param_spec_string("system-prompt", "System Prompt",
@@ -2078,6 +2243,17 @@ ai_conversation_set_provider(
         return TRUE;
     }
 
+	if (self->plan_mode && AI_IS_CLI_CLIENT(provider))
+	{
+		const gchar *value = NULL;
+		if (conversation_plan_property(provider, &value) == NULL)
+		{
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+				"This CLI provider does not support plan mode");
+			return FALSE;
+		}
+	}
+
     if (self->tool_endpoint != NULL)
     {
         if (!AI_IS_TOOL_ENDPOINT_CONSUMER(provider))
@@ -2131,7 +2307,9 @@ ai_conversation_set_provider(
         self->event_id = 0;
     }
 
+	conversation_plan_overlay(self, FALSE);
     g_set_object(&self->provider, provider);
+	if (self->plan_mode) conversation_plan_overlay(self, TRUE);
 
     if (AI_IS_EVENT_SOURCE(provider))
     {
@@ -2819,9 +2997,15 @@ ai_conversation_resolve_input(
         return NULL;
     }
 
-    result = ai_command_set_resolve(self->command_set, line,
-                                    self->working_directory, cancellable,
-                                    &local_error);
+	{
+		AiCommandShellPolicy saved = ai_command_set_get_shell_policy(self->command_set);
+
+		if (self->plan_mode)
+			ai_command_set_set_shell_policy(self->command_set, AI_COMMAND_SHELL_NEVER);
+		result = ai_command_set_resolve(self->command_set, line,
+			self->working_directory, cancellable, &local_error);
+		ai_command_set_set_shell_policy(self->command_set, saved);
+	}
 
     if (result != NULL)
     {
@@ -3094,6 +3278,8 @@ ai_conversation_fork(AiConversation *self, GObject *provider, GError **error)
 	ai_conversation_set_max_tokens(branch, self->max_tokens);
 	ai_conversation_set_stream(branch, self->stream);
 	ai_conversation_set_local_tools(branch, FALSE);
+	if (self->plan_mode && !ai_conversation_set_plan_mode(branch, TRUE, error))
+		return NULL;
 	branch->carried_context = g_strdup(self->carried_context);
 	count = self->busy ? self->turn_history_length : g_list_length(self->messages);
 	for (l = self->messages, i = 0; l != NULL && i < count; l = l->next, i++) {

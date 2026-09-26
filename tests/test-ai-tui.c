@@ -688,6 +688,19 @@ test_dry_run_cli_provider(void)
 }
 
 static void
+test_plan_startup(void)
+{
+	const gchar *args[] = { "-p", "grok-build", "--plan", "--skip-permissions", "--dry-run", NULL };
+	Stub *stub = stub_new("");
+	Run *run = run_tui(args, "GROK_PATH", stub->stub);
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "--permission-mode plan"));
+	g_assert_null(strstr(run->stdout_data, "bypassPermissions"));
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
 test_dry_run_http_provider_says_so(void)
 {
 	const gchar *args[] = { "-p", "claude", "--dry-run", NULL };
@@ -2362,6 +2375,7 @@ test_permission_modes(gconstpointer data)
 		"    then\n"
 		"        mode=child-bypass\n"
 		"    fi\n"
+		"    if [[ ${arg} == plan ]]; then mode=child-plan; fi\n"
 		"done\n"
 		"cat >/dev/null\n"
 		"printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
@@ -2380,17 +2394,18 @@ test_permission_modes(gconstpointer data)
 	g_assert_true(tmux_wait_for(TUI_SESSION, initial_skip
 		? "skip-permissions | S-TAB" : "read-only | S-TAB"));
 
-	for (i = 0; i < 2; i++)
+	for (i = 0; i < 3; i++)
 	{
-		gboolean skip = i == 0 ? !initial_skip : initial_skip;
+		guint mode = ((initial_skip ? 2 : 0) + i + 1) % 3;
+		const gchar *label = mode == 1 ? "plan | S-TAB" :
+			(mode == 2 ? "skip-permissions | S-TAB" : "read-only | S-TAB");
 
 		/* A completion menu must not consume the new global composer key. */
 		tmux_send(TUI_SESSION, "/pro");
 		/* Raw bytes exercise terminal-specific encodings without letting
 		 * tmux translate them back into its canonical BTab sequence. */
 		tmux_send(TUI_SESSION, keys[variant >> 1]);
-		g_assert_true(tmux_wait_for(TUI_SESSION, skip
-			? "skip-permissions | S-TAB" : "read-only | S-TAB"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, label));
 		g_assert_true(tmux_wait_for(TUI_SESSION, "/pro"));
 		tmux_send(TUI_SESSION, "C-u");
 		tmux_send(TUI_SESSION, "/reset");
@@ -2405,7 +2420,8 @@ test_permission_modes(gconstpointer data)
 		g_assert_true(tmux_wait_for(TUI_SESSION, "Provider switched"));
 		tmux_send(TUI_SESSION, "verify mode");
 		tmux_send(TUI_SESSION, "Enter");
-		g_assert_true(tmux_wait_for(TUI_SESSION, skip ? "child-bypass" : "child-guarded"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, mode == 1 ? "child-plan" :
+			(mode == 2 ? "child-bypass" : "child-guarded")));
 	}
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
@@ -3977,6 +3993,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/editor-abort",
 	                test_an_aborted_edit_keeps_the_prompt);
 
+	g_test_add_func("/ai-glib/ai-tui/plan-startup", test_plan_startup);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-default",
 		GINT_TO_POINTER(0), test_permission_modes);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-skip",

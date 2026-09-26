@@ -51,7 +51,7 @@ test_tmux_session_argv_plain_fresh(void)
     g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "sonnet", NULL, FALSE, NULL);
+        "sonnet", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 0), ==, "tmux");
     g_assert_cmpstr(AT(argv, 1), ==, "-L");
@@ -86,7 +86,7 @@ test_tmux_session_argv_dedicated_socket(void)
     g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "libreclaw", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "sonnet", NULL, FALSE, NULL);
+        "sonnet", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 1), ==, "-L");
     g_assert_cmpstr(AT(argv, 2), ==, "libreclaw");
@@ -217,7 +217,7 @@ test_tmux_session_argv_ollama_fresh(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "ollama/glm-5.2:cloud", NULL, FALSE, NULL);
+        "ollama/glm-5.2:cloud", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 9), ==, "--");
     g_assert_cmpstr(AT(argv, 10), ==, "ollama");
@@ -248,7 +248,7 @@ test_tmux_session_argv_ollama_resume(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ TRUE, "SID", "/tmp/settings.json",
-        "ollama/x", NULL, FALSE, NULL);
+        "ollama/x", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 10), ==, "ollama");
     g_assert_cmpstr(AT(argv, 15), ==, "--");
@@ -275,7 +275,7 @@ test_tmux_session_argv_ollama_effort_skip(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "ollama/x", "high", TRUE, NULL);
+        "ollama/x", "high", TRUE, NULL, NULL);
 
     for (i = 0; i < argv->len && g_ptr_array_index(argv, i) != NULL; i++)
     {
