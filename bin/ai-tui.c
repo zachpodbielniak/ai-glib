@@ -5924,7 +5924,9 @@ main(int argc, char *argv[])
             g_printerr("ai-tui: session is missing, active, or has no native resume ID\n");
             return 2;
         }
+        g_free(opt_provider);
         opt_provider = g_strdup(work_field(selected, "provider"));
+        g_free(opt_model);
         opt_model = g_strdup(work_field(selected, "model"));
         if (g_chdir(work_field(selected, "directory")) != 0)
         {
