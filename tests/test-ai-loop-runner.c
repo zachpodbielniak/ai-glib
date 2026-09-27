@@ -463,8 +463,18 @@ test_claim_is_exclusive(void)
 {
 	g_autoptr(AiLoopRunner) first = open_runner("exclusive", 0);
 	g_autoptr(AiLoopRunner) second = ai_loop_runner_new();
+	g_autoptr(AiLoopRunner) quiet = open_runner("never-used", 0);
 	g_autoptr(GError)       error = NULL;
+	g_autofree gchar       *unused = g_build_filename(store, "never-used", NULL);
+	g_autofree gchar       *unused_lock = g_build_filename(store, "never-used.lock", NULL);
 
+	/* A session that schedules nothing leaves nothing on disk. */
+	g_assert_false(ai_loop_runner_tick(quiet, 0));
+	g_assert_false(g_file_test(unused, G_FILE_TEST_EXISTS));
+	g_assert_false(g_file_test(unused_lock, G_FILE_TEST_EXISTS));
+
+	/* The first write claims it; a second process is then refused. */
+	g_free(run(first, "loop", "5m claim it", 0));
 	g_assert_false(ai_loop_runner_open(second, store, "exclusive", 0, &error));
 	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_BUSY);
 	g_clear_error(&error);

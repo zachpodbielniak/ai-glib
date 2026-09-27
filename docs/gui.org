@@ -514,6 +514,44 @@ ai-tui uses, so one link reads the same way in both. The state is
 cached: a stale =open= sits *beside* the number rather than replacing it.
 GitHub metadata needs an authenticated =gh=, Forgejo/Gitea needs =tea=.
 
+** Loops and goals
+
+=/loop= and =/goal= work in the message box exactly as in ai-tui -- the
+same =AiLoopRunner= drives both. See [[file:loops-and-goals.org][Loops and goals]].
+
+- *Loops and goals…* in the menu, or =Ctrl+Shift+L=, opens a view of the
+  current session's entries: each one's text, id and state in the
+  library's words, with buttons to pause or resume, run now, edit, stop a
+  goal, and delete. An expired goal offers *Raise the bounds*. A line at
+  the bottom takes a new =/loop …= or =/goal …=.
+- *Edit* fills in the current interval and prompt, or the condition and
+  bounds, and applies only the fields that changed -- as a
+  =/loop edit= or =/goal edit= line, so the window cannot accept what the
+  command would refuse.
+- *The sidebar* shows =2 loops, 1 goal, next in 4m= under any session with
+  a schedule, refreshed on the three-second heartbeat so "next in" never
+  goes stale. *The dashboard* shows the same line for every session on
+  the machine, read from each session's schedule file.
+
+Four things about how the window runs them:
+
+- *The schedule is keyed by the session's own id*, which survives a
+  restart, so a session's loops and goals come back when ai-gui is opened
+  again. What was missed while it was closed fires once.
+- *Nothing fires mid-turn.* A scheduled turn waits for a running turn, a
+  queued follow-up and an unanswered approval, the same rule ai-tui
+  applies.
+- *Deleting a session deletes its schedule* (=ai_gui_session_forget_loops()=,
+  called from =ai_gui_session_store_remove()=), so nothing it set up can
+  fire later from anywhere.
+- *The stop button on a scheduled turn pauses its goal* rather than
+  failing it.
+
+The runner lives in the GTK-free =gui/ai-gui-session.c=;
+=tests/test-ai-gui-loops.c= runs a goal to its end through the session's
+real send path against =AiMockProvider=, restarts a session, and deletes
+one, all without a display.
+
 ** Slash commands
 
 Built-ins resolve in the library and are run here: =/help=, =/commands=,

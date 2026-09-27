@@ -133,21 +133,6 @@ ai_loop_default_prompt(
 	gboolean    *truncated
 );
 
-/**
- * ai_loop_schedule_command:
- * @self: a schedule
- * @arguments: (nullable): the text after `/loop`
- * @cwd: (nullable): working directory, for the default prompt
- * @config_dir: (nullable): XDG config directory
- * @home: (nullable): home directory
- * @now_us: real time in microseconds, so a test can freeze the clock
- * @error: (nullable): return location for a #GError
- *
- * Applies one `/loop` command: schedule, list, cancel, or stop.
- *
- * Returns: (transfer full) (nullable): the line to show the user, or %NULL
- *   on error
- */
 gchar *
 ai_loop_schedule_command(
 	AiLoopSchedule *self,
@@ -388,18 +373,6 @@ ai_loop_schedule_clear_inflight(AiLoopSchedule *self, const gchar *id);
 gboolean
 ai_loop_schedule_save(AiLoopSchedule *self, const gchar *path, GError **error);
 
-/**
- * ai_loop_schedule_load:
- * @self: a schedule
- * @path: source file
- * @now_us: real time; expired tasks are dropped
- * @error: (nullable): return location for a #GError
- *
- * Replaces @self with the fixed tasks in @path. A missing file loads
- * nothing and returns 0. Self-paced tasks are not restored.
- *
- * Returns: the number of tasks loaded, or -1 on error
- */
 gint
 ai_loop_schedule_load(
 	AiLoopSchedule *self,

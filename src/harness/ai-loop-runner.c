@@ -271,6 +271,17 @@ ai_loop_runner_save(AiLoopRunner *self, GError **error)
 		return TRUE;
 	}
 
+	/* Never write a file another process is running. */
+	if (self->lock_fd < 0)
+	{
+		self->lock_fd = ai_loop_store_claim(self->directory, self->owner, error);
+
+		if (self->lock_fd < 0)
+		{
+			return FALSE;
+		}
+	}
+
 	return ai_loop_schedule_save(self->schedule, self->path, error);
 }
 
@@ -279,6 +290,8 @@ persist(AiLoopRunner *self)
 {
 	g_autoptr(GError) error = NULL;
 
+	/* The claim is taken on the first write, not on open, so a session
+	 * that never schedules anything leaves nothing on disk. */
 	if (!ai_loop_runner_save(self, &error))
 	{
 		g_autofree gchar *text = g_strdup_printf("Could not save loops and goals: %s",
@@ -299,10 +312,12 @@ persist(AiLoopRunner *self)
  * @now_us: real time in microseconds
  * @error: (nullable): return location for a #GError
  *
- * Claims @owner's schedule and loads it. The claim is an advisory lock,
+ * Loads @owner's schedule and claims it. The claim is an advisory lock,
  * so two processes never fire one schedule; the second is refused with
- * %G_IO_ERROR_BUSY and the runner is left as it was. What was missed
- * while nothing held the schedule fires once, not once per missed slot.
+ * %G_IO_ERROR_BUSY and the runner is left as it was. A schedule with no
+ * file yet is claimed when it is first saved, so a session that never
+ * schedules anything writes nothing. What was missed while nothing held
+ * the schedule fires once, not once per missed slot.
  *
  * Returns: %TRUE on success
  */
@@ -340,18 +355,33 @@ ai_loop_runner_open(
 		return TRUE;
 	}
 
-	fd = ai_loop_store_claim(directory, owner, error);
+	/*
+	 * A schedule that exists is claimed now: it may have something due,
+	 * and two processes must never fire it. One that does not exist yet
+	 * is claimed when it is first written, so opening a session that
+	 * never schedules anything writes nothing.
+	 */
+	fd = -1;
 
-	if (fd < 0)
+	if (g_file_test(path, G_FILE_TEST_EXISTS))
 	{
-		return FALSE;
+		fd = ai_loop_store_claim(directory, owner, error);
+
+		if (fd < 0)
+		{
+			return FALSE;
+		}
 	}
 
 	/* Load in place so a frontend holding the schedule pointer, and the
 	 * command set attached to it, keep working. */
 	if (ai_loop_schedule_load(self->schedule, path, now_us, error) < 0)
 	{
-		close(fd);
+		if (fd >= 0)
+		{
+			close(fd);
+		}
+
 		return FALSE;
 	}
 

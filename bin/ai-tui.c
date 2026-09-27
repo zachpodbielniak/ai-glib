@@ -3149,7 +3149,6 @@ loop_open(App *app)
 		loop_save(app);
 	}
 
-	ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
 	g_object_set(app->work, "loop-owner", ai_loop_runner_get_owner(app->loops), NULL);
 	restored = ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_LOOP) +
 	           ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_GOAL);
@@ -3157,6 +3156,9 @@ loop_open(App *app)
 	if (restored > 0)
 	{
 		g_autofree gchar *summary = ai_loop_schedule_dup_summary(schedule, now);
+
+		/* This session carries the schedule on; the next -c here finds it. */
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
 		say(app, "Restored %s.", summary);
 	}
 }
@@ -3309,6 +3311,16 @@ loop_command(App *app, const gchar *name, const gchar *arguments)
 	}
 
 	say(app, "%s", notice);
+
+	/* Written only by a session that schedules something: the next -c in
+	 * this directory resumes the schedule this one is using. */
+	if (ai_loop_runner_get_owner(app->loops) != NULL && app->dump_loop == NULL)
+	{
+		g_autofree gchar *store = ai_loop_store_default_directory();
+		g_autofree gchar *key = loop_resume_key(app);
+
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
+	}
 }
 
 /*

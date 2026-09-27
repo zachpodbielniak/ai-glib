@@ -66,6 +66,7 @@ see their provider pages.
 
 *** Commands, skills and agents
 - [[file:harness.org][The harness layer]] - Reading the other harnesses' files, @ mentions, completion
+- [[file:loops-and-goals.org][Loops and goals]] - /loop and /goal: scheduled prompts and bounded goals, in every front-end
 - [[file:commands.org][Authoring commands, skills and agents]] - File formats, with worked examples
 
 *** Observing a turn
