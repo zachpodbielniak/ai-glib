@@ -445,7 +445,7 @@ completed_provider_playback(Fixture *f, gconstpointer data)
  * several seconds of audio, identical on every call when it is seeded. */
 typedef struct {
 	const gchar *reply;
-	const gchar *spoken[4];
+	const gchar *spoken[6];
 } SpeakableCase;
 static const SpeakableCase speakable_cases[] = {
 	{"Let's get to work. \360\237\230\210", {"Let's get to work.", NULL}},
@@ -456,6 +456,11 @@ static const SpeakableCase speakable_cases[] = {
 	{"Shipped \342\234\205 and green.", {"Shipped and green.", NULL}},
 	{"Wait?! Really?", {"Wait?!", "Really?", NULL}},
 	{"He said \"stop.\" Then left.", {"He said \"stop.\"", "Then left.", NULL}},
+	{"Steps:\n1. Pull the branch.\n2. Build it.",
+	 {"Steps:", "1. Pull the branch.", "2. Build it.", NULL}},
+	{"## Summary\n> All green.\n- One fix.\n* Two tests.",
+	 {"Summary", "All green.", "One fix.", "Two tests.", NULL}},
+	{"It is 5 - 3 degrees.", {"It is 5 - 3 degrees.", NULL}},
 };
 static void
 speakable_segments(Fixture *f, gconstpointer data)

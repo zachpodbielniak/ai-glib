@@ -164,8 +164,19 @@ speakable(const gchar *text)
 {
 	GString *out = g_string_new(NULL);
 	gboolean alnum = FALSE, space = FALSE;
-	const gchar *p;
-	for (p = text; *p != '\0'; p = g_utf8_next_char(p)) {
+	const gchar *p = text;
+	/* Markdown block markers ("## ", "> ", "- ") would be read aloud. */
+	for (;;) {
+		const gchar *q;
+		while (g_ascii_isspace(*p))
+			p++;
+		for (q = p; *q == '#' || *q == '>' || *q == '-' || *q == '+'; q++)
+			;
+		if (q == p || !g_ascii_isspace(*q))
+			break;
+		p = q;
+	}
+	for (; *p != '\0'; p = g_utf8_next_char(p)) {
 		gunichar c = g_utf8_get_char(p);
 		if (unspoken_char(c))
 			continue;
@@ -225,6 +236,19 @@ closing_len(const gchar *text, gsize len)
 		return 3;
 	return 0;
 }
+static gboolean
+list_number(const gchar *text, gsize dot)
+{
+	gsize i = 0;
+	while (i < dot && g_ascii_isspace(text[i]))
+		i++;
+	if (i == dot)
+		return FALSE;
+	for (; i < dot; i++)
+		if (!g_ascii_isdigit(text[i]))
+			return FALSE;
+	return TRUE;
+}
 /* Byte length of the sentence at the head of @text, or 0 when none is
  * complete yet. Inside the text a terminator ends a sentence only when
  * whitespace follows it, so "3.5" is not cut apart, and a run of terminators
@@ -238,6 +262,9 @@ sentence_end(const gchar *text, gsize len, gboolean final)
 		if (text[i] == '\n')
 			return i + 1;
 		if (!terminator(text[i]))
+			continue;
+		/* "1." opening a numbered item is not a sentence of its own. */
+		if (text[i] == '.' && list_number(text, i))
 			continue;
 		end = i + 1;
 		while (end < len && terminator(text[end]))

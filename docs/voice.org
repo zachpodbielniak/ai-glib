@@ -51,6 +51,8 @@ reply.
 A terminator ends a sentence only when whitespace or the end of the text
 follows it. A run such as =?!= or =...= and any closing quote stay with their
 sentence. =3.5= is not split, and a streamed =3.= waits for the next delta.
+The number opening a list item (=1. Pull the branch.=) stays with its item,
+and leading markdown block markers (=##=, =>=, =-=, =+=) are dropped.
 Before a segment is sent, emoji, other pictographic symbols, invisible format
 characters and the markdown marks =*=, =`= and =~= are removed. Whitespace is
 collapsed and invalid UTF-8 is repaired. A segment with no letter or digit left
