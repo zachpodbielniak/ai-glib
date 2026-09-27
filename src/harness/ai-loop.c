@@ -3727,9 +3727,28 @@ goal_verdict(const gchar *text, gchar **why)
 
 	for (i = 0; lines[i] != NULL; i++)
 	{
-		guint w;
+		guint  w;
+		gchar *from;
+		gchar *to;
 
+		/* Markdown around a verdict is still the verdict: drop emphasis,
+		 * code marks and a quote marker before reading it. */
+		for (from = to = lines[i]; *from != '\0'; from++)
+		{
+			if (*from != '*' && *from != '`')
+			{
+				*to++ = *from;
+			}
+		}
+
+		*to = '\0';
 		g_strstrip(lines[i]);
+
+		if (lines[i][0] == '>')
+		{
+			memmove(lines[i], lines[i] + 1, strlen(lines[i]));
+			g_strstrip(lines[i]);
+		}
 
 		for (w = 0; w < G_N_ELEMENTS(words); w++)
 		{

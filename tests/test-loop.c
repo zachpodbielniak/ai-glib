@@ -861,6 +861,32 @@ test_vocabulary(void)
 	g_assert_cmpint(json_object_get_int_member(json_array_get_object_element(array, 1), "max_turns"), ==, 20);
 }
 
+/* Models dress a verdict in markdown. Bold or code around it is still
+ * the verdict; a goal that met its condition must not run to its bound. */
+static void
+test_goal_verdict_markdown(void)
+{
+	static const gchar *const replies[] = {
+		"Done.\n**GOAL_MET:** all green",
+		"Done.\n`GOAL_MET: all green`",
+		"Done.\n> **GOAL_MET**: all green",
+		NULL
+	};
+	guint i;
+
+	for (i = 0; replies[i] != NULL; i++)
+	{
+		g_autoptr(AiLoopSchedule) schedule = ai_loop_schedule_new();
+		g_autofree gchar         *id = ai_loop_schedule_add_goal(schedule, "green", 5, 0, 1, NULL);
+		g_autofree gchar         *notice = NULL;
+
+		g_assert_true(ai_loop_schedule_note_fired(schedule, id, 1, NULL));
+		notice = ai_loop_schedule_goal_complete(schedule, id, replies[i], NULL, 2);
+		g_assert_cmpint(ai_loop_schedule_get_state(schedule, 0), ==, AI_LOOP_STATE_MET);
+		g_assert_cmpstr(ai_loop_schedule_get_reason(schedule, 0), ==, "all green");
+	}
+}
+
 /* A goal that ran out of time while nothing was running is ended by the
  * reap with its reason, and a paused loop past its seven days goes. */
 static void
@@ -910,6 +936,7 @@ main(int argc, char **argv)
 	g_test_add_func("/ai-glib/loop/goal-bounds", test_goal_bounds_and_commands);
 	g_test_add_func("/ai-glib/loop/vocabulary", test_vocabulary);
 	g_test_add_func("/ai-glib/loop/reap", test_reap);
+	g_test_add_func("/ai-glib/loop/goal-verdict-markdown", test_goal_verdict_markdown);
 	{
 		gint status = g_test_run();
 		teardown_sandbox();

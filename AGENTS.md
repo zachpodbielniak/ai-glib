@@ -212,7 +212,9 @@ ai-glib/
 │   │   ├── ai-resource-registry.h/.c
 │   │   ├── ai-mention.h/.c    # @path references
 │   │   ├── ai-command.h/.c    # /commands, built-in and from disk
-│   │   └── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-loop.h/.c       # /loop and /goal: schedule, rules, vocabulary, store
+│   │   └── ai-loop-runner.h/.c # The one scheduler every frontend drives
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
