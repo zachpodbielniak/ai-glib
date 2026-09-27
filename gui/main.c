@@ -250,7 +250,9 @@ main(
 
 	if (opt_version)
 	{
-		g_print("ai-gui %s (ai-glib)\n", AI_GLIB_VERSION_STRING);
+		g_autofree gchar *summary = ai_build_info_dup_summary();
+
+		g_print("ai-gui %s\n", summary);
 		return 0;
 	}
 

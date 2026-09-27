@@ -581,6 +581,26 @@ def main():
     assert manifest[0]["id"] == "9"
     conversation.props.work_session = None
 
+    # Build provenance: what ai --version prints, readable from bindings.
+    version = AiGlib.build_info_get_version()
+    assert all(part.isdigit() for part in version.split(".")) and version.count(".") == 2
+    summary = AiGlib.build_info_dup_summary()
+    assert summary.startswith(AiGlib.build_info_get_version() + " (")
+    assert AiGlib.build_info_get_date() in summary
+    assert isinstance(AiGlib.build_info_get_dirty(), bool)
+    commit = AiGlib.build_info_get_commit()
+    assert (commit is None) == (AiGlib.build_info_get_describe() is None)
+    if commit is not None:
+        assert len(commit) == 40
+    assert AiGlib.build_info_get_prefix()
+
+    # The updates: config section is plain properties.
+    cfg2 = AiGlib.Config()
+    assert cfg2.props.update_check is True
+    assert cfg2.props.update_interval == 4 * 60 * 60
+    cfg2.props.update_upstream = "origin/main"
+    assert cfg2.props.update_upstream == "origin/main"
+
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"
           f" {AiGlib.__path__ if hasattr(AiGlib, '__path__') else '(typelib)'}")

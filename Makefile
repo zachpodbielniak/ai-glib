@@ -470,6 +470,11 @@ $(OUTDIR)/tests/test-ai-gui-work: $(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui
 		$(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
+$(OUTDIR)/tests/test-ai-gui-update: $(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)

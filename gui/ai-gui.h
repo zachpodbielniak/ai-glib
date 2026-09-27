@@ -154,4 +154,18 @@ ai_gui_window_export(
 	const gchar *arguments
 );
 
+/**
+ * ai_gui_window_update:
+ * @self: a window
+ * @arguments: (nullable): `status`, or nothing to run the update
+ *
+ * `/update`: check, or build and install. Refused while any session in
+ * the window has a turn running.
+ */
+void
+ai_gui_window_update(
+	AiGuiWindow *self,
+	const gchar *arguments
+);
+
 G_END_DECLS

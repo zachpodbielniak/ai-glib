@@ -22,6 +22,7 @@
 #include "ai-gui-settings.h"
 #include "ai-gui-sidebar.h"
 #include "ai-gui-style.h"
+#include "ai-gui-update.h"
 #include "ai-gui-work.h"
 
 struct _AiGuiWindow
@@ -44,6 +45,7 @@ struct _AiGuiWindow
 	GtkWidget *search_bar;
 	GtkWidget *search_entry;
 	GtkWidget *banner;
+	AiGuiUpdate *update;
 	GtkWidget *links_button;
 	GtkWidget *quota;
 	GtkWidget *links_popover;
@@ -1450,7 +1452,11 @@ action_about(
 	adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "ai-gui");
 	adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about),
 	                                      "chat-message-new-symbolic");
-	adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), AI_GLIB_VERSION_STRING);
+	{
+		g_autofree gchar *version = ai_build_info_dup_summary();
+
+		adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), version);
+	}
 	adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "ai-glib");
 	adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about),
 	                                  GTK_LICENSE_AGPL_3_0);
@@ -1502,6 +1508,77 @@ on_active_changed(
 	}
 }
 
+/* ================================================================
+ * Updates
+ * ================================================================ */
+
+/* Whether any session in this window has a turn in flight. An update
+ * replaces the binaries under all of them, so one busy session is
+ * enough to refuse. */
+static gboolean
+window_any_busy(AiGuiWindow *self)
+{
+	guint i;
+	guint n = ai_gui_session_store_get_n_sessions(self->store);
+
+	for (i = 0; i < n; i++)
+	{
+		if (ai_gui_session_get_busy(ai_gui_session_store_get(self->store, i)))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static void
+on_update_changed(AiGuiUpdate *update, gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+	g_autofree gchar *text = ai_gui_update_dup_banner(update);
+
+	adw_banner_set_title(ADW_BANNER(self->banner), text != NULL ? text : "");
+	adw_banner_set_button_label(ADW_BANNER(self->banner),
+		ai_gui_update_get_busy(update) ? NULL : "Update");
+	adw_banner_set_revealed(ADW_BANNER(self->banner), text != NULL);
+}
+
+/* Steps and outcomes go to the transcript the person is looking at. */
+static void
+on_update_message(AiGuiUpdate *update, const gchar *text, gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+
+	if (self->session != NULL)
+		ai_gui_commands_say(self->session, "%s", text);
+	else
+		ai_gui_window_toast(self, "%s", text);
+}
+
+static void
+on_update_clicked(AdwBanner *banner, gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+
+	ai_gui_update_run(self->update, window_any_busy(self));
+}
+
+void
+ai_gui_window_update(
+	AiGuiWindow *self,
+	const gchar *arguments
+){
+	g_autofree gchar *args = NULL;
+
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	args = g_strstrip(g_strdup(arguments != NULL ? arguments : ""));
+	if (g_str_equal(args, "status"))
+		ai_gui_update_check(self->update);
+	else if (args[0] == '\0')
+		ai_gui_update_run(self->update, window_any_busy(self));
+	else
+		on_update_message(self->update, "Usage: /update [status]", self);
+}
+
 static gboolean
 on_close_request(
 	GtkWindow *window,
@@ -1520,6 +1597,8 @@ on_close_request(
 	 * window is not somewhere to re-enter. */
 	if (self->quota != NULL)
 		ai_gui_quota_shutdown(AI_GUI_QUOTA(self->quota));
+	if (self->update != NULL)
+		ai_gui_update_shutdown(self->update);
 
 	ai_gui_session_store_save_all(self->store);
 
@@ -1714,6 +1793,7 @@ window_build_content(AiGuiWindow *self)
 	gtk_box_append(GTK_BOX(content), self->search_bar);
 
 	self->banner = adw_banner_new("");
+	g_signal_connect(self->banner, "button-clicked", G_CALLBACK(on_update_clicked), self);
 	gtk_box_append(GTK_BOX(content), self->banner);
 
 	self->chat = ai_gui_chat_view_new();
@@ -1827,6 +1907,17 @@ ai_gui_window_new(
 	if (options->dashboard)
 		ai_gui_window_show_dashboard(self, TRUE);
 
+	/* The update banner: checked in the background unless switched off. */
+	{
+		g_autoptr(AiConfig) config = ai_config_new();
+		g_autoptr(AiUpdater) updater = ai_updater_new(config);
+
+		self->update = ai_gui_update_new(updater);
+		g_signal_connect(self->update, "changed", G_CALLBACK(on_update_changed), self);
+		g_signal_connect(self->update, "message", G_CALLBACK(on_update_message), self);
+		ai_gui_update_start(self->update);
+	}
+
 	return self;
 }
 
@@ -1840,6 +1931,12 @@ ai_gui_window_dispose(GObject *object)
 	AiGuiWindow *self = AI_GUI_WINDOW(object);
 
 	ai_gui_style_remove_changed(on_appearance_changed, self);
+	if (self->update != NULL)
+	{
+		ai_gui_update_shutdown(self->update);
+		g_signal_handlers_disconnect_by_data(self->update, self);
+		g_clear_object(&self->update);
+	}
 	window_disconnect_session(self);
 	g_clear_object(&self->session);
 	g_clear_object(&self->store);
