@@ -2865,6 +2865,30 @@ ai_loop_schedule_stop_waiting(AiLoopSchedule *self)
 	return g_string_free(text, FALSE);
 }
 
+/**
+ * ai_loop_help_text:
+ *
+ * The examples every frontend's /help shows for /loop and /goal, so the
+ * terminal and the window teach the same commands.
+ *
+ * Returns: (transfer none): the text, several lines, no trailing newline
+ */
+const gchar *
+ai_loop_help_text(void)
+{
+	return
+		"Loops and goals\n"
+		"  /loop 5m check the deploy        every 5 minutes (1m floor; 7m rounds to 6m)\n"
+		"  /loop check whether CI passed    self-paced: the model picks the next delay\n"
+		"  /loop 1h /todos                  a /command on a schedule\n"
+		"  /goal the tests pass --turns 10  turns until it holds, at most 10 (default 20, 2h)\n"
+		"  /loop list    /goal list         ids, state, next run or progress\n"
+		"  /loop pause ID    /goal resume ID   also show, run, delete; /goal stop\n"
+		"  /loop edit ID --every 10m --prompt TEXT\n"
+		"  /goal edit ID --turns 30 --time 4h\n"
+		"  ai loop list --json              the same from a shell";
+}
+
 /* ----------------------------------------------------------------
  * Built-ins that a schedule may run. The command table decides; this
  * only asks it.
@@ -2908,10 +2932,25 @@ check_command(AiLoopSchedule *self, const gchar *prompt, GError **error)
 	if (command != NULL && ai_command_get_kind(command) == AI_COMMAND_BUILTIN &&
 	    !ai_command_get_schedulable(command))
 	{
+		g_autoptr(GString) allowed = g_string_new(NULL);
+		GList             *all = ai_command_set_list(self->commands);
+		GList             *link;
+
+		for (link = all; link != NULL; link = link->next)
+		{
+			if (ai_command_get_kind(link->data) == AI_COMMAND_BUILTIN &&
+			    ai_command_get_schedulable(link->data))
+			{
+				g_string_append_printf(allowed, "%s/%s", allowed->len > 0 ? " " : "",
+				                       ai_command_get_name(link->data));
+			}
+		}
+
+		g_list_free_full(all, g_object_unref);
 		g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
 		            "/%s cannot run on a schedule: it changes the session itself. "
-		            "Scheduled built-ins are the ones /help marks as schedulable.",
-		            name);
+		            "Built-ins a loop can run: %s",
+		            name, allowed->str);
 		return FALSE;
 	}
 
@@ -4317,26 +4356,21 @@ goal_progress(const Task *task, gint64 now_us)
 }
 
 /**
- * ai_loop_schedule_dup_line:
+ * ai_loop_schedule_dup_status:
  * @self: a schedule
  * @index: zero-based index
  * @now_us: real time in microseconds
  *
- * One entry on one line, the way `/loop list`, `/goal list`, `ai loop
- * list`, the ai-tui panel and the ai-gui view all show it:
+ * The state part of an entry, without its id or text: "every 5m, next in
+ * 4m", "paused", "turn 3/20, 1h 50m left", "met, 3/20 turns". A narrow
+ * panel shows this under the entry's text.
  *
- * |[
- * 1a2b3c4d  loop  active  every 5m  next in 4m  check the deploy
- * 5e6f7a8b  goal  active  turn 3/20, 1h 50m left  the tests pass
- * ]|
- *
- * Returns: (transfer full) (nullable): the line, or %NULL for a bad index
+ * Returns: (transfer full) (nullable): the text, or %NULL for a bad index
  */
 gchar *
-ai_loop_schedule_dup_line(AiLoopSchedule *self, guint index, gint64 now_us)
+ai_loop_schedule_dup_status(AiLoopSchedule *self, guint index, gint64 now_us)
 {
-	Task             *task = task_at(self, index);
-	g_autofree gchar *excerpt = NULL;
+	Task *task = task_at(self, index);
 
 	if (task == NULL)
 	{
@@ -4347,27 +4381,94 @@ ai_loop_schedule_dup_line(AiLoopSchedule *self, guint index, gint64 now_us)
 	{
 		g_autofree gchar *progress = goal_progress(task, now_us);
 
-		excerpt = prompt_excerpt(task->condition);
-
-		if (task->inflight)
+		if (task->state == AI_LOOP_STATE_ACTIVE)
 		{
-			return g_strdup_printf("%s  goal  %s  %s, running  %s", task->id,
-			                       ai_loop_state_to_string(task->state), progress, excerpt);
+			return task->inflight ? g_strdup_printf("%s, running", progress) : g_steal_pointer(&progress);
 		}
 
-		return g_strdup_printf("%s  goal  %s  %s  %s", task->id,
-		                       ai_loop_state_to_string(task->state), progress, excerpt);
+		return g_strdup_printf("%s, %s", ai_loop_state_to_string(task->state), progress);
 	}
 
 	{
 		g_autofree gchar *when = when_text(task, now_us);
+		const gchar      *cadence = task->cadence != NULL ? task->cadence : "scheduled";
 
-		excerpt = prompt_excerpt(task->prompt);
-		return g_strdup_printf("%s  loop  %s  %s  %s  %s", task->id,
-		                       ai_loop_state_to_string(task->state),
-		                       task->cadence != NULL ? task->cadence : "scheduled",
-		                       when, excerpt);
+		if (task->state == AI_LOOP_STATE_PAUSED && !task->inflight && !task->run_requested)
+		{
+			return g_strdup_printf("paused, %s", cadence);
+		}
+
+		return g_strdup_printf("%s, %s", cadence, when);
 	}
+}
+
+/**
+ * ai_loop_schedule_dup_excerpt:
+ * @self: a schedule
+ * @index: zero-based index
+ *
+ * The first line or so of what an entry runs: its prompt, its
+ * `/command`, "(maintenance prompt)", or a goal's condition.
+ *
+ * Returns: (transfer full) (nullable): the text, or %NULL for a bad index
+ */
+gchar *
+ai_loop_schedule_dup_excerpt(AiLoopSchedule *self, guint index)
+{
+	Task *task = task_at(self, index);
+
+	if (task == NULL)
+	{
+		return NULL;
+	}
+
+	return prompt_excerpt(task->kind == AI_LOOP_KIND_GOAL ? task->condition : task->prompt);
+}
+
+/**
+ * ai_loop_schedule_dup_line:
+ * @self: a schedule
+ * @index: zero-based index
+ * @now_us: real time in microseconds
+ *
+ * One entry on one line, the way `/loop list`, `/goal list`, `ai loop
+ * list` and the ai-gui view all show it:
+ *
+ * |[
+ * 1a2b3c4d  loop  active  every 5m, next in 4m  check the deploy
+ * 5e6f7a8b  goal  active  turn 3/20, 1h 50m left  the tests pass
+ * ]|
+ *
+ * Returns: (transfer full) (nullable): the line, or %NULL for a bad index
+ */
+gchar *
+ai_loop_schedule_dup_line(AiLoopSchedule *self, guint index, gint64 now_us)
+{
+	Task             *task = task_at(self, index);
+	g_autofree gchar *status = NULL;
+	g_autofree gchar *excerpt = NULL;
+
+	if (task == NULL)
+	{
+		return NULL;
+	}
+
+	status = ai_loop_schedule_dup_status(self, index, now_us);
+	excerpt = ai_loop_schedule_dup_excerpt(self, index);
+
+	/* The state word is already the start of a finished goal's status. */
+	if (task->kind == AI_LOOP_KIND_GOAL && task->state != AI_LOOP_STATE_ACTIVE)
+	{
+		return g_strdup_printf("%s  goal  %s  %s", task->id, status, excerpt);
+	}
+
+	if (task->kind == AI_LOOP_KIND_LOOP && g_str_has_prefix(status, "paused"))
+	{
+		return g_strdup_printf("%s  loop  %s  %s", task->id, status, excerpt);
+	}
+
+	return g_strdup_printf("%s  %s  %s  %s  %s", task->id, ai_loop_kind_to_string(task->kind),
+	                       ai_loop_state_to_string(task->state), status, excerpt);
 }
 
 /**

@@ -1223,6 +1223,11 @@ test_help_lists_commands_from_disk(void)
 	g_assert_nonnull(strstr(run->stdout_data, "/reset"));
 	g_assert_nonnull(strstr(run->stdout_data, "/effort"));
 
+	/* /loop and /goal come with worked examples, from the library. */
+	g_assert_nonnull(strstr(run->stdout_data, "Loops and goals"));
+	g_assert_nonnull(strstr(run->stdout_data, "/loop 5m check the deploy"));
+	g_assert_nonnull(strstr(run->stdout_data, "/goal the tests pass --turns 10"));
+
 	run_free(run);
 	sandbox_free(box);
 }
@@ -3148,7 +3153,8 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "expand", "/expand needs something to expand." },
 	{ "save", "/save needs a path." },
 	{ "export", "/export needs a format" },
-	{ "loop", "No scheduled loops." }
+	{ "loop", "No scheduled loops." },
+	{ "goal", "No goals." }
 };
 
 /**
@@ -3250,6 +3256,199 @@ test_loop_schedule(void)
 	g_assert_nonnull(strstr(saved, "every hour"));
 	g_assert_nonnull(strstr(saved, "0 * * * *"));
 	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/*
+ * A stub grok that answers the Nth call with `reply.N` (or `reply` when
+ * there is none) and counts its calls, so a goal's turns can be scripted
+ * one reply at a time.
+ */
+static gchar *
+goal_stub_new(const gchar *const *replies, const gchar *fallback)
+{
+	g_autoptr(GError) error = NULL;
+	gchar            *dir = g_dir_make_tmp("ai-glib-tui-goal-XXXXXX", &error);
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *path = NULL;
+	guint             i;
+
+	g_assert_no_error(error);
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"cat > /dev/null\n"
+		"n=$(cat '%s/calls' 2>/dev/null || echo 0)\n"
+		"n=$((n + 1))\n"
+		"echo $n > '%s/calls'\n"
+		"if [ -f '%s/reply.'$n ]; then cat '%s/reply.'$n; else cat '%s/reply'; fi\n",
+		dir, dir, dir, dir, dir);
+	path = g_build_filename(dir, "grok", NULL);
+	g_assert_true(g_file_set_contents(path, script, -1, NULL));
+	g_assert_cmpint(g_chmod(path, 0700), ==, 0);
+
+	for (i = 0; replies != NULL && replies[i] != NULL; i++)
+	{
+		g_autofree gchar *name = g_strdup_printf("reply.%u", i + 1);
+		sandbox_write(dir, name, replies[i]);
+	}
+
+	sandbox_write(dir, "reply", fallback);
+	return dir;
+}
+
+static gchar *
+goal_reply(const gchar *text)
+{
+	g_autofree gchar *escaped = g_strescape(text, NULL);
+
+	return g_strdup_printf("{\"type\":\"result\",\"result\":\"%s\",\"session_id\":\"s1\"}\n", escaped);
+}
+
+static guint
+goal_stub_calls(const gchar *dir)
+{
+	g_autofree gchar *path = g_build_filename(dir, "calls", NULL);
+	g_autofree gchar *text = NULL;
+
+	if (!g_file_get_contents(path, &text, NULL, NULL))
+	{
+		return 0;
+	}
+
+	return (guint)g_ascii_strtoull(text, NULL, 10);
+}
+
+static Run *
+goal_run(const gchar *dir, const gchar *line)
+{
+	g_autofree gchar *grok = g_build_filename(dir, "grok", NULL);
+	g_autofree gchar *state = g_build_filename(dir, "state", NULL);
+	const gchar      *args[] = { "-p", "grok-build", "--dump", line, NULL };
+	Run              *run = g_new0(Run, 1);
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	g_autoptr(GError) error = NULL;
+	guint i;
+
+	g_ptr_array_add(argv, tui_binary);
+	for (i = 0; args[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer)args[i]);
+	g_ptr_array_add(argv, NULL);
+
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	g_subprocess_launcher_set_cwd(launcher, dir);
+	g_subprocess_launcher_setenv(launcher, "GROK_PATH", grok, TRUE);
+	g_subprocess_launcher_setenv(launcher, "HOME", dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_STATE_HOME", state, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_DATA_HOME", dir, TRUE);
+	g_subprocess_launcher_unsetenv(launcher, "AI_LOOP_DISABLE");
+	proc = g_subprocess_launcher_spawnv(launcher, (const gchar * const *)argv->pdata, &error);
+	g_assert_no_error(error);
+	g_subprocess_communicate_utf8(proc, NULL, NULL, &run->stdout_data, &run->stderr_data, &error);
+	g_assert_no_error(error);
+	run->status = g_subprocess_get_exit_status(proc);
+	return run;
+}
+
+/**
+ * test_dump_goal_met:
+ *
+ * `--dump "/goal ..."` runs the goal to its end: a turn, a verdict of
+ * not met, the next turn carrying that verdict, and a met verdict that
+ * ends the run. The stub is called exactly twice.
+ */
+static void
+test_dump_goal_met(void)
+{
+	g_autofree gchar *first = goal_reply("Fixed one.\nGOAL_NOT_MET: one test still fails");
+	g_autofree gchar *second = goal_reply("All green.\nGOAL_MET: make test passes");
+	const gchar      *replies[] = { first, second, NULL };
+	g_autofree gchar *dir = goal_stub_new(replies, second);
+	g_autofree gchar *stdin_path = g_build_filename(dir, "stdin.log", NULL);
+	Run              *run = goal_run(dir, "/goal the tests pass --turns 5");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Goal"));
+	g_assert_nonnull(strstr(run->stdout_data, "not met yet (turn 1/5): one test still fails"));
+	g_assert_nonnull(strstr(run->stdout_data, "met after 2 turns: make test passes"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 2);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_dump_goal_bound:
+ *
+ * A goal the model never meets ends at its turn bound and says so, as
+ * expired and not met -- never as met, and never by running forever.
+ */
+static void
+test_dump_goal_bound(void)
+{
+	g_autofree gchar *reply = goal_reply("Tried again.\nGOAL_NOT_MET: still red");
+	g_autofree gchar *dir = goal_stub_new(NULL, reply);
+	Run              *run = goal_run(dir, "/goal it can never pass --turns 2");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "expired: not met after 2 turns"));
+	/* "not met after 2 turns, its bound" -- never "met after 2 turns: ...". */
+	g_assert_null(strstr(run->stdout_data, "met after 2 turns:"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 2);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_dump_loop_does_not_hold:
+ *
+ * A loop scheduled from --dump is confirmed and the run ends: a timer
+ * is not a reason to keep a one-shot process alive, and nothing is sent.
+ */
+static void
+test_dump_loop_does_not_hold(void)
+{
+	g_autofree gchar *reply = goal_reply("unused");
+	g_autofree gchar *dir = goal_stub_new(NULL, reply);
+	Run              *run = goal_run(dir, "/loop 5m check the deploy");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "every 5m"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 0);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_goal_schedule_panel:
+ *
+ * In the real terminal: /goal is confirmed, /goal list shows the entry
+ * in the shared vocabulary, and the panel lists it with its progress.
+ */
+static void
+test_goal_schedule_panel(void)
+{
+	Stub *stub;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_command("/loop 60m ping the build", "every hour");
+	tmux_command("/goal list", "No goals.");
+	tmux_command("/loop pause all", "Paused 1 scheduled loop");
+	tmux_command("/loop list", "paused, every hour");
+	tmux_command("/loop resume all", "Resumed 1 scheduled loop");
+	tmux_command("/loop pause nosuchid", "Valid ids:");
+	tmux_command("/loop 10m /clear", "cannot run on a schedule");
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }
@@ -3903,6 +4102,10 @@ main(int argc, char *argv[])
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-control-a-e", control_keys, test_command_cursor_completion);
 	g_test_add_func("/ai-glib/ai-tui/builtins/catalog", test_builtin_catalog);
 	g_test_add_func("/ai-glib/ai-tui/builtins/loop-schedule", test_loop_schedule);
+	g_test_add_func("/ai-glib/ai-tui/builtins/goal-schedule", test_goal_schedule_panel);
+	g_test_add_func("/ai-glib/ai-tui/dump/goal-met", test_dump_goal_met);
+	g_test_add_func("/ai-glib/ai-tui/dump/goal-bound", test_dump_goal_bound);
+	g_test_add_func("/ai-glib/ai-tui/dump/loop-does-not-hold", test_dump_loop_does_not_hold);
 	for (i = 0; i < G_N_ELEMENTS(COMMAND_CASES); i++)
 	{
 		g_autofree gchar *path = g_strconcat("/ai-glib/ai-tui/builtins/", COMMAND_CASES[i].name, NULL);

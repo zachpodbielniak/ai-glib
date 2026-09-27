@@ -131,7 +131,7 @@ test_list_human_and_json(void)
 	out = ai(human, 0, NULL);
 	g_assert_nonnull(strstr(out, "sess-json"));
 	g_assert_nonnull(strstr(out, loop_id));
-	g_assert_nonnull(strstr(out, "loop  active  every 5m  next in"));
+	g_assert_nonnull(strstr(out, "loop  active  every 5m, next in"));
 	/* `ai loop list` lists loops; goals are `ai goal list`. */
 	g_assert_null(strstr(out, goal_id));
 

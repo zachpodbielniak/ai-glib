@@ -680,6 +680,59 @@ ai_loop_runner_turn_finished(
 }
 
 /**
+ * ai_loop_runner_turn_cancelled:
+ * @self: a runner
+ * @now_us: real time in microseconds
+ *
+ * The person stopped a scheduled turn. That is an instruction, not a
+ * failure: a goal is paused, its turn uncounted, until it is resumed;
+ * a self-paced loop waits as if it had not named a delay. Nothing
+ * refires straight away.
+ */
+void
+ai_loop_runner_turn_cancelled(AiLoopRunner *self, gint64 now_us)
+{
+	g_autofree gchar *id = NULL;
+	g_autofree gchar *notice = NULL;
+	gint              index;
+
+	g_return_if_fail(AI_IS_LOOP_RUNNER(self));
+
+	if (self->active_id == NULL)
+	{
+		return;
+	}
+
+	id = g_steal_pointer(&self->active_id);
+	sync_from_disk(self, now_us);
+	index = ai_loop_schedule_find(self->schedule, id);
+
+	if (index < 0)
+	{
+		g_signal_emit(self, signals[SIGNAL_CHANGED], 0);
+		return;
+	}
+
+	if (ai_loop_schedule_get_kind(self->schedule, (guint)index) == AI_LOOP_KIND_GOAL)
+	{
+		ai_loop_schedule_clear_inflight(self->schedule, id);
+
+		if (ai_loop_schedule_pause(self->schedule, id, NULL))
+		{
+			notice = g_strdup_printf("Goal %s paused: its turn was stopped. /goal resume %s continues it.",
+			                         id, id);
+		}
+	}
+	else if (ai_loop_schedule_id_is_dynamic(self->schedule, id))
+	{
+		notice = ai_loop_schedule_complete(self->schedule, id, NULL, now_us);
+	}
+
+	say(self, notice);
+	persist(self);
+}
+
+/**
  * ai_loop_runner_command:
  * @self: a runner
  * @name: "loop" or "goal"

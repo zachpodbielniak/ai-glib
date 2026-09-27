@@ -73,6 +73,9 @@ ai_loop_runner_turn_finished(
 	gint64        now_us
 );
 
+void
+ai_loop_runner_turn_cancelled(AiLoopRunner *self, gint64 now_us);
+
 gchar *
 ai_loop_runner_command(
 	AiLoopRunner *self,

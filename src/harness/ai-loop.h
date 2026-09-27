@@ -78,6 +78,9 @@ ai_loop_state_is_final(AiLoopState state);
 gchar *
 ai_loop_format_duration(gint64 duration_us);
 
+const gchar *
+ai_loop_help_text(void);
+
 gchar *
 ai_loop_format_relative(gint64 delta_us);
 
@@ -570,6 +573,16 @@ ai_loop_schedule_goal_command(
 	gint64          now_us,
 	GError        **error
 );
+
+gchar *
+ai_loop_schedule_dup_status(
+	AiLoopSchedule *self,
+	guint           index,
+	gint64          now_us
+);
+
+gchar *
+ai_loop_schedule_dup_excerpt(AiLoopSchedule *self, guint index);
 
 gchar *
 ai_loop_schedule_dup_line(
