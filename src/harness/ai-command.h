@@ -102,6 +102,12 @@ ai_command_get_argument_hint(AiCommand *self);
 AiCommandKind
 ai_command_get_kind(AiCommand *self);
 
+gboolean
+ai_command_get_schedulable(AiCommand *self);
+
+void
+ai_command_set_schedulable(AiCommand *self, gboolean schedulable);
+
 AiResource *
 ai_command_get_resource(AiCommand *self);
 

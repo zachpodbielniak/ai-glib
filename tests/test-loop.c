@@ -392,6 +392,11 @@ test_default_prompt_files(void)
 	g_assert_cmpuint(strlen(text), ==, 24999);
 }
 
+/*
+ * Self-paced loops used to be dropped on save, following Claude Code. A
+ * loop now outlives the process that scheduled it -- the model-paced kind
+ * included -- so both come back, and both still expire after 7 days.
+ */
 static void
 test_save_load_drops_dynamic_and_expired(void)
 {
@@ -410,12 +415,15 @@ test_save_load_drops_dynamic_and_expired(void)
 	g_assert_no_error(error);
 	count = ai_loop_schedule_load(loaded, path, now, &error);
 	g_assert_no_error(error);
-	g_assert_cmpint(count, ==, 1);
+	g_assert_cmpint(count, ==, 2);
 	g_assert_cmpstr(ai_loop_schedule_get_id(loaded, 0), ==, id);
 	g_assert_cmpstr(ai_loop_schedule_get_prompt(loaded, 0), ==, "keep me");
 	g_assert_false(ai_loop_schedule_id_is_dynamic(loaded, id));
 	g_assert_cmpint(ai_loop_schedule_get_fire_us(loaded, 0), ==,
 	                ai_loop_schedule_get_fire_us(schedule, 0));
+	g_assert_cmpstr(ai_loop_schedule_get_id(loaded, 1), ==, ai_loop_schedule_get_id(schedule, 1));
+	g_assert_cmpstr(ai_loop_schedule_get_prompt(loaded, 1), ==, "self paced");
+	g_assert_true(ai_loop_schedule_id_is_dynamic(loaded, ai_loop_schedule_get_id(loaded, 1)));
 
 	count = ai_loop_schedule_load(loaded, path,
 	                              now + (gint64)8 * 24 * 60 * 60 * G_USEC_PER_SEC, &error);
