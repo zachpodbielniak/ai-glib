@@ -296,6 +296,15 @@ test_add(void)
 		out = ai(args, 1, &err);
 	}
 
+	/* The shell refuses what the slash command refuses. */
+	{
+		const gchar *args[] = { "loop", "add", "--session", "sess-add", "10m", "/clear", NULL };
+		g_clear_pointer(&out, g_free);
+		g_clear_pointer(&err, g_free);
+		out = ai(args, 1, &err);
+		g_assert_nonnull(strstr(err, "/clear cannot run on a schedule"));
+	}
+
 	schedule = load("sess-add");
 	g_assert_cmpuint(ai_loop_schedule_get_n_tasks(schedule), ==, 2);
 	g_assert_cmpstr(ai_loop_schedule_get_condition(schedule, 0), ==, "the docs build");

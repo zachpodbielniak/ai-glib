@@ -34,6 +34,20 @@ typedef struct
 	gchar          *directory;
 } LoopCliSession;
 
+/*
+ * The built-ins, so a shell refuses what the slash command refuses:
+ * `ai loop add --session X 10m /clear` is the same mistake as typing it.
+ * No registry -- a command from disk is never refused, so scanning the
+ * disk would change no answer.
+ */
+static void
+loop_cli_attach_commands(AiLoopSchedule *schedule)
+{
+	g_autoptr(AiCommandSet) commands = ai_command_set_new(NULL);
+
+	ai_loop_schedule_set_commands(schedule, commands);
+}
+
 static void
 loop_cli_session_free(gpointer data)
 {
@@ -155,6 +169,7 @@ loop_cli_sessions(const gchar *store, const gchar *only, gint64 now)
 		session->owner = g_strdup(owners[i]);
 		session->path = ai_loop_store_path(store, owners[i]);
 		session->schedule = ai_loop_schedule_new();
+		loop_cli_attach_commands(session->schedule);
 
 		if (ai_loop_schedule_load(session->schedule, session->path, now, &error) < 0)
 		{
@@ -415,6 +430,7 @@ loop_cli_add(const gchar *store, const gchar *owner, AiLoopKind kind, const gcha
 		return 1;
 	}
 
+	loop_cli_attach_commands(schedule);
 	before = ai_loop_schedule_get_n_tasks(schedule);
 	notice = loop_cli_apply(schedule, kind, text, now, &error);
 
