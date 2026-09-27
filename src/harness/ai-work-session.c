@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <errno.h>
 
-static const gchar *field_names[] = {"project", "directory", "branch", "title", "provider", "model", "provider-session", "socket", "pane", "activity", "status"};
+/* "loop-owner" names the schedule file (ai-loop.h) this session runs, so a
+ * dashboard can show its loops and goals without being that process. */
+static const gchar *field_names[] = {"project", "directory", "branch", "title", "provider", "model", "provider-session", "socket", "pane", "activity", "status", "loop-owner"};
 
 struct _AiWorkSession
 {

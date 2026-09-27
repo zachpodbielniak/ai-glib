@@ -299,6 +299,27 @@ dashboard_build_row(
 	gtk_widget_add_css_class(detail, "ai-session-subtitle");
 	gtk_box_append(GTK_BOX(column), detail);
 
+	/*
+	 * Loops and goals, read from the session's own schedule file -- so a
+	 * row shows them whichever front-end runs it, running or not.
+	 */
+	{
+		const gchar *owner = row_field(work, "loop-owner");
+		g_autofree gchar *loops = *owner != '\0'
+			? ai_loop_store_dup_summary(NULL, owner, g_get_real_time()) : NULL;
+
+		if (loops != NULL)
+		{
+			GtkWidget *label = gtk_label_new(loops);
+
+			gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+			gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+			gtk_widget_add_css_class(label, "dim-label");
+			gtk_widget_add_css_class(label, "ai-session-subtitle");
+			gtk_box_append(GTK_BOX(column), label);
+		}
+	}
+
 	activity = gtk_label_new(row_field(work, "activity"));
 	gtk_label_set_xalign(GTK_LABEL(activity), 0.0f);
 	gtk_label_set_ellipsize(GTK_LABEL(activity), PANGO_ELLIPSIZE_END);

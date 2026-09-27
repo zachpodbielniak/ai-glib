@@ -489,11 +489,9 @@ typedef struct
     gint link_last_row;
     gint link_pressed;
 
-    /* /loop. The source is on the thread-default context and is destroyed
-     * by pointer, not by id. */
-    AiLoopSchedule *loops;
-    GSource        *loop_source;
-    gchar          *loop_active_id;
+    /* /loop and /goal: the shared runner, which owns the timer. */
+    AiLoopRunner   *loops;
+    gboolean        loop_builtin;
 } App;
 
 static void app_schedule_redraw(App *app);
@@ -1735,6 +1733,36 @@ draw_chrome(App *app)
 		g_autofree gchar *todo_heading = g_strdup_printf("TODOS / %u", n);
 		g_autofree gchar *agent_heading = g_strdup_printf("AGENTS / %u", g_list_length(agents));
 		GList *iter;
+		{
+			/* Words from the library, the same ones ai-gui and `ai loop
+			 * list` print. Text first, state under it: 28 columns do not
+			 * fit both on one line. */
+			AiLoopSchedule *schedule = app->loops != NULL ? ai_loop_runner_get_schedule(app->loops) : NULL;
+			guint loops = schedule != NULL ? ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_LOOP) : 0;
+			guint goals = schedule != NULL ? ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_GOAL) : 0;
+			g_autofree gchar *heading = g_strdup_printf("LOOPS %u / GOALS %u", loops, goals);
+			gint64 now = g_get_real_time();
+			guint shown = 0;
+
+			y = panel_text(y + 1, x, 28, heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+			if (loops + goals == 0) y = panel_text(y, x, 28, "None /loop /goal", theme_attr(PAIR_SURFACE), FALSE);
+			for (i = 0; schedule != NULL && i < ai_loop_schedule_get_n_tasks(schedule) && shown < 3 && y < LINES - 6; i++)
+			{
+				g_autofree gchar *excerpt = NULL;
+				g_autofree gchar *status = NULL;
+				if (ai_loop_state_is_final(ai_loop_schedule_get_state(schedule, i))) continue;
+				excerpt = ai_loop_schedule_dup_excerpt(schedule, i);
+				status = ai_loop_schedule_dup_status(schedule, i, now);
+				y = panel_text(y, x, 28, excerpt, theme_attr(PAIR_SURFACE), TRUE);
+				y = panel_text(y, x + 2, 26, status, theme_attr(PAIR_SURFACE) | A_DIM, FALSE);
+				shown++;
+			}
+			if (loops + goals > shown && y < LINES - 5)
+			{
+				g_autofree gchar *more = g_strdup_printf("+%u more /loop list /goal list", loops + goals - shown);
+				y = panel_text(y, x, 28, more, theme_attr(PAIR_SURFACE), FALSE);
+			}
+		}
 		y = panel_text(y + 1, x, 28, todo_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 		if (n == 0) y = panel_text(y, x, 28, "No todos yet /todos", theme_attr(PAIR_SURFACE), FALSE);
 		for (i = 0; i < n && i < 3 && y < LINES - 5; i++)
@@ -2579,6 +2607,7 @@ show_help(App *app)
 
     g_list_free_full(commands, g_object_unref);
 
+    g_string_append_printf(out, "\n%s\n", ai_loop_help_text());
     g_string_append(out,
                     "\nKeys\n"
 					"  ^O help / ^T cycle theme / ^P panel / ^L latest\n"
@@ -2595,7 +2624,7 @@ show_help(App *app)
 					"  ^V           attach clipboard image (up to 4, 5 MiB each)\n"
 					"  Delete       delete the next Unicode character\n"
 					"  ^W / ^K      kill previous word / to line end\n"
-					"  Esc          on an empty line, stop a self-paced /loop\n"
+					"  Esc          on an empty line, stop self-paced /loops\n"
 					"  ^Y           yank the last killed text\n"
                     "  ^C           stop the turn, then clear the line,\n"
                     "               then drop queued prompts, then quit\n"
@@ -2924,6 +2953,8 @@ change_directory(App *app, const gchar *path)
     }
 
     ai_conversation_set_working_directory(app->conversation, resolved);
+    if (app->loops != NULL)
+        ai_loop_runner_set_working_directory(app->loops, resolved);
     if (app->work != NULL)
     {
         g_autoptr(AiWorkSession) location = ai_work_session_new(resolved);
@@ -2985,20 +3016,32 @@ show_expansion(App *app, const gchar *line)
 }
 
 /*
- * /loop. The schedule lives in the library; this file only decides when
- * the session is idle enough to send the next one, and it tears the
- * timer down by pointer because the source is on the thread-default context.
+ * /loop and /goal. The schedule and the scheduler live in the library
+ * (AiLoopRunner, shared with ai-gui). This file answers "is the session
+ * idle", sends what it is handed, and reports how the turn ended.
  */
 
-static AiLoopSchedule *
-app_loops(App *app)
+static gchar *
+loop_resume_key(App *app)
 {
-	if (app->loops == NULL)
-	{
-		app->loops = ai_loop_schedule_new();
-	}
+	const gchar *provider;
+	const gchar *cwd;
 
-	return app->loops;
+	provider = ai_provider_type_to_string(ai_provider_get_provider_type(
+		AI_PROVIDER(ai_conversation_get_provider(app->conversation))));
+	cwd = ai_conversation_get_working_directory(app->conversation);
+	return g_strdup_printf("%s\n%s", provider != NULL ? provider : "unknown", cwd != NULL ? cwd : "");
+}
+
+static void
+loop_save(App *app)
+{
+	g_autoptr(GError) error = NULL;
+
+	if (app->loops != NULL && !ai_loop_runner_save(app->loops, &error))
+	{
+		say(app, "Could not save loops and goals: %s", error->message);
+	}
 }
 
 static gboolean
@@ -3037,104 +3080,105 @@ loop_should_restore(void)
 	return FALSE;
 }
 
-static gchar *
-loop_resume_path(App *app)
-{
-	const gchar      *provider;
-	const gchar      *cwd;
-	g_autofree gchar *material = NULL;
-	g_autofree gchar *sum = NULL;
-
-	provider = ai_provider_type_to_string(ai_provider_get_provider_type(
-		AI_PROVIDER(ai_conversation_get_provider(app->conversation))));
-	cwd = ai_conversation_get_working_directory(app->conversation);
-	material = g_strdup_printf("%s\n%s",
-	                           provider != NULL ? provider : "unknown",
-	                           cwd != NULL ? cwd : "");
-	sum = g_compute_checksum_for_string(G_CHECKSUM_SHA256, material, -1);
-	return g_build_filename(app->work_directory, "loops", "resume", sum, NULL);
-}
-
+/*
+ * Which schedule this process runs. A fresh launch starts its own, keyed
+ * by the new session's id. A resumed one takes over the schedule the
+ * previous process ran: --workspace-session names it, and -c finds it
+ * through the pointer the last run in this directory left. The file is
+ * claimed with a lock, so a second window resuming the same session
+ * starts without it rather than firing every prompt twice.
+ */
 static void
-loop_save(App *app)
+loop_open(App *app)
 {
-	g_autofree gchar  *path = NULL;
-	g_autofree gchar  *resume = NULL;
+	g_autofree gchar  *store = ai_loop_store_default_directory();
+	g_autofree gchar  *key = loop_resume_key(app);
+	g_autofree gchar  *owner = NULL;
+	g_autofree gchar  *legacy = NULL;
 	g_autoptr(GError)  error = NULL;
+	const gchar       *work_id = ai_work_session_get_id(app->work);
+	gint64             now = g_get_real_time();
+	AiLoopSchedule    *schedule = ai_loop_runner_get_schedule(app->loops);
+	guint              restored;
 
-	if (!app->running || app->loops == NULL || app->work == NULL ||
-	    app->work_directory == NULL)
+	if (loop_should_restore())
 	{
-		return;
-	}
-
-	path = g_build_filename(app->work_directory, "loops",
-	                        ai_work_session_get_id(app->work), NULL);
-	resume = loop_resume_path(app);
-
-	if (!ai_loop_schedule_save(app->loops, path, &error) ||
-	    !ai_loop_schedule_save(app->loops, resume, &error))
-	{
-		say(app, "Could not save loops: %s", error != NULL ? error->message : "unknown error");
-	}
-}
-
-static void
-loop_restore(App *app)
-{
-	g_autofree gchar  *primary = NULL;
-	g_autofree gchar  *fallback = NULL;
-	g_autoptr(GError)  error = NULL;
-	gint               loaded;
-
-	if (!loop_should_restore() || app->work == NULL || app->work_directory == NULL)
-	{
-		return;
-	}
-
-	fallback = loop_resume_path(app);
-
-	if (opt_workspace_session != NULL)
-	{
-		primary = g_build_filename(app->work_directory, "loops",
-		                           ai_work_session_get_id(app->work), NULL);
-	}
-	else
-	{
-		primary = g_strdup(fallback);
-	}
-
-	loaded = ai_loop_schedule_load(app_loops(app), primary, g_get_real_time(), &error);
-
-	if (loaded < 0)
-	{
-		say(app, "Could not restore loops: %s", error->message);
-		return;
-	}
-
-	if (loaded == 0 && !g_file_test(primary, G_FILE_TEST_EXISTS) &&
-	    g_strcmp0(primary, fallback) != 0)
-	{
-		g_clear_error(&error);
-		loaded = ai_loop_schedule_load(app->loops, fallback, g_get_real_time(), &error);
-
-		if (loaded < 0)
+		if (opt_workspace_session != NULL)
 		{
-			say(app, "Could not restore loops: %s", error->message);
-			return;
+			const gchar *recorded = ai_work_session_get_field(app->work, "loop-owner");
+
+			owner = g_strdup(recorded != NULL && recorded[0] != '\0' ? recorded : work_id);
+		}
+		else if ((owner = ai_loop_store_dup_resume(store, key)) == NULL)
+		{
+			/* Before the pointer, the resume file was a copy of the
+			 * schedule itself. Adopt one of those into this session. */
+			g_autofree gchar *sum = g_compute_checksum_for_string(G_CHECKSUM_SHA256, key, -1);
+
+			legacy = g_build_filename(store, "resume", sum, NULL);
 		}
 	}
 
-	if (loaded > 0)
+	if (owner != NULL && !ai_loop_runner_open(app->loops, store, owner, now, &error))
 	{
-		say(app, "Restored %d scheduled loop%s.", loaded, loaded == 1 ? "" : "s");
+		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_BUSY))
+			say(app, "That session's loops and goals are running in another window; this one starts without them.");
+		else
+			say(app, "Could not restore loops and goals: %s", error->message);
+
+		g_clear_error(&error);
+	}
+
+	if (ai_loop_runner_get_path(app->loops) == NULL &&
+	    !ai_loop_runner_open(app->loops, store, work_id, now, &error))
+	{
+		say(app, "Loops and goals will not be saved: %s", error->message);
+		return;
+	}
+
+	if (legacy != NULL && g_file_test(legacy, G_FILE_TEST_IS_REGULAR) &&
+	    ai_loop_schedule_get_n_tasks(schedule) == 0)
+	{
+		if (ai_loop_schedule_load(schedule, legacy, now, &error) < 0)
+		{
+			say(app, "Could not restore loops: %s", error->message);
+			ai_loop_schedule_clear(schedule);
+			g_clear_error(&error);
+		}
+
+		loop_save(app);
+	}
+
+	g_object_set(app->work, "loop-owner", ai_loop_runner_get_owner(app->loops), NULL);
+	restored = ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_LOOP) +
+	           ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_GOAL);
+
+	if (restored > 0)
+	{
+		g_autofree gchar *summary = ai_loop_schedule_dup_summary(schedule, now);
+
+		/* This session carries the schedule on; the next -c here finds it. */
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
+		say(app, "Restored %s.", summary);
 	}
 }
 
+/*
+ * The runner asks before every fire. A one-shot --dump has nothing else
+ * to wait for, so there only a turn in flight holds it back -- that is
+ * what lets `ai-tui --dump "/goal ..."` run a goal to its end.
+ */
 static gboolean
-loop_blocked(App *app)
+loop_should_wait(AiLoopRunner *runner, gpointer user_data)
 {
-	return app->dump_loop != NULL ||
+	App *app = user_data;
+
+	if (app->dump_loop != NULL)
+	{
+		return app->sending || ai_conversation_get_busy(app->conversation);
+	}
+
+	return !app->running ||
 	       app->sending ||
 	       ai_conversation_get_busy(app->conversation) ||
 	       (app->send_queue != NULL && ai_prompt_queue_get_length(app->send_queue) > 0) ||
@@ -3144,46 +3188,32 @@ loop_blocked(App *app)
 	       app->dashboard ||
 	       app->searching ||
 	       app->picker_models != NULL ||
-	       app->launch_pending > 0 ||
-	       app->loop_active_id != NULL;
+	       app->launch_pending > 0;
 }
 
+static void on_loop_input_sent(GObject *source, GAsyncResult *result, gpointer user_data);
+
+/*
+ * A scheduled /command the library judged safe goes through the input
+ * pipeline, so a skill expands and a schedulable built-in such as /todos
+ * runs. One that is not safe -- a file written before the rule existed,
+ * scheduling /clear -- is sent to the model as text instead.
+ */
 static gboolean
-loop_line_is_builtin(App *app, const gchar *text)
+loop_fire(AiLoopRunner *runner, const gchar *id, const gchar *text, gboolean expand, gpointer user_data)
 {
-	const gchar *cursor;
-	g_autofree gchar *name = NULL;
-	g_autoptr(AiCommand) command = NULL;
+	App *app = user_data;
 
-	if (app->commands == NULL || text == NULL || text[0] != '/')
-	{
-		return FALSE;
-	}
-
-	cursor = text + 1;
-
-	while (*cursor != '\0' && !g_ascii_isspace(*cursor))
-	{
-		cursor++;
-	}
-
-	name = g_strndup(text + 1, (gsize)(cursor - (text + 1)));
-	command = ai_command_set_lookup(app->commands, name);
-	return command != NULL && ai_command_get_kind(command) == AI_COMMAND_BUILTIN;
-}
-
-static void
-loop_dispatch(App *app, const gchar *text)
-{
 	app->sending = TRUE;
 	app->follow = TRUE;
 	g_clear_object(&app->cancellable);
 	app->cancellable = g_cancellable_new();
 	app_sync_herdr(app);
 
-	/* A built-in inside a scheduled prompt is text for the model. Running
-	 * /clear from a loop would wipe the session that owns the loop. */
-	if (opt_no_expand || loop_line_is_builtin(app, text))
+	ai_loop_runner_set_working_directory(runner,
+		ai_conversation_get_working_directory(app->conversation));
+
+	if (opt_no_expand || !expand)
 	{
 		ai_conversation_send_async(app->conversation, text, app->cancellable,
 		                           on_sent, app);
@@ -3191,7 +3221,26 @@ loop_dispatch(App *app, const gchar *text)
 	else
 	{
 		ai_conversation_send_input_async(app->conversation, text, app->cancellable,
-		                                 on_input_sent, app);
+		                                 on_loop_input_sent, app);
+	}
+
+	return app->sending || ai_conversation_get_busy(app->conversation);
+}
+
+static void
+loop_notice(AiLoopRunner *runner, const gchar *text, gpointer user_data)
+{
+	say((App *)user_data, "%s", text);
+}
+
+static void
+loop_changed(AiLoopRunner *runner, gpointer user_data)
+{
+	App *app = user_data;
+
+	if (app->running)
+	{
+		app_schedule_redraw(app);
 	}
 }
 
@@ -3210,22 +3259,21 @@ loop_assistant_text(App *app)
 	return ai_message_get_text(AI_MESSAGE(last->data));
 }
 
+static gboolean send_error_is_cancelled(const GError *error);
+
 static void
 loop_after_turn(App *app, const GError *error)
 {
-	g_autofree gchar *id = NULL;
 	g_autofree gchar *text = NULL;
-	g_autofree gchar *notice = NULL;
 
-	if (app->loop_active_id == NULL || app->loops == NULL)
+	if (app->loops == NULL || ai_loop_runner_get_active_id(app->loops) == NULL)
 	{
 		return;
 	}
 
-	id = g_steal_pointer(&app->loop_active_id);
-
-	if (!ai_loop_schedule_id_is_dynamic(app->loops, id))
+	if (send_error_is_cancelled(error))
 	{
+		ai_loop_runner_turn_cancelled(app->loops, g_get_real_time());
 		return;
 	}
 
@@ -3234,96 +3282,45 @@ loop_after_turn(App *app, const GError *error)
 		text = loop_assistant_text(app);
 	}
 
-	notice = ai_loop_schedule_complete(app->loops, id, text, g_get_real_time());
-
-	if (notice != NULL)
-	{
-		say(app, "%s", notice);
-	}
-
-	loop_save(app);
+	ai_loop_runner_turn_finished(app->loops, text, error != NULL ? error->message : NULL,
+	                             g_get_real_time());
 }
 
+/* A one-shot run stays up while a goal it started still wants turns. */
 static gboolean
-on_loop_tick(gpointer user_data)
+loop_dump_continues(App *app)
 {
-	App              *app = user_data;
-	const gchar      *due;
-	g_autofree gchar *id = NULL;
-	g_autofree gchar *prompt = NULL;
-	g_autofree gchar *fired = NULL;
-	gboolean          dynamic;
-	const gchar      *cwd;
-
-	if (!app->running || app->loops == NULL || loop_blocked(app))
-	{
-		return G_SOURCE_CONTINUE;
-	}
-
-	due = ai_loop_schedule_due(app->loops, g_get_real_time());
-
-	if (due == NULL)
-	{
-		return G_SOURCE_CONTINUE;
-	}
-
-	id = g_strdup(due);
-	dynamic = ai_loop_schedule_id_is_dynamic(app->loops, id);
-	cwd = ai_conversation_get_working_directory(app->conversation);
-	prompt = ai_loop_schedule_dup_prompt(app->loops, id, cwd,
-	                                     g_get_user_config_dir(), g_get_home_dir());
-
-	if (prompt == NULL ||
-	    !ai_loop_schedule_note_fired(app->loops, id, g_get_real_time(), &fired))
-	{
-		return G_SOURCE_CONTINUE;
-	}
-
-	if (fired != NULL)
-	{
-		say(app, "%s", fired);
-	}
-
-	say(app, "Loop %s running.", id);
-
-	if (dynamic)
-	{
-		app->loop_active_id = g_strdup(id);
-	}
-
-	loop_save(app);
-	loop_dispatch(app, prompt);
-
-	if (dynamic && app->loop_active_id != NULL && !app->sending &&
-	    !ai_conversation_get_busy(app->conversation))
-	{
-		ai_loop_schedule_clear_inflight(app->loops, id);
-		g_clear_pointer(&app->loop_active_id, g_free);
-		say(app, "Loop %s did not start.", id);
-	}
-
-	return G_SOURCE_CONTINUE;
+	return app->dump_loop != NULL && app->loops != NULL &&
+	       ai_loop_runner_has_pending_goal(app->loops);
 }
 
 static void
-loop_command(App *app, const gchar *arguments)
+loop_command(App *app, const gchar *name, const gchar *arguments)
 {
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *notice = NULL;
-	const gchar      *cwd = ai_conversation_get_working_directory(app->conversation);
 
-	notice = ai_loop_schedule_command(app_loops(app), arguments, cwd,
-	                                  g_get_user_config_dir(), g_get_home_dir(),
-	                                  g_get_real_time(), &error);
+	ai_loop_runner_set_working_directory(app->loops,
+		ai_conversation_get_working_directory(app->conversation));
+	notice = ai_loop_runner_command(app->loops, name, arguments, g_get_real_time(), &error);
 
 	if (notice == NULL)
 	{
-		say(app, "%s", error != NULL ? error->message : "Could not schedule that loop.");
+		say(app, "%s", error != NULL ? error->message : "Could not change the schedule.");
 		return;
 	}
 
 	say(app, "%s", notice);
-	loop_save(app);
+
+	/* Written only by a session that schedules something: the next -c in
+	 * this directory resumes the schedule this one is using. */
+	if (ai_loop_runner_get_owner(app->loops) != NULL && app->dump_loop == NULL)
+	{
+		g_autofree gchar *store = ai_loop_store_default_directory();
+		g_autofree gchar *key = loop_resume_key(app);
+
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
+	}
 }
 
 /*
@@ -3738,9 +3735,9 @@ handle_builtin(App *app, AiCommandResult *result)
             }
         }
     }
-    else if (g_strcmp0(name, "loop") == 0)
+    else if (g_strcmp0(name, "loop") == 0 || g_strcmp0(name, "goal") == 0)
     {
-        loop_command(app, arguments);
+        loop_command(app, name, arguments);
     }
     else
     {
@@ -4698,7 +4695,8 @@ drain_keys(App *app)
 
 					if (!menu_open && app->input->len == 0 && app->loops != NULL)
 					{
-						g_autofree gchar *notice = ai_loop_schedule_stop_waiting(app->loops);
+						g_autofree gchar *notice = ai_loop_schedule_stop_waiting(
+							ai_loop_runner_get_schedule(app->loops));
 
 						if (notice != NULL)
 						{
@@ -4870,7 +4868,8 @@ app_finish_send(
 
 	app_schedule_redraw(app);
 
-	if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending)
+	if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending &&
+	    !loop_dump_continues(app))
 		g_main_loop_quit(app->dump_loop);
 }
 
@@ -4911,28 +4910,34 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
 		app->sending = FALSE;
 		app_sync_herdr(app);
 
-		/* A scheduled built-in is model text. Reaching here means the line
-		 * was resolved locally instead, and running it would do the thing
-		 * the loop was told not to do. */
-		if (app->loop_active_id != NULL)
-		{
-			say(app, "Scheduled /%s was not run.",
-			    ai_command_result_get_name(command));
-			app_finish_send(app, NULL, TRUE);
-			return;
-		}
-
         handle_builtin(app, command);
+
+		/* A schedulable built-in a loop ran has no reply to judge; its
+		 * turn is over when it returns. */
+		if (app->loop_builtin && app->loops != NULL)
+			ai_loop_runner_turn_finished(app->loops, NULL, NULL, g_get_real_time());
+
 		/* /quit clears running; dump mode never sets it. Flush only when
 		 * the interactive session is still alive. */
 		if (app->running && app_flush_send_queue(app))
 			return;
 		app_schedule_redraw(app);
-		if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending)
+		if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending &&
+		    !loop_dump_continues(app))
 			g_main_loop_quit(app->dump_loop);
     }
 	else
 		app_finish_send(app, NULL, TRUE);
+}
+
+static void
+on_loop_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	App *app = user_data;
+
+	app->loop_builtin = TRUE;
+	on_input_sent(source, result, user_data);
+	app->loop_builtin = FALSE;
 }
 
 /* ================================================================
@@ -5921,11 +5926,7 @@ app_reset(App *app)
 	}
 	/* Forget drafts and navigation as well as the visible conversation. */
 	if (app->loops != NULL)
-	{
-		ai_loop_schedule_clear(app->loops);
-		g_clear_pointer(&app->loop_active_id, g_free);
-		loop_save(app);
-	}
+		ai_loop_runner_clear(app->loops);
 	g_ptr_array_set_size(app->history, 0);
 	g_string_truncate(app->input, 0);
 	app_clear_send_queue(app);
@@ -6642,6 +6643,14 @@ main(int argc, char *argv[])
 	g_signal_connect_swapped(app.conversation, "notify::busy",
 		G_CALLBACK(app_sync_herdr), &app);
 
+    app.loops = ai_loop_runner_new();
+    ai_loop_schedule_set_commands(ai_loop_runner_get_schedule(app.loops), app.commands);
+    ai_loop_runner_set_working_directory(app.loops, ai_conversation_get_working_directory(app.conversation));
+    g_signal_connect(app.loops, "should-wait", G_CALLBACK(loop_should_wait), &app);
+    g_signal_connect(app.loops, "fire", G_CALLBACK(loop_fire), &app);
+    g_signal_connect(app.loops, "notice", G_CALLBACK(loop_notice), &app);
+    g_signal_connect(app.loops, "changed", G_CALLBACK(loop_changed), &app);
+
     app.work_directory = ai_work_session_default_directory();
     if (opt_workspace_session != NULL)
     {
@@ -6676,6 +6685,8 @@ main(int argc, char *argv[])
 
             app.loop = loop;
             app.dump_loop = loop;
+            /* No file: a one-shot run's goal ends with the run. */
+            ai_loop_runner_start(app.loops);
 			app.sending = TRUE;
 			app_sync_herdr(&app);
 
@@ -6703,6 +6714,7 @@ main(int argc, char *argv[])
 
             g_print("%s", text);
 
+            g_clear_object(&app.loops);
             g_clear_object(&app.work);
             g_clear_pointer(&app.work_directory, g_free);
             g_clear_object(&app.completion);
@@ -6723,6 +6735,7 @@ main(int argc, char *argv[])
     {
         g_printerr("ai-tui: stdin is not a terminal; pass a prompt as an "
                    "argument, pipe it on stdin, or use --dump PROMPT\n");
+        g_clear_object(&app.loops);
         g_clear_object(&app.work);
         g_clear_pointer(&app.work_directory, g_free);
         g_clear_object(&app.completion);
@@ -6772,7 +6785,9 @@ main(int argc, char *argv[])
         app.work_lock_fd = g_open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
         if (app.work_lock_fd < 0 || flock(app.work_lock_fd, LOCK_EX | LOCK_NB) != 0)
         {
-            g_printerr("ai-tui: cannot claim workspace session\n"); return 2;
+            g_printerr("ai-tui: cannot claim workspace session\n");
+            g_clear_object(&app.loops);
+            return 2;
         }
     }
     app.link_pressed = -1;
@@ -6917,10 +6932,8 @@ main(int argc, char *argv[])
      * the same blocks and must not spawn a language server per fence. */
     ai_view_text_block_set_semantic_highlight(TRUE);
     app_redraw(&app);
-	loop_restore(&app);
-	app.loop_source = g_timeout_source_new_seconds(1);
-	g_source_set_callback(app.loop_source, on_loop_tick, &app, NULL);
-	g_source_attach(app.loop_source, g_main_context_get_thread_default());
+	loop_open(&app);
+	ai_loop_runner_start(app.loops);
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
     g_main_loop_run(app.loop);
@@ -6929,6 +6942,10 @@ main(int argc, char *argv[])
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	/* Before anything else can spin the loop: nothing scheduled may start
+	 * while the session is closing, and the turn being cancelled below is
+	 * not judged -- closing the window is not an answer. */
+	ai_loop_runner_close(app.loops);
 	ai_quota_stop(&app.usage);
 	ai_quota_drain(&app.usage);
 	ai_quota_clear(&app.usage);
@@ -6955,13 +6972,6 @@ main(int argc, char *argv[])
 		g_source_remove(app.redraw_id);
 		app.redraw_id = 0;
 	}
-	if (app.loop_source != NULL)
-	{
-		g_source_destroy(app.loop_source);
-		g_source_unref(app.loop_source);
-		app.loop_source = NULL;
-	}
-	g_clear_pointer(&app.loop_active_id, g_free);
 	g_clear_object(&app.loops);
 
 	fputs("\033[?2004l", stdout);

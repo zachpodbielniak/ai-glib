@@ -421,8 +421,15 @@ work_draw(App *app)
 			g_string_append_printf(badges, " %s#%s", strstr(links[link_index], "/issues/") != NULL ? "ISSUE" : "PR", number != NULL ? number + 1 : "?");
 		}
 		if (g_strv_length(links) > 2) g_string_append_printf(badges, " +%u", g_strv_length(links) - 2);
-		line = g_strdup_printf("%-12s %s%s / %s / %s", work_field(row, "status"), project, badges->str,
-			work_field(row, "branch"), *work_field(row, "title") ? work_field(row, "title") : work_field(row, "provider"));
+		{
+			/* Read from the session's schedule file, so a row shows its
+			 * loops and goals whether or not that process is running. */
+			g_autofree gchar *schedule = *work_field(row, "loop-owner")
+				? ai_loop_store_dup_summary(NULL, work_field(row, "loop-owner"), g_get_real_time()) : NULL;
+			line = g_strdup_printf("%-12s %s%s / %s / %s%s%s", work_field(row, "status"), project, badges->str,
+				work_field(row, "branch"), *work_field(row, "title") ? work_field(row, "title") : work_field(row, "provider"),
+				schedule != NULL ? " / " : "", schedule != NULL ? schedule : "");
+		}
 		chrome_text(y, 1, COLS - 2, line, i == app->work_selected ? A_REVERSE : A_NORMAL);
 	}
 	if (app->work_rows == NULL || app->work_rows->len == 0)

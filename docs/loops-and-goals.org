@@ -1,0 +1,264 @@
+#+TITLE: Loops and goals
+
+* What they are
+
+Two ways to let a session keep working without somebody typing the next
+prompt.
+
+- A *loop* repeats a prompt or a =/command=: on an interval, or at a
+  delay the model picks after each pass. =/loop 10m check the deploy=.
+- A *goal* keeps taking turns until a condition holds, judged after each
+  turn, and always stops at a bound. =/goal the tests pass --turns 10=.
+
+Both belong to one session. They are the same thing in every front-end:
+=/loop= and =/goal= in ai-tui and ai-gui, =ai loop= and =ai goal= from a
+shell, and =AiLoopSchedule= / =AiLoopRunner= in the library. The words
+shown for them -- state names, "next in 4m", "turn 3/20" -- are produced
+once, in the library, so the terminal, the window and the CLI never
+disagree about one schedule.
+
+* Quick start
+
+#+begin_example
+/loop 5m check the deploy          every 5 minutes
+/loop check whether CI passed      self-paced: the model picks the delay
+/loop 1h /todos                    a /command on a schedule
+/loop                              the maintenance prompt (loop.md)
+/goal the tests pass --turns 10    turns until it holds, at most 10
+/loop list    /goal list           what is scheduled, in one line each
+/goal show 5e6f                    everything about one, by id prefix
+#+end_example
+
+* Vocabulary
+
+| Word | Means |
+|------+-------|
+| loop | A prompt or =/command= that repeats |
+| goal | Turns that continue until a condition holds |
+| id | Eight hex characters. Any unambiguous prefix of three or more works |
+| active | Runs when due |
+| paused | Kept, not run until resumed |
+| met | A goal whose condition the model reported holds |
+| failed | A goal that cannot continue: the model reported it blocked, or three turns in a row failed |
+| stopped | A goal somebody stopped before it was met |
+| expired | A goal that reached its turn or time bound without being met |
+
+The last four are final and only goals reach them. A loop that ends --
+seven days after it was created, or because the model said =LOOP_STOP=
+-- is removed, with a notice saying why. Finished goals stay in the list
+(the 30 most recent) so how one ended stays visible.
+
+* Loops
+
+| You type | What happens |
+|----------+--------------|
+| =/loop 5m PROMPT= | Every five minutes. The interval is rounded to one cron can express (=7m= becomes =6m=, =90m= becomes =2h=) and the confirmation says so |
+| =/loop PROMPT every 2 hours= | The same, with the interval at the end |
+| =/loop PROMPT= | Self-paced. The model ends each reply with =LOOP_NEXT: 5m why= or =LOOP_STOP: why=; the delay is clamped to 1--60 minutes. With neither, it waits 20 minutes once, then stops if the next reply also omits it |
+| =/loop 1h /todos= | A =/command=. A command from disk expands as typed. A built-in runs only if it is schedulable (below) |
+| =/loop= | The maintenance prompt, from =loop.md= when there is one |
+
+*The floor is one minute.* =30s= rounds up to =1m= and the confirmation
+says so; nothing fires more often than once a minute.
+
+*A fixed loop's clock is local*, and each one gets a small per-loop offset
+(derived from its id) so two loops on the same interval do not fire the
+same second.
+
+*Loops expire seven days after they are created*, fixed and self-paced
+alike. A fixed loop fires one last time, then goes.
+
+** Scheduled built-ins
+
+A schedule must not be able to change the session that owns it. A
+built-in that does -- =/clear=, =/reset=, =/quit=, =/model=, =/provider=,
+=/cwd=, =/loop=, =/goal=, ... -- is refused when it is scheduled, and the
+refusal lists the ones that are allowed. Those are the ones that report
+or write a file: =/todos=, =/running=, =/links=, =/tools=, =/save=,
+=/export=, =/expand=, =/reload= and a few more. The command table decides
+(=schedulable= in =BUILTIN_COMMANDS=); an embedder marks its own with
+=ai_command_set_schedulable()=.
+
+A schedule file written by hand, or by an older build, that names a
+refused built-in has the line sent to the model as text instead of run.
+
+* Goals
+
+#+begin_example
+/goal CONDITION [--turns N] [--time SPAN]
+#+end_example
+
+The first turn is sent as soon as the session is idle: "Work toward this
+goal until it holds", the condition, and an instruction to end with one
+verdict line:
+
+#+begin_example
+GOAL_MET: <the evidence that the condition holds now>
+GOAL_NOT_MET: <what still remains>
+GOAL_BLOCKED: <why it cannot be met without the user>
+#+end_example
+
+After each turn the verdict is read. =GOAL_MET= ends the goal as met;
+=GOAL_BLOCKED= ends it as failed; =GOAL_NOT_MET=, or no verdict at all,
+sends the next turn at once, carrying the last check. A turn that fails
+(a provider error) is retried a minute later; three in a row fail the
+goal.
+
+** The bound is what guarantees an end
+
+*The judge is the model doing the work*, and a model can be wrong about
+its own work. What makes a goal safe to leave running is the bound, which
+is checked whatever the model says:
+
+| Bound | Default | Most |
+|-------+---------+------|
+| =--turns N= | 20 | 200 |
+| =--time SPAN= (=30m=, =4h=, =2d=) | 2 hours | 7 days |
+
+There is no unbounded goal. A condition the model can never satisfy ends
+at whichever bound comes first, as *expired*, with the reason:
+
+#+begin_example
+Goal 5e6f7a8b expired: not met after 20 turns, its bound. Last check: two tests still fail
+#+end_example
+
+The time bound is wall-clock from when the goal was set. It keeps running
+while the goal is paused and while the application is closed; a goal
+that passed it while nothing was running is ended, with that reason, the
+next time its session opens.
+
+Raising the bounds of an expired goal (=/goal edit ID --turns 40=) makes
+it active again. A goal that was met, failed or stopped stays finished:
+start a new one.
+
+* Managing them
+
+The same verbs for both, on =/loop= and =/goal= and on =ai loop= and
+=ai goal=:
+
+| Verb | Does |
+|------+------|
+| =list= | One line per entry |
+| =show ID= | Everything about one |
+| =pause ID\vert all= | Keep it, do not run it. A turn in flight finishes |
+| =resume ID\vert all= | A fixed loop resumes at its next slot (missed ones are skipped); a self-paced loop or a goal runs when idle |
+| =run ID= | One turn as soon as the session is idle, even when paused (it stays paused) |
+| =delete ID\vert all= | Remove it. =cancel= is the same for loops |
+| =stop ID\vert all= | Goals: end as stopped, not met |
+| =edit ID ...= | Loops: =--every 10m=, =--self-paced=, =--prompt TEXT=. Goals: =--turns N=, =--time SPAN=, =--condition TEXT= |
+
+=--prompt= and =--condition= take the rest of the line, so they go last.
+
+A verb followed by more than one word is a prompt or a condition, not a
+command: =/loop list the deploys= schedules a loop, =/goal stop the
+bleeding= sets a goal.
+
+*A typo is an error that names the ids that exist*, never a silent no-op
+and never a guess:
+
+#+begin_example
+/loop pause 1a2x
+No loop '1a2x'. Valid ids: 1a2b3c4d, 9f8e7d6c.
+#+end_example
+
+A prefix matching more than one id is an error listing both.
+
+In ai-tui, Esc on an empty composer stops self-paced loops (=/loop stop=).
+
+* When a scheduled turn runs
+
+*Never mid-turn.* Something due waits for anything in flight -- a running
+turn, a queued draft, an approval, a decision, the dashboard -- and then
+runs *once*, however many slots went by. The same holds across a restart:
+a loop that missed three hours of five-minute slots while the application
+was closed fires once when its session opens, then carries on at the next
+slot.
+
+At most one scheduled turn starts per second, and none while another
+scheduled turn is still running.
+
+Stopping a scheduled turn (Ctrl+C, the stop button) is an instruction,
+not a failure: a goal is paused, its turn uncounted, until it is resumed;
+a self-paced loop waits as if it had not named a delay.
+
+* Where they live
+
+One file per session, under
+=$XDG_STATE_HOME/ai-glib/sessions/loops/<session>=, beside the
+dashboard's registry. It is JSON, version 2, written atomically at mode
+0600 and refused when it or its directory is a symlink. Version 1 files
+(fixed loops only, from before goals existed) still load.
+
+*A record that cannot be read costs itself.* An unknown state, a bound out
+of range, a duplicate id, a field of the wrong type: that record is
+skipped with a =g_debug=, and the rest load. A file that is not JSON, not
+UTF-8, or of an unknown version is an error for that session only --
+=ai loop list= reports it and lists every other session.
+
+*A running session claims its file with a lock*, so two processes never
+fire one schedule. A second window resuming the same session starts
+without its loops and says so.
+
+*Edits from outside are picked up within a second.* =ai loop pause ID=
+from a shell rewrites the file; the running session notices on its next
+tick. Every change the session makes is written at once.
+
+Which session a schedule belongs to:
+
+| Front-end | Owner | Comes back when |
+|-----------+-------+-----------------|
+| ai-tui | The dashboard session id | Resumed with =--workspace-session=, =-c= / =--continue=, or =--set session-id== |
+| ai-gui | The window's own session id | The application opens again: ai-gui restores its sessions |
+
+A fresh =ai-tui= starts its own empty schedule; the previous session's
+stays on disk, listed by =ai loop list= as not running, until that session
+is resumed. Deleting a session in ai-gui deletes its schedule. =/reset= in
+ai-tui clears it.
+
+Set =AI_LOOP_DISABLE= to anything other than =0=, =false=, =no= or =off=
+and nothing is scheduled or run.
+
+* Seeing them
+
+| Where | Shows |
+|-------+-------|
+| =/loop list=, =/goal list= | One line per entry |
+| ai-tui panel | Live loops and goals: the text, then "every 5m, next in 4m" or "turn 3/20, 1h 50m left" |
+| ai-tui dashboard | Per session: "2 loops, 1 goal, next in 4m" |
+| ai-gui sidebar | The same line under each session |
+| ai-gui dashboard | The same, for every session on the machine |
+| ai-gui Loops and goals view (Ctrl+Shift+L) | Every entry, with pause, resume, run, edit, stop and delete |
+| =ai loop list=, =ai goal list= | Grouped by session, running or not; =--json= for the fields |
+
+* From a shell
+
+See [[file:cli.org][the ai CLI]]. In short:
+
+#+begin_example
+ai loop list [--json] [--session ID]
+ai goal show 5e6f
+ai loop pause 1a2b
+ai goal edit 5e6f --turns 40
+ai loop delete all --session 3f2a...
+ai goal add --session 3f2a... "the docs build" --turns 5
+#+end_example
+
+* For embedders
+
+#+begin_src c
+g_autoptr(AiLoopRunner) runner = ai_loop_runner_new();
+
+g_signal_connect(runner, "should-wait", G_CALLBACK(is_busy), app);
+g_signal_connect(runner, "fire", G_CALLBACK(send_turn), app);
+g_signal_connect(runner, "notice", G_CALLBACK(show_line), app);
+
+ai_loop_runner_open(runner, NULL, session_id, g_get_real_time(), &error);
+ai_loop_runner_start(runner);
+
+/* when a turn ends: */
+ai_loop_runner_turn_finished(runner, reply_text, error_or_null, g_get_real_time());
+#+end_src
+
+Every function takes the time as an argument, so a test runs a week of
+schedule in microseconds; =ai_loop_runner_tick()= is what the timer calls.
+See [[file:api-reference/ai-loop.org][AiLoopSchedule and AiLoopRunner]].

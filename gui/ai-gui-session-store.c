@@ -165,6 +165,10 @@ ai_gui_session_store_remove(
 			g_debug("ai-gui: could not remove %s", file);
 	}
 
+	/* A deleted session's loops and goals go with it: nothing it
+	 * scheduled may fire later, here or from a resumed ai-tui. */
+	ai_gui_session_forget_loops(session);
+
 	g_ptr_array_remove_index(self->sessions, position);
 	g_list_model_items_changed(G_LIST_MODEL(self), position, 1, 0);
 

@@ -134,7 +134,8 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/harness/ai-mention.h \
 	$(SRCDIR)/harness/ai-command.h \
 	$(SRCDIR)/harness/ai-completion.h \
-	$(SRCDIR)/harness/ai-loop.h
+	$(SRCDIR)/harness/ai-loop.h \
+	$(SRCDIR)/harness/ai-loop-runner.h
 
 # Library source files
 LIB_SOURCES = \
@@ -242,7 +243,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-mention.c \
 	$(SRCDIR)/harness/ai-command.c \
 	$(SRCDIR)/harness/ai-completion.c \
-	$(SRCDIR)/harness/ai-loop.c
+	$(SRCDIR)/harness/ai-loop.c \
+	$(SRCDIR)/harness/ai-loop-runner.c
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
@@ -440,6 +442,11 @@ $(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODE
 		$(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
+$(OUTDIR)/tests/test-ai-gui-loops: $(TESTDIR)/test-ai-gui-loops.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-loops.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
 $(OUTDIR)/tests/test-ai-gui-content: $(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
 	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
 		$(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c -o $@ \
@@ -462,6 +469,7 @@ $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-decision-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-linked-work-tui: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-loop-cli: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."
@@ -552,9 +560,18 @@ ifeq ($(GIR),1)
 .PHONY: gir
 gir: $(TYPELIB_FILE)
 
+# g-ir-scanner builds and runs a small program against the library to
+# dump its types. Against an ASAN=1 library that program has the runtime
+# loaded second, which ASan refuses unless told the order is fine -- and
+# leak checking there would report the scanner's leaks, not ours. The
+# warnings gate itself is unchanged.
+ifeq ($(ASAN),1)
+GIR_SCANNER_ENV = ASAN_OPTIONS=verify_asan_link_order=0:detect_leaks=0
+endif
+
 $(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS) | $(OUTDIR)
 	@echo "Generating GObject introspection data..."
-	$(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
+	$(GIR_SCANNER_ENV) $(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
 		--nsversion=$(GIR_VERSION) \
 		--identifier-prefix=Ai \
 		--symbol-prefix=ai \

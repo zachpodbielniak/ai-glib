@@ -12,6 +12,8 @@ installed into =$(PREFIX)/bin= by =make install=.
 #+begin_example
 ai [OPTIONS] [PROMPT]
 echo "PROMPT" | ai [OPTIONS]
+ai loop|goal SUBCOMMAND ...     see "Loops and goals" below
+ai decide ...                   see "Typed decisions"
 #+end_example
 
 The prompt comes from the positional argument(s) if present, otherwise from
@@ -46,6 +48,79 @@ piping.
 | =-v=, =--version=       | Print version and exit                                             |
 
 See [[file:cli-reporting.org][CLI usage and history reports]] for provider support, the C API, JSON fields, and examples. Reports default to plain text and do not read stdin.
+
+** Loops and goals (=ai loop=, =ai goal=)
+
+Lists and edits the loops and goals every session has scheduled -- the
+same files ai-tui and ai-gui run, under
+=$XDG_STATE_HOME/ai-glib/sessions/loops/=. What loops and goals are is in
+[[file:loops-and-goals.org][Loops and goals]].
+
+#+begin_example
+ai loop list [--json] [--session ID]
+ai loop show ID
+ai loop pause|resume|run|delete ID|all [--session ID]
+ai loop edit ID [--every INTERVAL | --self-paced] [--prompt TEXT]
+ai loop add --session ID [INTERVAL] PROMPT|/command
+
+ai goal list [--json] [--session ID]
+ai goal show ID
+ai goal pause|resume|run|stop|delete ID|all [--session ID]
+ai goal edit ID [--turns N] [--time SPAN] [--condition TEXT]
+ai goal add --session ID CONDITION [--turns N] [--time SPAN]
+#+end_example
+
+*Subcommands, not flags.* =ai decide= set the precedent: a first word
+=loop= or =goal= selects the subcommand, and a prompt that really is one
+of those words is still =ai -- loop=. Every edit is handed to the same
+parser as the slash command, so =ai loop edit ID --every 10m= means
+exactly what =/loop edit ID --every 10m= does, and every line printed is
+the library's, so it reads the same as the TUI panel and the GUI view.
+
+- *ID* is an id or an unambiguous prefix of three or more characters,
+  searched across every session. A typo is an error naming the ids that
+  exist; a prefix in two sessions is an error naming both.
+- *=all= needs =--session=.* It never reaches across sessions.
+  =--session= is an id or a unique prefix of one.
+- *A running session picks the change up within a second*; a closed one
+  applies it when it is resumed. Each change says which.
+- *=add= needs =--session=*, because a loop or goal always belongs to one.
+- *An unreadable file is reported on stderr and skipped*; every other
+  session still lists.
+
+Human output groups entries by session:
+
+#+begin_example
+$ ai loop list
+Session 3f2a... (running)  /home/me/src/app
+  1a2b3c4d  loop  active  every 5m, next in 4m  check the deploy
+#+end_example
+
+=--json= prints the fields instead:
+
+#+begin_src json
+{
+  "kind": "goal",
+  "sessions": [
+    {
+      "session": "3f2a...",
+      "running": true,
+      "directory": "/home/me/src/app",
+      "entries": [
+        { "id": "5e6f7a8b", "kind": "goal", "state": "active",
+          "running": false, "trigger": "goal", "next_fire_us": 1790000000000000,
+          "condition": "the tests pass", "turns": 3, "max_turns": 20,
+          "deadline_us": 1790007200000000, "reason": "two tests still fail",
+          "line": "5e6f7a8b  goal  active  turn 3/20, 1h 50m left  the tests pass" }
+      ]
+    }
+  ]
+}
+#+end_src
+
+=state= is always one of =active=, =paused=, =met=, =failed=,
+=stopped=, =expired=. Exit status is 0 on success, 1 when the edit was
+refused or nothing matched, 2 for a usage error.
 
 ** CLI Process Deadline
 CLI chat runs default to =process-timeout-ms=0= in =ai=: the wrapper does not terminate a turn after thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline, or explicitly use =--set process-timeout-ms=0= to disable it. This applies to synchronous and shared streaming subprocess runs; cancellation remains available. The library default remains 1800000 ms. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls.

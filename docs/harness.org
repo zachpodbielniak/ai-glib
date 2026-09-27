@@ -634,8 +634,12 @@ Either may be =NULL=. Nothing else in the library needs to change: the
 layouts, the precedence, the completion and the =/help= listing all come
 from the table.
 
-** Scheduled prompts (=/loop=)
-=AiLoopSchedule= (=src/harness/ai-loop.h=) is the session-scoped schedule behind ai-tui's =/loop=. The library parses the interval, stores the tasks, computes the next local cron time, and reads =loop.md=. The frontend owns the timer and only calls in while the session is idle, because a source in here would fire during a turn the UI still has on screen. Fixed tasks can be saved and loaded; self-paced ones cannot. =AI_LOOP_DISABLE= turns scheduling off. The behaviour a person sees is documented in [[file:tui.org][ai-tui]].
+** Loops and goals (=/loop=, =/goal=)
+=AiLoopSchedule= (=src/harness/ai-loop.h=) holds one session's loops and goals: it parses =/loop= and =/goal= lines, stores the entries, computes the next local cron time, reads =loop.md=, judges a goal's verdict line and enforces its bounds, and formats every word a frontend shows. It never reads the clock -- every call takes the time -- and owns no timer.
+
+=AiLoopRunner= (=src/harness/ai-loop-runner.h=) is the scheduler both frontends use. It holds a one-second =GSource= on the thread-default context, by pointer; asks the frontend through =::should-wait= before every fire, so nothing starts mid-turn; hands the turn to =::fire=; and takes the result back through =ai_loop_runner_turn_finished()=. Its file is claimed with an advisory lock and re-read when another process (=ai loop=) changes it.
+
+A built-in in a scheduled line runs only if the command table marks it =schedulable= (=ai_command_get_schedulable()=); one that changes the session is refused when scheduled. =AI_LOOP_DISABLE= turns scheduling off. See [[file:loops-and-goals.org][Loops and goals]] and [[file:api-reference/ai-loop.org][the API]].
 
 ** See also
 - [[file:provider-switching.org][Provider switching]] --- how context and input policy move

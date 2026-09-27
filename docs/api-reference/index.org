@@ -36,6 +36,7 @@ Complete API documentation for ai-glib.
 | [[file:ai-mention.org][AiMention]]                         | =@path= references in a prompt                  |
 | [[file:ai-completion.org][AiCompletionContext]]            | Completing =/= and =@= at a cursor              |
 | [[file:ai-todo.org][AiTodo]]                               | One item on an agent's todo list                |
+| [[file:ai-loop.org][AiLoopSchedule / AiLoopRunner]]         | Loops and goals, and the scheduler that runs them |
 
 ** Agent Layer
 Running work that outlives the turn it was asked in. See
