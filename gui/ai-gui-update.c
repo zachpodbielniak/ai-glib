@@ -289,9 +289,10 @@ ai_gui_update_run(AiGuiUpdate *self, gboolean turn_running)
 /*
  * What the window's Update button should be: nothing, "Update", or
  * "Restart now" once a newer build is installed -- by this window or by
- * anything else, which the status's pending-restart says. The button is
- * insensitive while a turn or an update is running; @turn_running is the
- * window's answer for all its sessions.
+ * anything else, which the status's pending-restart says. Either is
+ * insensitive while a turn or an update is running: a restart would end
+ * the turn as surely as an update would. @turn_running is the window's
+ * answer for all its sessions.
  */
 AiGuiUpdateAction
 ai_gui_update_get_action(AiGuiUpdate *self, gboolean turn_running, gboolean *sensitive)
@@ -311,8 +312,7 @@ ai_gui_update_get_action(AiGuiUpdate *self, gboolean turn_running, gboolean *sen
 
 	if (sensitive != NULL)
 		*sensitive = action != AI_GUI_UPDATE_ACTION_NONE && !self->running &&
-		             self->checking == 0 &&
-		             (action == AI_GUI_UPDATE_ACTION_RESTART || !turn_running);
+		             self->checking == 0 && !turn_running;
 	return action;
 }
 

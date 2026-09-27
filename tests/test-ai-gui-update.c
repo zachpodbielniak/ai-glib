@@ -355,11 +355,13 @@ test_run_installs_then_restart(Fixture *f, gconstpointer data)
 	g_assert_true(saw(f, "Installed 0.3.0"));
 	banner = ai_gui_update_dup_banner(f->update);
 	g_assert_true(g_str_has_prefix(banner, "Installed 0.3.0"));
+	g_assert_cmpint(ai_gui_update_get_action(f->update, FALSE, &sensitive), ==,
+	                AI_GUI_UPDATE_ACTION_RESTART);
+	g_assert_true(sensitive);
+	/* A restart would end a running turn: not while one runs. */
 	g_assert_cmpint(ai_gui_update_get_action(f->update, TRUE, &sensitive), ==,
 	                AI_GUI_UPDATE_ACTION_RESTART);
-	/* Restarting does not interrupt a turn in this process's sense: the
-	 * window saves every session first. It is offered regardless. */
-	g_assert_true(sensitive);
+	g_assert_false(sensitive);
 	restart = ai_gui_update_dup_restart_path(f->update);
 	expected = g_build_filename(f->prefix, "bin", "ai-gui", NULL);
 	g_assert_cmpstr(restart, ==, expected);

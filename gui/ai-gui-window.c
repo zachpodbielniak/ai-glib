@@ -1597,18 +1597,17 @@ on_update_message(AiGuiUpdate *update, const gchar *text, gpointer user_data)
 }
 
 /*
- * Restart: save every window's sessions, start the binary just
- * installed, then close every window. Saving comes first so the new
- * process restores what this one had.
+ * Restart: every window closes -- which saves its sessions, exactly as
+ * quitting does -- and main() then replaces the process with the binary
+ * just installed. Spawning it from here instead would race the bus name
+ * this unique application still owns.
  */
 static void
 window_restart(AiGuiWindow *self)
 {
 	GtkApplication *app = gtk_window_get_application(GTK_WINDOW(self));
 	g_autofree gchar *path = ai_gui_update_dup_restart_path(self->update);
-	g_autoptr(GError) error = NULL;
 	g_autoptr(GList) windows = NULL;
-	const gchar *argv[2];
 	GList *iter;
 
 	if (path == NULL || !g_file_test(path, G_FILE_TEST_IS_EXECUTABLE))
@@ -1617,18 +1616,9 @@ window_restart(AiGuiWindow *self)
 		return;
 	}
 
-	windows = app != NULL ? g_list_copy(gtk_application_get_windows(app)) : g_list_prepend(NULL, self);
-	for (iter = windows; iter != NULL; iter = iter->next)
-		if (AI_GUI_IS_WINDOW(iter->data))
-			ai_gui_session_store_save_all(AI_GUI_WINDOW(iter->data)->store);
-
-	argv[0] = path;
-	argv[1] = NULL;
-	if (!g_spawn_async(NULL, (gchar **)argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &error))
-	{
-		ai_gui_window_toast(self, "Could not start %s: %s", path, error->message);
-		return;
-	}
+	ai_gui_request_restart(path);
+	windows = app != NULL ? g_list_copy(gtk_application_get_windows(app))
+	                      : g_list_prepend(NULL, self);
 	for (iter = windows; iter != NULL; iter = iter->next)
 		gtk_window_close(GTK_WINDOW(iter->data));
 }
@@ -1637,12 +1627,20 @@ static void
 on_update_clicked(GtkButton *button, gpointer user_data)
 {
 	AiGuiWindow *self = user_data;
+	gboolean busy = window_any_busy(self);
+	gboolean sensitive = FALSE;
+	AiGuiUpdateAction action = ai_gui_update_get_action(self->update, busy, &sensitive);
 
-	if (ai_gui_update_get_action(self->update, window_any_busy(self), NULL) ==
-	    AI_GUI_UPDATE_ACTION_RESTART)
+	/* The button follows only this session's turn; another session's
+	 * may have started since it was drawn. Check again at the click. */
+	if (action == AI_GUI_UPDATE_ACTION_RESTART && sensitive)
 		window_restart(self);
+	else if (action == AI_GUI_UPDATE_ACTION_RESTART)
+		on_update_message(self->update,
+			"A turn is running. Stop it or let it finish, then restart.", self);
 	else
-		ai_gui_update_run(self->update, window_any_busy(self));
+		ai_gui_update_run(self->update, busy);
+	window_update_refresh(self);
 }
 
 static void

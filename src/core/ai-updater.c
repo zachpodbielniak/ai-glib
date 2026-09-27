@@ -1295,6 +1295,7 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 	g_autofree gchar *at = now_iso8601();
 	AiUpdateStatus *status;
 	GError **error = &output->error;
+	gboolean installing = FALSE;
 
 	plan->fetch = TRUE;
 	status = classify(plan, cancellable, error);
@@ -1389,6 +1390,8 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 
 	argv = make_argv(plan, "install", NULL);
 	add_make_vars(plan, argv);
+	/* From here a failure may have copied some files already. */
+	installing = TRUE;
 	if (install_writable(plan))
 	{
 		if (!run_step(plan, "Installing", argv, FALSE, cancellable, error))
@@ -1495,7 +1498,11 @@ failed:
 		GError *cause = *error;
 
 		*error = g_error_new(cause->domain, cause->code,
-		                     "Update stopped; nothing was installed. %s%s%s%s",
+		                     "%s %s%s%s%s",
+		                     installing
+		                         ? "The install step failed and may have left the install "
+		                           "incomplete; run the update again."
+		                         : "Update stopped; nothing was installed.",
 		                     cause->message,
 		                     result->log_path != NULL ? " See " : "",
 		                     result->log_path != NULL ? result->log_path : "",

@@ -1061,6 +1061,9 @@ test_run_polkit_install_fails(Fixture *f, gconstpointer data)
 	result = run_polkit(f, "exit 2", &pk_log, &error);
 	g_assert_null(result);
 	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	/* Something may already be copied; saying otherwise would be a lie. */
+	g_assert_nonnull(strstr(error->message, "may have left the install incomplete"));
+	g_assert_null(strstr(error->message, "nothing was installed"));
 }
 
 /* No pkexec on the machine: straight to the command. */
