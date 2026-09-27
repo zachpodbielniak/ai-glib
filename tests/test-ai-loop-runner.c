@@ -485,6 +485,37 @@ test_claim_is_exclusive(void)
 	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
 }
 
+/* A session that has not written its schedule holds no claim. If the file
+ * then appears from outside (`ai goal add --session`) and another process
+ * claims it, only that one fires: nothing runs without the claim. */
+static void
+test_fire_needs_the_claim(void)
+{
+	g_autoptr(AiLoopRunner)   lazy = open_runner("appears", 0);
+	g_autoptr(AiLoopRunner)   other = NULL;
+	g_autoptr(AiLoopSchedule) outside = ai_loop_schedule_new();
+	g_autofree gchar         *path = g_build_filename(store, "appears", NULL);
+	g_autoptr(GError)         error = NULL;
+	Frontend                  front_lazy;
+	Frontend                  front_other;
+	gint64                    now = 100 * G_USEC_PER_SEC;
+
+	frontend_init(&front_lazy, lazy);
+	g_free(ai_loop_schedule_add_goal(outside, "from a shell", 3, 0, now, &error));
+	g_assert_true(ai_loop_schedule_save(outside, path, &error));
+	g_assert_no_error(error);
+
+	other = open_runner("appears", now);
+	frontend_init(&front_other, other);
+
+	g_assert_false(ai_loop_runner_tick(lazy, now));
+	g_assert_cmpuint(front_lazy.fired->len, ==, 0);
+	g_assert_true(ai_loop_runner_tick(other, now));
+	g_assert_cmpuint(front_other.fired->len, ==, 1);
+	frontend_clear(&front_lazy);
+	frontend_clear(&front_other);
+}
+
 /* A schedule must not clear its own session: /clear is refused when it
  * is scheduled, and a /command that is allowed runs as a command. */
 static void
@@ -579,6 +610,7 @@ main(int argc, char **argv)
 	g_test_add_func("/ai-glib/loop-runner/refused-and-close", test_refused_fire_is_retried_and_close_stops);
 	g_test_add_func("/ai-glib/loop-runner/claim", test_claim_is_exclusive);
 	g_test_add_func("/ai-glib/loop-runner/commands", test_scheduled_commands);
+	g_test_add_func("/ai-glib/loop-runner/fire-needs-claim", test_fire_needs_the_claim);
 	g_test_add_func("/ai-glib/loop-runner/timer", test_timer_on_private_context);
 	status = g_test_run();
 	g_chdir("/");

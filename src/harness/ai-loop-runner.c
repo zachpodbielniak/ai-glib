@@ -613,6 +613,25 @@ ai_loop_runner_tick(AiLoopRunner *self, gint64 now_us)
 		return FALSE;
 	}
 
+	/*
+	 * Nothing fires without the claim. A session that never wrote its
+	 * schedule holds none, and its file can still appear from outside
+	 * (`ai goal add --session`) -- by which time another process may
+	 * have claimed it. Only one of them may run what is in it.
+	 */
+	if (self->path != NULL && self->lock_fd < 0)
+	{
+		g_autoptr(GError) error = NULL;
+
+		self->lock_fd = ai_loop_store_claim(self->directory, self->owner, &error);
+
+		if (self->lock_fd < 0)
+		{
+			g_debug("not firing %s: %s", self->owner, error->message);
+			return FALSE;
+		}
+	}
+
 	prompt = ai_loop_schedule_dup_prompt(self->schedule, id, self->working_directory,
 	                                     g_get_user_config_dir(), g_get_home_dir());
 	index = ai_loop_schedule_find(self->schedule, id);
