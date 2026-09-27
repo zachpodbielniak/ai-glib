@@ -212,7 +212,9 @@ ai-glib/
 │   │   ├── ai-resource-registry.h/.c
 │   │   ├── ai-mention.h/.c    # @path references
 │   │   ├── ai-command.h/.c    # /commands, built-in and from disk
-│   │   └── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-loop.h/.c       # /loop and /goal: schedule, rules, vocabulary, store
+│   │   └── ai-loop-runner.h/.c # The one scheduler every frontend drives
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
@@ -1159,6 +1161,45 @@ of hazard as the image-generation timeout note above.
 Never fires for the CLI wrappers: they run their own tools in their own
 process. `AiConversation` refuses `local-tools` for them for the same
 reason.
+
+## Loops and goals (`src/harness/ai-loop*.{h,c}`)
+
+`/loop` repeats a prompt or `/command`; `/goal` takes turns until a
+condition holds. `AiLoopSchedule` is the state and every rule;
+`AiLoopRunner` is the one scheduler, and ai-tui and ai-gui both drive it.
+`ai loop` / `ai goal` edit the same files. See `docs/loops-and-goals.org`.
+
+Five rules are load-bearing, each with a test that fails by name:
+
+- **One scheduler, one vocabulary.** A frontend answers `::should-wait`,
+  sends what `::fire` hands it, and calls `ai_loop_runner_turn_finished()`.
+  It never computes what is due and never formats a state, a "next in"
+  or a progress line itself — those come from `ai_loop_schedule_dup_*()`,
+  the same arrangement as `ai-quota.h`. A second scheduler in a frontend
+  is how the TUI and the window start disagreeing about one schedule.
+- **Never mid-turn, and once.** Something due waits for anything in
+  flight and then fires once, however many slots went by — including
+  across a restart. `test-ai-loop-runner` `queue-behind-turn` and
+  `restart-coalesces`.
+- **A goal always ends.** Every goal has a turn bound and a time bound,
+  checked whatever the model's verdict says, and one that reaches either
+  is *expired*, never *met*. The judge is the working model's own
+  `GOAL_MET` / `GOAL_NOT_MET` / `GOAL_BLOCKED` line; the bound is what
+  makes that safe. Do not add an unbounded goal.
+- **The file is the truth, and it is claimed.** One file per session
+  under `$XDG_STATE_HOME/ai-glib/sessions/loops/`, written atomically
+  after every change, re-read when another process changed it (a random
+  revision token, not a counter — two writers from revision N would both
+  write N+1), and locked by the process running it so two never fire one
+  schedule. A bad record is skipped with `g_debug` and costs nothing else.
+- **A schedule cannot change its own session.** A built-in runs from a
+  loop only if `BUILTIN_COMMANDS` marks it `schedulable`; `/clear` and
+  friends are refused when scheduled. Adding a built-in means deciding
+  that column.
+
+Every function takes `now_us`. Tests pass a fake clock to
+`ai_loop_runner_tick()`; none sleeps for real minutes, and the one that
+proves the real `GSource` fires runs it on a private context.
 
 ## TUI binary (`ai-tui`)
 

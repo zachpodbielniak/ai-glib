@@ -178,6 +178,39 @@ AiGuiOptions *
 ai_gui_session_get_options(AiGuiSession *self);
 
 /**
+ * ai_gui_session_get_loops:
+ * @self: a session
+ *
+ * The runner behind /loop and /goal here: the same one ai-tui drives,
+ * with its schedule keyed by this session's id, so the loops and goals
+ * come back when the application is opened again.
+ *
+ * Returns: (transfer none): the runner
+ */
+AiLoopRunner *
+ai_gui_session_get_loops(AiGuiSession *self);
+
+/**
+ * ai_gui_session_forget_loops:
+ * @self: a session
+ *
+ * Stops the runner and deletes the schedule file. Called when a session
+ * is deleted, so nothing it scheduled can fire later from anywhere.
+ */
+void
+ai_gui_session_forget_loops(AiGuiSession *self);
+
+/**
+ * ai_gui_session_dup_loop_summary:
+ * @self: a session
+ *
+ * Returns: (transfer full) (nullable): "2 loops, 1 goal, next in 4m", or
+ *   %NULL when nothing is scheduled
+ */
+gchar *
+ai_gui_session_dup_loop_summary(AiGuiSession *self);
+
+/**
  * ai_gui_session_get_work:
  * @self: a session
  *

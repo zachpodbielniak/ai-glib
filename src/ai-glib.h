@@ -125,5 +125,6 @@
 #include "harness/ai-command.h"
 #include "harness/ai-completion.h"
 #include "harness/ai-loop.h"
+#include "harness/ai-loop-runner.h"
 
 #undef AI_GLIB_INSIDE

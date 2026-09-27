@@ -35,7 +35,7 @@ def main():
     os.environ["XDG_STATE_HOME"] = gi_home.name
 
     gi.require_version("AiGlib", "1.0")
-    from gi.repository import AiGlib, Gio  # noqa: E402
+    from gi.repository import AiGlib, Gio, GLib  # noqa: E402
     gi_home  # keep the directory until process exit
 
     # Decision types, array annotations and interface dispatch need no weights.
@@ -580,6 +580,49 @@ def main():
     assert manifest[0]["relationship"] == "assigned"
     assert manifest[0]["id"] == "9"
     conversation.props.work_session = None
+
+    # Loops and goals: the schedule, its vocabulary and the runner are
+    # what an Emacs frontend would drive, so they have to survive the
+    # scanner with their enums, out-parameters and signals intact.
+    now = 1000 * 1000000
+    schedule = AiGlib.LoopSchedule.new()
+    goal_id = schedule.add_goal("the tests pass", 5, 0, now)
+    assert len(goal_id) == 8
+    index = schedule.find(goal_id)
+    assert schedule.get_kind(index) == AiGlib.LoopKind.GOAL
+    assert schedule.get_state(index) == AiGlib.LoopState.ACTIVE
+    assert AiGlib.loop_state_to_string(AiGlib.LoopState.EXPIRED) == "expired"
+    assert "turn 0/5" in schedule.dup_line(index, now)
+    loop_id, notice = schedule.add_loop(5 * 60 * 1000000, "check the deploy", now)
+    assert "every 5m" in notice
+    assert schedule.pause(loop_id[:4])
+    assert schedule.dup_summary(now) == "1 loop, 1 goal, next now"
+    entries = json.loads(schedule.dup_json(now))
+    assert [e["kind"] for e in entries] == ["goal", "loop"]
+    assert entries[1]["state"] == "paused"
+    try:
+        schedule.resolve_id("zzz")
+        assert False, "a typo must be an error"
+    except GLib.Error as error:
+        assert "Valid ids" in error.message
+    assert AiGlib.loop_format_relative(4 * 60 * 1000000) == "in 4m"
+    assert "Loops and goals" in AiGlib.loop_help_text()
+
+    runner = AiGlib.LoopRunner.new()
+    fired = []
+    runner.connect("should-wait", lambda r: False)
+    runner.connect("fire", lambda r, i, text, expand: fired.append(text) or True)
+    assert runner.open(None, "gi-session", now)
+    runner.command("goal", "the build is green --turns 2", now)
+    assert runner.tick(now)
+    assert "the build is green" in fired[0]
+    runner.turn_finished("Done.\nGOAL_MET: green", None, now)
+    assert not runner.has_pending_goal()
+    assert AiGlib.loop_store_list_owners(None) == ["gi-session"]
+    # A met goal is history: nothing is scheduled, so no summary.
+    assert AiGlib.loop_store_dup_summary(None, "gi-session", now) is None
+    runner.close()
+    assert AiGlib.loop_store_remove(None, "gi-session")
 
     # Build provenance: what ai --version prints, readable from bindings.
     version = AiGlib.build_info_get_version()

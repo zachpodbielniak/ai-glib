@@ -48,46 +48,53 @@ typedef struct
     const gchar *name;
     const gchar *description;
     const gchar *argument_hint;
+    /* May a /loop run it unattended? Only what reports or writes a
+     * file: nothing that changes the session, the provider or the
+     * schedule itself. /clear on a timer would wipe the session that
+     * owns the timer. */
+    gboolean     schedulable;
 } BuiltinCommand;
 
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
-    { "decide", "Classify text with a separately managed Laya server", "--question QUESTION TEXT | --request FILE" },
-    { "work", "Load linked issue or PR as an assignment", "<URL>" },
-    { "project", "Open a project in a tmux window", "[directory]" },
-    { "dashboard", "Toggle project dashboard", NULL },
-    { "links", "List linked issues and pull requests", NULL },
-    { "issue", "Link or unlink an issue", "<link|unlink> <URL>" },
-    { "pr", "Link or unlink a pull request", "<link|unlink> <URL>" },
-    { "btw",      "Ask a side question without interrupting the current turn", "<question>" },
-    { "help",     "List every command, skill and agent",        NULL },
-    { "clear",    "Empty the transcript and the history",       NULL },
-    { "reset",    "Start a fresh session and return to the splash screen", NULL },
-    { "quit",     "Leave",                                      NULL },
-    { "exit",     "Leave, same as /quit",                       NULL },
-    { "model",    "Open the model picker, or switch with /model MODEL_ID", "[model]" },
-    { "provider", "List providers or switch with /provider NAME", "[provider]" },
-    { "effort",   "List effort levels or switch with /effort LEVEL", "[level]" },
-    { "tools",    "List the tools the model can call",          NULL },
-    { "commands", "List commands, and what shadows what",       NULL },
-    { "skills",   "List skills",                                NULL },
-    { "agents",   "List agents",                                NULL },
-    { "reload",   "Rescan the command, skill and agent paths",  NULL },
-    { "cwd",      "Show or change the working directory",       "[path]" },
+    { "decide", "Classify text with a separately managed Laya server", "--question QUESTION TEXT | --request FILE", TRUE },
+    { "work", "Load linked issue or PR as an assignment", "<URL>", FALSE },
+    { "project", "Open a project in a tmux window", "[directory]", FALSE },
+    { "dashboard", "Toggle project dashboard", NULL, FALSE },
+    { "links", "List linked issues and pull requests", NULL, TRUE },
+    { "issue", "Link or unlink an issue", "<link|unlink> <URL>", FALSE },
+    { "pr", "Link or unlink a pull request", "<link|unlink> <URL>", FALSE },
+    { "btw",      "Ask a side question without interrupting the current turn", "<question>", TRUE },
+    { "help",     "List every command, skill and agent",        NULL, TRUE },
+    { "clear",    "Empty the transcript and the history",       NULL, FALSE },
+    { "reset",    "Start a fresh session and return to the splash screen", NULL, FALSE },
+    { "quit",     "Leave",                                      NULL, FALSE },
+    { "exit",     "Leave, same as /quit",                       NULL, FALSE },
+    { "model",    "Open the model picker, or switch with /model MODEL_ID", "[model]", FALSE },
+    { "provider", "List providers or switch with /provider NAME", "[provider]", FALSE },
+    { "effort",   "List effort levels or switch with /effort LEVEL", "[level]", FALSE },
+    { "tools",    "List the tools the model can call",          NULL, TRUE },
+    { "commands", "List commands, and what shadows what",       NULL, TRUE },
+    { "skills",   "List skills",                                NULL, TRUE },
+    { "agents",   "List agents",                                NULL, TRUE },
+    { "reload",   "Rescan the command, skill and agent paths",  NULL, TRUE },
+    { "cwd",      "Show or change the working directory",       "[path]", FALSE },
     { "context",  "Show or drop history carried from a previous provider",
-      "[clear]" },
-    { "todos",    "Show the current todo list",                 NULL },
-    { "running",  "Show background agents and what they are doing", NULL },
-    { "kill",     "Stop a background agent",                    "<id|all>" },
+      "[clear]", FALSE },
+    { "todos",    "Show the current todo list",                 NULL, TRUE },
+    { "running",  "Show background agents and what they are doing", NULL, TRUE },
+    { "kill",     "Stop a background agent",                    "<id|all>", FALSE },
     { "expand",   "Show what a line would send, without sending it",
-      "<line>" },
-    { "save",     "Write the transcript to a file",             "<path>" },
+      "<line>", TRUE },
+    { "save",     "Write the transcript to a file",             "<path>", TRUE },
     { "export",   "Write the transcript as markdown or org",
-      "<text|markdown|org> [path]" },
-    { "loop",     "Run a prompt on a schedule while this session is open",
-      "[list|stop|cancel <id|all>] [INTERVAL] [PROMPT]" },
+      "<text|markdown|org> [path]", TRUE },
+    { "loop",     "Repeat a prompt or /command on an interval, or at a pace the model picks",
+      "[INTERVAL] [PROMPT|/command] | list | show|pause|resume|run|delete ID|all | edit ID ... | stop", FALSE },
+    { "goal",     "Keep taking turns until a condition holds, within a turn and time bound",
+      "CONDITION [--turns N] [--time SPAN] | list | show|pause|resume|run|stop|delete ID|all | edit ID ...", FALSE },
     { "update",   "Install the latest ai-glib, or show whether one is available",
-      "[status]" },
-    { NULL, NULL, NULL }
+      "[status]", FALSE },
+    { NULL, NULL, NULL, FALSE }
 };
 
 /* ================================================================
@@ -103,6 +110,7 @@ struct _AiCommand
     gchar         *argument_hint;
     AiCommandKind  kind;
     AiResource    *resource;
+    gboolean       schedulable;
 };
 
 G_DEFINE_TYPE(AiCommand, ai_command, G_TYPE_OBJECT)
@@ -246,6 +254,41 @@ ai_command_get_kind(AiCommand *self)
     g_return_val_if_fail(AI_IS_COMMAND(self), AI_COMMAND_BUILTIN);
 
     return self->kind;
+}
+
+/**
+ * ai_command_get_schedulable:
+ * @self: an #AiCommand
+ *
+ * Whether a scheduled loop may run this command unattended. A command
+ * from a file always may -- it expands to text for the model. A built-in
+ * may only when it reports or writes a file rather than changing the
+ * session.
+ *
+ * Returns: %TRUE when a loop may run it
+ */
+gboolean
+ai_command_get_schedulable(AiCommand *self)
+{
+    g_return_val_if_fail(AI_IS_COMMAND(self), FALSE);
+
+    return self->kind != AI_COMMAND_BUILTIN || self->schedulable;
+}
+
+/**
+ * ai_command_set_schedulable:
+ * @self: an #AiCommand
+ * @schedulable: whether a loop may run it
+ *
+ * For an embedder's own built-ins. The ones ai-glib ships are decided by
+ * its command table.
+ */
+void
+ai_command_set_schedulable(AiCommand *self, gboolean schedulable)
+{
+    g_return_if_fail(AI_IS_COMMAND(self));
+
+    self->schedulable = schedulable;
 }
 
 /**
@@ -986,6 +1029,8 @@ ai_command_set_init(AiCommandSet *self)
         AiCommand *command = ai_command_new_builtin(entry->name,
                                                     entry->description,
                                                     entry->argument_hint);
+
+        command->schedulable = entry->schedulable;
 
         g_hash_table_replace(self->builtins, g_strdup(entry->name), command);
     }

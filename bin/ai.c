@@ -35,6 +35,7 @@
 #include "ai-launch.h"
 #include "ai-mcp-options.h"
 #include "ai-cli-update.h"
+#include "ai-loop-cli.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -1486,6 +1487,9 @@ main(int argc, char *argv[])
 
 	if (argc > 1 && g_str_equal(argv[1], "decide"))
 		return decide_cli_main(argv + 1);
+
+	if (argc > 1 && (g_str_equal(argv[1], "loop") || g_str_equal(argv[1], "goal")))
+		return loop_cli_main(argc - 1, argv + 1);
 
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);

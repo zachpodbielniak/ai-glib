@@ -11,6 +11,7 @@
 
 #include "ai-gui.h"
 #include "ai-gui-agents.h"
+#include "ai-gui-loops.h"
 #include "ai-gui-approval.h"
 #include "ai-gui-chat.h"
 #include "ai-gui-commands.h"
@@ -1081,6 +1082,18 @@ action_agents(
 }
 
 static void
+action_loops(
+	GtkWidget   *widget,
+	const gchar *name,
+	GVariant    *parameter
+){
+	AiGuiWindow *self = AI_GUI_WINDOW(widget);
+
+	if (self->session != NULL)
+		ai_gui_loops_present(widget, self->session);
+}
+
+static void
 action_clear(
 	GtkWidget   *widget,
 	const gchar *name,
@@ -1390,6 +1403,7 @@ static const AiGuiShortcut SHORTCUTS[] = {
 
 	{ "Window",       "Ctrl+backslash",   "Project dashboard, and back" },
 	{ "Window",       "Ctrl+Shift+G",     "Background agents" },
+	{ "Window",       "Ctrl+Shift+L",     "Loops and goals" },
 	{ "Window",       "Ctrl+T",           "Next theme" },
 	{ "Window",       "Ctrl+comma",       "Preferences" },
 	{ "Window",       "Ctrl+question",    "This list" }
@@ -1636,6 +1650,7 @@ window_build_menu(void)
 	g_menu_append(view, "Expand everything", "win.expand-all");
 	g_menu_append(view, "Collapse everything", "win.collapse-all");
 	g_menu_append(view, "Background agents…", "win.agents");
+	g_menu_append(view, "Loops and goals…", "win.loops");
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(view));
 
 	g_menu_append(app, "Keyboard shortcuts", "win.shortcuts");
@@ -1981,6 +1996,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 	                                action_preferences);
 	gtk_widget_class_install_action(widget_class, "win.agents", NULL,
 	                                action_agents);
+	gtk_widget_class_install_action(widget_class, "win.loops", NULL,
+	                                action_loops);
 	gtk_widget_class_install_action(widget_class, "win.clear", NULL,
 	                                action_clear);
 	gtk_widget_class_install_action(widget_class, "win.pin", NULL,
@@ -2022,6 +2039,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.export", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_g,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.agents", NULL);
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_l,
+		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.loops", NULL);
 }
 
 static void

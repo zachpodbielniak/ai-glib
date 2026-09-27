@@ -110,8 +110,10 @@ commands_help(AiGuiSession *session)
 	}
 
 	g_list_free_full(list, g_object_unref);
+	g_string_append_printf(text, "\n%s\n", ai_loop_help_text());
 	g_string_append(text,
-		"\n@path mentions a file. Ctrl+backslash opens the dashboard.");
+		"\n@path mentions a file. Ctrl+backslash opens the dashboard; "
+		"Ctrl+Shift+L shows this session's loops and goals.");
 	ai_gui_commands_say(session, "%s", text->str);
 }
 
@@ -634,10 +636,17 @@ ai_gui_commands_handle(
 			"/btw is an ai-tui feature. Open a second session (Ctrl+N) to "
 			"ask something alongside this one.");
 	}
-	else if (g_strcmp0(name, "loop") == 0)
+	else if (g_strcmp0(name, "loop") == 0 || g_strcmp0(name, "goal") == 0)
 	{
-		ai_gui_commands_say(session,
-			"/loop schedules a prompt in ai-tui. It needs that session to stay open.");
+		/* The runner ai-tui uses; the view is Ctrl+Shift+L. */
+		g_autoptr(GError) error = NULL;
+		g_autofree gchar *notice = ai_loop_runner_command(ai_gui_session_get_loops(session),
+			name, arguments, g_get_real_time(), &error);
+
+		if (notice == NULL)
+			commands_error(session, "%s", error->message);
+		else
+			ai_gui_commands_say(session, "%s", notice);
 	}
 	else if (g_strcmp0(name, "update") == 0)
 	{
