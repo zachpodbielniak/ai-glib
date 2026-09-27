@@ -6,6 +6,7 @@ typedef struct {
 	GObject parent;
 	gint cancelled;
 	gboolean emit_text;
+	const gchar *const *deltas; /* NULL-terminated; replaces the fixed sentence */
 } TestStalledProvider;
 typedef GObjectClass TestStalledProviderClass;
 static void
@@ -51,7 +52,13 @@ stalled_stream(AiStreamable *stream, GList *messages, const gchar *system,
 	g_source_set_callback(source, G_SOURCE_FUNC(stalled_complete), g_object_ref(task),
 						  g_object_unref);
 	g_source_attach(source, g_main_context_get_thread_default());
-	if (self->emit_text) {
+	if (self->deltas != NULL) {
+		const gchar *const *d;
+		for (d = self->deltas; *d != NULL; d++) {
+			g_autoptr(AiEvent) event = ai_event_new_text_delta(*d);
+			ai_event_source_emit(AI_EVENT_SOURCE(self), event);
+		}
+	} else if (self->emit_text) {
 		g_autoptr(AiEvent) event = ai_event_new_text_delta("A streamed sentence.");
 		ai_event_source_emit(AI_EVENT_SOURCE(self), event);
 	}

@@ -180,6 +180,32 @@ tools(Fixture *f, gconstpointer data)
 	wait_replies(f, 2);
 	g_assert_nonnull(strstr(g_ptr_array_index(f->tts->texts, 0), "error"));
 }
+/* A tool error is cut at 512 bytes before it is spoken. Cut through a
+ * two-byte character, the line must still be spoken rather than rejected by
+ * the synthesizer as invalid text, which the session reads as a TTS outage. */
+static void
+tool_error_multibyte(Fixture *f, gconstpointer data)
+{
+	GString *input = g_string_new("{\"path\":\"/missing-voice-fixture-");
+	guint i;
+	if (GPOINTER_TO_UINT(data) != 0)
+		g_string_append_c(input, 'x');
+	for (i = 0; i < 400; i++)
+		g_string_append(input, "\303\251");
+	g_string_append(input, "\"}");
+	ai_mock_provider_push_tool_use(f->provider, "read", input->str);
+	ai_mock_provider_push_text(f->provider, "The file was unavailable.");
+	g_string_free(input, TRUE);
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	for (i = 0; i < f->tts->texts->len; i++) {
+		const gchar *text = g_ptr_array_index(f->tts->texts, i);
+		g_assert_true(g_utf8_validate(text, -1, NULL));
+		g_assert_null(strstr(text, "speech service"));
+	}
+	g_assert_nonnull(strstr(g_ptr_array_index(f->tts->texts, 0), "error"));
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "The file was unavailable.");
+}
 static gboolean
 contains_tool_result(Fixture *f, const gchar *needle)
 {
@@ -415,6 +441,76 @@ completed_provider_playback(Fixture *f, gconstpointer data)
 		g_assert_cmpstr(text, ==, "A complete long reply.");
 	}
 }
+/* A TTS model handed nothing it can pronounce does not fail: it invents
+ * several seconds of audio, identical on every call when it is seeded. */
+typedef struct {
+	const gchar *reply;
+	const gchar *spoken[4];
+} SpeakableCase;
+static const SpeakableCase speakable_cases[] = {
+	{"Let's get to work. \360\237\230\210", {"Let's get to work.", NULL}},
+	{"Done! \360\237\230\210\360\237\224\245", {"Done!", NULL}},
+	{"Hmm... okay then.", {"Hmm...", "okay then.", NULL}},
+	{"Version 3.5 is out. Upgrade.", {"Version 3.5 is out.", "Upgrade.", NULL}},
+	{"That is **really** it.\n\n---\n", {"That is really it.", NULL}},
+	{"Shipped \342\234\205 and green.", {"Shipped and green.", NULL}},
+	{"Wait?! Really?", {"Wait?!", "Really?", NULL}},
+	{"He said \"stop.\" Then left.", {"He said \"stop.\"", "Then left.", NULL}},
+};
+static void
+speakable_segments(Fixture *f, gconstpointer data)
+{
+	const SpeakableCase *c = data;
+	guint n = 0, i;
+	while (c->spoken[n] != NULL)
+		n++;
+	ai_mock_provider_push_text(f->provider, c->reply);
+	utterance(f, "caller");
+	wait_replies(f, n);
+	iterate_for(50);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_test_message("tts[%u] = '%s'", i, (gchar *)g_ptr_array_index(f->tts->texts, i));
+	g_assert_cmpuint(f->tts->texts->len, ==, n);
+	for (i = 0; i < n; i++)
+		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, c->spoken[i]);
+}
+/* The same boundaries when the reply arrives a token at a time and the turn
+ * has not finished: nothing is held back waiting for more, except a "3."
+ * that may still become "3.5". */
+static const gchar *const streamed_deltas[] = {
+	"Let's get to work", ".", " ", "\360\237\230\210", " Version 3", ".", "5 is out",
+	".", " Hmm", ".", ".", ".", " okay", ".", NULL};
+static const gchar *const streamed_spoken[] = {
+	"Let's get to work.", "Version 3.5 is out.", "Hmm.", "okay.", NULL};
+static void
+streamed_segments(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GObject) provider = g_object_new(test_stalled_provider_get_type(), NULL);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint i;
+	((TestStalledProvider *)provider)->deltas = streamed_deltas;
+	ai_voice_session_stop(f->session);
+	g_clear_object(&f->session);
+	g_clear_object(&f->conversation);
+	f->conversation = ai_conversation_new(provider);
+	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
+							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
+							  f->vad, "conversation", f->conversation, NULL);
+	g_object_set(f->session, "barge-in-ms", 10, NULL);
+	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
+	utterance(f, "caller");
+	while (f->tts->texts->len < G_N_ELEMENTS(streamed_spoken) - 1 &&
+		   g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	iterate_for(50);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_test_message("tts[%u] = '%s'", i, (gchar *)g_ptr_array_index(f->tts->texts, i));
+	g_assert_cmpuint(f->tts->texts->len, ==, G_N_ELEMENTS(streamed_spoken) - 1);
+	for (i = 0; streamed_spoken[i] != NULL; i++)
+		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, streamed_spoken[i]);
+}
 static void
 recovery_pauses_deadline(Fixture *f, gconstpointer data)
 {
@@ -443,6 +539,14 @@ int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	{
+		guint i;
+		for (i = 0; i < G_N_ELEMENTS(speakable_cases); i++) {
+			g_autofree gchar *path = g_strdup_printf("/voice/session/speakable/%u", i);
+			g_test_add(path, Fixture, &speakable_cases[i], setup, speakable_segments,
+					   teardown);
+		}
+	}
 	g_test_add("/voice/session/completed-provider-playback", Fixture, NULL, setup,
 			   completed_provider_playback, teardown);
 	g_test_add("/voice/session/recovery-pauses-deadline", Fixture, NULL, setup,
@@ -463,6 +567,12 @@ main(int argc, char **argv)
 			   stalled_turn, teardown);
 	g_test_add("/voice/session/never-answering-provider", Fixture, "deadline", setup,
 			   stalled_turn, teardown);
+	g_test_add("/voice/session/streamed-segments", Fixture, NULL, setup,
+			   streamed_segments, teardown);
+	g_test_add("/voice/session/tool-error-multibyte/0", Fixture, GUINT_TO_POINTER(0),
+			   setup, tool_error_multibyte, teardown);
+	g_test_add("/voice/session/tool-error-multibyte/1", Fixture, GUINT_TO_POINTER(2),
+			   setup, tool_error_multibyte, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/speakers", Fixture, NULL, setup, speakers, teardown);

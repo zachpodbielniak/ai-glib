@@ -46,7 +46,20 @@ Leaving a participant cancels only that participant's recognition.
 
 Streaming provider text is split at sentence-ending punctuation/newlines and
 submitted incrementally to TTS. Non-streaming providers submit their final
-reply. Tool execution remains inside the conversation's executor. Tool failure
+reply.
+
+A terminator ends a sentence only when whitespace or the end of the text
+follows it. A run such as =?!= or =...= and any closing quote stay with their
+sentence. =3.5= is not split, and a streamed =3.= waits for the next delta.
+Before a segment is sent, emoji, other pictographic symbols, invisible format
+characters and the markdown marks =*=, =`= and =~= are removed. Whitespace is
+collapsed and invalid UTF-8 is repaired. A segment with no letter or digit left
+is not sent.
+
+That last rule is what stops the tail artifact. A voice-cloning TTS model given
+nothing it can pronounce does not fail. It invents several seconds of babble.
+A seeded model invents the /same/ babble every time. A reply ending in an emoji
+used to reach the synthesizer as a request for just that emoji. Tool execution remains inside the conversation's executor. Tool failure
 events enqueue an explicit spoken error notice. Tool results remain available
 to the model through the existing executor history.
 

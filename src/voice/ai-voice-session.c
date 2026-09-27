@@ -2,6 +2,7 @@
 #include "voice/ai-voice-session.h"
 #include "voice/ai-voice-worker-private.h"
 #include "model/ai-tool-result.h"
+#include <string.h>
 
 /**
  * ai_voice_state_get_type:
@@ -138,32 +139,130 @@ clear_deadline(AiVoiceSession *self)
 	g_source_destroy(self->deadline);
 	g_clear_pointer(&self->deadline, g_source_unref);
 }
+/* Emoji, pictographs and markdown markup have no pronunciation. A TTS model
+ * handed only those does not fail: it invents audio, and a seeded one invents
+ * the same few seconds of noise every time. */
+static gboolean
+unspoken_char(gunichar c)
+{
+	switch (g_unichar_type(c)) {
+	case G_UNICODE_OTHER_SYMBOL:
+	case G_UNICODE_FORMAT:
+	case G_UNICODE_PRIVATE_USE:
+	case G_UNICODE_SURROGATE:
+	case G_UNICODE_UNASSIGNED:
+		return TRUE;
+	default:
+		break;
+	}
+	return (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0xE0100 && c <= 0xE01EF) ||
+		   (c >= 0x1F3FB && c <= 0x1F3FF) || c == '*' || c == '`' || c == '~';
+}
+/* Returns NULL when nothing pronounceable remains. */
+static gchar *
+speakable(const gchar *text)
+{
+	GString *out = g_string_new(NULL);
+	gboolean alnum = FALSE, space = FALSE;
+	const gchar *p;
+	for (p = text; *p != '\0'; p = g_utf8_next_char(p)) {
+		gunichar c = g_utf8_get_char(p);
+		if (unspoken_char(c))
+			continue;
+		if (g_unichar_isspace(c)) {
+			space = out->len != 0;
+			continue;
+		}
+		if (space)
+			g_string_append_c(out, ' ');
+		space = FALSE;
+		alnum |= g_unichar_isalnum(c);
+		g_string_append_unichar(out, c);
+	}
+	if (!alnum) {
+		g_string_free(out, TRUE);
+		return NULL;
+	}
+	return g_string_free(out, FALSE);
+}
 static void
 queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
 {
 	Line *line;
-	if (text == NULL || *text == '\0' || self->stopped)
+	g_autofree gchar *valid = NULL;
+	g_autofree gchar *spoken = NULL;
+	if (text == NULL || self->stopped)
 		return;
 	if (g_queue_get_length(&self->lines) >= 128)
 		return;
+	/* A byte-bounded cut can split a character, and the synthesizer refuses
+	 * invalid UTF-8, which would read as a TTS outage. The replacement
+	 * character is a symbol, so speakable() drops it. */
+	valid = g_utf8_make_valid(text, -1);
+	spoken = speakable(valid);
+	if (spoken == NULL) {
+		g_debug("voice: not speaking unpronounceable segment '%s'", valid);
+		return;
+	}
 	line = g_new0(Line, 1);
-	line->text = g_strdup(text);
+	line->text = g_steal_pointer(&spoken);
 	line->remember = remember;
 	g_queue_push_tail(&self->lines, line);
+}
+static gboolean
+terminator(gchar c)
+{
+	return c == '.' || c == '!' || c == '?';
+}
+static gsize
+closing_len(const gchar *text, gsize len)
+{
+	if (len >= 1 && (text[0] == '"' || text[0] == '\'' || text[0] == ')' || text[0] == ']'))
+		return 1;
+	/* U+2019 and U+201D, the curly closing quotes. */
+	if (len >= 3 && (memcmp(text, "\342\200\231", 3) == 0 ||
+					 memcmp(text, "\342\200\235", 3) == 0))
+		return 3;
+	return 0;
+}
+/* Byte length of the sentence at the head of @text, or 0 when none is
+ * complete yet. Inside the text a terminator ends a sentence only when
+ * whitespace follows it, so "3.5" is not cut apart, and a run of terminators
+ * and closing quotes stays with its sentence. */
+static gsize
+sentence_end(const gchar *text, gsize len, gboolean final)
+{
+	gsize i;
+	for (i = 0; i < len; i++) {
+		gsize end, n;
+		if (text[i] == '\n')
+			return i + 1;
+		if (!terminator(text[i]))
+			continue;
+		end = i + 1;
+		while (end < len && terminator(text[end]))
+			end++;
+		while ((n = closing_len(text + end, len - end)) != 0)
+			end += n;
+		/* Speak a sentence as soon as it arrives, unless "3." may yet be "3.5". */
+		if (end == len)
+			return final || end - i > 1 || i == 0 || !g_ascii_isdigit(text[i - 1]) ? end
+																				 : 0;
+		if (g_ascii_isspace(text[end]))
+			return end;
+		i = end - 1;
+	}
+	return 0;
 }
 static void
 segment(AiVoiceSession *self, gboolean final)
 {
-	gsize i = 0;
-	while (i < self->pending_text->len) {
-		gchar c = self->pending_text->str[i];
-		if (c == '.' || c == '!' || c == '?' || c == '\n') {
-			g_autofree gchar *text = g_strndup(self->pending_text->str, i + 1);
-			queue_line(self, g_strstrip(text), TRUE);
-			g_string_erase(self->pending_text, 0, i + 1);
-			i = 0;
-		} else
-			i++;
+	gsize end;
+	while ((end = sentence_end(self->pending_text->str, self->pending_text->len,
+							   final)) != 0) {
+		g_autofree gchar *text = g_strndup(self->pending_text->str, end);
+		queue_line(self, text, TRUE);
+		g_string_erase(self->pending_text, 0, end);
 	}
 	if (final && self->pending_text->len != 0) {
 		queue_line(self, self->pending_text->str, TRUE);
