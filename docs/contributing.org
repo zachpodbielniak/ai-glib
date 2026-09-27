@@ -251,9 +251,43 @@ int main(int argc, char *argv[])
 2. Create a feature branch: =git checkout -b feature/my-feature=
 3. Make your changes following the code style
 4. Add tests for new functionality
-5. Ensure all tests pass: =make test=
-6. Commit with clear messages
-7. Push and create a merge request
+5. Bump the version and add a changelog entry (see [[*Versioning][Versioning]])
+6. Ensure all tests pass: =make test=
+7. Commit with clear messages
+8. Push and create a merge request
+
+** Versioning
+Every pull request that changes behaviour bumps the version, in the same
+PR. The number lives in one place, =VERSION_MAJOR=, =VERSION_MINOR= and
+=VERSION_MICRO= in =config.mk=; everything else (=--version=, the pkg-config
+file, the shared library's file name) is derived from it.
+
+Pick the bump from what the PR does, using [[https://semver.org/][semantic versioning]]:
+
+- *Fix only* --- bump the micro: =0.4.0= to =0.4.1=.
+- *New feature*, or anything a user can see that was not there before ---
+  bump the minor and reset the micro: =0.4.1= to =0.5.0=.
+- *Breaking change* to the public API --- bump the minor while below
+  =1.0.0=, the major after it.
+- *No behaviour change* (tests, comments, internal refactors, CI) --- no
+  bump and no changelog entry.
+
+Bump once per PR, from what is on master when it merges, not once per
+commit. If two PRs bump to the same number, the second one to land
+rebases and takes the next number; the conflict in =config.mk= is there to
+make that impossible to miss.
+
+Then add the entry to =CHANGELOG.org=: a new top heading for the version
+with the date, =* 0.5.0 - 2026-10-01=, and the change under =** Added=,
+=** Changed=, =** Fixed= or =** Removed=. Write it for someone deciding
+whether to update, not as a commit log.
+
+=make test= runs =make test-version=, which fails when the newest heading in
+=CHANGELOG.org= does not match =config.mk=. It catches the bump without the
+entry and the entry without the bump; it cannot tell whether the bump was
+needed, so that part is on the author and the reviewer.
+
+Tags are the maintainer's, after merge; see =CHANGELOG.org=.
 
 ** Commit Messages
 - Use present tense: "Add feature" not "Added feature"

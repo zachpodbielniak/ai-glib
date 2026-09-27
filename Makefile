@@ -335,8 +335,9 @@ $(YAML_GLIB_STATIC):
 .PHONY: all
 all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries gui
 
-# Generate config.h from template
-$(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
+# Generate config.h from template.  config.mk is a prerequisite because the
+# version lives there: without it a bump leaves the old number compiled in.
+$(OUTDIR)/config.h: $(SRCDIR)/config.h.in config.mk | $(OUTDIR)
 	@echo "Generating config.h..."
 	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
@@ -349,8 +350,8 @@ $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
 	     -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' \
 	     $< > $@
 
-# Generate ai-version.h from template
-$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
+# Generate ai-version.h from template (config.mk: see config.h above)
+$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in config.mk | $(OUTDIR)
 	@echo "Generating ai-version.h..."
 	@sed -e 's/@AI_GLIB_MAJOR_VERSION@/$(VERSION_MAJOR)/g' \
 	     -e 's/@AI_GLIB_MINOR_VERSION@/$(VERSION_MINOR)/g' \
@@ -500,7 +501,20 @@ test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 		$$test || exit 1; \
 	done
 	@$(MAKE) --no-print-directory test-gir-clean
+	@$(MAKE) --no-print-directory test-version
 	@echo "All tests passed!"
+
+# The newest heading in CHANGELOG.org must name the version in config.mk.
+# Catches a bump without its entry, and an entry without its bump.
+.PHONY: test-version
+test-version:
+	@TOP=$$(sed -n 's/^\* \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' CHANGELOG.org | head -n 1); \
+	if [ "$$TOP" != "$(VERSION)" ]; then \
+		echo "FAIL: config.mk says $(VERSION) but the newest CHANGELOG.org heading says '$$TOP'" >&2; \
+		echo "      Bump both together; see docs/contributing.org, Versioning." >&2; \
+		exit 1; \
+	fi; \
+	echo "PASS: version $(VERSION) matches CHANGELOG.org"
 
 .PHONY: test-verbose
 test-verbose: $(TEST_BINARIES) $(BIN_BINARIES)

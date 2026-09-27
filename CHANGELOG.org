@@ -4,9 +4,14 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
-* Unreleased
+* 0.4.0 - 2026-09-27
 
 ** Added
+- =/loop= and =/goal=: repeating prompts and bounded goals that persist
+  across restarts and can be listed, edited, paused and run from ai-tui,
+  ai-gui and =ai loop= / =ai goal=. See
+  [[file:docs/loops-and-goals.org][docs/loops-and-goals.org]].
+- Plan mode on =Shift-Tab= in ai-tui.
 - Build provenance: the commit, a dirty flag, the build date, the source
   directory and the install paths are embedded at build time.
   =ai_build_info_*()= reads them, including from bindings, and =--version=
@@ -26,23 +31,20 @@ release may change the API.
 The version in =config.mk= when this changelog started. Earlier history is in
 =git log=.
 
-* Release procedure
+* Versioning
 
-For the maintainer. Nothing here is automated, and no tooling pushes a tag.
+Every pull request that changes behaviour bumps the version in =config.mk=
+and adds its entry under a heading for that version at the top of this
+file, in the same PR. =make test= fails when the newest heading here does
+not match =config.mk= (=make test-version=). The rules, and what counts as
+a feature or a fix, are in [[file:docs/contributing.org::*Versioning][docs/contributing.org]].
 
-1. Decide the number from what "Unreleased" contains: a breaking API
-   change bumps the minor while below 1.0.0 (the major after), new features
-   bump the minor, fixes only bump the micro.
-2. Set =VERSION_MAJOR=, =VERSION_MINOR= and =VERSION_MICRO= in =config.mk=.
-3. Rename "Unreleased" to the version with the date, =* 0.4.0 - 2026-10-01=,
-   and open a new empty "Unreleased" above it.
-4. Commit: =chore(release): 0.4.0=.
-5. Run =make clean-all && make test && make test ASAN=1=.
-6. Tag the commit and push the tag:
-   #+begin_example
-   git tag -a v0.4.0 -m "ai-glib 0.4.0"
-   git push origin v0.4.0
-   #+end_example
+Tags are the maintainer's, after merge; nothing in the tree pushes one:
 
-After the tag, =git describe= in every build says =v0.4.0-N-g<commit>=, which
+#+begin_example
+git tag -a v0.4.0 -m "ai-glib 0.4.0"
+git push origin v0.4.0
+#+end_example
+
+After a tag, =git describe= in every build says =v0.4.0-N-g<commit>=, which
 is what =--version= shows.

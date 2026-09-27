@@ -1513,6 +1513,12 @@ into `build/<type>/ai-build-stamp.h`, read only by
 private) checks and updates from that checkout; `ai`, `ai-tui` and
 `ai-gui` all drive it. See `docs/updating.org` and `CHANGELOG.org`.
 
+**Every PR that changes behaviour bumps the version** in `config.mk` and
+adds a matching top heading to `CHANGELOG.org`, in the same PR: micro for
+a fix, minor for a feature (and, below 1.0.0, for a break). `make test`
+runs `test-version`, which fails when the two disagree. See
+`docs/contributing.org`, Versioning.
+
 Rules that are load-bearing, each with a test:
 
 - **The stamp is rewritten only when its content changes** (the date is

@@ -175,6 +175,7 @@ help:
 	@echo "  test-verbose - Build and run tests with verbose output"
 	@echo "  test-gi      - Run the PyGObject binding smoke test (needs python3-gobject)"
 	@echo "  test-gir-clean - Assert g-ir-scanner emits zero warnings"
+	@echo "  test-version - Assert CHANGELOG.org's newest heading matches config.mk"
 	@echo "  examples     - Build example programs"
 	@echo "  binaries     - Build installable CLI binaries (the 'ai' front-end)"
 	@echo "  gui          - Build the ai-gui desktop client (needs gtk4 + libadwaita)"
