@@ -123,4 +123,44 @@ ai_gui_format_relative_time(gint64 unix_time);
 gchar *
 ai_gui_summarise_prompt(const gchar *text);
 
+/**
+ * ai_gui_loops_edit_line:
+ * @id: the loop or goal
+ * @goal: which kind @id is
+ * @interval: (nullable): a loop's new interval ("10m", "self-paced"),
+ *   %NULL or blank to leave it
+ * @prompt: (nullable): a loop's new prompt; %NULL to leave it, "" for
+ *   the maintenance prompt
+ * @turns: (nullable): a goal's new turn bound
+ * @time: (nullable): a goal's new time bound ("4h")
+ * @condition: (nullable): a goal's new condition
+ *
+ * What the loops view's edit fields mean, as the `/loop edit` or
+ * `/goal edit` line the slash command would take. One parser decides
+ * both, so the window cannot accept something the command refuses.
+ *
+ * Returns: (transfer full) (nullable): the line, or %NULL when nothing
+ *   changed
+ */
+gchar *
+ai_gui_loops_edit_line(
+	const gchar *id,
+	gboolean     goal,
+	const gchar *interval,
+	const gchar *prompt,
+	const gchar *turns,
+	const gchar *time,
+	const gchar *condition
+);
+
+/**
+ * ai_gui_loops_interval_text:
+ * @interval_us: a loop's interval, 0 when self-paced
+ *
+ * Returns: (transfer full): "45m", "2h", "1d" or "self-paced" -- the
+ *   form ai_gui_loops_edit_line() reads back
+ */
+gchar *
+ai_gui_loops_interval_text(gint64 interval_us);
+
 G_END_DECLS

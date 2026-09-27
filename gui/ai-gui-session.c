@@ -65,6 +65,10 @@ struct _AiGuiSession
 	GCancellable  *work_cancellable;
 	gint           work_lock;
 	gboolean       awaiting_approval;
+
+	/* /loop and /goal: the same runner ai-tui drives, owning its timer. */
+	AiLoopRunner  *loops;
+	gchar         *loop_summary;
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiSession, ai_gui_session, G_TYPE_OBJECT)
@@ -82,6 +86,7 @@ enum
 	PROP_QUEUED,
 	PROP_UPDATED_AT,
 	PROP_PINNED,
+	PROP_LOOPS,
 	N_PROPS
 };
 
@@ -99,6 +104,8 @@ enum
 static guint signals[N_SIGNALS];
 
 static void session_pump_queue(AiGuiSession *self);
+static void on_loops_changed(AiLoopRunner *runner, gpointer user_data);
+static void session_dispatch(AiGuiSession *self, const gchar *text, GList *images, gboolean expand);
 
 /* ================================================================
  * Provider construction
@@ -483,6 +490,7 @@ ai_gui_session_publish_work(AiGuiSession *self)
 		"provider-session", native != NULL ? native : "",
 		"activity", activity,
 		"title", self->title != NULL ? self->title : "",
+		"loop-owner", self->loops != NULL ? ai_loop_runner_get_owner(self->loops) : "",
 		NULL);
 
 	ai_work_session_update(self->work,
@@ -518,7 +526,14 @@ ai_gui_session_release_work(AiGuiSession *self)
 static gboolean
 on_heartbeat(gpointer user_data)
 {
-	ai_gui_session_publish_work(user_data);
+	AiGuiSession *self = user_data;
+
+	ai_gui_session_publish_work(self);
+
+	/* "next in 4m" goes stale with nobody touching the schedule. */
+	if (self->loops != NULL)
+		on_loops_changed(self->loops, self);
+
 	return G_SOURCE_CONTINUE;
 }
 
@@ -737,6 +752,110 @@ session_register_work(AiGuiSession *self)
 	                      on_work_ready, g_object_ref(self));
 }
 
+/* ================================================================
+ * Loops and goals
+ * ================================================================ */
+
+/*
+ * The same answer ai-tui gives: a scheduled turn waits for anything in
+ * flight -- a turn, a queued follow-up, an approval somebody has not
+ * answered -- and fires once when it clears.
+ */
+static gboolean
+on_loops_should_wait(AiLoopRunner *runner, gpointer user_data)
+{
+	AiGuiSession *self = user_data;
+
+	return self->sending || ai_conversation_get_busy(self->conversation) ||
+	       ai_prompt_queue_get_length(self->queue) != 0 || self->awaiting_approval;
+}
+
+static gboolean
+on_loops_fire(AiLoopRunner *runner, const gchar *id, const gchar *text, gboolean expand, gpointer user_data)
+{
+	AiGuiSession *self = user_data;
+
+	session_dispatch(self, text, NULL, expand);
+	return self->sending;
+}
+
+static void
+on_loops_notice(AiLoopRunner *runner, const gchar *text, gpointer user_data)
+{
+	AiGuiSession *self = user_data;
+	g_autoptr(AiViewBlock) block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, text);
+
+	ai_view_block_set_complete(block, TRUE);
+	ai_transcript_append(ai_conversation_get_transcript(self->conversation), block);
+}
+
+static void
+on_loops_changed(AiLoopRunner *runner, gpointer user_data)
+{
+	AiGuiSession     *self = user_data;
+	g_autofree gchar *summary = ai_gui_session_dup_loop_summary(self);
+
+	if (g_strcmp0(summary, self->loop_summary) != 0)
+	{
+		g_free(self->loop_summary);
+		self->loop_summary = g_steal_pointer(&summary);
+		g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_LOOPS]);
+	}
+}
+
+/*
+ * Keyed by this session's own id, which -- unlike the dashboard record's
+ * -- survives a restart. That is what brings a session's loops back when
+ * the application is opened again.
+ */
+static void
+session_open_loops(AiGuiSession *self)
+{
+	g_autoptr(GError) error = NULL;
+
+	ai_loop_schedule_set_commands(ai_loop_runner_get_schedule(self->loops), self->commands);
+	ai_loop_runner_set_working_directory(self->loops, self->working_directory);
+
+	if (!ai_loop_runner_open(self->loops, NULL, self->id, g_get_real_time(), &error))
+	{
+		/* Another instance already runs this session's schedule: the
+		 * loops still work here, they are just not this window's to save. */
+		g_debug("ai-gui: loops for %s stay in memory: %s", self->id, error->message);
+	}
+
+	ai_loop_runner_start(self->loops);
+}
+
+AiLoopRunner *
+ai_gui_session_get_loops(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+	return self->loops;
+}
+
+void
+ai_gui_session_forget_loops(AiGuiSession *self)
+{
+	g_autofree gchar *owner = NULL;
+	g_autoptr(GError) error = NULL;
+
+	g_return_if_fail(AI_GUI_IS_SESSION(self));
+
+	ai_loop_runner_stop(self->loops);
+	owner = g_strdup(ai_loop_runner_get_owner(self->loops));
+	ai_loop_runner_close(self->loops);
+
+	if (owner != NULL && !ai_loop_store_remove(NULL, owner, &error))
+		g_debug("ai-gui: could not delete the schedule for %s: %s", owner, error->message);
+}
+
+gchar *
+ai_gui_session_dup_loop_summary(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+	return ai_loop_schedule_dup_summary(ai_loop_runner_get_schedule(self->loops), g_get_real_time());
+}
+
 static void
 session_configure(AiGuiSession *self)
 {
@@ -798,6 +917,7 @@ ai_gui_session_new(
 	g_object_unref(provider);
 
 	session_configure(self);
+	session_open_loops(self);
 
 	return g_steal_pointer(&self);
 }
@@ -1149,6 +1269,7 @@ ai_gui_session_new_from_json(
 	}
 
 	session_configure(self);
+	session_open_loops(self);
 
 	blocks = ai_json_get_array(object, "blocks");
 
@@ -1252,6 +1373,33 @@ on_send_ready(
 		              error != NULL ? error->message : NULL);
 
 	/*
+	 * Tell the runner how its turn ended. It ignores a turn it did not
+	 * start, and while one of its own is in flight every other send is
+	 * queued, so the next finish is always that one. A stop pressed on
+	 * a scheduled turn pauses a goal rather than failing it.
+	 */
+	if (self->loops != NULL && ai_loop_runner_get_active_id(self->loops) != NULL)
+	{
+		if (!ok && error == NULL && command == NULL)
+		{
+			ai_loop_runner_turn_cancelled(self->loops, g_get_real_time());
+		}
+		else
+		{
+			g_autofree gchar *reply = NULL;
+			GList *last = g_list_last(ai_conversation_get_messages(self->conversation));
+
+			if (ok && command == NULL && last != NULL && AI_IS_MESSAGE(last->data) &&
+			    ai_message_get_role(AI_MESSAGE(last->data)) == AI_ROLE_ASSISTANT)
+				reply = ai_message_get_text(AI_MESSAGE(last->data));
+
+			ai_loop_runner_turn_finished(self->loops, reply,
+			                             error != NULL ? error->message : NULL,
+			                             g_get_real_time());
+		}
+	}
+
+	/*
 	 * Pump before dropping the turn's reference: the queue entry takes a
 	 * reference of its own, so the object survives either way -- but
 	 * unrefing first means a closed session with a queue can be finalised
@@ -1265,7 +1413,8 @@ static void
 session_dispatch(
 	AiGuiSession *self,
 	const gchar  *text,
-	GList        *images
+	GList        *images,
+	gboolean      expand
 ){
 	AiTranscript *transcript = ai_conversation_get_transcript(self->conversation);
 	guint before = ai_transcript_get_n_blocks(transcript);
@@ -1300,7 +1449,7 @@ session_dispatch(
 	 */
 	g_object_ref(self);
 
-	if (self->options->expand)
+	if (self->options->expand && expand)
 	{
 		ai_conversation_send_input_images_async(self->conversation, text,
 		                                        images, self->cancellable,
@@ -1368,7 +1517,7 @@ session_pump_queue(AiGuiSession *self)
 	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_QUEUED]);
 
 	if (text != NULL)
-		session_dispatch(self, text, images);
+		session_dispatch(self, text, images, TRUE);
 
 	g_list_free_full(images, g_object_unref);
 }
@@ -1392,7 +1541,7 @@ ai_gui_session_send(
 		return TRUE;
 	}
 
-	session_dispatch(self, text, images);
+	session_dispatch(self, text, images, TRUE);
 	return TRUE;
 }
 
@@ -1566,6 +1715,7 @@ ai_gui_session_set_working_directory(
 
 	ai_conversation_set_working_directory(self->conversation, path);
 	ai_resource_registry_set_working_directory(self->registry, path);
+	ai_loop_runner_set_working_directory(self->loops, path);
 	ai_resource_registry_scan(self->registry);
 	ai_completion_context_set_working_directory(self->completion, path);
 
@@ -1743,6 +1893,9 @@ ai_gui_session_get_property(
 		case PROP_PINNED:
 			g_value_set_boolean(value, self->pinned);
 			break;
+		case PROP_LOOPS:
+			g_value_take_string(value, ai_gui_session_dup_loop_summary(self));
+			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
 			break;
@@ -1783,6 +1936,15 @@ ai_gui_session_dispose(GObject *object)
 		g_clear_signal_handler(&self->agent_id, self->conversation);
 		g_clear_signal_handler(&self->busy_id, self->conversation);
 		g_clear_signal_handler(&self->activity_id, self->conversation);
+	}
+
+	/* First: nothing scheduled may start on a session being torn down. */
+	if (self->loops != NULL)
+	{
+		g_signal_handlers_disconnect_by_data(self->loops, self);
+		ai_loop_runner_stop(self->loops);
+		ai_loop_runner_close(self->loops);
+		g_clear_object(&self->loops);
 	}
 
 	if (self->registry != NULL)
@@ -1834,6 +1996,7 @@ ai_gui_session_finalize(GObject *object)
 	g_free(self->project);
 	g_free(self->work_directory);
 	g_free(self->work_outcome);
+	g_free(self->loop_summary);
 
 	G_OBJECT_CLASS(ai_gui_session_parent_class)->finalize(object);
 }
@@ -1869,6 +2032,14 @@ ai_gui_session_class_init(AiGuiSessionClass *klass)
 		0, G_MAXINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 	properties[PROP_PINNED] = g_param_spec_boolean("pinned", NULL, NULL,
 		FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+	/*
+	 * "2 loops, 1 goal, next in 4m", or NULL. Notified when the schedule
+	 * changes and when the heartbeat finds the relative time has moved,
+	 * so a sidebar bound to it never shows a stale "next in".
+	 */
+	properties[PROP_LOOPS] = g_param_spec_string("loop-summary", NULL, NULL,
+		NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
 	g_object_class_install_properties(object_class, N_PROPS, properties);
 
@@ -1937,4 +2108,9 @@ ai_gui_session_init(AiGuiSession *self)
 	self->work_lock = -1;
 	self->work_cancellable = g_cancellable_new();
 	self->work_directory = ai_work_session_default_directory();
+	self->loops = ai_loop_runner_new();
+	g_signal_connect(self->loops, "should-wait", G_CALLBACK(on_loops_should_wait), self);
+	g_signal_connect(self->loops, "fire", G_CALLBACK(on_loops_fire), self);
+	g_signal_connect(self->loops, "notice", G_CALLBACK(on_loops_notice), self);
+	g_signal_connect(self->loops, "changed", G_CALLBACK(on_loops_changed), self);
 }

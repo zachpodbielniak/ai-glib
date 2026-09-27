@@ -16,6 +16,7 @@ typedef struct
 {
 	GtkWidget *title;
 	GtkWidget *subtitle;
+	GtkWidget *loops;
 	GtkWidget *spinner;
 	GtkWidget *pin;
 
@@ -341,6 +342,15 @@ row_sync(AiGuiSessionRow *row)
 	gtk_label_set_text(GTK_LABEL(row->title),
 	                   ai_gui_session_get_title(row->session));
 	gtk_label_set_text(GTK_LABEL(row->subtitle), subtitle);
+
+	/* The library's words: "2 loops, 1 goal, next in 4m". Hidden when
+	 * nothing is scheduled, so a quiet session keeps a two-line row. */
+	{
+		g_autofree gchar *loops = ai_gui_session_dup_loop_summary(row->session);
+
+		gtk_label_set_text(GTK_LABEL(row->loops), loops != NULL ? loops : "");
+		gtk_widget_set_visible(row->loops, loops != NULL);
+	}
 	gtk_widget_set_visible(row->spinner, busy);
 	gtk_spinner_set_spinning(GTK_SPINNER(row->spinner), busy);
 	gtk_widget_set_visible(row->pin,
@@ -382,6 +392,14 @@ on_row_setup(
 	gtk_widget_add_css_class(row->subtitle, "dim-label");
 	gtk_widget_add_css_class(row->subtitle, "ai-session-subtitle");
 	gtk_box_append(GTK_BOX(column), row->subtitle);
+
+	row->loops = gtk_label_new(NULL);
+	gtk_label_set_xalign(GTK_LABEL(row->loops), 0.0f);
+	gtk_label_set_ellipsize(GTK_LABEL(row->loops), PANGO_ELLIPSIZE_END);
+	gtk_widget_add_css_class(row->loops, "dim-label");
+	gtk_widget_add_css_class(row->loops, "ai-session-subtitle");
+	gtk_widget_set_visible(row->loops, FALSE);
+	gtk_box_append(GTK_BOX(column), row->loops);
 
 	gtk_widget_set_hexpand(column, TRUE);
 	gtk_box_append(GTK_BOX(box), column);

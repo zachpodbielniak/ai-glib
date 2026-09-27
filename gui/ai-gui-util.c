@@ -268,3 +268,99 @@ ai_gui_options_free(AiGuiOptions *self)
 	g_strfreev(self->sets);
 	g_free(self);
 }
+
+static gboolean
+blank(const gchar *text)
+{
+	const gchar *cursor;
+
+	for (cursor = text; cursor != NULL && *cursor != '\0'; cursor++)
+		if (!g_ascii_isspace(*cursor))
+			return FALSE;
+
+	return TRUE;
+}
+
+gchar *
+ai_gui_loops_edit_line(
+	const gchar *id,
+	gboolean     goal,
+	const gchar *interval,
+	const gchar *prompt,
+	const gchar *turns,
+	const gchar *time,
+	const gchar *condition
+){
+	g_autoptr(GString) line = NULL;
+
+	g_return_val_if_fail(id != NULL, NULL);
+
+	line = g_string_new(NULL);
+	g_string_printf(line, "edit %s", id);
+
+	if (goal)
+	{
+		if (!blank(turns))
+		{
+			g_autofree gchar *count = g_strstrip(g_strdup(turns));
+			g_string_append_printf(line, " --turns %s", count);
+		}
+
+		if (!blank(time))
+		{
+			g_autofree gchar *span = g_strstrip(g_strdup(time));
+			g_string_append_printf(line, " --time %s", span);
+		}
+
+		/* Last: it takes the rest of the line. */
+		if (!blank(condition))
+		{
+			g_autofree gchar *text = g_strstrip(g_strdup(condition));
+			g_string_append_printf(line, " --condition %s", text);
+		}
+	}
+	else
+	{
+		if (!blank(interval))
+		{
+			g_autofree gchar *every = g_strstrip(g_strdup(interval));
+
+			if (g_ascii_strcasecmp(every, "self-paced") == 0)
+				g_string_append(line, " --self-paced");
+			else
+				g_string_append_printf(line, " --every %s", every);
+		}
+
+		if (prompt != NULL)
+		{
+			g_autofree gchar *text = g_strstrip(g_strdup(prompt));
+
+			g_string_append(line, " --prompt");
+
+			if (*text != '\0')
+				g_string_append_printf(line, " %s", text);
+		}
+	}
+
+	if (line->len == strlen("edit ") + strlen(id))
+		return NULL;
+
+	return g_string_free(g_steal_pointer(&line), FALSE);
+}
+
+gchar *
+ai_gui_loops_interval_text(gint64 interval_us)
+{
+	gint64 minutes = interval_us / (60 * G_USEC_PER_SEC);
+
+	if (interval_us <= 0)
+		return g_strdup("self-paced");
+
+	if (minutes % (24 * 60) == 0)
+		return g_strdup_printf("%" G_GINT64_FORMAT "d", minutes / (24 * 60));
+
+	if (minutes % 60 == 0)
+		return g_strdup_printf("%" G_GINT64_FORMAT "h", minutes / 60);
+
+	return g_strdup_printf("%" G_GINT64_FORMAT "m", MAX(minutes, 1));
+}

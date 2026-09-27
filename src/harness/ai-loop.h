@@ -442,6 +442,9 @@ ai_loop_schedule_get_max_turns(AiLoopSchedule *self, guint index);
 gint64
 ai_loop_schedule_get_deadline_us(AiLoopSchedule *self, guint index);
 
+gint64
+ai_loop_schedule_get_max_duration_us(AiLoopSchedule *self, guint index);
+
 gboolean
 ai_loop_schedule_get_inflight(AiLoopSchedule *self, guint index);
 

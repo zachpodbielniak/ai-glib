@@ -4236,6 +4236,13 @@ ai_loop_schedule_get_deadline_us(AiLoopSchedule *self, guint index)
 	return task->deadline_us;
 }
 
+gint64
+ai_loop_schedule_get_max_duration_us(AiLoopSchedule *self, guint index)
+{
+	TASK_AT_OR_RETURN(0);
+	return task->max_duration_us;
+}
+
 gboolean
 ai_loop_schedule_get_inflight(AiLoopSchedule *self, guint index)
 {
