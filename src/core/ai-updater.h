@@ -65,11 +65,15 @@ typedef struct
 	gchar          *from_commit;
 	gchar          *to_commit;
 	gchar          *privileged_command;
+	gchar          *prefix;
 	gchar          *log_path;
 } AiUpdateResult;
 
 void
 ai_update_result_free(AiUpdateResult *result);
+
+gchar *
+ai_update_result_dup_summary(const AiUpdateResult *result);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(AiUpdateResult, ai_update_result_free)
 

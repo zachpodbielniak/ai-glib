@@ -85,6 +85,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
       "<text|markdown|org> [path]" },
     { "loop",     "Run a prompt on a schedule while this session is open",
       "[list|stop|cancel <id|all>] [INTERVAL] [PROMPT]" },
+    { "update",   "Install the latest ai-glib, or show whether one is available",
+      "[status]" },
     { NULL, NULL, NULL }
 };
 

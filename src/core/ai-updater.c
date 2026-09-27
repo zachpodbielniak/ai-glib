@@ -872,8 +872,35 @@ ai_update_result_free(AiUpdateResult *result)
 	g_free(result->from_commit);
 	g_free(result->to_commit);
 	g_free(result->privileged_command);
+	g_free(result->prefix);
 	g_free(result->log_path);
 	g_free(result);
+}
+
+/*
+ * The outcome in one sentence, for every front-end: what went where, or
+ * the exact command that finishes the job.
+ */
+gchar *
+ai_update_result_dup_summary(const AiUpdateResult *result)
+{
+	g_autofree gchar *from = NULL;
+	g_autofree gchar *to = NULL;
+
+	g_return_val_if_fail(result != NULL, NULL);
+
+	if (result->outcome == AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE)
+		return g_strdup_printf("Built, not installed: installing into %s needs privilege. "
+		                       "Finish with: %s",
+		                       result->prefix != NULL ? result->prefix : "the prefix",
+		                       result->privileged_command);
+
+	from = result->from_commit != NULL ? g_strndup(result->from_commit, 12) : g_strdup("unknown");
+	to = result->to_commit != NULL ? g_strndup(result->to_commit, 12) : g_strdup("unknown");
+	return g_strdup_printf("Installed %s (%s) -> %s (%s) into %s. Restart to use it.",
+	                       result->from_version != NULL ? result->from_version : "unknown", from,
+	                       result->to_version != NULL ? result->to_version : "unknown", to,
+	                       result->prefix != NULL ? result->prefix : "the prefix");
 }
 
 /* config.mk's VERSION_MAJOR/MINOR/MICRO, which is the release number. */
@@ -1199,12 +1226,6 @@ record_install(Plan *plan, AiUpdateResult *result)
 	state_write(plan->state_dir, root);
 }
 
-static gchar *
-short_commit(const gchar *commit)
-{
-	return commit != NULL ? g_strndup(commit, 12) : g_strdup("unknown");
-}
-
 static void
 pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 {
@@ -1213,8 +1234,6 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 	g_autofree gchar *refusal = NULL;
 	g_autofree gchar *jobs = g_strdup_printf("-j%u", MAX(1u, g_get_num_processors()));
 	g_autofree gchar *at = now_iso8601();
-	g_autofree gchar *from_short = NULL;
-	g_autofree gchar *to_short = NULL;
 	AiUpdateStatus *status;
 	GError **error = &output->error;
 
@@ -1242,6 +1261,7 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 
 	result->from_version = g_strdup(plan->build_version);
 	result->from_commit = g_strdup(plan->build_commit);
+	result->prefix = g_strdup(plan->prefix);
 
 	if (status->checkout_behind > 0)
 	{
@@ -1324,20 +1344,19 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 		g_ptr_array_insert(argv, 0, g_strdup(plan->sudo_program != NULL ? plan->sudo_program : "sudo"));
 		result->privileged_command = argv_to_display(argv);
 		result->outcome = AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE;
-		plan_say(plan, "Built. Installing into %s needs privilege; run:", plan->prefix);
-		plan_say(plan, "  %s", result->privileged_command);
+		plan_log(plan, "Built. Installing needs privilege; run:");
+		plan_log(plan, result->privileged_command);
 		output->result = g_steal_pointer(&result);
 		return;
 	}
 
 	result->outcome = AI_UPDATE_OUTCOME_INSTALLED;
 	record_install(plan, result);
-	from_short = short_commit(result->from_commit);
-	to_short = short_commit(result->to_commit);
-	plan_say(plan, "Installed %s (%s) -> %s (%s) into %s. Restart to use it.",
-	         result->from_version != NULL ? result->from_version : "unknown", from_short,
-	         result->to_version != NULL ? result->to_version : "unknown", to_short,
-	         plan->prefix);
+	{
+		g_autofree gchar *summary = ai_update_result_dup_summary(result);
+
+		plan_log(plan, summary);
+	}
 
 	/* This process is now the old build; say so rather than "behind". */
 	{
