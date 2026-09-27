@@ -11,6 +11,7 @@
 
 #include "core/ai-config.h"
 #include "core/ai-error.h"
+#include "core/ai-update-status.h"
 
 #include <yaml-glib.h>
 #include <glib/gstdio.h>
@@ -188,6 +189,63 @@ config_app_index(const gchar *app)
 	return -1;
 }
 
+/* A scalar that is exactly `true` or `false`. */
+static gboolean
+config_yaml_is_boolean(yaml_document_t *document, gint id)
+{
+	yaml_node_t *node = yaml_document_get_node(document, id);
+
+	return node->type == YAML_SCALAR_NODE &&
+	       (g_str_equal((const gchar *)node->data.scalar.value, "true") ||
+	        g_str_equal((const gchar *)node->data.scalar.value, "false"));
+}
+
+/*
+ * updates: {check, interval, upstream, source-dir, run-tests}.
+ *
+ * Checked here, with the rest of the file, so a typo rejects the whole
+ * config on load rather than being read as "no preference" -- the same
+ * rule as every other key. An interval is plain seconds.
+ */
+static gboolean
+config_yaml_validate_updates(yaml_document_t *document)
+{
+	gint updates_id = config_yaml_member(document, 1, "updates");
+	gint value_id;
+	yaml_node_t *node;
+	const gchar *text;
+
+	if (updates_id == 0)
+		return TRUE;
+	if (yaml_document_get_node(document, updates_id)->type != YAML_MAPPING_NODE)
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "check");
+	if (value_id != 0 && !config_yaml_is_boolean(document, value_id))
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "run-tests");
+	if (value_id != 0 && !config_yaml_is_boolean(document, value_id))
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "interval");
+	if (value_id != 0)
+	{
+		guint64 seconds;
+
+		node = yaml_document_get_node(document, value_id);
+		if (node->type != YAML_SCALAR_NODE)
+			return FALSE;
+		text = (const gchar *)node->data.scalar.value;
+		if (!g_ascii_string_to_unsigned(text, 10, 0, G_MAXUINT, &seconds, NULL))
+			return FALSE;
+	}
+	value_id = config_yaml_member(document, updates_id, "upstream");
+	if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "source-dir");
+	if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
+		return FALSE;
+	return TRUE;
+}
+
 /* Validate all scopes before either loading or rewriting any of their values. */
 static gboolean
 config_yaml_validate(yaml_document_t *document)
@@ -222,6 +280,8 @@ config_yaml_validate(yaml_document_t *document)
 	}
 	apps_id = config_yaml_member(document, 1, "apps");
 	if (apps_id != 0 && yaml_document_get_node(document, apps_id)->type != YAML_MAPPING_NODE)
+		return FALSE;
+	if (!config_yaml_validate_updates(document))
 		return FALSE;
 	for (i = 0; i < G_N_ELEMENTS(apps); i++)
 	{
@@ -332,6 +392,13 @@ struct _AiConfig
 	AiProviderType app_providers[G_N_ELEMENTS(AI_CONFIG_APPS)];
 	gchar *app_models[G_N_ELEMENTS(AI_CONFIG_APPS)];
 	gboolean app_dashboards[G_N_ELEMENTS(AI_CONFIG_APPS)];
+
+	/* updates: -- read by the self-updater in ai, ai-tui and ai-gui. */
+	gboolean update_check;
+	guint    update_interval;
+	gchar   *update_upstream;
+	gchar   *update_source_dir;
+	gboolean update_run_tests;
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -345,6 +412,11 @@ enum
     PROP_TIMEOUT,
     PROP_MAX_RETRIES,
     PROP_OPEN_DASHBOARD_ON_LOAD,
+    PROP_UPDATE_CHECK,
+    PROP_UPDATE_INTERVAL,
+    PROP_UPDATE_UPSTREAM,
+    PROP_UPDATE_SOURCE_DIR,
+    PROP_UPDATE_RUN_TESTS,
     N_PROPS
 };
 
@@ -376,6 +448,8 @@ ai_config_finalize(GObject *object)
     g_clear_pointer(&self->grok_base_url, g_free);
     g_clear_pointer(&self->ollama_base_url, g_free);
     g_clear_pointer(&self->default_model, g_free);
+	g_clear_pointer(&self->update_upstream, g_free);
+	g_clear_pointer(&self->update_source_dir, g_free);
 	{
 		gsize i;
 
@@ -413,6 +487,21 @@ ai_config_get_property(
         case PROP_TIMEOUT:
             g_value_set_uint(value, self->timeout_seconds);
             break;
+        case PROP_UPDATE_CHECK:
+            g_value_set_boolean(value, self->update_check);
+            break;
+        case PROP_UPDATE_INTERVAL:
+            g_value_set_uint(value, self->update_interval);
+            break;
+        case PROP_UPDATE_UPSTREAM:
+            g_value_set_string(value, self->update_upstream);
+            break;
+        case PROP_UPDATE_SOURCE_DIR:
+            g_value_set_string(value, self->update_source_dir);
+            break;
+        case PROP_UPDATE_RUN_TESTS:
+            g_value_set_boolean(value, self->update_run_tests);
+            break;
         case PROP_MAX_RETRIES:
             g_value_set_uint(value, self->max_retries);
             break;
@@ -439,6 +528,23 @@ ai_config_set_property(
             break;
         case PROP_TIMEOUT:
             self->timeout_seconds = g_value_get_uint(value);
+            break;
+        case PROP_UPDATE_CHECK:
+            self->update_check = g_value_get_boolean(value);
+            break;
+        case PROP_UPDATE_INTERVAL:
+            self->update_interval = g_value_get_uint(value);
+            break;
+        case PROP_UPDATE_UPSTREAM:
+            g_free(self->update_upstream);
+            self->update_upstream = g_value_dup_string(value);
+            break;
+        case PROP_UPDATE_SOURCE_DIR:
+            g_free(self->update_source_dir);
+            self->update_source_dir = g_value_dup_string(value);
+            break;
+        case PROP_UPDATE_RUN_TESTS:
+            self->update_run_tests = g_value_get_boolean(value);
             break;
         case PROP_MAX_RETRIES:
             self->max_retries = g_value_get_uint(value);
@@ -491,6 +597,58 @@ ai_config_class_init(AiConfigClass *klass)
     properties[PROP_OPEN_DASHBOARD_ON_LOAD] = g_param_spec_boolean(
         "open-dashboard-on-load", "Open dashboard on load", "Start ai-tui on its dashboard",
         FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-check:
+     *
+     * Whether ai-tui and ai-gui check for a newer ai-glib in the background
+     * (`updates.check`). `AI_GLIB_NO_UPDATE_CHECK` also turns it off. An
+     * explicit `ai --check-update` or `/update` still runs.
+     */
+    properties[PROP_UPDATE_CHECK] = g_param_spec_boolean(
+        "update-check", "Update check", "Check for updates in the background",
+        TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-interval:
+     *
+     * Seconds between fetches of the upstream branch (`updates.interval`).
+     * Values under five minutes are treated as five minutes.
+     */
+    properties[PROP_UPDATE_INTERVAL] = g_param_spec_uint(
+        "update-interval", "Update interval", "Seconds between update fetches",
+        0, G_MAXUINT, AI_UPDATE_DEFAULT_INTERVAL_S,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-upstream:
+     *
+     * `REMOTE/BRANCH` to update from (`updates.upstream`). %NULL means the
+     * checkout's own upstream, else `origin/master`.
+     */
+    properties[PROP_UPDATE_UPSTREAM] = g_param_spec_string(
+        "update-upstream", "Update upstream", "REMOTE/BRANCH to update from",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-source-dir:
+     *
+     * The checkout to update from (`updates.source-dir`), overriding the
+     * directory the binary was built in. `AI_GLIB_SOURCE_DIR` wins over it.
+     */
+    properties[PROP_UPDATE_SOURCE_DIR] = g_param_spec_string(
+        "update-source-dir", "Update source directory", "Checkout to update from",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-run-tests:
+     *
+     * Run `make test` before installing an update (`updates.run-tests`).
+     * A failure installs nothing.
+     */
+    properties[PROP_UPDATE_RUN_TESTS] = g_param_spec_boolean(
+        "update-run-tests", "Run tests on update", "Run make test before installing",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
     g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -499,6 +657,8 @@ ai_config_init(AiConfig *self)
 {
     self->timeout_seconds = AI_CONFIG_DEFAULT_TIMEOUT;
     self->max_retries = AI_CONFIG_DEFAULT_MAX_RETRIES;
+	self->update_check = TRUE;
+	self->update_interval = AI_UPDATE_DEFAULT_INTERVAL_S;
 	{
 		gsize i;
 
@@ -1157,6 +1317,39 @@ ai_config_load_from_file(
 			g_clear_pointer(&self->app_models[i], g_free);
 			if (str_val[0] != '\0')
 				self->app_models[i] = g_strdup(str_val);
+		}
+	}
+
+	/* updates: already validated, so each value is the right shape. */
+	{
+		gint updates_id = config_yaml_member(document, 1, "updates");
+		gint value_id;
+
+		value_id = config_yaml_member(document, updates_id, "check");
+		if (value_id != 0)
+			self->update_check = g_str_equal(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, "true");
+		value_id = config_yaml_member(document, updates_id, "run-tests");
+		if (value_id != 0)
+			self->update_run_tests = g_str_equal(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, "true");
+		value_id = config_yaml_member(document, updates_id, "interval");
+		if (value_id != 0)
+			self->update_interval = (guint)g_ascii_strtoull(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, NULL, 10);
+		value_id = config_yaml_member(document, updates_id, "upstream");
+		if (value_id != 0)
+		{
+			str_val = config_yaml_model(yaml_document_get_node(document, value_id));
+			g_free(self->update_upstream);
+			self->update_upstream = str_val[0] != '\0' ? g_strdup(str_val) : NULL;
+		}
+		value_id = config_yaml_member(document, updates_id, "source-dir");
+		if (value_id != 0)
+		{
+			str_val = config_yaml_model(yaml_document_get_node(document, value_id));
+			g_free(self->update_source_dir);
+			self->update_source_dir = str_val[0] != '\0' ? g_strdup(str_val) : NULL;
 		}
 	}
 

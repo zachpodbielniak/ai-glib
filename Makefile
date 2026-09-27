@@ -51,6 +51,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/ai-types.h \
+	$(SRCDIR)/core/ai-build-info.h \
 	$(SRCDIR)/core/ai-error.h \
 	$(SRCDIR)/core/ai-session-limit.h \
 	$(SRCDIR)/core/ai-enums.h \
@@ -145,6 +146,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-work-session.c \
 	$(SRCDIR)/harness/ai-work-context.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
+	$(SRCDIR)/core/ai-build-info.c \
+	$(SRCDIR)/core/ai-updater.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
@@ -352,6 +355,18 @@ $(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
 	     -e 's/@AI_GLIB_MICRO_VERSION@/$(VERSION_MICRO)/g' \
 	     -e 's/@AI_GLIB_VERSION@/$(VERSION)/g' \
 	     $< > $@
+
+# Build provenance: commit, dirty flag, date, source directory, install
+# paths.  FORCE runs the generator on every invocation; it rewrites the
+# header only when its content changed, so a commit (or a first edit
+# after one) recompiles ai-build-info.o and nothing else.  A dependency
+# on .git/HEAD would miss a commit on the current branch and a worktree,
+# whose HEAD is not under .git at all.
+$(OUTDIR)/ai-build-stamp.h: FORCE | $(OUTDIR)
+	@sh build-aux/gen-build-stamp.sh $@ "$(CURDIR)" "$(VERSION)" \
+		"$(PREFIX)" "$(LIBDIR)" "$(INCLUDEDIR)" "$(BUILD_TYPE)"
+
+$(OBJDIR)/core/ai-build-info.o: $(OUTDIR)/ai-build-stamp.h
 
 # Shared library
 .PHONY: shared
