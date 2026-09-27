@@ -365,8 +365,9 @@ ai_loop_schedule_clear_inflight(AiLoopSchedule *self, const gchar *id);
  * @path: destination file
  * @error: (nullable): return location for a #GError
  *
- * Writes fixed tasks as JSON, mode 0600. Self-paced tasks are omitted.
- * Refuses to follow a symlink at @path or its parent directory.
+ * Writes the schedule as JSON, mode 0600: fixed and self-paced loops,
+ * and goals whether or not they have finished. Refuses to follow a
+ * symlink at @path or its parent directory.
  *
  * Returns: %TRUE on success
  */

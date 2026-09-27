@@ -783,13 +783,22 @@ on_loops_fire(AiLoopRunner *runner, const gchar *id, const gchar *text, gboolean
 }
 
 static void
-on_loops_notice(AiLoopRunner *runner, const gchar *text, gpointer user_data)
+session_loop_note(AiGuiSession *self, const gchar *text)
 {
-	AiGuiSession *self = user_data;
-	g_autoptr(AiViewBlock) block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, text);
+	g_autoptr(AiViewBlock) block = NULL;
 
+	if (text == NULL || text[0] == '\0')
+		return;
+
+	block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, text);
 	ai_view_block_set_complete(block, TRUE);
 	ai_transcript_append(ai_conversation_get_transcript(self->conversation), block);
+}
+
+static void
+on_loops_notice(AiLoopRunner *runner, const gchar *text, gpointer user_data)
+{
+	session_loop_note(user_data, text);
 }
 
 static void
@@ -810,23 +819,40 @@ on_loops_changed(AiLoopRunner *runner, gpointer user_data)
  * Keyed by this session's own id, which -- unlike the dashboard record's
  * -- survives a restart. That is what brings a session's loops back when
  * the application is opened again.
+ *
+ * A second window does not take a schedule another process already
+ * claimed: it would fire every prompt twice. The caller shows the
+ * returned line, the same sentence ai-tui uses, so the window says it
+ * started without them.
+ *
+ * Returns: (transfer full) (nullable): that line, or %NULL
  */
-static void
+static gchar *
 session_open_loops(AiGuiSession *self)
 {
 	g_autoptr(GError) error = NULL;
+	gchar            *notice = NULL;
 
 	ai_loop_schedule_set_commands(ai_loop_runner_get_schedule(self->loops), self->commands);
 	ai_loop_runner_set_working_directory(self->loops, self->working_directory);
 
 	if (!ai_loop_runner_open(self->loops, NULL, self->id, g_get_real_time(), &error))
 	{
-		/* Another instance already runs this session's schedule: the
-		 * loops still work here, they are just not this window's to save. */
-		g_debug("ai-gui: loops for %s stay in memory: %s", self->id, error->message);
+		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_BUSY))
+		{
+			notice = g_strdup("That session's loops and goals are running in another window; "
+			                  "this one starts without them.");
+		}
+		else
+		{
+			notice = g_strdup_printf("Could not restore loops and goals: %s", error->message);
+		}
+
+		g_debug("ai-gui: %s", notice);
 	}
 
 	ai_loop_runner_start(self->loops);
+	return notice;
 }
 
 AiLoopRunner *
@@ -920,7 +946,12 @@ ai_gui_session_new(
 	g_object_unref(provider);
 
 	session_configure(self);
-	session_open_loops(self);
+
+	{
+		g_autofree gchar *notice = session_open_loops(self);
+
+		session_loop_note(self, notice);
+	}
 
 	return g_steal_pointer(&self);
 }
@@ -1167,7 +1198,6 @@ ai_gui_session_new_from_json(
 	const gchar *session_id;
 	const gchar *directory;
 	GObject *provider;
-	JsonArray *blocks;
 
 	g_return_val_if_fail(object != NULL, NULL);
 	g_return_val_if_fail(options != NULL, NULL);
@@ -1272,35 +1302,41 @@ ai_gui_session_new_from_json(
 	}
 
 	session_configure(self);
-	session_open_loops(self);
 
-	blocks = ai_json_get_array(object, "blocks");
-
-	if (blocks != NULL)
 	{
-		guint i;
-		guint n = json_array_get_length(blocks);
+		g_autofree gchar *notice = session_open_loops(self);
+		JsonArray        *blocks = ai_json_get_array(object, "blocks");
 
-		for (i = 0; i < n; i++)
+		if (blocks != NULL)
 		{
-			JsonObject *record = ai_json_array_get_object(blocks, i);
+			guint i;
+			guint n = json_array_get_length(blocks);
 
-			if (record != NULL)
-				session_restore_block(self, record);
+			for (i = 0; i < n; i++)
+			{
+				JsonObject *record = ai_json_array_get_object(blocks, i);
+
+				if (record != NULL)
+					session_restore_block(self, record);
+			}
+
+			if (n > 0)
+			{
+				g_autoptr(AiViewBlock) note = NULL;
+
+				note = ai_view_status_block_new(AI_VIEW_STATUS_INFO,
+					session_id != NULL && *session_id != '\0'
+						? "Restored from disk; the provider's own session was resumed."
+						: "Restored from disk for reading. The model has not been told about it.");
+				ai_view_block_set_complete(note, TRUE);
+				ai_transcript_append(
+					ai_conversation_get_transcript(self->conversation), note);
+			}
 		}
 
-		if (n > 0)
-		{
-			g_autoptr(AiViewBlock) note = NULL;
-
-			note = ai_view_status_block_new(AI_VIEW_STATUS_INFO,
-				session_id != NULL && *session_id != '\0'
-					? "Restored from disk; the provider's own session was resumed."
-					: "Restored from disk for reading. The model has not been told about it.");
-			ai_view_block_set_complete(note, TRUE);
-			ai_transcript_append(
-				ai_conversation_get_transcript(self->conversation), note);
-		}
+		/* After the restored transcript, so the line is the last thing
+		 * a reopened session shows. */
+		session_loop_note(self, notice);
 	}
 
 	return g_steal_pointer(&self);

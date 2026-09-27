@@ -538,6 +538,9 @@ Four things about how the window runs them:
 - *The schedule is keyed by the session's own id*, which survives a
   restart, so a session's loops and goals come back when ai-gui is opened
   again. What was missed while it was closed fires once.
+- *A second window on that session starts without its loops* and says so
+  in the transcript. The first window holds the lock; both firing the
+  same schedule would send every prompt twice.
 - *Nothing fires mid-turn.* A scheduled turn waits for a running turn, a
   queued follow-up and an unanswered approval, the same rule ai-tui
   applies.
@@ -549,8 +552,9 @@ Four things about how the window runs them:
 
 The runner lives in the GTK-free =gui/ai-gui-session.c=;
 =tests/test-ai-gui-loops.c= runs a goal to its end through the session's
-real send path against =AiMockProvider=, restarts a session, and deletes
-one, all without a display.
+real send path against =AiMockProvider=, restarts a session, opens a
+second window onto one that is already claimed, and deletes one, all
+without a display.
 
 ** Slash commands
 

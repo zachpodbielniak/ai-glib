@@ -209,6 +209,42 @@ test_loops_survive_restart(Fixture *fixture, gconstpointer data)
 	                                      loop_id), ==, 0);
 }
 
+/* A second window on a session whose schedule is already claimed starts
+ * without those loops and says so. Silence there reads as the schedule
+ * having been lost. */
+static void
+test_second_window_says_so(Fixture *fixture, gconstpointer data)
+{
+	g_autoptr(AiGuiOptions) options = options_for(fixture);
+	g_autoptr(GError)       error = NULL;
+	g_autoptr(JsonNode)     json = NULL;
+	g_autoptr(AiGuiSession) second = NULL;
+	g_autofree gchar       *text = NULL;
+	AiGuiSession           *first;
+	AiLoopRunner           *runner;
+
+	first = ai_gui_session_new(options, "ollama", NULL, &error);
+	g_assert_no_error(error);
+	runner = ai_gui_session_get_loops(first);
+	g_free(ai_loop_runner_command(runner, "loop", "15m check the deploy",
+	                              g_get_real_time(), &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(ai_loop_schedule_get_n_tasks(
+		ai_loop_runner_get_schedule(runner)), ==, 1);
+
+	json = ai_gui_session_to_json(first);
+	second = ai_gui_session_new_from_json(json_node_get_object(json), options, &error);
+	g_assert_no_error(error);
+	text = ai_transcript_to_text(
+		ai_conversation_get_transcript(ai_gui_session_get_conversation(second)), 80);
+	g_assert_nonnull(strstr(text, "running in another window"));
+	g_assert_cmpuint(ai_loop_schedule_get_n_tasks(
+		ai_loop_runner_get_schedule(ai_gui_session_get_loops(second))), ==, 0);
+	g_assert_cmpuint(ai_loop_schedule_get_n_tasks(
+		ai_loop_runner_get_schedule(runner)), ==, 1);
+	g_object_unref(first);
+}
+
 /* Deleting a session deletes its schedule: nothing it set up fires
  * later, from this window or from a resumed ai-tui. */
 static void
@@ -243,6 +279,8 @@ main(int argc, char **argv)
 	           fixture_set_up, test_goal_runs_in_session, fixture_tear_down);
 	g_test_add("/ai-gui/loops/survive-restart", Fixture, NULL,
 	           fixture_set_up, test_loops_survive_restart, fixture_tear_down);
+	g_test_add("/ai-gui/loops/second-window-says-so", Fixture, NULL,
+	           fixture_set_up, test_second_window_says_so, fixture_tear_down);
 	g_test_add("/ai-gui/loops/delete-forgets", Fixture, NULL,
 	           fixture_set_up, test_delete_forgets_loops, fixture_tear_down);
 	return g_test_run();
