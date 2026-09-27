@@ -37,11 +37,17 @@ G_DECLARE_FINAL_TYPE(AiUpdater, ai_updater, AI, UPDATER, GObject)
  * @AI_UPDATE_RUN_INTERACTIVE: the caller's terminal belongs to the
  *   update, so an install into a prefix this user cannot write runs
  *   under sudo with the terminal attached, where it can prompt
+ * @AI_UPDATE_RUN_POLKIT: no terminal, but a desktop: try the install
+ *   step alone under pkexec, whose agent asks in a dialog. With no agent,
+ *   or when the dialog is dismissed, fall back to returning the command.
+ *   pkexec gets no terminal and a closed stdin, so it cannot wait on a
+ *   password prompt nobody can see
  */
 typedef enum
 {
 	AI_UPDATE_RUN_NONE        = 0,
-	AI_UPDATE_RUN_INTERACTIVE = 1 << 0
+	AI_UPDATE_RUN_INTERACTIVE = 1 << 0,
+	AI_UPDATE_RUN_POLKIT      = 1 << 1
 } AiUpdateRunFlags;
 
 typedef enum

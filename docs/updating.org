@@ -169,8 +169,14 @@ directory it writes is writable, it runs directly. Otherwise:
   terminal attached so it can prompt. ai-tui hands the terminal over the way
   =^G= does for =$EDITOR=, shows the build scrolling past, and takes it back
   when Enter is pressed.
-- ai-gui, =ai --update= without a terminal, and =ai-tui --dump=, never run
-  sudo. They build, stop, and print the one command that finishes the job:
+- ai-gui runs the install step alone under =pkexec= when it is installed:
+  the desktop's polkit agent asks in a dialog. pkexec gets no terminal and a
+  closed stdin, so without an agent it fails at once rather than waiting.
+  A dismissed dialog or a missing agent falls back to the line below. After
+  an install, ai-gui's header button offers *Restart now*.
+- ai-gui without pkexec or permission, =ai --update= without a terminal, and
+  =ai-tui --dump= never run sudo. They build, stop, and print the one
+  command that finishes the job:
 
 #+begin_example
 Built, not installed: installing into /usr/local needs privilege. Finish with: sudo make -C /home/me/src/ai-glib install PREFIX=/usr/local LIBDIR=/usr/local/lib INCLUDEDIR=/usr/local/include

@@ -11,7 +11,9 @@
  * tests/test-ai-gui-update.c links it without a display.
  *
  * ai-gui has no terminal, so a run never uses sudo. When the prefix
- * needs privilege it builds, stops, and says the one command to run.
+ * needs privilege the install step alone goes through pkexec, whose
+ * desktop agent asks in a dialog; with no agent, or a dismissed dialog,
+ * it builds, stops, and says the one command to run.
  */
 
 #pragma once
@@ -26,6 +28,13 @@ G_BEGIN_DECLS
 #define AI_GUI_TYPE_UPDATE (ai_gui_update_get_type())
 
 G_DECLARE_FINAL_TYPE(AiGuiUpdate, ai_gui_update, AI_GUI, UPDATE, GObject)
+
+typedef enum
+{
+	AI_GUI_UPDATE_ACTION_NONE,
+	AI_GUI_UPDATE_ACTION_UPDATE,
+	AI_GUI_UPDATE_ACTION_RESTART
+} AiGuiUpdateAction;
 
 AiGuiUpdate *
 ai_gui_update_new(AiUpdater *updater);
@@ -50,5 +59,11 @@ ai_gui_update_check(AiGuiUpdate *self);
 
 void
 ai_gui_update_run(AiGuiUpdate *self, gboolean turn_running);
+
+AiGuiUpdateAction
+ai_gui_update_get_action(AiGuiUpdate *self, gboolean turn_running, gboolean *sensitive);
+
+gchar *
+ai_gui_update_dup_restart_path(AiGuiUpdate *self);
 
 G_END_DECLS

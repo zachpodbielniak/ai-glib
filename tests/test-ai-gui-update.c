@@ -29,6 +29,8 @@ typedef struct
 	gchar      *seed;
 	gchar      *clone;
 	gchar      *make_log;
+	gchar      *prefix;
+	gchar      *pkexec;
 	AiUpdater  *updater;
 	AiGuiUpdate *update;
 	GPtrArray  *messages;
@@ -75,7 +77,6 @@ fixture_set_up(Fixture *f, gconstpointer data)
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *upstream = NULL;
 	g_autofree gchar *make = NULL;
-	g_autofree gchar *prefix = NULL;
 	g_autofree gchar *bin = NULL;
 	g_autofree gchar *state = NULL;
 	g_autofree gchar *script = NULL;
@@ -87,8 +88,9 @@ fixture_set_up(Fixture *f, gconstpointer data)
 	f->seed = g_build_filename(f->root, "seed", NULL);
 	f->clone = g_build_filename(f->root, "clone", NULL);
 	make = g_build_filename(f->root, "make", NULL);
-	prefix = g_build_filename(f->root, "prefix", NULL);
-	bin = g_build_filename(prefix, "bin", NULL);
+	f->prefix = g_build_filename(f->root, "prefix", NULL);
+	f->pkexec = g_build_filename(f->root, "pkexec", NULL);
+	bin = g_build_filename(f->prefix, "bin", NULL);
 	state = g_build_filename(f->root, "state", NULL);
 	f->make_log = g_build_filename(f->root, "make.log", NULL);
 
@@ -106,13 +108,20 @@ fixture_set_up(Fixture *f, gconstpointer data)
 	g_assert_cmpint(g_mkdir_with_parents(bin, 0755), ==, 0);
 	g_assert_cmpint(g_chmod(bin, 0555), ==, 0);
 
+	/* Never the machine's pkexec. This one says "no agent" unless a case
+	 * stages a grant, the way a desktop without polkit would. */
+	g_assert_true(g_file_set_contents(f->pkexec,
+		"#!/bin/sh\n[ -e \"$0.grant\" ] && exec \"$@\"\nexit 127\n", -1, NULL));
+	g_assert_cmpint(g_chmod(f->pkexec, 0755), ==, 0);
+
 	f->updater = g_object_new(AI_TYPE_UPDATER,
 	                          "source-dir", f->clone,
 	                          "build-commit", commit,
 	                          "build-version", "0.3.0",
 	                          "state-dir", state,
 	                          "make-program", make,
-	                          "prefix", prefix,
+	                          "prefix", f->prefix,
+	                          "pkexec-program", f->pkexec,
 	                          NULL);
 	f->update = ai_gui_update_new(f->updater);
 	f->messages = g_ptr_array_new_with_free_func(g_free);
@@ -157,6 +166,8 @@ fixture_tear_down(Fixture *f, gconstpointer data)
 	g_free(f->seed);
 	g_free(f->clone);
 	g_free(f->make_log);
+	g_free(f->prefix);
+	g_free(f->pkexec);
 }
 
 static void
@@ -203,6 +214,7 @@ test_banner(Fixture *f, gconstpointer data)
 	g_autofree gchar *banner = NULL;
 
 	g_assert_null(ai_gui_update_dup_banner(f->update));
+	g_assert_cmpint(ai_gui_update_get_action(f->update, FALSE, NULL), ==, AI_GUI_UPDATE_ACTION_NONE);
 	ai_gui_update_check(f->update);
 	g_assert_true(saw(f, "Checking for updates"));
 	wait_idle(f);
@@ -216,6 +228,18 @@ test_banner(Fixture *f, gconstpointer data)
 	g_assert_cmpstr(banner, ==, "Update available: 1 commit behind origin/master. "
 	                            "Run `ai --update` or /update.");
 	g_assert_cmpuint(f->changes, >, 0);
+
+	/* The button: Update, and not while a turn runs. */
+	{
+		gboolean sensitive = FALSE;
+
+		g_assert_cmpint(ai_gui_update_get_action(f->update, FALSE, &sensitive), ==,
+		                AI_GUI_UPDATE_ACTION_UPDATE);
+		g_assert_true(sensitive);
+		g_assert_cmpint(ai_gui_update_get_action(f->update, TRUE, &sensitive), ==,
+		                AI_GUI_UPDATE_ACTION_UPDATE);
+		g_assert_false(sensitive);
+	}
 }
 
 static void
@@ -250,7 +274,13 @@ test_run_needs_privilege(Fixture *f, gconstpointer data)
 
 		g_assert_cmpstr(banner, ==, "Updating ai-glib…");
 	}
-	/* A second click while one runs does not start a second one. */
+	/* Disabled while it runs, and a second click does not start another. */
+	{
+		gboolean sensitive = TRUE;
+
+		ai_gui_update_get_action(f->update, FALSE, &sensitive);
+		g_assert_false(sensitive);
+	}
 	ai_gui_update_run(f->update, FALSE);
 	g_assert_true(saw(f, "already running"));
 
@@ -302,6 +332,39 @@ test_drain(Fixture *f, gconstpointer data)
 	g_assert_null(strstr(log, "install"));
 }
 
+/* Granted through pkexec: installed, and the button becomes Restart now. */
+static void
+test_run_installs_then_restart(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *grant = g_strconcat(f->pkexec, ".grant", NULL);
+	g_autofree gchar *banner = NULL;
+	g_autofree gchar *restart = NULL;
+	g_autofree gchar *expected = NULL;
+	gboolean sensitive = FALSE;
+
+	if (geteuid() == 0)
+	{
+		g_test_skip("root can write anywhere");
+		return;
+	}
+	g_assert_true(g_file_set_contents(grant, "", -1, NULL));
+	push_upstream(f);
+	ai_gui_update_run(f->update, FALSE);
+	wait_idle(f);
+
+	g_assert_true(saw(f, "Installed 0.3.0"));
+	banner = ai_gui_update_dup_banner(f->update);
+	g_assert_true(g_str_has_prefix(banner, "Installed 0.3.0"));
+	g_assert_cmpint(ai_gui_update_get_action(f->update, TRUE, &sensitive), ==,
+	                AI_GUI_UPDATE_ACTION_RESTART);
+	/* Restarting does not interrupt a turn in this process's sense: the
+	 * window saves every session first. It is offered regardless. */
+	g_assert_true(sensitive);
+	restart = ai_gui_update_dup_restart_path(f->update);
+	expected = g_build_filename(f->prefix, "bin", "ai-gui", NULL);
+	g_assert_cmpstr(restart, ==, expected);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -332,6 +395,8 @@ main(int argc, char *argv[])
 	           fixture_set_up, test_run_needs_privilege, fixture_tear_down);
 	g_test_add("/ai-glib/ai-gui/update/shutdown-is-silent", Fixture, NULL,
 	           fixture_set_up, test_shutdown_is_silent, fixture_tear_down);
+	g_test_add("/ai-glib/ai-gui/update/installs-then-restart", Fixture, NULL,
+	           fixture_set_up, test_run_installs_then_restart, fixture_tear_down);
 	g_test_add("/ai-glib/ai-gui/update/drain", Fixture, NULL,
 	           fixture_set_up, test_drain, fixture_tear_down);
 

@@ -25,6 +25,8 @@ struct _AiGuiUpdate
 	gboolean      running;
 	guint         checking;
 	gboolean      shut_down;
+	gchar        *step;         /* the step in progress, for the banner */
+	gchar        *installed;    /* the outcome of an install this process ran */
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiUpdate, ai_gui_update, G_TYPE_OBJECT)
@@ -61,9 +63,13 @@ on_status_changed(AiUpdater *updater, gpointer data)
 static void
 on_step(AiUpdater *updater, const gchar *step, gpointer data)
 {
+	AiGuiUpdate *self = data;
 	g_autofree gchar *text = g_strdup_printf("==> %s", step);
 
-	update_say(data, text);
+	g_free(self->step);
+	self->step = g_strdup(step);
+	update_say(self, text);
+	update_changed(self);
 }
 
 static void
@@ -74,6 +80,8 @@ ai_gui_update_dispose(GObject *object)
 	ai_gui_update_shutdown(self);
 	g_clear_object(&self->updater);
 	g_clear_object(&self->cancel);
+	g_clear_pointer(&self->step, g_free);
+	g_clear_pointer(&self->installed, g_free);
 	G_OBJECT_CLASS(ai_gui_update_parent_class)->dispose(object);
 }
 
@@ -178,7 +186,10 @@ ai_gui_update_dup_banner(AiGuiUpdate *self)
 	if (self->shut_down)
 		return NULL;
 	if (self->running)
-		return g_strdup("Updating ai-glib…");
+		return self->step != NULL ? g_strdup_printf("Updating ai-glib: %s…", self->step)
+		                          : g_strdup("Updating ai-glib…");
+	if (self->installed != NULL)
+		return g_strdup(self->installed);
 	status = ai_updater_get_status(self->updater);
 	badge = ai_update_status_dup_badge(status);
 	return badge != NULL ? ai_update_status_dup_summary(status) : NULL;
@@ -228,10 +239,16 @@ on_run_done(GObject *source, GAsyncResult *res, gpointer data)
 	g_autofree gchar *summary = NULL;
 
 	self->running = FALSE;
+	g_clear_pointer(&self->step, g_free);
 	result = ai_updater_run_finish(AI_UPDATER(source), res, &error);
 	if (self->shut_down)
 		return;
 	summary = result != NULL ? ai_update_result_dup_summary(result) : g_strdup(error->message);
+	if (result != NULL && result->outcome == AI_UPDATE_OUTCOME_INSTALLED)
+	{
+		g_free(self->installed);
+		self->installed = g_strdup(summary);
+	}
 	update_say(self, summary);
 	update_changed(self);
 }
@@ -264,6 +281,55 @@ ai_gui_update_run(AiGuiUpdate *self, gboolean turn_running)
 	self->running = TRUE;
 	update_say(self, "Updating ai-glib. Nothing is installed until the build succeeds.");
 	update_changed(self);
-	ai_updater_run_async(self->updater, AI_UPDATE_RUN_NONE, self->cancel, on_run_done,
+	/* No terminal: pkexec for the install, if the desktop can ask. */
+	ai_updater_run_async(self->updater, AI_UPDATE_RUN_POLKIT, self->cancel, on_run_done,
 	                     g_object_ref(self));
+}
+
+/*
+ * What the window's Update button should be: nothing, "Update", or
+ * "Restart now" once a newer build is installed -- by this window or by
+ * anything else, which the status's pending-restart says. The button is
+ * insensitive while a turn or an update is running; @turn_running is the
+ * window's answer for all its sessions.
+ */
+AiGuiUpdateAction
+ai_gui_update_get_action(AiGuiUpdate *self, gboolean turn_running, gboolean *sensitive)
+{
+	const AiUpdateStatus *status;
+	AiGuiUpdateAction action = AI_GUI_UPDATE_ACTION_NONE;
+
+	g_return_val_if_fail(AI_GUI_IS_UPDATE(self), AI_GUI_UPDATE_ACTION_NONE);
+
+	status = self->shut_down ? NULL : ai_updater_get_status(self->updater);
+	if (self->shut_down)
+		action = AI_GUI_UPDATE_ACTION_NONE;
+	else if (self->installed != NULL || (status != NULL && status->pending_restart))
+		action = AI_GUI_UPDATE_ACTION_RESTART;
+	else if (self->running || (status != NULL && status->state == AI_UPDATE_STATE_BEHIND))
+		action = AI_GUI_UPDATE_ACTION_UPDATE;
+
+	if (sensitive != NULL)
+		*sensitive = action != AI_GUI_UPDATE_ACTION_NONE && !self->running &&
+		             self->checking == 0 &&
+		             (action == AI_GUI_UPDATE_ACTION_RESTART || !turn_running);
+	return action;
+}
+
+/*
+ * The binary a restart runs: the one just installed, in the prefix this
+ * build was configured with -- not /proc/self/exe, which still names
+ * the old file's inode.
+ */
+gchar *
+ai_gui_update_dup_restart_path(AiGuiUpdate *self)
+{
+	g_autofree gchar *prefix = NULL;
+
+	g_return_val_if_fail(AI_GUI_IS_UPDATE(self), NULL);
+
+	g_object_get(self->updater, "prefix", &prefix, NULL);
+	if (prefix == NULL)
+		return NULL;
+	return g_build_filename(prefix, "bin", "ai-gui", NULL);
 }

@@ -74,6 +74,7 @@ struct _AiUpdater
 	gchar           *state_dir;
 	gchar           *make_program;
 	gchar           *sudo_program;
+	gchar           *pkexec_program;
 	gchar           *prefix;
 	gchar           *libdir;
 	gchar           *includedir;
@@ -104,6 +105,7 @@ enum
 	PROP_STATE_DIR,
 	PROP_MAKE_PROGRAM,
 	PROP_SUDO_PROGRAM,
+	PROP_PKEXEC_PROGRAM,
 	PROP_PREFIX,
 	PROP_LIBDIR,
 	PROP_INCLUDEDIR,
@@ -139,6 +141,8 @@ typedef struct
 	gchar            *state_dir;
 	gchar            *make_program;
 	gchar            *sudo_program;
+	gchar            *pkexec_program;
+	gint              last_exit;   /* the last failed step's status, -1 for a signal */
 	gchar            *prefix;
 	gchar            *libdir;
 	gchar            *includedir;
@@ -166,6 +170,7 @@ plan_free(Plan *plan)
 	g_free(plan->state_dir);
 	g_free(plan->make_program);
 	g_free(plan->sudo_program);
+	g_free(plan->pkexec_program);
 	g_free(plan->prefix);
 	g_free(plan->libdir);
 	g_free(plan->includedir);
@@ -191,6 +196,7 @@ plan_new(AiUpdater *self, gboolean fetch, AiUpdateRunFlags flags, gboolean threa
 	plan->state_dir = g_strdup(self->state_dir);
 	plan->make_program = g_strdup(self->make_program);
 	plan->sudo_program = g_strdup(self->sudo_program);
+	plan->pkexec_program = g_strdup(self->pkexec_program);
 	plan->prefix = g_strdup(self->prefix);
 	plan->libdir = g_strdup(self->libdir);
 	plan->includedir = g_strdup(self->includedir);
@@ -1205,6 +1211,7 @@ run_step(
 	if (!g_subprocess_get_successful(proc))
 	{
 		status = g_subprocess_get_if_exited(proc) ? g_subprocess_get_exit_status(proc) : -1;
+		plan->last_exit = status;
 		g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
 		            "%s failed (%s %d)", description,
 		            status >= 0 ? "exit status" : "signal",
@@ -1397,16 +1404,63 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 	}
 	else
 	{
-		/* The same command, spelled for a person: -C rather than a cwd. */
-		g_ptr_array_insert(argv, 1, g_strdup("-C"));
-		g_ptr_array_insert(argv, 2, g_strdup(plan->source_dir));
-		g_ptr_array_insert(argv, 0, g_strdup(plan->sudo_program != NULL ? plan->sudo_program : "sudo"));
-		result->privileged_command = argv_to_display(argv);
-		result->outcome = AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE;
-		plan_log(plan, "Built. Installing needs privilege; run:");
-		plan_log(plan, result->privileged_command);
-		output->result = g_steal_pointer(&result);
-		return;
+		gboolean installed = FALSE;
+
+		/*
+		 * pkexec, for the install step alone. It is run detached with
+		 * stdin closed, so with no graphical agent it fails at once
+		 * rather than waiting on a prompt nobody can see. 126 is a
+		 * dismissed dialog and 127 no agent or a failed login: both mean
+		 * "not now", and the person gets the command instead.
+		 */
+		if ((plan->flags & AI_UPDATE_RUN_POLKIT) && plan->pkexec_program != NULL)
+		{
+			g_autofree gchar *make_path = g_find_program_in_path(
+				plan->make_program != NULL ? plan->make_program : "make");
+
+			if (make_path != NULL)
+			{
+				g_autoptr(GPtrArray) elevated = g_ptr_array_new_with_free_func(g_free);
+				GError *local = NULL;
+				guint i;
+
+				g_ptr_array_add(elevated, g_strdup(plan->pkexec_program));
+				g_ptr_array_add(elevated, g_strdup(make_path));
+				g_ptr_array_add(elevated, g_strdup("-C"));
+				g_ptr_array_add(elevated, g_strdup(plan->source_dir));
+				for (i = 1; i < argv->len; i++)
+					g_ptr_array_add(elevated, g_strdup(g_ptr_array_index(argv, i)));
+				plan_say(plan, "%s is not writable; asking for permission to install.", plan->prefix);
+				plan->last_exit = 0;
+				if (run_step(plan, "Installing", elevated, FALSE, cancellable, &local))
+					installed = TRUE;
+				else if (line_is_cancelled(local) ||
+				         (plan->last_exit != 126 && plan->last_exit != 127))
+				{
+					g_propagate_error(error, local);
+					goto failed;
+				}
+				else
+				{
+					plan_say(plan, "Permission was not granted (%s).", local->message);
+					g_clear_error(&local);
+				}
+			}
+		}
+
+		if (!installed)
+		{
+			/* The same command, spelled for a person: -C rather than a cwd. */
+			g_ptr_array_insert(argv, 1, g_strdup("-C"));
+			g_ptr_array_insert(argv, 2, g_strdup(plan->source_dir));
+			g_ptr_array_insert(argv, 0, g_strdup(plan->sudo_program != NULL ? plan->sudo_program : "sudo"));
+			result->privileged_command = argv_to_display(argv);
+			result->outcome = AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE;
+			plan_log(plan, "Built. Installing needs privilege; run:");
+			plan_log(plan, result->privileged_command);
+			output->result = g_steal_pointer(&result);
+			return;
+		}
 	}
 
 	result->outcome = AI_UPDATE_OUTCOME_INSTALLED;
@@ -1488,6 +1542,7 @@ ai_updater_finalize(GObject *object)
 	g_free(self->state_dir);
 	g_free(self->make_program);
 	g_free(self->sudo_program);
+	g_free(self->pkexec_program);
 	g_free(self->prefix);
 	g_free(self->libdir);
 	g_free(self->includedir);
@@ -1510,6 +1565,7 @@ string_field(AiUpdater *self, guint prop_id)
 		case PROP_STATE_DIR:     return &self->state_dir;
 		case PROP_MAKE_PROGRAM:  return &self->make_program;
 		case PROP_SUDO_PROGRAM:  return &self->sudo_program;
+		case PROP_PKEXEC_PROGRAM: return &self->pkexec_program;
 		case PROP_PREFIX:        return &self->prefix;
 		case PROP_LIBDIR:        return &self->libdir;
 		case PROP_INCLUDEDIR:    return &self->includedir;
@@ -1593,6 +1649,10 @@ ai_updater_class_init(AiUpdaterClass *klass)
 		"The make to build and install with", "make");
 	properties[PROP_SUDO_PROGRAM] = string_pspec("sudo-program",
 		"The privilege helper for a prefix this user cannot write", "sudo");
+	/* No default in the pspec: which pkexec is on PATH is found in init. */
+	properties[PROP_PKEXEC_PROGRAM] = g_param_spec_string("pkexec-program", NULL,
+		"The polkit helper for a privileged install without a terminal; NULL for none",
+		NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 	properties[PROP_PREFIX] = string_pspec("prefix", "PREFIX to install into", NULL);
 	properties[PROP_LIBDIR] = string_pspec("libdir", "LIBDIR to install into", NULL);
 	properties[PROP_INCLUDEDIR] = string_pspec("includedir", "INCLUDEDIR to install into", NULL);
@@ -1620,6 +1680,7 @@ static void
 ai_updater_init(AiUpdater *self)
 {
 	self->state_dir = g_build_filename(g_get_user_state_dir(), "ai-glib", NULL);
+	self->pkexec_program = g_find_program_in_path("pkexec");
 }
 
 /* ================================================================

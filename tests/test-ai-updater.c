@@ -959,6 +959,126 @@ test_run_keeps_gir(Fixture *f, gconstpointer data)
 	g_assert_nonnull(strstr(lines[2], "GIR=1"));
 }
 
+/*
+ * pkexec for the install step alone. The stub records its argv, reads
+ * stdin (closed, so it cannot wait on a prompt) and exits with whatever
+ * the case stages in pkexec-exit, else runs the command.
+ */
+static AiUpdateResult *
+run_polkit(Fixture *f, const gchar *exit_code, gchar **pk_log, GError **error)
+{
+	g_autofree gchar *pkexec = g_build_filename(f->stub_dir, "pkexec", NULL);
+	g_autofree gchar *log_path = g_build_filename(f->root, "pkexec.log", NULL);
+	g_autofree gchar *script = NULL;
+	AiUpdateResult *result;
+
+	script = g_strdup_printf("#!/bin/sh\n"
+	                         "echo \"$*\" >> '%s'\n"
+	                         "read password\n"
+	                         "%s\n"
+	                         "exec \"$@\"\n",
+	                         log_path,
+	                         exit_code != NULL ? exit_code : "");
+	make_executable(pkexec, script);
+	push_upstream(f, "one");
+	make_prefix_readonly(f);
+	g_object_set(f->updater, "pkexec-program", pkexec, NULL);
+	result = ai_updater_run(f->updater, AI_UPDATE_RUN_POLKIT, NULL, error);
+	*pk_log = read_file(log_path);
+	return result;
+}
+
+static void
+test_run_polkit_granted(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *pk_log = NULL;
+	g_autofree gchar *make_log = NULL;
+	g_autofree gchar *expected = NULL;
+
+	if (geteuid() == 0)
+	{
+		g_test_skip("root can write anywhere");
+		return;
+	}
+	result = run_polkit(f, NULL, &pk_log, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(result->outcome, ==, AI_UPDATE_OUTCOME_INSTALLED);
+	expected = g_strdup_printf(" -C %s install PREFIX=%s", f->clone, f->prefix);
+	g_assert_nonnull(strstr(pk_log, expected));
+	/* Only the install is elevated: one pkexec run, not the build. */
+	g_assert_null(strchr(g_strstrip(pk_log), '\n'));
+	g_assert_null(strstr(pk_log, " all "));
+	make_log = read_file(f->make_log);
+	g_assert_nonnull(strstr(make_log, "install PREFIX="));
+}
+
+static void
+assert_polkit_declined(Fixture *f, const gchar *exit_code)
+{
+	g_autoptr(AiUpdateResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *pk_log = NULL;
+	g_autofree gchar *make_log = NULL;
+	gint64 started = g_get_monotonic_time();
+
+	result = run_polkit(f, exit_code, &pk_log, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 15 * G_USEC_PER_SEC);
+	g_assert_cmpint(result->outcome, ==, AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE);
+	g_assert_true(g_str_has_prefix(result->privileged_command, "sudo "));
+	g_assert_nonnull(strstr(pk_log, " install "));
+	make_log = read_file(f->make_log);
+	g_assert_null(strstr(make_log, "install"));
+}
+
+static void
+test_run_polkit_dismissed(Fixture *f, gconstpointer data)
+{
+	if (geteuid() == 0) { g_test_skip("root can write anywhere"); return; }
+	assert_polkit_declined(f, "exit 126");
+}
+
+static void
+test_run_polkit_no_agent(Fixture *f, gconstpointer data)
+{
+	if (geteuid() == 0) { g_test_skip("root can write anywhere"); return; }
+	/* A text agent would read the password from stdin; it is closed, so
+	 * this fails at once instead of hanging. */
+	assert_polkit_declined(f, "[ -n \"$password\" ] || exit 127");
+}
+
+/* A failed install under pkexec is a failure, not a request for help. */
+static void
+test_run_polkit_install_fails(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *pk_log = NULL;
+
+	if (geteuid() == 0) { g_test_skip("root can write anywhere"); return; }
+	result = run_polkit(f, "exit 2", &pk_log, &error);
+	g_assert_null(result);
+	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+}
+
+/* No pkexec on the machine: straight to the command. */
+static void
+test_run_polkit_absent(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+
+	if (geteuid() == 0) { g_test_skip("root can write anywhere"); return; }
+	push_upstream(f, "one");
+	make_prefix_readonly(f);
+	g_object_set(f->updater, "pkexec-program", NULL, NULL);
+	result = ai_updater_run(f->updater, AI_UPDATE_RUN_POLKIT, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(result->outcome, ==, AI_UPDATE_OUTCOME_NEEDS_PRIVILEGE);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1011,6 +1131,11 @@ main(int argc, char *argv[])
 	ADD("run/refusals", test_run_refusals);
 	ADD("run/needs-privilege", test_run_needs_privilege);
 	ADD("run/interactive-sudo", test_run_interactive_sudo);
+	ADD("run/polkit-granted", test_run_polkit_granted);
+	ADD("run/polkit-dismissed", test_run_polkit_dismissed);
+	ADD("run/polkit-no-agent", test_run_polkit_no_agent);
+	ADD("run/polkit-install-fails", test_run_polkit_install_fails);
+	ADD("run/polkit-absent", test_run_polkit_absent);
 	ADD("run/async-streams", test_run_async_streams);
 	ADD("run/cancel", test_run_cancel);
 

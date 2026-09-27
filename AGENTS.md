@@ -1531,8 +1531,11 @@ Rules that are load-bearing, each with a test:
   the real tree.
 - **Argv, never a shell string; first failure stops.** Nothing is
   installed after a failed build or test. Only an interactive caller
-  (`ai --update` on a tty, ai-tui) may run `sudo`; everything else stops
-  and returns the exact command.
+  (`ai --update` on a tty, ai-tui) may run `sudo`. ai-gui passes
+  `AI_UPDATE_RUN_POLKIT`: the install step alone under `pkexec`, detached
+  with stdin closed so it can never wait on an invisible prompt; exit 126
+  or 127 (dismissed, no agent) falls back to returning the exact command.
+  Tests always set `pkexec-program` to a stub — never the machine's.
 - **One vocabulary.** States, sentences, badge, refusals and the fetch
   policy live in `src/core/ai-update-status.h`, and every front-end prints
   those strings. `tests/test-ai-update-status.c` asserts them literally.

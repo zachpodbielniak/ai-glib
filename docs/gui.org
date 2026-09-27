@@ -582,14 +582,25 @@ an ai-tui feature; open a second session instead.
 
 ** Updates
 
-ai-gui checks the checkout that built it in the background, like ai-tui, and
-shows a banner above the conversation only when there is an update. Its
-*Update* button and =/update= run the same pipeline as =ai --update=; the
-steps and the outcome are written into the conversation you are looking at.
-The run is refused while a turn is running in any session in the window.
+ai-gui checks the checkout that built it in the background, like ai-tui.
+When there is an update, a banner above the conversation says so and an
+*Update* button appears in the header bar. The main menu's *Check for
+Updates* checks on demand, as =/update status= does.
+
+*Update* and =/update= run the same pipeline as =ai --update=. The banner
+shows the step in progress, and the steps and the outcome are written into
+the conversation you are looking at. The button is disabled while a turn is
+running (and =/update= is refused while any session in the window has one)
+and while an update is already running.
 
 ai-gui has no terminal, so it never runs =sudo=. When the install prefix is
-not writable it builds, stops, and shows the exact command to run in a
-terminal to finish. Closing the window cancels a run in progress and waits
-for its build to stop. The About box shows the build's provenance. See
+not writable, the install step alone goes through =pkexec=, whose desktop
+agent asks for a password in a dialog. With no polkit agent, or when the
+dialog is dismissed, it stops after the build and shows the exact command to
+run in a terminal; it never waits on a prompt nobody can see.
+
+After a successful install the button becomes *Restart now*: it saves every
+session, starts the newly installed ai-gui, and closes this one. Closing the
+window instead cancels a run in progress and waits for its build to stop.
+The About box shows the build's provenance. See
 [[file:updating.org][Versions and self-update]].

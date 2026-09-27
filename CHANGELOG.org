@@ -13,7 +13,9 @@ release may change the API.
   in =ai=, =ai-tui= and =ai-gui= prints them.
 - Self-update from the checkout that built the binary: =ai --check-update=
   (=--json=), =ai --update=, and =/update [status]= in ai-tui and ai-gui,
-  with a background check, an update badge in ai-tui and a banner in ai-gui.
+  with a background check, an update badge in ai-tui, and in ai-gui a banner,
+  an Update button (pkexec for a privileged install), "Check for Updates" in
+  the menu and "Restart now" after an install.
   See [[file:docs/updating.org][docs/updating.org]].
 - =updates:= configuration section: =check=, =interval=, =upstream=,
   =source-dir=, =run-tests=. Matching =AiConfig= properties.
