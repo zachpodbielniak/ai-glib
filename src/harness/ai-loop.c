@@ -1802,8 +1802,8 @@ resolve(AiLoopSchedule *self, const gchar *text, gint kind, GError **error)
 	if (kind >= 0 && found->kind != (AiLoopKind)kind)
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
-		            "%s is a %s; use /%s.", found->id, ai_loop_kind_to_string(found->kind),
-		            ai_loop_kind_to_string(found->kind));
+		            "%s is a %s, not a %s.", found->id, ai_loop_kind_to_string(found->kind),
+		            ai_loop_kind_to_string((AiLoopKind)kind));
 		return NULL;
 	}
 
