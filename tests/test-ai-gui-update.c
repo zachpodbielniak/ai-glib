@@ -283,6 +283,25 @@ test_shutdown_is_silent(Fixture *f, gconstpointer data)
 	g_assert_false(ai_gui_update_get_busy(f->update));
 }
 
+/* The drain returns once the cancelled run has really finished. */
+static void
+test_drain(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *log = NULL;
+	gint64 started;
+
+	push_upstream(f);
+	ai_gui_update_run(f->update, FALSE);
+	ai_gui_update_check(f->update);
+	ai_gui_update_shutdown(f->update);
+	started = g_get_monotonic_time();
+	ai_gui_update_drain(f->update);
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 20 * G_USEC_PER_SEC);
+	g_assert_false(ai_updater_is_checking(f->updater));
+	log = make_log(f);
+	g_assert_null(strstr(log, "install"));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -313,6 +332,8 @@ main(int argc, char *argv[])
 	           fixture_set_up, test_run_needs_privilege, fixture_tear_down);
 	g_test_add("/ai-glib/ai-gui/update/shutdown-is-silent", Fixture, NULL,
 	           fixture_set_up, test_shutdown_is_silent, fixture_tear_down);
+	g_test_add("/ai-glib/ai-gui/update/drain", Fixture, NULL,
+	           fixture_set_up, test_drain, fixture_tear_down);
 
 	return g_test_run();
 }

@@ -256,6 +256,7 @@ ai-glib/
 | Antigravity | `AGY_PATH` (override `agy` path) |
 | Cursor | `CURSOR_AGENT_PATH` then `CURSOR_PATH` (override `cursor-agent` path), `CURSOR_API_KEY` (optional) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
+| Self-update | `AI_GLIB_SOURCE_DIR` (checkout), `AI_GLIB_NO_UPDATE_CHECK` (no background check), `AI_GLIB_UPDATE_MAKE` (make program) |
 
 ## CLI provider options
 
@@ -1461,6 +1462,43 @@ documented as ai-tui's, so a host reading it back still sees what it
 set.
 
 See `docs/gui.org`.
+
+## Versions and self-update
+
+`config.mk` holds the release number; `build-aux/gen-build-stamp.sh`
+writes the provenance (commit, dirty, date, source dir, install paths)
+into `build/<type>/ai-build-stamp.h`, read only by
+`src/core/ai-build-info.c`. `AiUpdater` (`src/core/ai-updater.{h,c}`,
+private) checks and updates from that checkout; `ai`, `ai-tui` and
+`ai-gui` all drive it. See `docs/updating.org` and `CHANGELOG.org`.
+
+Rules that are load-bearing, each with a test:
+
+- **The stamp is rewritten only when its content changes** (the date is
+  excluded from the comparison), or every `make` relinks everything. When
+  git fails and a stamp exists it is kept: `sudo make install` runs git as
+  root, which is why it also passes `safe.directory` and
+  `--no-optional-locks`.
+- **Never guess the checkout.** It must exist, be the top of a repository,
+  contain the build commit, and be on a branch tracking the upstream.
+  Anything else is `unavailable` with a sentence saying which.
+- **Git never prompts and never leaves the file protocol in tests.**
+  Children get their own session, stdin closed, askpass disabled; tests
+  set `GIT_ALLOW_PROTOCOL=file` and pin submodule URLs to local paths. A
+  test that spawns an interactive ai-tui sets `AI_GLIB_NO_UPDATE_CHECK=1`
+  and a nonexistent `AI_GLIB_SOURCE_DIR`, so nothing can fetch or build
+  the real tree.
+- **Argv, never a shell string; first failure stops.** Nothing is
+  installed after a failed build or test. Only an interactive caller
+  (`ai --update` on a tty, ai-tui) may run `sudo`; everything else stops
+  and returns the exact command.
+- **One vocabulary.** States, sentences, badge, refusals and the fetch
+  policy live in `src/core/ai-update-status.h`, and every front-end prints
+  those strings. `tests/test-ai-update-status.c` asserts them literally.
+- **No fire after teardown.** `ai_updater_stop()` silences every later
+  completion; front-ends then drain (`ai_updater_is_checking()`, the GUI's
+  `ai_gui_update_drain()`) before exiting so a cancelled make or git is
+  actually killed. The monitor's timer is a held `GSource *`.
 
 ## Log levels
 

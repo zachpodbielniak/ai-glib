@@ -141,6 +141,23 @@ ai_gui_update_shutdown(AiGuiUpdate *self)
 	}
 }
 
+/*
+ * After shutdown, wait for whatever was in flight to finish cancelling.
+ * The cancel kills the step's whole process group, but only once the
+ * worker thread notices; a process that exited first would leave make
+ * building for nobody. Call it while the window is still whole: it
+ * iterates the main context.
+ */
+void
+ai_gui_update_drain(AiGuiUpdate *self)
+{
+	g_return_if_fail(AI_GUI_IS_UPDATE(self));
+
+	while (self->running || self->checking > 0 ||
+	       (self->updater != NULL && ai_updater_is_checking(self->updater)))
+		g_main_context_iteration(NULL, TRUE);
+}
+
 /* A run or an explicit check is in flight. */
 gboolean
 ai_gui_update_get_busy(AiGuiUpdate *self)

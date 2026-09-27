@@ -530,7 +530,24 @@ built-in opens a tmux window in ai-tui; with no argument it opens the
 dashboard. =/cwd <directory>= moves the session you are in, and its row
 moves to the matching group.
 
+=/update status= prints the version and whether a newer ai-glib is
+available; =/update= builds and installs it (see *Updates* below).
+
 =/model=, =/provider= and =/effort= report where the controls are instead
 of reimplementing a list you would then have to type an exact id into —
 the two menus under the message box and the preferences dialog. =/btw= is
 an ai-tui feature; open a second session instead.
+
+** Updates
+
+ai-gui checks the checkout that built it in the background, like ai-tui, and
+shows a banner above the conversation only when there is an update. Its
+*Update* button and =/update= run the same pipeline as =ai --update=; the
+steps and the outcome are written into the conversation you are looking at.
+The run is refused while a turn is running in any session in the window.
+
+ai-gui has no terminal, so it never runs =sudo=. When the install prefix is
+not writable it builds, stops, and shows the exact command to run in a
+terminal to finish. Closing the window cancels a run in progress and waits
+for its build to stop. The About box shows the build's provenance. See
+[[file:updating.org][Versions and self-update]].

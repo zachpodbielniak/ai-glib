@@ -49,6 +49,14 @@ providers:
 # Global request settings
 timeout: 120
 max_retries: 3
+
+# Self-update (ai, ai-tui, ai-gui); see updating.org
+updates:
+  check: true              # background checks in ai-tui and ai-gui
+  interval: 14400          # seconds between fetches (minimum 300)
+  upstream: origin/master  # REMOTE/BRANCH; default: the branch's upstream
+  source-dir: /home/me/src/ai-glib
+  run-tests: false
 #+end_src
 
 All keys are optional. Missing keys are skipped (fall through to env vars / defaults).
@@ -179,6 +187,16 @@ ai_config_set_timeout(config, 60);
 /* Set max retries (default: 3) */
 ai_config_set_max_retries(config, 5);
 #+end_src
+
+** Updates
+The =updates:= section is read into five =AiConfig= properties:
+=update-check=, =update-interval=, =update-upstream=, =update-source-dir=
+and =update-run-tests=. A malformed value (a non-boolean =check=, a negative
+or non-numeric =interval=, a list where a string belongs) rejects the whole
+file, as for every other key. =AI_GLIB_NO_UPDATE_CHECK= turns background
+checks off regardless, =AI_GLIB_SOURCE_DIR= overrides =source-dir=, and
+=AI_GLIB_UPDATE_MAKE= names the =make= to run. See
+[[file:updating.org][Versions and self-update]].
 
 ** Validation
 Validate configuration before making requests:

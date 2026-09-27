@@ -626,6 +626,36 @@ split_upstream(const gchar *upstream, gchar **remote, gchar **branch)
 	return TRUE;
 }
 
+/* A full or abbreviated object name, and nothing git could read as an
+ * option: the state file is ours, but it is a file on disk. */
+static gboolean
+is_object_name(const gchar *text)
+{
+	gsize i;
+
+	if (text == NULL || text[0] == '\0')
+		return FALSE;
+	for (i = 0; text[i] != '\0'; i++)
+		if (!g_ascii_isxdigit(text[i]))
+			return FALSE;
+	return i >= 7 && i <= 64;
+}
+
+/* A remote or branch name that cannot be mistaken for an option or
+ * split into two words when it lands in an argv. */
+static gboolean
+is_ref_word(const gchar *text)
+{
+	const gchar *p;
+
+	if (text == NULL || text[0] == '\0' || text[0] == '-')
+		return FALSE;
+	for (p = text; *p != '\0'; p++)
+		if (g_ascii_isspace(*p) || g_ascii_iscntrl(*p) || *p == ':')
+			return FALSE;
+	return TRUE;
+}
+
 /* Whether the last recorded install already carries @upstream_commit
  * into this prefix, so only this process is old. */
 static gboolean
@@ -636,7 +666,7 @@ install_pending_restart(Plan *plan, const gchar *upstream_commit, GCancellable *
 	const gchar *to_commit = ai_json_get_string(last, "to_commit", NULL);
 	const gchar *prefix = ai_json_get_string(last, "prefix", NULL);
 
-	if (to_commit == NULL || g_strcmp0(prefix, plan->prefix) != 0 ||
+	if (!is_object_name(to_commit) || g_strcmp0(prefix, plan->prefix) != 0 ||
 	    g_strcmp0(to_commit, plan->build_commit) == 0)
 		return FALSE;
 	return git_run(plan, GIT_ARGS("merge-base", "--is-ancestor", upstream_commit, to_commit),
@@ -663,6 +693,7 @@ classify(Plan *plan, GCancellable *cancellable, GError **error)
 	g_autofree gchar *range = NULL;
 	g_autofree gchar *porcelain = NULL;
 	g_autofree gchar *commit_spec = NULL;
+	g_autofree gchar *fetch_error = NULL;
 	GError *local = NULL;
 
 	status->source_dir = g_strdup(plan->source_dir);
@@ -701,6 +732,9 @@ classify(Plan *plan, GCancellable *cancellable, GError **error)
 	if (plan->build_commit == NULL || plan->build_commit[0] == '\0')
 		UNAVAILABLE(
 			"this binary was not built from a git checkout.");
+	if (!is_object_name(plan->build_commit))
+		UNAVAILABLE(
+			"the recorded build commit \"%s\" is not a commit id.", plan->build_commit);
 	commit_spec = g_strdup_printf("%s^{commit}", plan->build_commit);
 	if (!git_run(plan, GIT_ARGS("cat-file", "-e", commit_spec), AI_UPDATE_LOCAL_TIMEOUT_MS,
 	             cancellable, NULL, NULL, &local))
@@ -751,6 +785,9 @@ classify(Plan *plan, GCancellable *cancellable, GError **error)
 		branch_name = g_strdup("master");
 	}
 	status->upstream = g_strdup_printf("%s/%s", remote, branch_name);
+	if (!is_ref_word(remote) || !is_ref_word(branch_name))
+		UNAVAILABLE(
+			"\"%s\" is not a usable REMOTE/BRANCH.", status->upstream);
 
 	/* The branch has to track it, or a fast-forward would move a branch
 	 * that is not the one being checked. */
@@ -779,7 +816,6 @@ classify(Plan *plan, GCancellable *cancellable, GError **error)
 	if (plan->fetch)
 	{
 		g_autofree gchar *refspec = g_strdup_printf("+refs/heads/%s:%s", branch_name, upstream_ref);
-		g_autofree gchar *fetch_error = NULL;
 		gint timeout_ms = (gint)MIN((guint)G_MAXINT / 1000, MAX(plan->fetch_timeout, 1u)) * 1000;
 
 		status->attempted_at = g_get_real_time() / G_USEC_PER_SEC;
@@ -810,7 +846,8 @@ classify(Plan *plan, GCancellable *cancellable, GError **error)
 			return NULL;
 		if (status->upstream_commit == NULL)
 			UNAVAILABLE(
-				"%s has never been fetched into %s.", status->upstream, plan->source_dir);
+				"%s has never been fetched into %s%s%s.", status->upstream, plan->source_dir,
+				fetch_error != NULL ? ": " : "", fetch_error != NULL ? fetch_error : "");
 	}
 
 	status->head_commit = git_line(plan, GIT_ARGS("rev-parse", "HEAD"), cancellable, &local);
@@ -944,7 +981,20 @@ read_checkout_version(const gchar *source_dir)
 	                       parts[0], parts[1], parts[2]);
 }
 
-/* PREFIX=... LIBDIR=... INCLUDEDIR=... [DEBUG=1], appended to @argv. */
+/* Whether the previous install included the typelib; a new library
+ * next to an old typelib would be read through the wrong symbols. */
+static gboolean
+installed_gir(Plan *plan)
+{
+	g_autofree gchar *libdir = plan->libdir != NULL ? g_strdup(plan->libdir)
+	                                                : g_build_filename(plan->prefix, "lib", NULL);
+	g_autofree gchar *typelib = g_build_filename(libdir, "girepository-1.0",
+	                                             "AiGlib-1.0.typelib", NULL);
+
+	return g_file_test(typelib, G_FILE_TEST_EXISTS);
+}
+
+/* PREFIX=... LIBDIR=... INCLUDEDIR=... [DEBUG=1] [GIR=1], appended to @argv. */
 static void
 add_make_vars(Plan *plan, GPtrArray *argv)
 {
@@ -956,6 +1006,8 @@ add_make_vars(Plan *plan, GPtrArray *argv)
 		g_ptr_array_add(argv, g_strdup_printf("INCLUDEDIR=%s", plan->includedir));
 	if (g_strcmp0(plan->build_type, "debug") == 0)
 		g_ptr_array_add(argv, g_strdup("DEBUG=1"));
+	if (plan->prefix != NULL && installed_gir(plan))
+		g_ptr_array_add(argv, g_strdup("GIR=1"));
 }
 
 static GPtrArray *
@@ -1253,6 +1305,13 @@ pipeline(Plan *plan, GCancellable *cancellable, RunOutput *output)
 	if (refusal != NULL)
 	{
 		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST, refusal);
+		return;
+	}
+
+	if (plan->prefix == NULL || !g_path_is_absolute(plan->prefix))
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		                    "This build does not know where it was installed.");
 		return;
 	}
 

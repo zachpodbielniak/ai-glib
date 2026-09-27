@@ -572,6 +572,14 @@ test_run_installs(Fixture *f, gconstpointer data)
 	g_assert_cmpstr(result->to_commit, ==, upstream_head);
 	g_assert_cmpstr(result->from_version, ==, "0.3.0");
 	g_assert_cmpstr(result->to_version, ==, "0.4.0");
+	{
+		g_autofree gchar *summary = ai_update_result_dup_summary(result);
+		g_autofree gchar *expected = g_strdup_printf("Installed 0.3.0 (%.12s) -> 0.4.0 (%.12s) into %s. "
+		                                             "Restart to use it.",
+		                                             f->build_commit, upstream_head, f->prefix);
+
+		g_assert_cmpstr(summary, ==, expected);
+	}
 
 	head = git_out(f->clone, "rev-parse", "HEAD");
 	g_assert_cmpstr(head, ==, upstream_head);
@@ -877,6 +885,80 @@ test_cache_malformed(Fixture *f, gconstpointer data)
 	}
 }
 
+/* Names that would be read as options never reach an argv. */
+static void
+test_option_like_names(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateStatus) status = NULL;
+
+	g_object_set(f->updater, "upstream", "--upload-pack=touch/master", NULL);
+	status = check(f, TRUE);
+	g_assert_cmpint(status->state, ==, AI_UPDATE_STATE_UNAVAILABLE);
+	g_assert_nonnull(strstr(status->detail, "is not a usable REMOTE/BRANCH"));
+	g_clear_pointer(&status, ai_update_status_free);
+
+	g_object_set(f->updater, "upstream", "origin/-x", NULL);
+	status = check(f, TRUE);
+	g_assert_cmpint(status->state, ==, AI_UPDATE_STATE_UNAVAILABLE);
+	g_clear_pointer(&status, ai_update_status_free);
+
+	g_object_set(f->updater, "upstream", NULL, "build-commit", "--all", NULL);
+	status = check(f, TRUE);
+	g_assert_cmpint(status->state, ==, AI_UPDATE_STATE_UNAVAILABLE);
+	g_assert_nonnull(strstr(status->detail, "is not a commit id"));
+	g_clear_pointer(&status, ai_update_status_free);
+
+	/* A state file naming something odd as the last install is ignored. */
+	g_object_set(f->updater, "build-commit", f->build_commit, NULL);
+	g_assert_cmpint(g_mkdir_with_parents(f->state_dir, 0700), ==, 0);
+	write_file(f->state_dir, "update-status.json",
+	           "{\"version\":1,\"last_update\":{\"to_commit\":\"--output=/tmp/x\","
+	           "\"prefix\":\"/nowhere\"}}");
+	push_upstream(f, "one");
+	status = check(f, TRUE);
+	g_assert_cmpint(status->state, ==, AI_UPDATE_STATE_BEHIND);
+	g_assert_false(status->pending_restart);
+}
+
+/* Offline before the first fetch: unavailable, and the reason kept. */
+static void
+test_never_fetched(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateStatus) status = NULL;
+	g_autofree gchar *nowhere = g_build_filename(f->root, "nowhere.git", NULL);
+
+	GIT(f->clone, "update-ref", "-d", "refs/remotes/origin/master");
+	GIT(f->clone, "remote", "set-url", "origin", nowhere);
+	status = check(f, TRUE);
+	g_assert_cmpint(status->state, ==, AI_UPDATE_STATE_UNAVAILABLE);
+	g_assert_true(status->fetch_failed);
+	g_assert_nonnull(strstr(status->detail, "has never been fetched"));
+	g_assert_nonnull(strstr(status->detail, "nowhere.git"));
+}
+
+/* An install that had the typelib gets a new one, not a stale one. */
+static void
+test_run_keeps_gir(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiUpdateResult) result = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *gir_dir = g_build_filename(f->prefix, "lib", "girepository-1.0", NULL);
+	g_autofree gchar *log = NULL;
+	g_auto(GStrv) lines = NULL;
+
+	g_assert_cmpint(g_mkdir_with_parents(gir_dir, 0755), ==, 0);
+	write_file(gir_dir, "AiGlib-1.0.typelib", "");
+	push_upstream(f, "one");
+
+	result = ai_updater_run(f->updater, AI_UPDATE_RUN_NONE, NULL, &error);
+	g_assert_no_error(error);
+	log = read_file(f->make_log);
+	lines = g_strsplit(g_strstrip(log), "\n", -1);
+	g_assert_cmpuint(g_strv_length(lines), ==, 3);
+	g_assert_nonnull(strstr(lines[1], "GIR=1"));
+	g_assert_nonnull(strstr(lines[2], "GIR=1"));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -915,6 +997,9 @@ main(int argc, char *argv[])
 	ADD("check/non-tracking-branch", test_non_tracking_branch);
 	ADD("check/fetch-failure", test_fetch_failure);
 	ADD("check/fetch-timeout", test_fetch_timeout);
+	ADD("check/option-like-names", test_option_like_names);
+	ADD("check/never-fetched", test_never_fetched);
+	ADD("run/keeps-gir", test_run_keeps_gir);
 	ADD("cache/round-trip", test_cache_round_trip);
 	ADD("cache/malformed", test_cache_malformed);
 	ADD("cache/json", test_status_json);

@@ -65,7 +65,10 @@ tui_update_stop(App *app)
 		g_cancellable_cancel(app->update_cancel);
 	if (app->updater != NULL)
 		ai_updater_stop(app->updater);
-	while (app->update_pending > 0)
+	/* The monitor's own check too: a process that exited before the
+	 * worker noticed the cancel would leave git running for nobody. */
+	while (app->update_pending > 0 ||
+	       (app->updater != NULL && ai_updater_is_checking(app->updater)))
 		g_main_context_iteration(NULL, TRUE);
 	g_clear_object(&app->update_cancel);
 	if (app->updater != NULL)

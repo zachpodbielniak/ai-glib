@@ -1,0 +1,46 @@
+#+TITLE: Changelog
+
+All notable changes to ai-glib. The format follows [[https://keepachangelog.com/en/1.1.0/][Keep a Changelog]]
+and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
+release may change the API.
+
+* Unreleased
+
+** Added
+- Build provenance: the commit, a dirty flag, the build date, the source
+  directory and the install paths are embedded at build time.
+  =ai_build_info_*()= reads them, including from bindings, and =--version=
+  in =ai=, =ai-tui= and =ai-gui= prints them.
+- Self-update from the checkout that built the binary: =ai --check-update=
+  (=--json=), =ai --update=, and =/update [status]= in ai-tui and ai-gui,
+  with a background check, an update badge in ai-tui and a banner in ai-gui.
+  See [[file:docs/updating.org][docs/updating.org]].
+- =updates:= configuration section: =check=, =interval=, =upstream=,
+  =source-dir=, =run-tests=. Matching =AiConfig= properties.
+- This changelog.
+
+* 0.3.0
+
+The version in =config.mk= when this changelog started. Earlier history is in
+=git log=.
+
+* Release procedure
+
+For the maintainer. Nothing here is automated, and no tooling pushes a tag.
+
+1. Decide the number from what "Unreleased" contains: a breaking API
+   change bumps the minor while below 1.0.0 (the major after), new features
+   bump the minor, fixes only bump the micro.
+2. Set =VERSION_MAJOR=, =VERSION_MINOR= and =VERSION_MICRO= in =config.mk=.
+3. Rename "Unreleased" to the version with the date, =* 0.4.0 - 2026-10-01=,
+   and open a new empty "Unreleased" above it.
+4. Commit: =chore(release): 0.4.0=.
+5. Run =make clean-all && make test && make test ASAN=1=.
+6. Tag the commit and push the tag:
+   #+begin_example
+   git tag -a v0.4.0 -m "ai-glib 0.4.0"
+   git push origin v0.4.0
+   #+end_example
+
+After the tag, =git describe= in every build says =v0.4.0-N-g<commit>=, which
+is what =--version= shows.

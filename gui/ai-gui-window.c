@@ -1598,7 +1598,10 @@ on_close_request(
 	if (self->quota != NULL)
 		ai_gui_quota_shutdown(AI_GUI_QUOTA(self->quota));
 	if (self->update != NULL)
+	{
 		ai_gui_update_shutdown(self->update);
+		ai_gui_update_drain(self->update);
+	}
 
 	ai_gui_session_store_save_all(self->store);
 

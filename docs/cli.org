@@ -43,9 +43,27 @@ piping.
 | =--json=               | Serialize a usage/history report as versioned JSON |
 | =--report-limit N=     | Maximum historical periods (1..1000; default 20) |
 | =-i=, =--interactive=   | Interactive multi-turn REPL (keeps history)                        |
-| =-v=, =--version=       | Print version and exit                                             |
+| =-v=, =--version=       | Print version and build provenance, and exit                       |
+| =--check-update=        | Fetch upstream and say whether a newer ai-glib is available (=--json= for JSON) |
+| =--update=              | Pull, rebuild and install ai-glib from the checkout that built this binary |
 
 See [[file:cli-reporting.org][CLI usage and history reports]] for provider support, the C API, JSON fields, and examples. Reports default to plain text and do not read stdin.
+
+** Version and updates
+=ai --version= prints the release and the build's provenance:
+
+#+begin_example
+ai (ai-glib) 0.3.0 (v0.3.0-4-g0123456789ab-dirty, built 2026-09-27T12:00:00Z)
+#+end_example
+
+=ai --check-update= fetches the tracked upstream branch of the checkout that
+built this binary and prints one sentence; =--json= prints the full status.
+=ai --update= fast-forwards that checkout, updates submodules, rebuilds clean
+and installs --- through =sudo= on a terminal when the prefix needs it,
+otherwise it builds and prints the one command to finish. It refuses local
+changes, a diverged branch and a branch that does not track the upstream.
+Exit status: 0 installed or nothing to do, 1 refused or failed, 3 built but
+the privileged install is left to you. See [[file:updating.org][Versions and self-update]].
 
 ** CLI Process Deadline
 CLI chat runs default to =process-timeout-ms=0= in =ai=: the wrapper does not terminate a turn after thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline, or explicitly use =--set process-timeout-ms=0= to disable it. This applies to synchronous and shared streaming subprocess runs; cancellation remains available. The library default remains 1800000 ms. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls.

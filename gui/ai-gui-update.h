@@ -36,6 +36,9 @@ ai_gui_update_start(AiGuiUpdate *self);
 void
 ai_gui_update_shutdown(AiGuiUpdate *self);
 
+void
+ai_gui_update_drain(AiGuiUpdate *self);
+
 gboolean
 ai_gui_update_get_busy(AiGuiUpdate *self);
 
