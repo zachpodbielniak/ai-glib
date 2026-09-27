@@ -164,6 +164,9 @@ test_goal_runs_in_session(Fixture *fixture, gconstpointer data)
 	}
 
 	g_assert_cmpuint(ai_mock_provider_get_call_count(provider), ==, 3);
+	/* The first thing typed names the session; a scheduled turn does not. */
+	g_assert_cmpstr(ai_gui_session_get_title(session), !=, "Work toward this goal until it holds:");
+	g_assert_null(strstr(ai_gui_session_get_title(session), "goal"));
 	g_assert_false(ai_loop_runner_tick(runner, g_get_real_time()));
 }
 

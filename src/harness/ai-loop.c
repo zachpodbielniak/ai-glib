@@ -2303,10 +2303,22 @@ ai_loop_schedule_command(
 		return notice != NULL ? notice : g_strdup("No self-paced loop is waiting.");
 	}
 
-	if (g_strcmp0(text, "cancel") == 0 || g_strcmp0(text, "delete") == 0)
+	/* A verb with nothing after it is a mistake, not a one-word prompt:
+	 * "/loop pause" scheduling a loop that says "pause" helps nobody. */
+	if (g_strcmp0(text, "cancel") == 0 || g_strcmp0(text, "delete") == 0 ||
+	    g_strcmp0(text, "pause") == 0 || g_strcmp0(text, "resume") == 0 ||
+	    g_strcmp0(text, "show") == 0 || g_strcmp0(text, "run") == 0 ||
+	    g_strcmp0(text, "run-now") == 0)
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
 		            "Usage: /loop %s <id|all>", text);
+		return NULL;
+	}
+
+	if (g_strcmp0(text, "edit") == 0)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+		                    "Usage: /loop edit ID [--every INTERVAL | --self-paced] [--prompt TEXT]");
 		return NULL;
 	}
 
@@ -4113,7 +4125,9 @@ ai_loop_schedule_goal_command(
 	if (verb == NULL && tokens->len == 1 &&
 	    (g_strcmp0(text, "stop") == 0 || g_strcmp0(text, "delete") == 0 ||
 	     g_strcmp0(text, "pause") == 0 || g_strcmp0(text, "resume") == 0 ||
-	     g_strcmp0(text, "show") == 0 || g_strcmp0(text, "run") == 0))
+	     g_strcmp0(text, "show") == 0 || g_strcmp0(text, "run") == 0 ||
+	     g_strcmp0(text, "run-now") == 0 || g_strcmp0(text, "cancel") == 0 ||
+	     g_strcmp0(text, "edit") == 0))
 	{
 		tokens_free(tokens);
 		g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST, "Usage: /goal %s <id|all>", text);

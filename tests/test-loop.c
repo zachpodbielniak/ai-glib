@@ -262,6 +262,7 @@ test_list_cancel_and_cap(void)
 	}
 
 	g_assert_cmpuint(ai_loop_schedule_get_n_tasks(schedule), ==, 50);
+	g_clear_pointer(&notice, g_free);
 	notice = ai_loop_schedule_command(schedule, "60m one more", sandbox,
 	                                  sandbox, sandbox, now, &error);
 	g_assert_null(notice);
@@ -457,6 +458,24 @@ test_subcommands_that_are_prompts(void)
 	g_clear_pointer(&notice, g_free);
 	notice = command(schedule, "cancel the job", 1);
 	g_assert_cmpstr(ai_loop_schedule_get_prompt(schedule, 0), ==, "cancel the job");
+
+	/* A verb alone is a mistake, not a one-word prompt. */
+	{
+		static const gchar *const verbs[] = { "pause", "resume", "show", "run", "edit", "delete", NULL };
+		guint i;
+
+		for (i = 0; verbs[i] != NULL; i++)
+		{
+			g_autoptr(GError) error = NULL;
+			gchar *text = ai_loop_schedule_command(schedule, verbs[i], NULL, NULL, NULL, 1, &error);
+
+			g_assert_null(text);
+			g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+			g_assert_nonnull(strstr(error->message, "Usage: /loop"));
+		}
+
+		g_assert_cmpuint(ai_loop_schedule_get_n_tasks(schedule), ==, 1);
+	}
 }
 
 

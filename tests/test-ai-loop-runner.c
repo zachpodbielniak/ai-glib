@@ -468,8 +468,11 @@ test_claim_is_exclusive(void)
 	g_autofree gchar       *unused = g_build_filename(store, "never-used", NULL);
 	g_autofree gchar       *unused_lock = g_build_filename(store, "never-used.lock", NULL);
 
-	/* A session that schedules nothing leaves nothing on disk. */
+	/* A session that schedules nothing leaves nothing on disk, even
+	 * after somebody looks. */
 	g_assert_false(ai_loop_runner_tick(quiet, 0));
+	g_free(run(quiet, "loop", "list", 0));
+	g_free(run(quiet, "goal", "list", 0));
 	g_assert_false(g_file_test(unused, G_FILE_TEST_EXISTS));
 	g_assert_false(g_file_test(unused_lock, G_FILE_TEST_EXISTS));
 

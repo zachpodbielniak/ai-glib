@@ -6735,6 +6735,7 @@ main(int argc, char *argv[])
     {
         g_printerr("ai-tui: stdin is not a terminal; pass a prompt as an "
                    "argument, pipe it on stdin, or use --dump PROMPT\n");
+        g_clear_object(&app.loops);
         g_clear_object(&app.work);
         g_clear_pointer(&app.work_directory, g_free);
         g_clear_object(&app.completion);
@@ -6784,7 +6785,9 @@ main(int argc, char *argv[])
         app.work_lock_fd = g_open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
         if (app.work_lock_fd < 0 || flock(app.work_lock_fd, LOCK_EX | LOCK_NB) != 0)
         {
-            g_printerr("ai-tui: cannot claim workspace session\n"); return 2;
+            g_printerr("ai-tui: cannot claim workspace session\n");
+            g_clear_object(&app.loops);
+            return 2;
         }
     }
     app.link_pressed = -1;

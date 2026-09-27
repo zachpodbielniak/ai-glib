@@ -69,6 +69,7 @@ struct _AiGuiSession
 	/* /loop and /goal: the same runner ai-tui drives, owning its timer. */
 	AiLoopRunner  *loops;
 	gchar         *loop_summary;
+	gboolean       scheduled;
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiSession, ai_gui_session, G_TYPE_OBJECT)
@@ -775,7 +776,9 @@ on_loops_fire(AiLoopRunner *runner, const gchar *id, const gchar *text, gboolean
 {
 	AiGuiSession *self = user_data;
 
+	self->scheduled = TRUE;
 	session_dispatch(self, text, NULL, expand);
+	self->scheduled = FALSE;
 	return self->sending;
 }
 
@@ -1431,7 +1434,9 @@ session_dispatch(
 	 * somebody does in a new session is often /help, which would then
 	 * name it for as long as it lives. ai-tui applies the same rule.
 	 */
-	if ((self->title_is_automatic || self->title == NULL) &&
+	/* Nor does a scheduled turn: "Work toward this goal..." is not what
+	 * the conversation is about either. */
+	if ((self->title_is_automatic || self->title == NULL) && !self->scheduled &&
 	    text != NULL && text[0] != '/')
 	{
 		g_free(self->title);

@@ -560,9 +560,18 @@ ifeq ($(GIR),1)
 .PHONY: gir
 gir: $(TYPELIB_FILE)
 
+# g-ir-scanner builds and runs a small program against the library to
+# dump its types. Against an ASAN=1 library that program has the runtime
+# loaded second, which ASan refuses unless told the order is fine -- and
+# leak checking there would report the scanner's leaks, not ours. The
+# warnings gate itself is unchanged.
+ifeq ($(ASAN),1)
+GIR_SCANNER_ENV = ASAN_OPTIONS=verify_asan_link_order=0:detect_leaks=0
+endif
+
 $(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS) | $(OUTDIR)
 	@echo "Generating GObject introspection data..."
-	$(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
+	$(GIR_SCANNER_ENV) $(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
 		--nsversion=$(GIR_VERSION) \
 		--identifier-prefix=Ai \
 		--symbol-prefix=ai \

@@ -782,11 +782,14 @@ ai_loop_runner_command(
 	gint64        now_us,
 	GError      **error
 ){
-	gchar *notice;
+	g_autofree gchar *before = NULL;
+	g_autofree gchar *after = NULL;
+	gchar            *notice;
 
 	g_return_val_if_fail(AI_IS_LOOP_RUNNER(self), NULL);
 
 	sync_from_disk(self, now_us);
+	before = ai_loop_schedule_dup_json(self->schedule, now_us);
 
 	if (g_strcmp0(name, "goal") == 0)
 	{
@@ -799,7 +802,11 @@ ai_loop_runner_command(
 		                                  now_us, error);
 	}
 
-	if (notice != NULL)
+	/* `list` and `show` change nothing, and must not write -- or claim --
+	 * a file for a session that has never scheduled anything. */
+	after = ai_loop_schedule_dup_json(self->schedule, now_us);
+
+	if (notice != NULL && g_strcmp0(before, after) != 0)
 	{
 		persist(self);
 	}
