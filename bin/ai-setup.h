@@ -88,6 +88,52 @@ ai_setup_pick(const gchar *prompt, guint count)
 	}
 }
 
+/* Scope 4: write updates.check and nothing else. q leaves the file alone. */
+static gint
+ai_setup_updates(AiConfig *config)
+{
+	g_autoptr(GError) error = NULL;
+	gboolean current = FALSE;
+	gboolean enable;
+
+	g_object_get(config, "update-check", &current, NULL);
+	g_print("\nBackground update checks are %s.\n"
+	        "ai-tui and ai-gui fetch upstream on a timer and say when a newer build exists.\n"
+	        "Leave them off on an immutable system. ai --check-update, ai --update and /update still work.\n",
+	        current ? "on" : "off");
+	for (;;)
+	{
+		g_autofree gchar *answer = ai_setup_read("Enable background update checks? [y/N]: ");
+
+		if (answer == NULL)
+			goto cancelled;
+		if (answer[0] == '\0' || g_ascii_strcasecmp(answer, "n") == 0 ||
+		    g_ascii_strcasecmp(answer, "no") == 0)
+		{
+			enable = FALSE;
+			break;
+		}
+		if (g_ascii_strcasecmp(answer, "y") == 0 || g_ascii_strcasecmp(answer, "yes") == 0)
+		{
+			enable = TRUE;
+			break;
+		}
+		g_print("Enter y to enable, or n to leave them off.\n");
+	}
+	if (!ai_config_save_update_check(config, enable, &error))
+	{
+		g_printerr("ai: could not save defaults: %s\n", error->message);
+		return 1;
+	}
+	g_print("Background update checks %s. Run ai --setup again to change another scope.\n",
+	        enable ? "enabled" : "left off");
+	return 0;
+
+cancelled:
+	g_print("Setup cancelled; nothing saved.\n");
+	return 0;
+}
+
 /* Select and confirm one independent scope; no mutation precedes confirmation. */
 static gint
 ai_setup_run(AiConfig *config)
@@ -102,6 +148,7 @@ ai_setup_run(AiConfig *config)
 	const gchar *app;
 	const gchar *saved_model;
 	AiProviderType selected;
+	gboolean checks = FALSE;
 	guint scope, choice, i, count;
 	guint timeout;
 	GList *item;
@@ -121,9 +168,13 @@ ai_setup_run(AiConfig *config)
 		        ai_provider_type_to_string(saved),
 		        saved_model != NULL && saved_model[0] != '\0' ? saved_model : "native");
 	}
-	scope = ai_setup_pick("Scope: ", 3);
+	g_object_get(config, "update-check", &checks, NULL);
+	g_print("  4. background update checks (current: %s)\n", checks ? "on" : "off");
+	scope = ai_setup_pick("Scope: ", 4);
 	if (scope == 0)
 		goto cancelled;
+	if (scope == 4)
+		return ai_setup_updates(config);
 	app = scopes[scope - 1];
 	if (g_getenv("AI_PROVIDER") != NULL && g_getenv("AI_PROVIDER")[0] != '\0')
 		g_print("Warning: AI_PROVIDER overrides omitted provider selections; "

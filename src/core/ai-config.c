@@ -602,12 +602,14 @@ ai_config_class_init(AiConfigClass *klass)
      * AiConfig:update-check:
      *
      * Whether ai-tui and ai-gui check for a newer ai-glib in the background
-     * (`updates.check`). `AI_GLIB_NO_UPDATE_CHECK` also turns it off. An
-     * explicit `ai --check-update` or `/update` still runs.
+     * (`updates.check`). Off unless the config says true: an immutable
+     * install must not fetch or announce updates on its own. `ai --setup`
+     * writes the key. `AI_GLIB_NO_UPDATE_CHECK` forces it off even then.
+     * An explicit `ai --check-update` or `/update` still runs.
      */
     properties[PROP_UPDATE_CHECK] = g_param_spec_boolean(
         "update-check", "Update check", "Check for updates in the background",
-        TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     /**
      * AiConfig:update-interval:
@@ -657,7 +659,7 @@ ai_config_init(AiConfig *self)
 {
     self->timeout_seconds = AI_CONFIG_DEFAULT_TIMEOUT;
     self->max_retries = AI_CONFIG_DEFAULT_MAX_RETRIES;
-	self->update_check = TRUE;
+	self->update_check = FALSE;
 	self->update_interval = AI_UPDATE_DEFAULT_INTERVAL_S;
 	{
 		gsize i;
@@ -1671,6 +1673,96 @@ config_yaml_copy_mapping(yaml_document_t *document, gint parent, const gchar *na
 	return new_id;
 }
 
+/* Replace or append one plain scalar. The old node stays in the document. */
+static void
+config_yaml_set_plain(
+	yaml_document_t *document,
+	gint             mapping_id,
+	const gchar     *key,
+	const gchar     *value
+){
+	gint value_id = yaml_document_add_scalar(document, (const yaml_char_t *)YAML_STR_TAG,
+		(const yaml_char_t *)value, -1, YAML_PLAIN_SCALAR_STYLE);
+	yaml_node_t *root = yaml_document_get_node(document, mapping_id);
+	yaml_node_pair_t *pair;
+	gboolean found = FALSE;
+
+	for (pair = root->data.mapping.pairs.start; pair < root->data.mapping.pairs.top; pair++)
+	{
+		yaml_node_t *existing = yaml_document_get_node(document, pair->key);
+
+		if (existing->type == YAML_SCALAR_NODE &&
+		    g_str_equal((const gchar *)existing->data.scalar.value, key))
+		{
+			pair->value = value_id;
+			found = TRUE;
+		}
+	}
+	if (!found)
+	{
+		gint key_id = yaml_document_add_scalar(document, (const yaml_char_t *)YAML_STR_TAG,
+			(const yaml_char_t *)key, -1, YAML_PLAIN_SCALAR_STYLE);
+
+		yaml_document_append_mapping_pair(document, mapping_id, key_id, value_id);
+	}
+}
+
+/*
+ * Replace the user config with @document. dump consumes the document
+ * contents; once dump has been attempted the struct is freed and
+ * *@document is NULL, so the caller's g_autoptr does not delete it again.
+ */
+static gboolean
+config_yaml_store_user(yaml_document_t **document, GError **error)
+{
+	g_autoptr(GString) output = g_string_new(NULL);
+	g_autoptr(GFile) file = NULL;
+	g_autofree gchar *directory = NULL;
+	g_autofree gchar *path = NULL;
+	yaml_emitter_t emitter;
+	gboolean emitted;
+
+	g_return_val_if_fail(document != NULL && *document != NULL, FALSE);
+
+	if (!yaml_emitter_initialize(&emitter))
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		                    "Cannot initialize YAML emitter");
+		return FALSE;
+	}
+	yaml_emitter_set_output(&emitter, config_yaml_output, output);
+	/* dump consumes the document contents even on failure, not its allocation. */
+	emitted = yaml_emitter_open(&emitter);
+	if (emitted)
+	{
+		emitted = yaml_emitter_dump(&emitter, *document);
+		g_free(*document);
+		*document = NULL;
+	}
+	if (emitted)
+		emitted = yaml_emitter_close(&emitter);
+	if (!emitted)
+		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		            "Cannot emit config YAML: %s",
+		            emitter.problem != NULL ? emitter.problem : "emitter failure");
+	yaml_emitter_delete(&emitter);
+	if (!emitted)
+		return FALSE;
+	directory = g_build_filename(g_get_user_config_dir(), "ai-glib", NULL);
+	path = g_build_filename(directory, AI_CONFIG_FILENAME, NULL);
+	if (g_mkdir_with_parents(directory, 0700) != 0)
+	{
+		g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+		            "Cannot create config directory %s: %s", directory, g_strerror(errno));
+		return FALSE;
+	}
+	/* Replace the inode, not its contents: old permissive modes must not survive. */
+	file = g_file_new_for_path(path);
+	return g_file_replace_contents(file, output->str, output->len, NULL, FALSE,
+	                               G_FILE_CREATE_PRIVATE | G_FILE_CREATE_REPLACE_DESTINATION,
+	                               NULL, NULL, error);
+}
+
 /**
  * ai_config_save_defaults:
  * @self: an #AiConfig
@@ -1704,20 +1796,16 @@ ai_config_save_defaults(
 	GError        **error
 ){
 	g_autoptr(yaml_document_t) document = NULL;
-	g_autoptr(GString) output = g_string_new(NULL);
-	g_autoptr(GFile) file = NULL;
 	g_autoptr(GError) read_error = NULL;
 	g_autofree gchar *directory = NULL;
 	g_autofree gchar *path = NULL;
 	g_autofree gchar *contents = NULL;
 	g_autofree gchar *saved_model = g_strdup(model != NULL ? model : "");
-	yaml_emitter_t emitter;
 	yaml_node_pair_t *pair;
 	yaml_node_t *root;
 	const gchar *keys[] = {"default_provider", "default_model"};
 	const gchar *values[2];
 	guint i;
-	gboolean emitted;
 	const gchar *name;
 	gsize length;
 	gint mapping_id = 1;
@@ -1789,38 +1877,7 @@ ai_config_save_defaults(
 			yaml_document_append_mapping_pair(document, mapping_id, key_id, value_id);
 		}
 	}
-	if (!yaml_emitter_initialize(&emitter))
-	{
-		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Cannot initialize YAML emitter");
-		return FALSE;
-	}
-	yaml_emitter_set_output(&emitter, config_yaml_output, output);
-	/* dump consumes the document contents even on failure, not its allocation. */
-	emitted = yaml_emitter_open(&emitter);
-	if (emitted)
-	{
-		emitted = yaml_emitter_dump(&emitter, document);
-		g_free(g_steal_pointer(&document));
-	}
-	if (emitted)
-		emitted = yaml_emitter_close(&emitter);
-	if (!emitted)
-		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Cannot emit config YAML: %s",
-		            emitter.problem != NULL ? emitter.problem : "emitter failure");
-	yaml_emitter_delete(&emitter);
-	if (!emitted)
-		return FALSE;
-	if (g_mkdir_with_parents(directory, 0700) != 0)
-	{
-		g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
-		            "Cannot create config directory %s: %s", directory, g_strerror(errno));
-		return FALSE;
-	}
-	/* Replace the inode, not its contents: old permissive modes must not survive. */
-	file = g_file_new_for_path(path);
-	if (!g_file_replace_contents(file, output->str, output->len, NULL, FALSE,
-	                             G_FILE_CREATE_PRIVATE | G_FILE_CREATE_REPLACE_DESTINATION,
-	                             NULL, NULL, error))
+	if (!config_yaml_store_user(&document, error))
 		return FALSE;
 	if (app == NULL)
 	{
@@ -1834,5 +1891,60 @@ ai_config_save_defaults(
 		g_free(self->app_models[i]);
 		self->app_models[i] = saved_model[0] != '\0' ? g_strdup(saved_model) : NULL;
 	}
+	return TRUE;
+}
+
+/**
+ * ai_config_save_update_check:
+ * @self: an #AiConfig
+ * @enabled: whether ai-tui and ai-gui should check for updates in the background
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Writes only `updates.check` in `$XDG_CONFIG_HOME/ai-glib/config.yaml`.
+ * Background checks stay off until this is true. Other keys, including the
+ * rest of `updates:`, are kept. A missing file is created. A malformed file
+ * is rejected and left untouched. The file is replaced atomically with mode
+ * 0600, and the parent directory is created with mode 0700 when missing.
+ * On success, #AiConfig:update-check on @self matches @enabled. On failure,
+ * @self is unchanged.
+ *
+ * Returns: %TRUE on success, %FALSE on validation or I/O failure
+ */
+gboolean
+ai_config_save_update_check(
+	AiConfig  *self,
+	gboolean   enabled,
+	GError   **error
+){
+	g_autoptr(yaml_document_t) document = NULL;
+	g_autoptr(GError) read_error = NULL;
+	g_autofree gchar *directory = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *contents = NULL;
+	gsize length;
+	gint mapping_id;
+
+	g_return_val_if_fail(AI_IS_CONFIG(self), FALSE);
+
+	directory = g_build_filename(g_get_user_config_dir(), "ai-glib", NULL);
+	path = g_build_filename(directory, AI_CONFIG_FILENAME, NULL);
+	if (!g_file_get_contents(path, &contents, &length, &read_error))
+	{
+		if (!g_error_matches(read_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+		{
+			g_propagate_error(error, (GError *)g_steal_pointer(&read_error));
+			return FALSE;
+		}
+		contents = g_strdup("{}\n");
+		length = 3;
+	}
+	document = config_yaml_parse(contents, length, error);
+	if (document == NULL)
+		return FALSE;
+	mapping_id = config_yaml_copy_mapping(document, 1, "updates");
+	config_yaml_set_plain(document, mapping_id, "check", enabled ? "true" : "false");
+	if (!config_yaml_store_user(&document, error))
+		return FALSE;
+	self->update_check = enabled;
 	return TRUE;
 }

@@ -2012,7 +2012,7 @@ ai_gui_window_new(
 	if (options->dashboard)
 		ai_gui_window_show_dashboard(self, TRUE);
 
-	/* The update banner: checked in the background unless switched off. */
+	/* The update banner. The background check runs only when updates.check is true. */
 	{
 		g_autoptr(AiConfig) config = ai_config_new();
 		g_autoptr(AiUpdater) updater = ai_updater_new(config);

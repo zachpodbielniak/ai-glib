@@ -582,10 +582,12 @@ an ai-tui feature; open a second session instead.
 
 ** Updates
 
-ai-gui checks the checkout that built it in the background, like ai-tui.
-When there is an update, a banner above the conversation says so and an
-*Update* button appears in the header bar. The main menu's *Check for
-Updates* checks on demand, as =/update status= does.
+When =updates.check= is true, ai-gui checks the checkout that built it in
+the background, like ai-tui. That key is off by default; =ai --setup= scope
+=4= writes it. When there is an update, a banner above the conversation says
+so and an *Update* button appears in the header bar. The main menu's *Check
+for Updates* checks on demand, as =/update status= does, whether or not the
+background check is on.
 
 *Update* and =/update= run the same pipeline as =ai --update=. The banner
 shows the step in progress, and the steps and the outcome are written into

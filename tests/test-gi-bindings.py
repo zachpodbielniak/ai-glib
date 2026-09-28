@@ -639,7 +639,7 @@ def main():
 
     # The updates: config section is plain properties.
     cfg2 = AiGlib.Config()
-    assert cfg2.props.update_check is True
+    assert cfg2.props.update_check is False
     assert cfg2.props.update_interval == 4 * 60 * 60
     cfg2.props.update_upstream = "origin/main"
     assert cfg2.props.update_upstream == "origin/main"

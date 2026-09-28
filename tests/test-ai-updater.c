@@ -1066,6 +1066,22 @@ test_run_polkit_install_fails(Fixture *f, gconstpointer data)
 	g_assert_null(strstr(error->message, "nothing was installed"));
 }
 
+/* Background checks stay off until updates.check is true, and the env wins. */
+static void
+test_checks_opt_in(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+
+	g_assert_false(ai_updater_checks_enabled(NULL));
+	g_assert_false(ai_updater_checks_enabled(config));
+	g_object_set(config, "update-check", TRUE, NULL);
+	g_assert_true(ai_updater_checks_enabled(config));
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_assert_false(ai_updater_checks_enabled(config));
+	g_unsetenv("AI_GLIB_NO_UPDATE_CHECK");
+	g_assert_true(ai_updater_checks_enabled(config));
+}
+
 /* No pkexec on the machine: straight to the command. */
 static void
 test_run_polkit_absent(Fixture *f, gconstpointer data)
@@ -1110,6 +1126,7 @@ main(int argc, char *argv[])
 #define ADD(path, fn) \
 	g_test_add("/ai-glib/updater/" path, Fixture, NULL, fixture_set_up, fn, fixture_tear_down)
 
+	g_test_add_func("/ai-glib/updater/checks-opt-in", test_checks_opt_in);
 	ADD("check/up-to-date", test_up_to_date);
 	ADD("check/behind", test_behind);
 	ADD("check/behind-binary-only", test_behind_binary_only);

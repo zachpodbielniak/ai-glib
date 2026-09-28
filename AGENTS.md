@@ -1521,6 +1521,11 @@ runs `test-version`, which fails when the two disagree. See
 
 Rules that are load-bearing, each with a test:
 
+- **Background checks are opt-in.** `AiConfig:update-check` defaults to
+  false. ai-tui and ai-gui fetch only when `updates.check` is true, which
+  `ai --setup` scope 4 writes. `AI_GLIB_NO_UPDATE_CHECK` still forces them
+  off. An explicit `--check-update`, `--update` or `/update` ignores the
+  switch. An immutable image should leave the key unset.
 - **The stamp is rewritten only when its content changes** (the date is
   excluded from the comparison), or every `make` relinks everything. When
   git fails and a stamp exists it is kept: `sudo make install` runs git as

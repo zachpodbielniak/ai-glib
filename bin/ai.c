@@ -1534,6 +1534,7 @@ main(int argc, char *argv[])
 		"  ai --mcp-server --mcp-tools conversation_status,conversation_send\n"
 		"  ai --mcp-server --mcp-all-tools --mcp-no-inject\n"
 		"  ai --setup                       # choose defaults for one scope\n"
+		"  printf '4\\ny\\n' | ai --setup       # opt in to background update checks\n"
 		"  ai -p default -m default \"hi\"    # same defaults as ai \"hi\"\n"
 		"  ai \"why is the sky blue?\"\n"
 		"  git diff | ai -s \"Review this diff for bugs\"\n"

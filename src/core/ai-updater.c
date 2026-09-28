@@ -1695,16 +1695,16 @@ ai_updater_init(AiUpdater *self)
  * ================================================================ */
 
 /*
- * Whether the background check may run at all: AI_GLIB_NO_UPDATE_CHECK
- * (any value but "" or "0") and `updates.check: false` both say no.
- * An explicit `ai --check-update` or /update ignores this -- the user
- * asked.
+ * Whether the background check may run at all. It is off unless
+ * `updates.check` is true. AI_GLIB_NO_UPDATE_CHECK (any value but "" or
+ * "0") forces it off even then. An explicit `ai --check-update` or
+ * /update ignores this -- the user asked.
  */
 gboolean
 ai_updater_checks_enabled(AiConfig *config)
 {
 	const gchar *env = g_getenv("AI_GLIB_NO_UPDATE_CHECK");
-	gboolean enabled = TRUE;
+	gboolean enabled = FALSE;
 
 	if (env != NULL && env[0] != '\0' && !g_str_equal(env, "0"))
 		return FALSE;

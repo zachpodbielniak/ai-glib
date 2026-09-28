@@ -905,11 +905,11 @@ test_config_updates(void)
 	};
 	guint i;
 
-	/* Defaults: checks on, four hours, nothing configured. */
+	/* Defaults: checks off, four hours, nothing configured. */
 	g_object_get(config, "update-check", &check, "update-interval", &interval,
 	             "update-upstream", &upstream, "update-source-dir", &source_dir,
 	             "update-run-tests", &run_tests, NULL);
-	g_assert_true(check);
+	g_assert_false(check);
 	g_assert_cmpuint(interval, ==, 4 * 60 * 60);
 	g_assert_null(upstream);
 	g_assert_null(source_dir);
@@ -931,6 +931,16 @@ test_config_updates(void)
 	g_assert_cmpstr(upstream, ==, "fork/main");
 	g_assert_cmpstr(source_dir, ==, "/src/ai-glib");
 	g_assert_true(run_tests);
+
+	{
+		g_autoptr(AiConfig) opted = g_object_new(AI_TYPE_CONFIG, NULL);
+
+		g_assert_true(g_file_set_contents(path, "updates:\n  check: true\n", -1, &error));
+		g_assert_true(ai_config_load_from_file(opted, path, &error));
+		g_assert_no_error(error);
+		g_object_get(opted, "update-check", &check, NULL);
+		g_assert_true(check);
+	}
 
 	for (i = 0; i < G_N_ELEMENTS(bad); i++)
 	{

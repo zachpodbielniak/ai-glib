@@ -712,10 +712,11 @@ text must reach the model verbatim.
 
 *** Updating with =/update=
 
-ai-tui checks the checkout that built it for upstream commits in the
-background --- at start, then every ten minutes, fetching at most once per
-=updates.interval= --- and puts =update available (N)= on the status line
-when there is one. Nothing is shown otherwise.
+When =updates.check= is true, ai-tui checks the checkout that built it for
+upstream commits in the background --- at start, then every ten minutes,
+fetching at most once per =updates.interval= --- and puts =update available (N)=
+on the status line when there is one. Nothing is shown otherwise. The check
+is off until that key is set, including with =ai --setup= scope =4=.
 
 =/update status= prints the version and the answer. =/update= refuses while a
 turn is running, then hands the terminal over the way =^G= does for
@@ -725,8 +726,8 @@ unless the build succeeded. Restart ai-tui to use the new build. Under
 =--dump= there is no terminal to hand over, so =/update= builds and prints the
 command for a privileged install instead of running sudo.
 
-=AI_GLIB_NO_UPDATE_CHECK=1= or =updates.check: false= turns the background
-check off. See [[file:updating.org][Versions and self-update]].
+The background check stays off unless =updates.check= is true. =AI_GLIB_NO_UPDATE_CHECK=1=
+forces it off even then. See [[file:updating.org][Versions and self-update]].
 
 ** Mentions
 =@path= pulls a file in. The prompt keeps its shape and the files follow

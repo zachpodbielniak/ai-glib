@@ -103,8 +103,15 @@ remote-tracking ref, never tags.
 
 ** The check
 
-In ai-tui and ai-gui the check runs in the background: once at start and then
-every ten minutes, fetching only when the interval (=updates.interval=,
+The background check is off until =updates.check= is =true=. An immutable
+install does not fetch or announce updates on its own. Opt in with
+=ai --setup= and choose scope =4=, which writes that one key, or set it in
+=config.yaml=. =AI_GLIB_NO_UPDATE_CHECK=1= forces the background check off
+even when the key is true. =ai --check-update=, =ai --update= and =/update=
+still run: somebody asked.
+
+When it is on, ai-tui and ai-gui check in the background: once at start and
+then every ten minutes, fetching only when the interval (=updates.interval=,
 default four hours, never less than five minutes) has passed since the last
 attempt. The last result and its fetch times are kept in
 =$XDG_STATE_HOME/ai-glib/update-status.json=, so a restart does not fetch
@@ -114,9 +121,6 @@ It never blocks: it runs on a worker thread, the fetch is bounded (sixty
 seconds) and git is never allowed to prompt --- no terminal, no askpass, its
 own session. Offline, a failed login and a moved remote are all quiet; the
 last fetched state still answers.
-
-Turn it off with =updates.check: false= or =AI_GLIB_NO_UPDATE_CHECK=1=.
-=ai --check-update= and =/update= still work: somebody asked.
 
 ** What the answer means
 
@@ -193,7 +197,7 @@ commits, prefix, time). Restart the programs to use the new build.
 
 #+begin_src yaml
 updates:
-  check: true              # background checks in ai-tui and ai-gui
+  check: false             # true opts in to background checks; ai --setup scope 4 writes this
   interval: 14400          # seconds between fetches (minimum 300)
   upstream: origin/master  # REMOTE/BRANCH; default: the branch's upstream
   source-dir: /home/me/src/ai-glib
