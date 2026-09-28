@@ -1,0 +1,97 @@
+Projects and Claude Code usage: verbatim demonstrations
+Captured 2026-09-28 from the built binaries (build/release/bin) on branch
+feat/projects-and-claude-usage. Paths under /tmp are throwaway sandboxes.
+
+== 1. Claude Code usage works in a folder Claude does not trust
+
+$ cd /tmp && ai -p claude-code --usage
+claude-code usage
+Source: claude get_usage
+Collected: 2026-09-28T13:24:02.655533Z
+Availability: available
+Plan: max
+Session (5h) [percent]
+  used_percent: 2
+  reset_at: 2026-09-28T17:29:59Z
+  window_minutes: 300
+Weekly [percent]
+  used_percent: 25
+  reset_at: 2026-10-02T17:59:59Z
+  window_minutes: 10080
+Weekly (Fable) [percent]
+  used_percent: 0
+  reset_at: 2026-10-02T18:00:00Z
+  window_minutes: 10080
+
+== 2. ai-tui side panel: project, branch and real account quota
+
+         SESSION
+         Claude Code
+         opus
+         Project: ai-glib
+         Branch:
+         feat/projects-and-claude-usa
+         ge
+         ACCOUNT REMAINING
+         Session (5h)
+         [##########] 97% remaining
+         Reset: in 4h 4m
+         Weekly
+         [#######---] 74% remaining
+         Reset: Fri 14:00
+         Weekly (Fable)
+         [##########] 100% remaining
+         Reset: Fri 14:00
+         LINKED WORK / ^] open
+
+== 3. Why, instead of a bare Unavailable (a home with no Claude login)
+
+         ACCOUNT REMAINING
+         Unavailable
+         Claude plan limits do not
+         apply to this login (API
+         key, Bedrock or Vertex
+         authentication)
+
+== 4. One tmux session per project; two repos both named alpha
+
+$ tmux ls   # after n, n in work/alpha and n in other/alpha
+alpha: 2 window(s)  @ai_project=/tmp/tmp.V7ZfUpz3p2/work/alpha/.git
+alpha-2: 1 window(s)  @ai_project=/tmp/tmp.V7ZfUpz3p2/other/alpha/.git
+dash: 1 window(s)  @ai_project=
+dash2: 1 window(s)  @ai_project=
+
+--- dashboard after workers settle ---
+ PROJECT DASHBOARD
+ State       Project / branch / task
+ alpha - 2 sessions  /tmp/<sandbox>/other/alpha
+   IDLE         alpha / master / claude-code
+   IDLE         alpha / master / claude-code
+ alpha - 3 sessions  /tmp/<sandbox>/work/alpha
+   IDLE         alpha / master / claude-code
+   IDLE         alpha / master / claude-code
+   IDLE         alpha / master / claude-code
+
+== 5. ai project (real registry; the worktree groups with ai-glib)
+
+$ ai project
+fai                  WORK         1 session, 1 working             /home/fai
+ai-glib              DONE         2 sessions                       /home/fai/ai-glib
+venture              DONE         1 session                        /home/fai/venture
+
+$ cd ~/ai-glib && ai project show
+ai-glib  /home/fai/ai-glib
+DONE, 2 sessions
+
+  DONE         You see the linked PR? We  still  have issues here. I need this worked on in a w
+               /home/fai/ai-glib (master)  claude-code/opus
+  DISCONNECTED claude-code
+               /home/fai/ai-glib/trees/projects-usage (feat/projects-and-claude-usage)  claude-code/opus
+
+$ ai project show gamma; echo "exit $?"
+ai: No recorded project named 'gamma'
+exit 1
+
+== 6. ai-gui: the window subtitle leads with the project
+
+See gui-project-subtitle.png: "fai · Claude · claude-sonnet-5".
