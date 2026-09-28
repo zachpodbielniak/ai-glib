@@ -33,5 +33,12 @@ and caches title/state on the caller's context. Cancellation and failed reads
 leave the preceding cache intact. Unlinking during the read does not recreate
 the link. The title/state getters return borrowed cached values or NULL.
 
+=ai_work_session_status_priority()= ranks a status by how urgently it
+needs a person: INPUT, ERROR, WORK, DONE, STOPPED, IDLE, DISCONNECTED, with
+an unknown or =NULL= status ranked last. =ai_work_session_compare()= orders
+two sessions by that rank, then project, then UUID, so the order is total.
+Every dashboard and =ai project= use these two; see [[file:ai-project.org][AiProject]]
+for the grouping by project.
+
 See [[file:../dashboard.org][Dashboard and projects]] for configuration, CLI
 adapters, status semantics and persistence boundaries.

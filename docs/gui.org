@@ -133,12 +133,20 @@ Two things follow, and both are the point:
 - *A subdirectory groups with its repository.* Chatting in =src/view/=
   is chatting in the same project as chatting in the root.
 
-The name shown is =ai_gui_work_project_label()=, which is where the
-=.git= suffix is undone --- the common directory's own basename is
-=.git=, so taken literally every heading in the list would read "git".
-The dashboard's group headings call the same function, because one
-project appearing under two names in one window would be worse than no
-grouping at all.
+The name shown is the library's =ai_project_label_for_path()=, which is
+where the =.git= suffix is undone --- the common directory's own basename
+is =.git=, so taken literally every heading in the list would read "git".
+The sidebar, the dashboard's group headings, ai-tui and =ai project= all
+call it, because one project appearing under two names would be worse
+than no grouping at all. It used to be a copy in =gui/=, and the TUI had
+another that had already drifted. The order is the library's too,
+=ai_work_session_compare()=. See [[file:projects.org][Projects]].
+
+The window subtitle leads with the project: =ai-glib · Claude Code ·
+opus=. It comes from =ai_gui_session_dup_subtitle()=, which is
+GTK-free and tested, and it follows =notify::project=, so it changes when
+registration replaces the working-directory fallback with the
+repository.
 
 *** Opening another project
 
@@ -405,14 +413,20 @@ the second and none of the first, and the one about to stop the
 conversation is the one worth a single number. It turns amber below 25%
 and red below 10%, using the palette's own warning and error colours so
 it matches whichever theme is loaded. Click it for every allowance, each
-with its own bar and the provider's own words for when it refills.
+with its own bar and when it refills: the provider's own words where it
+gives them, otherwise "Resets in 2h 41m", "Resets Fri 17:59" or "Resets
+Nov 5", phrased by the same =ai_quota_format_reset()= ai-tui uses.
 
 Four things follow from a report being a CLI subprocess rather than a
 field on a response:
 
 1. *It is hidden when there is nothing to report.* An HTTP provider has
    no account report at all, and a permanently blank indicator beside one
-   would teach you to ignore the place the number appears.
+   would teach you to ignore the place the number appears. A CLI provider
+   whose report *failed* is different: that is something you can fix, so
+   the indicator stays as a dimmed =–= whose tooltip, and whose popover,
+   say why (the report's own error, e.g. plan limits not applying to an
+   API-key login).
 2. *Polling follows the window.* A window behind a browser has no
    business spawning a CLI every minute, so queries stop when the window
    is not active and resume when it comes forward --- the same rule

@@ -23,11 +23,83 @@ Reporting requires a CLI provider. It accepts no prompt and never reads stdin, s
 |----------+--------------+----------------|
 | =codex-cli= | App-server =account/rateLimits/read=, including each named limit pool | App-server =account/usage/read= daily token buckets |
 | =grok-build= | ACP =_x.ai/billing= allowance percentage, dollar amounts when provided, on-demand and prepaid balances | Billing history periods, if the native response includes them |
-| =claude-code= and =claude-tmux= | Native interactive =/usage= panel | Local =stats-cache.json= daily model token totals |
+| =claude-code= and =claude-tmux= | Stream-json control request =get_usage= (the numbers =/usage= draws, as data); the panel only for a CLI too old to know it | Local =stats-cache.json= daily model token totals |
 | =antigravity= | Native interactive =/usage= panel; native alias is =/quota= | Unsupported: no verified historical-usage interface integrated |
 | =opencode= and =cursor= | Unsupported in this API | Unsupported in this API |
 
 Unsupported does not mean zero usage. Account type, authentication, and native version can also make an otherwise supported source unavailable. Grok can return current allowance without historical billing periods. Codex service-backed account history is distinct from local session history. Claude's statistics cache must already exist; open native =/stats= to populate or refresh it. Cache reads honor =CLAUDE_CONFIG_DIR= and otherwise use =$HOME/.claude/stats-cache.json=. A missing cache is a file error, not an empty history.
+
+* Claude Code usage: =get_usage=
+
+Claude Code answers a read-only =get_usage= control request on its
+stream-json SDK transport. ai-glib runs
+
+#+begin_example
+claude -p --input-format stream-json --output-format stream-json --verbose --strict-mcp-config
+#+end_example
+
+writes one line to its stdin,
+
+#+begin_example
+{"type":"control_request","request_id":"<random UUID>","request":{"subtype":"get_usage","skip_behaviors":true}}
+#+end_example
+
+and reads stdout until the =control_response= carrying that =request_id=,
+then ends the process. Other lines, and answers to other request ids, are
+skipped. =skip_behaviors= skips a scan of seven days of local transcripts
+that a usage meter does not need.
+
+Why this path and not the =/usage= panel:
+
+- Print mode never shows the workspace-trust prompt. Current Claude Code
+  shows that prompt in front of the interactive panel in every directory
+  it has not been told to trust, so a panel scrape fails with
+  =AI_ERROR_PERMISSION_DENIED=, and the front-ends then show
+  "Unavailable" permanently.
+- It sends no prompt, so it uses no model allowance, and it writes no
+  transcript.
+- =--strict-mcp-config= with no =--mcp-config= means the user's MCP
+  servers are not started just to read a number.
+- The answer is data with a documented meaning: the CLI's own schema
+  describes =utilization= as "Percentage of the window used, 0-100".
+
+The answer's =rate_limits= windows become entries:
+
+| Field | Entry label | =window_minutes= |
+|-------+-------------+------------------|
+| =five_hour= | =Session (5h)= | 300 |
+| =seven_day= | =Weekly= | 10080 |
+| =seven_day_opus= | =Weekly (Opus)= | 10080 |
+| =seven_day_sonnet= | =Weekly (Sonnet)= | 10080 |
+| each =model_scoped[]= | =Weekly (<display_name>)= | 10080 |
+
+=utilization= becomes =used_percent=, and =resets_at= becomes =reset_at=
+in UTC to the second. =subscription_type= becomes the report's =plan=.
+A window that is =null=, or whose =utilization= is =null=, is not an
+entry: it is a window this account does not have, not a zero. Keys that
+are not in the table (codenamed pools, credit schemes) are not guessed
+at, and a =model_scoped= row whose label repeats a named window is the
+same allowance and is not listed twice. The table in
+=src/core/ai-cli-report-native.c= is the registration.
+
+Errors:
+
+| Situation | Error |
+|-----------+-------|
+| =rate_limits_available= false or =rate_limits= missing (API key, Bedrock, Vertex) | =AI_ERROR_NOT_SUPPORTED=, saying plan limits do not apply to this login |
+| No usable window | =AI_ERROR_NOT_SUPPORTED= |
+| An =ollama/= transport model | =AI_ERROR_NOT_SUPPORTED= before anything is spawned |
+| An error answer to the request | =AI_ERROR_CLI_EXECUTION=; the backend's text is not echoed |
+| The CLI exits before answering | =AI_ERROR_CLI_EXECUTION= |
+| Invalid JSON on stdout | =AI_ERROR_CLI_PARSE_ERROR= |
+| No answer by the deadline | =AI_ERROR_TIMEOUT= |
+
+The one error answer that is recognised is "Unsupported control request
+subtype": a Claude Code too old to know =get_usage=. Only then does the
+query fall back to the interactive panel described below, trust prompt
+and all.
+
+* Native panels
 
 Native panel adapters need =tmux=. They create an isolated private server/socket, capture the panel, and stop it after the query; they do not attach to an existing user session. Workspace trust prompts fail with =AI_ERROR_PERMISSION_DENIED= and require the user to open the native CLI interactively in that directory. Authentication prompts or an unrecognized panel can time out. Provider chat permission-bypass settings are not passed to reporting panels.
 
@@ -41,6 +113,13 @@ Codex's wire =usedPercent: 25= becomes =used_percent: 25= in the report and
 75% remaining in the sidebar; a native panel's explicit 75% remaining is
 already in that direction. The CLI JSON schema preserves source direction
 and is unchanged. Unknown-direction =percent= values are not converted.
+When a query fails, the error's message is kept as the reason and shown
+under "Unavailable" (the TUI panel) or in the popover and the button's
+tooltip (ai-gui), so a login without plan limits, a CLI too old to ask and
+a broken one no longer look the same. Reset times are phrased once, by
+=ai_quota_format_reset()=: the provider's own =reset_text= if it has one,
+otherwise "in 2h 41m" within a day, a weekday and time within a week, and
+a date beyond that.
 Both front-ends read =src/core/ai-quota.h=, so the direction rule and the
 rounding are one decision rather than two. See [[file:tui.org][the TUI guide]] and
 [[file:gui.org][the ai-gui guide]] for refresh, unavailable and stale behavior.
@@ -96,9 +175,9 @@ Each entry has a =label= and =unit= (=percent=, =tokens=, or =USD=). All of the 
 A query error document contains =schema_version=, =provider=, =kind=, =availability=, and =error= with =domain=, =code=, and =message=. Do not use error messages as stable identifiers. RPC errors expose method and numeric code without echoing arbitrary backend payloads. C callers receive the corresponding =GError= instead of an error report object.
 
 * Build and validation
-Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libyaml-devel=, =ncurses-devel=, and =gobject-introspection-devel=. =tmux= is needed at runtime for Claude/Antigravity usage panels and their integration tests. No new library dependency is introduced.
+Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =libsoup3-devel=, =json-glib-devel=, =libxml2-devel=, =libyaml-devel=, =ncurses-devel=, and =gobject-introspection-devel=. =tmux= is needed at runtime for the Antigravity usage panel, the Claude panel fallback, and their integration tests. No new library dependency is introduced.
 
-=tests/test-cli-report.c= uses its own executable as a strict native-protocol fixture, with no live account or network required. It tests normalization, exact integers, deep-copy ownership, native argv/method selection, transport failures and bounds, cancellation, cache reads, and private panel capture/trust refusal. =tests/test-ai-cli.c= verifies text/JSON output and errors while leaving stdin open. The full =make test= target also checks public-header installation and GIR warnings.
+=tests/test-cli-report.c= uses its own executable as a strict native-protocol fixture, with no live account or network required. It tests normalization, exact integers, deep-copy ownership, native argv/method selection, transport failures and bounds, cancellation, cache reads, and private panel capture/trust refusal. For Claude it acts as a stream-json CLI that insists on the exact print-mode argv and on exactly one =get_usage= request, answers with a trimmed real response surrounded by noise lines, and covers stall, invalid output, error answers, early exit, accounts without plan limits, =ollama/= models and the panel fallback for an older CLI. =tests/test-ai-cli.c= verifies text/JSON output and errors while leaving stdin open. The full =make test= target also checks public-header installation and GIR warnings.
 
 * Native references
 - [[https://learn.chatgpt.com/docs/app-server][Codex app-server protocol: account rate limits and usage]]

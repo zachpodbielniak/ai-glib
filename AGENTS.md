@@ -1355,8 +1355,9 @@ line is deliberately *not* written back.
 
 **One cache, two front-ends**, `src/core/ai-quota.h` — the same pattern as
 `AI_THEMES` and for the same reason. `AiCliReport` gives each allowance in
-whatever direction its provider stated (Codex says `used_percent`, a Claude
-panel says remaining, some give a count against a limit), and turning that
+whatever direction its provider stated (Codex and Claude's `get_usage` say
+`used_percent`, a native panel may say remaining, some give a count against
+a limit), and turning that
 into a number a person acts on is a *decision*. A terminal saying 75%
 remaining while a window says 25% for one account is worse than either
 saying nothing.
@@ -1367,7 +1368,13 @@ the "worst allowance" pick, the heading vocabulary *and* the refresh
 policy. `bin/ai-tui-usage.h` was the first copy and was folded into it when
 ai-gui needed the second.
 
-Five rules:
+**Claude usage is the `get_usage` control request, never the `/usage`
+panel** (see `docs/cli-reporting.org`): the panel sits behind a trust prompt
+in every untrusted directory, and scraping it is why the quota read
+Unavailable. The panel is only the fallback for a CLI that answers
+"Unsupported control request subtype".
+
+Six rules:
 
 - **Never infer a direction.** An unlabeled `percent`, a missing
   denominator or an out-of-range value is unavailable. A number that might
@@ -1385,6 +1392,9 @@ Five rules:
   asks only while the panel is drawn; ai-gui only while the window is
   active. Failures back off at the same one minute as successes, or a
   broken CLI becomes a subprocess per redraw.
+- **A failure keeps its reason.** `ai_quota_reason()` is the report's error
+  message, shown under "Unavailable"; dropping it made every cause look the
+  same. Reset times are phrased only by `ai_quota_format_reset()`.
 - **Teardown is stop, drain, clear, in that order.** `ai_quota_ready()`
   clears `pending` *before* it checks `stopped`, so the drain always
   terminates — including when the cancel it just fired is what completed
@@ -1405,8 +1415,10 @@ as three unrelated things.
 
 Four rules:
 
-- **One function names a project**, `ai_gui_work_project_label()`. The
-  dashboard's group headings and the sidebar's both call it. The common
+- **One function names a project**, the library's
+  `ai_project_label_for_path()`, and one orders sessions,
+  `ai_work_session_compare()`; ai-tui, ai-gui and `ai project` all call
+  them (see `docs/projects.org`). The common
   directory's own basename is `.git`, so a literal `g_path_get_basename()`
   makes every heading in the list read "git" — there were two copies of
   the undo for that, and the second one is how a project ends up under two
@@ -1446,10 +1458,10 @@ the dashboard's "Open project…" already used.
 `$XDG_STATE_HOME/ai-glib/sessions` registry — so each front-end's
 dashboard lists the other's work. Four things follow:
 
-- **The ordering is copied, not approximated.** `ai_gui_work_priority()`
-  and `ai_gui_work_compare()` reproduce ai-tui's three keys exactly.
-  Two dashboards reading one registry that sorted it differently would
-  be two answers to "what needs me next". If one changes, change both.
+- **The ordering is shared, not copied.** Both dashboards sort with the
+  library's `ai_work_session_compare()` (`ai_gui_work_compare()` is only a
+  `g_ptr_array_sort()` adaptor). Two dashboards reading one registry that
+  sorted it differently would be two answers to "what needs me next".
 - **`AiGuiSession:busy` and the record are published from one place.**
   `ai_gui_session_publish_work()` derives every field from the
   conversation, the executor and the brigade rather than caching them as
