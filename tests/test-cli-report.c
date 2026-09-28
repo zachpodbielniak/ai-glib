@@ -424,7 +424,10 @@ int
 main(int argc, char **argv)
 {
 	gint result;
-	if (argc > 1 && g_str_equal(argv[1], "-p")) return claude_stub(argc, argv);
+	/* GTest's own -p selects a test path, so the stub needs the second
+	 * word too before it takes over as Claude. */
+	if (argc > 2 && g_str_equal(argv[1], "-p") && g_str_equal(argv[2], "--input-format"))
+		return claude_stub(argc, argv);
 	if (argc > 1 && (g_str_equal(argv[1], "app-server") || g_str_equal(argv[1], "agent") ||
 	    g_str_equal(argv[1], "/usage") || g_str_equal(argv[1], "--prompt-interactive"))) return native_stub(argc, argv);
 	g_test_init(&argc, &argv, NULL);
