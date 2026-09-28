@@ -97,6 +97,14 @@ test_usage_panel(void)
 	erase();
 	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
 	assert_row(4, 90, "Unavailable");
+	/* With a reason, the panel says why instead of leaving a dead end. */
+	usage.reason = g_strdup("Claude plan limits do not apply to this login");
+	erase();
+	panel_usage(3, 90, 28, &usage, A_BOLD, A_NORMAL);
+	assert_row(4, 90, "Unavailable");
+	assert_row(5, 90, "Claude plan limits do not");
+	assert_row(6, 90, "apply to this login");
+	g_clear_pointer(&usage.reason, g_free);
 	usage.failed = FALSE;
 	usage.data = json_from_string(
 		"{\"availability\":\"partial\",\"entries\":["

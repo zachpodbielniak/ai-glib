@@ -89,14 +89,22 @@ panel_usage(gint y, gint x, gint width, AiQuota *usage, attr_t heading, attr_t n
 
 	/* The heading -- stale, refreshing, partial -- is decided in
 	 * core/ai-quota.h so the window says the same words. */
+	g_autoptr(GDateTime) now = g_date_time_new_now_local();
+
 	y = panel_usage_line(y, x, width, ai_quota_heading(usage), heading);
 	if (usage->data == NULL || count == 0)
-		return panel_usage_line(y, x, width,
+	{
+		y = panel_usage_line(y, x, width,
 			usage->pending ? "Loading..." : "Unavailable", normal);
+		/* Say why, wrapped, so a dead end has a next step. */
+		if (!usage->pending && ai_quota_reason(usage) != NULL && y < LINES - 3)
+			y = MIN(panel_text(y, x, width, ai_quota_reason(usage), normal, FALSE), LINES - 2);
+		return y;
+	}
 	for (i = 0; i < count && i < 3 && y < LINES - 4; i++)
 	{
 		JsonObject *row = ai_quota_object(json_array_get_element(entries, i));
-		const gchar *reset = ai_quota_row_reset(row);
+		g_autofree gchar *reset = ai_quota_format_reset(row, now);
 		g_autofree gchar *bar = ai_quota_format_bar(row);
 
 		y = panel_usage_line(y, x, width, ai_quota_row_label(row), normal);
