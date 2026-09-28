@@ -479,6 +479,31 @@ test_session_project_falls_back(
 	g_assert_cmpstr(ai_gui_session_get_project(session), ==, elsewhere);
 }
 
+/* The window's subtitle names the project first, with the library's label,
+ * so the chat header, the sidebar heading and `ai project` agree. */
+static void
+test_session_subtitle(
+	Fixture       *fixture,
+	gconstpointer  data
+){
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGuiSession) session = NULL;
+	g_autofree gchar *subtitle = NULL;
+	g_autofree gchar *label = NULL;
+	g_autofree gchar *expected = NULL;
+
+	session = ai_gui_session_new(options, "ollama", NULL, &error);
+	g_assert_no_error(error);
+
+	label = ai_project_label_for_path(ai_gui_session_get_project(session));
+	expected = g_strdup_printf("%s · %s · ", label,
+		ai_gui_session_get_provider_name(session));
+	subtitle = ai_gui_session_dup_subtitle(session);
+	g_assert_true(g_str_has_prefix(subtitle, expected));
+	g_assert_null(strchr(subtitle, '\n'));
+}
+
 /* A saved session groups correctly on the first frame after a restart,
  * without waiting for one git subprocess per restored row. */
 static void
@@ -594,6 +619,9 @@ main(
 
 	g_test_add("/ai-gui/session/project-falls-back", Fixture, NULL,
 	           fixture_set_up, test_session_project_falls_back,
+	           fixture_tear_down);
+	g_test_add("/ai-gui/session/subtitle", Fixture, NULL,
+	           fixture_set_up, test_session_subtitle,
 	           fixture_tear_down);
 	g_test_add("/ai-gui/session/project-round-trips", Fixture, NULL,
 	           fixture_set_up, test_session_project_round_trips,
