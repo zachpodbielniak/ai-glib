@@ -33,6 +33,7 @@
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
 #include "core/ai-quota.h"
+#include "core/ai-updater.h"
 #include "ai-tui-panel.h"
 #include "ai-tui-images.h"
 
@@ -492,9 +493,15 @@ typedef struct
     /* /loop and /goal: the shared runner, which owns the timer. */
     AiLoopRunner   *loops;
     gboolean        loop_builtin;
+
+    /* Self-update: the background check, and /update status in flight. */
+    AiUpdater      *updater;
+    GCancellable   *update_cancel;
+    guint           update_pending;
 } App;
 
 static void app_schedule_redraw(App *app);
+static gchar *tui_update_badge(App *app);
 static void
 on_usage_changed(gpointer data)
 {
@@ -1242,6 +1249,19 @@ draw_status(App *app)
                                        ? "your turn · type to reply"
                                        : "ready",
                                 app->follow ? "" : "   [scrolled]");
+
+		/* Only an update that exists earns space here. */
+		{
+			g_autofree gchar *badge = tui_update_badge(app);
+
+			if (badge != NULL)
+			{
+				gchar *with_badge = g_strdup_printf("%s   · %s", line, badge);
+
+				g_free(line);
+				line = with_badge;
+			}
+		}
     }
 	if (app->feedback != NULL && app->interrupt_id == 0 &&
 		!ai_conversation_get_busy(app->conversation) &&
@@ -3392,6 +3412,8 @@ start_decision(App *app, const gchar *arguments)
 
 static void app_reset(App *app);
 
+#include "ai-tui-update.h"
+
 static void
 handle_builtin(App *app, AiCommandResult *result)
 {
@@ -3738,6 +3760,10 @@ handle_builtin(App *app, AiCommandResult *result)
     else if (g_strcmp0(name, "loop") == 0 || g_strcmp0(name, "goal") == 0)
     {
         loop_command(app, name, arguments);
+    }
+    else if (g_strcmp0(name, "update") == 0)
+    {
+        tui_update_command(app, arguments);
     }
     else
     {
@@ -6345,7 +6371,9 @@ main(int argc, char *argv[])
     }
     if (opt_version)
     {
-        g_print("ai-tui %s\n", AI_GLIB_VERSION_STRING);
+        g_autofree gchar *summary = ai_build_info_dup_summary();
+
+        g_print("ai-tui %s\n", summary);
         return 0;
     }
 
@@ -6702,6 +6730,7 @@ main(int argc, char *argv[])
             }
 
             g_main_loop_run(loop);
+            tui_update_stop(&app);
             if (app.decision_cancel != NULL) g_cancellable_cancel(app.decision_cancel);
             while (app.decision_pending) g_main_context_iteration(NULL, TRUE);
             app.dump_loop = NULL;
@@ -6936,7 +6965,9 @@ main(int argc, char *argv[])
 	ai_loop_runner_start(app.loops);
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
+    tui_update_start(&app);
     g_main_loop_run(app.loop);
+    tui_update_stop(&app);
 	app.model_generation++;
 	picker_close(&app);
 	/* MCP stop drains callbacks, including UI and input sources. Do that

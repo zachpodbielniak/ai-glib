@@ -1,0 +1,211 @@
+#+TITLE: Versions and self-update
+
+* Versions
+
+Two numbers describe a build.
+
+- *The release.* =VERSION_MAJOR=, =VERSION_MINOR= and =VERSION_MICRO= in
+  =config.mk=. Semantic versioning; changed only by the release procedure in
+  [[file:../CHANGELOG.org][CHANGELOG.org]].
+- *The provenance.* Written at build time into a generated header,
+  =build/<type>/ai-build-stamp.h=, by =build-aux/gen-build-stamp.sh=: the
+  commit, =git describe --tags --always=, whether tracked files were modified,
+  the build date, the absolute source directory, and the =PREFIX=, =LIBDIR=
+  and =INCLUDEDIR= the build was configured with.
+
+All three binaries print both:
+
+#+begin_example
+$ ai --version
+ai (ai-glib) 0.3.0 (v0.3.0-4-g0123456789ab-dirty, built 2026-09-27T12:00:00Z)
+$ ai-tui --version
+ai-tui 0.3.0 (v0.3.0-4-g0123456789ab-dirty, built 2026-09-27T12:00:00Z)
+#+end_example
+
+ai-gui shows the same line in its About box, and =/update status= prints it
+in ai-tui and ai-gui.
+
+** Reading it from code
+
+The provenance is public and introspectable:
+
+| Function                         | Answers                                            |
+|----------------------------------+----------------------------------------------------|
+| =ai_build_info_get_version()=    | The release, =0.3.0=                               |
+| =ai_build_info_get_commit()=     | Full commit id, or =NULL= outside git              |
+| =ai_build_info_get_describe()=   | =git describe= output, or =NULL= outside git       |
+| =ai_build_info_get_dirty()=      | Built from modified tracked files                  |
+| =ai_build_info_get_date()=       | UTC ISO 8601; honours =SOURCE_DATE_EPOCH=          |
+| =ai_build_info_get_source_dir()= | The checkout it was built in                       |
+| =ai_build_info_get_prefix()=     | The =PREFIX= it installs into                      |
+| =ai_build_info_dup_summary()=    | The one line =--version= prints                    |
+
+From Python: =AiGlib.build_info_dup_summary()=.
+
+** When the stamp changes
+
+The generator runs on every =make= and rewrites the header only when its
+content changes, so a commit --- or the first edit after one --- recompiles
+=ai-build-info.o= and relinks; nothing else. The date is left out of the
+comparison, so it moves only when something else does.
+
+Two rules in the generator are load-bearing:
+
+- *git runs with =safe.directory= and =--no-optional-locks=.* =sudo make
+  install= runs it as root in a tree root does not own. Without the first,
+  git refuses and the installed binary would claim it came from no checkout
+  at all; without the second, the status refresh would leave a root-owned
+  index in the user's tree.
+- *When git fails and a stamp exists, the stamp is kept.* An old answer beats
+  an invented one. A tree that is only a subdirectory of some other repository
+  (ai-glib vendored as a plain directory) is treated as "not a git checkout",
+  so it never stamps the enclosing project's commit.
+
+* Updating
+
+The binaries can update themselves from the checkout that built them. This is
+for people who run ai-glib from a clone --- =git clone=, =make=, =sudo make
+install= --- which is the only way it is distributed today.
+
+#+begin_example
+$ ai --check-update
+Update available: 3 commits behind origin/master. Run `ai --update` or /update.
+$ ai --update
+#+end_example
+
+In ai-tui and ai-gui the same pipeline is =/update=, and =/update status=
+checks.
+
+** Which checkout
+
+In order, the first that is set:
+
+1. =AI_GLIB_SOURCE_DIR=
+2. =updates.source-dir= in =config.yaml=
+3. The directory the binary was built in
+
+The updater never guesses. It refuses, and says which, when the directory:
+
+- does not exist;
+- is not a git checkout, or is a subdirectory of one rather than its top;
+- does not contain the commit this binary was built from --- the only way to
+  be sure it is the same repository;
+- has a detached HEAD, or is on a branch that does not track the upstream
+  being checked.
+
+A binary built outside git (a tarball) has no commit, so it cannot update.
+
+** Which upstream
+
+=updates.upstream= (=REMOTE/BRANCH=) if set, else the current branch's own
+upstream, else =origin/master=. The fetch updates only that one
+remote-tracking ref, never tags.
+
+** The check
+
+The background check is off until =updates.check= is =true=. An immutable
+install does not fetch or announce updates on its own. Opt in with
+=ai --setup= and choose scope =4=, which writes that one key, or set it in
+=config.yaml=. =AI_GLIB_NO_UPDATE_CHECK=1= forces the background check off
+even when the key is true. =ai --check-update=, =ai --update= and =/update=
+still run: somebody asked.
+
+When it is on, ai-tui and ai-gui check in the background: once at start and
+then every ten minutes, fetching only when the interval (=updates.interval=,
+default four hours, never less than five minutes) has passed since the last
+attempt. The last result and its fetch times are kept in
+=$XDG_STATE_HOME/ai-glib/update-status.json=, so a restart does not fetch
+again, and several open windows share one fetch.
+
+It never blocks: it runs on a worker thread, the fetch is bounded (sixty
+seconds) and git is never allowed to prompt --- no terminal, no askpass, its
+own session. Offline, a failed login and a moved remote are all quiet; the
+last fetched state still answers.
+
+** What the answer means
+
+| State           | Meaning                                                                  |
+|-----------------+--------------------------------------------------------------------------|
+| =up-to-date=    | This build has everything upstream has                                   |
+| =behind=        | Upstream has commits this build lacks, and the checkout can take them     |
+| =diverged=      | The checkout and upstream each have commits the other lacks               |
+| =local-changes= | Tracked files are modified (untracked files and submodules do not count) |
+| =unavailable=   | No usable checkout; =detail= says why                                    |
+
+"Behind" is measured from the *running build*, not the checkout: a =git pull=
+without an install still leaves an update to install. Once one is installed,
+a process started before it says "Update installed; restart to use it."
+
+The sentences are the same in all three front-ends; they come from one
+private header, =src/core/ai-update-status.h=. ai-tui puts a short badge on
+its status line and ai-gui a banner, only when an update exists.
+
+=ai --check-update --json= prints the same status as an object: =state=,
+=summary=, =behind=, =checkout_behind=, =ahead=, =dirty=, =pending_restart=,
+=fetch_failed=, =upstream=, =branch=, =source_dir=, =build_commit=,
+=head_commit=, =upstream_commit=, =detail=, the three timestamps, and this
+build's =version=, =describe=, =build_dirty= and =build_date=.
+
+** The update
+
+Refused, with the reason and nothing done, when the state is anything but
+=behind=, when the fetch failed, or while a turn is running (in ai-gui, a turn
+in any of the window's sessions). Otherwise, in the checkout:
+
+1. =git merge --ff-only= to the commit just checked (a =pull --ff-only= whose
+   fetch already happened)
+2. =git submodule update --init --recursive=
+3. =make clean=
+4. =make -jN all PREFIX=... LIBDIR=... INCLUDEDIR=...= (and =DEBUG=1= for a
+   debug build)
+5. =make test=, only with =updates.run-tests: true=
+6. =make install= with the same variables
+
+Every step is a subprocess with an argument vector --- never a shell string ---
+and the first failure stops the pipeline, so nothing is installed from a build
+or a test run that failed, and the running install is untouched. A cancel (^C,
+or closing ai-gui) stops the step and everything under it.
+
+The install goes into the prefix the binary was configured with. If every
+directory it writes is writable, it runs directly. Otherwise:
+
+- =ai --update= on a terminal, and ai-tui, run it under =sudo= with the
+  terminal attached so it can prompt. ai-tui hands the terminal over the way
+  =^G= does for =$EDITOR=, shows the build scrolling past, and takes it back
+  when Enter is pressed.
+- ai-gui runs the install step alone under =pkexec= when it is installed:
+  the desktop's polkit agent asks in a dialog. pkexec gets no terminal and a
+  closed stdin, so without an agent it fails at once rather than waiting.
+  A dismissed dialog or a missing agent falls back to the line below. After
+  an install, ai-gui's header button offers *Restart now*.
+- ai-gui without pkexec or permission, =ai --update= without a terminal, and
+  =ai-tui --dump= never run sudo. They build, stop, and print the one
+  command that finishes the job:
+
+#+begin_example
+Built, not installed: installing into /usr/local needs privilege. Finish with: sudo make -C /home/me/src/ai-glib install PREFIX=/usr/local LIBDIR=/usr/local/lib INCLUDEDIR=/usr/local/include
+#+end_example
+
+=ai --update= exits 0 for an install or nothing to do, 1 for a refusal or a
+failed step, and 3 for "built, needs the privileged install".
+
+Every run is appended to =$XDG_STATE_HOME/ai-glib/update.log=, and a
+successful one is recorded in =update-status.json= as =last_update= (versions,
+commits, prefix, time). Restart the programs to use the new build.
+
+** Configuration
+
+#+begin_src yaml
+updates:
+  check: false             # true opts in to background checks; ai --setup scope 4 writes this
+  interval: 14400          # seconds between fetches (minimum 300)
+  upstream: origin/master  # REMOTE/BRANCH; default: the branch's upstream
+  source-dir: /home/me/src/ai-glib
+  run-tests: false         # make test before installing
+#+end_src
+
+| Environment               | Effect                                              |
+|---------------------------+-----------------------------------------------------|
+| =AI_GLIB_SOURCE_DIR=      | The checkout to update from                         |
+| =AI_GLIB_NO_UPDATE_CHECK= | Any value but empty or =0= turns background checks off |
+| =AI_GLIB_UPDATE_MAKE=     | The =make= to run (for example =gmake=)             |

@@ -54,6 +54,9 @@ main(int argc, char **argv)
 {
 	g_autofree gchar *exe = g_file_read_link("/proc/self/exe", NULL);
 	g_autofree gchar *dir = g_path_get_dirname(exe);
+	/* Never check for, let alone install, a real update from a test. */
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
 	g_test_init(&argc, &argv, NULL);
 	tui = g_build_filename(dir, "..", "bin", "ai-tui", NULL);
 	g_test_add_func("/linked-work/tui/resumed-provider-request", test_resumed_provider_request);

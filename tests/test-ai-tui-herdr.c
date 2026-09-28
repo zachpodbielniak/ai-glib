@@ -771,6 +771,10 @@ main(int argc, char **argv)
 	g_autofree gchar *oversized = g_strnfill(AI_TUI_HERDR_REPLY_LIMIT + 1, ' ');
 	gint result;
 
+	/* Never check for, let alone install, a real update from a test. */
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
+
 	g_test_init(&argc, &argv, NULL);
 	tui_binary = g_canonicalize_filename(relative, NULL);
 	g_test_add_func("/herdr/detection", test_detection);

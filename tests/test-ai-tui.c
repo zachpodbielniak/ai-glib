@@ -3154,7 +3154,8 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "save", "/save needs a path." },
 	{ "export", "/export needs a format" },
 	{ "loop", "No scheduled loops." },
-	{ "goal", "No goals." }
+	{ "goal", "No goals." },
+	{ "update", "Checking for updates" }
 };
 
 /**
@@ -3187,6 +3188,8 @@ test_builtin_enter(gconstpointer data)
 		? g_strdup("/model grok-4.7")
 		: g_str_equal(test_case->name, "loop")
 			? g_strdup("/loop list")
+		: g_str_equal(test_case->name, "update")
+			? g_strdup("/update status")
 			: g_strconcat("/", test_case->name, NULL);
 	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
@@ -4057,6 +4060,10 @@ main(int argc, char *argv[])
 
 	/* Spawned fixtures must never register in the developer's real herdr pane. */
 	g_unsetenv("HERDR_ENV");
+	/* Never check for, let alone install, a real update from a test: no
+	 * background fetch, and a checkout that does not exist. */
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/ai-glib/ai-tui/decision/interactive", test_decision_interactive);
 	/* Never inherit the developer's tmux options or touch their sessions. */

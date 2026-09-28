@@ -572,7 +572,37 @@ built-in opens a tmux window in ai-tui; with no argument it opens the
 dashboard. =/cwd <directory>= moves the session you are in, and its row
 moves to the matching group.
 
+=/update status= prints the version and whether a newer ai-glib is
+available; =/update= builds and installs it (see *Updates* below).
+
 =/model=, =/provider= and =/effort= report where the controls are instead
 of reimplementing a list you would then have to type an exact id into —
 the two menus under the message box and the preferences dialog. =/btw= is
 an ai-tui feature; open a second session instead.
+
+** Updates
+
+When =updates.check= is true, ai-gui checks the checkout that built it in
+the background, like ai-tui. That key is off by default; =ai --setup= scope
+=4= writes it. When there is an update, a banner above the conversation says
+so and an *Update* button appears in the header bar. The main menu's *Check
+for Updates* checks on demand, as =/update status= does, whether or not the
+background check is on.
+
+*Update* and =/update= run the same pipeline as =ai --update=. The banner
+shows the step in progress, and the steps and the outcome are written into
+the conversation you are looking at. The button is disabled while a turn is
+running (and =/update= is refused while any session in the window has one)
+and while an update is already running.
+
+ai-gui has no terminal, so it never runs =sudo=. When the install prefix is
+not writable, the install step alone goes through =pkexec=, whose desktop
+agent asks for a password in a dialog. With no polkit agent, or when the
+dialog is dismissed, it stops after the build and shows the exact command to
+run in a terminal; it never waits on a prompt nobody can see.
+
+After a successful install the button becomes *Restart now*: it saves every
+session, starts the newly installed ai-gui, and closes this one. Closing the
+window instead cancels a run in progress and waits for its build to stop.
+The About box shows the build's provenance. See
+[[file:updating.org][Versions and self-update]].

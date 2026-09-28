@@ -1,0 +1,51 @@
+#+TITLE: Changelog
+
+All notable changes to ai-glib. The format follows [[https://keepachangelog.com/en/1.1.0/][Keep a Changelog]]
+and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
+release may change the API.
+
+* 0.4.0 - 2026-09-27
+
+** Added
+- =/loop= and =/goal=: repeating prompts and bounded goals that persist
+  across restarts and can be listed, edited, paused and run from ai-tui,
+  ai-gui and =ai loop= / =ai goal=. See
+  [[file:docs/loops-and-goals.org][docs/loops-and-goals.org]].
+- Plan mode on =Shift-Tab= in ai-tui.
+- Build provenance: the commit, a dirty flag, the build date, the source
+  directory and the install paths are embedded at build time.
+  =ai_build_info_*()= reads them, including from bindings, and =--version=
+  in =ai=, =ai-tui= and =ai-gui= prints them.
+- Self-update from the checkout that built the binary: =ai --check-update=
+  (=--json=), =ai --update=, and =/update [status]= in ai-tui and ai-gui,
+  with an opt-in background check (=updates.check=, also =ai --setup= scope 4),
+  an update badge in ai-tui, and in ai-gui a banner,
+  an Update button (pkexec for a privileged install), "Check for Updates" in
+  the menu and "Restart now" after an install.
+  See [[file:docs/updating.org][docs/updating.org]].
+- =updates:= configuration section: =check=, =interval=, =upstream=,
+  =source-dir=, =run-tests=. Matching =AiConfig= properties.
+- This changelog.
+
+* 0.3.0
+
+The version in =config.mk= when this changelog started. Earlier history is in
+=git log=.
+
+* Versioning
+
+Every pull request that changes behaviour bumps the version in =config.mk=
+and adds its entry under a heading for that version at the top of this
+file, in the same PR. =make test= fails when the newest heading here does
+not match =config.mk= (=make test-version=). The rules, and what counts as
+a feature or a fix, are in [[file:docs/contributing.org::*Versioning][docs/contributing.org]].
+
+Tags are the maintainer's, after merge; nothing in the tree pushes one:
+
+#+begin_example
+git tag -a v0.4.0 -m "ai-glib 0.4.0"
+git push origin v0.4.0
+#+end_example
+
+After a tag, =git describe= in every build says =v0.4.0-N-g<commit>=, which
+is what =--version= shows.

@@ -16,6 +16,7 @@
 
 /* Version information */
 #include "ai-version.h"
+#include "core/ai-build-info.h"
 
 /* Forward type declarations */
 #include "ai-types.h"

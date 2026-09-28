@@ -154,4 +154,27 @@ ai_gui_window_export(
 	const gchar *arguments
 );
 
+/**
+ * ai_gui_request_restart:
+ * @path: the ai-gui binary to become once the application has quit
+ *
+ * Replace this process with @path after the last window closes.
+ */
+void
+ai_gui_request_restart(const gchar *path);
+
+/**
+ * ai_gui_window_update:
+ * @self: a window
+ * @arguments: (nullable): `status`, or nothing to run the update
+ *
+ * `/update`: check, or build and install. Refused while any session in
+ * the window has a turn running.
+ */
+void
+ai_gui_window_update(
+	AiGuiWindow *self,
+	const gchar *arguments
+);
+
 G_END_DECLS

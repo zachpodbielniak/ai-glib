@@ -648,6 +648,10 @@ ai_gui_commands_handle(
 		else
 			ai_gui_commands_say(session, "%s", notice);
 	}
+	else if (g_strcmp0(name, "update") == 0)
+	{
+		ai_gui_window_update(window, arguments);
+	}
 	else
 	{
 		ai_gui_commands_say(session, "/%s is not available here yet.", name);

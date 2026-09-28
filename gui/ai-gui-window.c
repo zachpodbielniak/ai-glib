@@ -23,6 +23,7 @@
 #include "ai-gui-settings.h"
 #include "ai-gui-sidebar.h"
 #include "ai-gui-style.h"
+#include "ai-gui-update.h"
 #include "ai-gui-work.h"
 
 struct _AiGuiWindow
@@ -45,6 +46,8 @@ struct _AiGuiWindow
 	GtkWidget *search_bar;
 	GtkWidget *search_entry;
 	GtkWidget *banner;
+	GtkWidget *update_button;
+	AiGuiUpdate *update;
 	GtkWidget *links_button;
 	GtkWidget *quota;
 	GtkWidget *links_popover;
@@ -160,6 +163,8 @@ on_agent_finished(
 	                    ai_agent_state_to_string((AiAgentState)state));
 }
 
+static void window_update_refresh(AiGuiWindow *self);
+
 static void
 on_busy_changed(
 	GObject    *object,
@@ -170,6 +175,8 @@ on_busy_changed(
 
 	ai_gui_composer_set_busy(AI_GUI_COMPOSER(self->composer),
 	                         ai_gui_session_get_busy(self->session));
+	/* The Update button is off while a turn runs. */
+	window_update_refresh(self);
 }
 
 static void
@@ -1464,7 +1471,11 @@ action_about(
 	adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "ai-gui");
 	adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about),
 	                                      "chat-message-new-symbolic");
-	adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), AI_GLIB_VERSION_STRING);
+	{
+		g_autofree gchar *version = ai_build_info_dup_summary();
+
+		adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), version);
+	}
 	adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "ai-glib");
 	adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about),
 	                                  GTK_LICENSE_AGPL_3_0);
@@ -1516,6 +1527,151 @@ on_active_changed(
 	}
 }
 
+/* ================================================================
+ * Updates
+ * ================================================================ */
+
+/* Whether any session in this window has a turn in flight. An update
+ * replaces the binaries under all of them, so one busy session is
+ * enough to refuse. */
+static gboolean
+window_any_busy(AiGuiWindow *self)
+{
+	guint i;
+	guint n = ai_gui_session_store_get_n_sessions(self->store);
+
+	for (i = 0; i < n; i++)
+	{
+		if (ai_gui_session_get_busy(ai_gui_session_store_get(self->store, i)))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * The banner says what is happening; the header's button is the one
+ * thing to do about it -- Update, or Restart now once a newer build is
+ * installed. The decision is the GTK-free controller's; this maps it.
+ */
+static void
+window_update_refresh(AiGuiWindow *self)
+{
+	g_autofree gchar *text = NULL;
+	AiGuiUpdateAction action;
+	gboolean sensitive = FALSE;
+
+	if (self->update == NULL || self->update_button == NULL)
+		return;
+	text = ai_gui_update_dup_banner(self->update);
+	adw_banner_set_title(ADW_BANNER(self->banner), text != NULL ? text : "");
+	adw_banner_set_revealed(ADW_BANNER(self->banner), text != NULL);
+
+	action = ai_gui_update_get_action(self->update, window_any_busy(self), &sensitive);
+	gtk_button_set_label(GTK_BUTTON(self->update_button),
+		action == AI_GUI_UPDATE_ACTION_RESTART ? "Restart now" : "Update");
+	gtk_widget_set_tooltip_text(self->update_button,
+		action == AI_GUI_UPDATE_ACTION_RESTART
+			? "Save every session and start the newly installed ai-gui"
+			: sensitive ? "Pull, rebuild and install the latest ai-glib"
+			            : "Unavailable while a turn or an update is running");
+	gtk_widget_set_sensitive(self->update_button, sensitive);
+	gtk_widget_set_visible(self->update_button, action != AI_GUI_UPDATE_ACTION_NONE);
+}
+
+static void
+on_update_changed(AiGuiUpdate *update, gpointer user_data)
+{
+	window_update_refresh(user_data);
+}
+
+/* Steps and outcomes go to the transcript the person is looking at. */
+static void
+on_update_message(AiGuiUpdate *update, const gchar *text, gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+
+	if (self->session != NULL)
+		ai_gui_commands_say(self->session, "%s", text);
+	else
+		ai_gui_window_toast(self, "%s", text);
+}
+
+/*
+ * Restart: every window closes -- which saves its sessions, exactly as
+ * quitting does -- and main() then replaces the process with the binary
+ * just installed. Spawning it from here instead would race the bus name
+ * this unique application still owns.
+ */
+static void
+window_restart(AiGuiWindow *self)
+{
+	GtkApplication *app = gtk_window_get_application(GTK_WINDOW(self));
+	g_autofree gchar *path = ai_gui_update_dup_restart_path(self->update);
+	g_autoptr(GList) windows = NULL;
+	GList *iter;
+
+	if (path == NULL || !g_file_test(path, G_FILE_TEST_IS_EXECUTABLE))
+	{
+		ai_gui_window_toast(self, "The new ai-gui is not where it was installed; start it by hand.");
+		return;
+	}
+
+	ai_gui_request_restart(path);
+	windows = app != NULL ? g_list_copy(gtk_application_get_windows(app))
+	                      : g_list_prepend(NULL, self);
+	for (iter = windows; iter != NULL; iter = iter->next)
+		gtk_window_close(GTK_WINDOW(iter->data));
+}
+
+static void
+on_update_clicked(GtkButton *button, gpointer user_data)
+{
+	AiGuiWindow *self = user_data;
+	gboolean busy = window_any_busy(self);
+	gboolean sensitive = FALSE;
+	AiGuiUpdateAction action = ai_gui_update_get_action(self->update, busy, &sensitive);
+
+	/* The button follows only this session's turn; another session's
+	 * may have started since it was drawn. Check again at the click. */
+	if (action == AI_GUI_UPDATE_ACTION_RESTART && sensitive)
+		window_restart(self);
+	else if (action == AI_GUI_UPDATE_ACTION_RESTART)
+		on_update_message(self->update,
+			"A turn is running. Stop it or let it finish, then restart.", self);
+	else
+		ai_gui_update_run(self->update, busy);
+	window_update_refresh(self);
+}
+
+static void
+action_check_updates(
+	GtkWidget   *widget,
+	const gchar *name,
+	GVariant    *parameter
+){
+	AiGuiWindow *self = AI_GUI_WINDOW(widget);
+
+	ai_gui_update_check(self->update);
+}
+
+void
+ai_gui_window_update(
+	AiGuiWindow *self,
+	const gchar *arguments
+){
+	g_autofree gchar *args = NULL;
+
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	args = g_strstrip(g_strdup(arguments != NULL ? arguments : ""));
+	if (g_str_equal(args, "status"))
+		ai_gui_update_check(self->update);
+	else if (args[0] == '\0')
+		ai_gui_update_run(self->update, window_any_busy(self));
+	else
+		on_update_message(self->update, "Usage: /update [status]", self);
+}
+
 static gboolean
 on_close_request(
 	GtkWindow *window,
@@ -1534,6 +1690,11 @@ on_close_request(
 	 * window is not somewhere to re-enter. */
 	if (self->quota != NULL)
 		ai_gui_quota_shutdown(AI_GUI_QUOTA(self->quota));
+	if (self->update != NULL)
+	{
+		ai_gui_update_shutdown(self->update);
+		ai_gui_update_drain(self->update);
+	}
 
 	ai_gui_session_store_save_all(self->store);
 
@@ -1573,6 +1734,7 @@ window_build_menu(void)
 
 	g_menu_append(app, "Keyboard shortcuts", "win.shortcuts");
 	g_menu_append(app, "Preferences", "win.preferences");
+	g_menu_append(app, "Check for Updates", "win.check-updates");
 	g_menu_append(app, "About ai-gui", "win.about");
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(app));
 
@@ -1713,6 +1875,14 @@ window_build_content(AiGuiWindow *self)
 	gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_button), menu);
 	adw_header_bar_pack_end(ADW_HEADER_BAR(header), menu_button);
 
+	/* Shown only when there is an update to install or a build to restart
+	 * into; window_update_refresh() decides which, and when it is off. */
+	self->update_button = gtk_button_new_with_label("Update");
+	gtk_widget_add_css_class(self->update_button, "suggested-action");
+	gtk_widget_set_visible(self->update_button, FALSE);
+	g_signal_connect(self->update_button, "clicked", G_CALLBACK(on_update_clicked), self);
+	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->update_button);
+
 	adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
 
 	self->search_bar = gtk_search_bar_new();
@@ -1842,6 +2012,18 @@ ai_gui_window_new(
 	if (options->dashboard)
 		ai_gui_window_show_dashboard(self, TRUE);
 
+	/* The update banner. The background check runs only when updates.check is true. */
+	{
+		g_autoptr(AiConfig) config = ai_config_new();
+		g_autoptr(AiUpdater) updater = ai_updater_new(config);
+
+		self->update = ai_gui_update_new(updater);
+		g_signal_connect(self->update, "changed", G_CALLBACK(on_update_changed), self);
+		g_signal_connect(self->update, "message", G_CALLBACK(on_update_message), self);
+		ai_gui_update_start(self->update);
+		window_update_refresh(self);
+	}
+
 	return self;
 }
 
@@ -1855,6 +2037,12 @@ ai_gui_window_dispose(GObject *object)
 	AiGuiWindow *self = AI_GUI_WINDOW(object);
 
 	ai_gui_style_remove_changed(on_appearance_changed, self);
+	if (self->update != NULL)
+	{
+		ai_gui_update_shutdown(self->update);
+		g_signal_handlers_disconnect_by_data(self->update, self);
+		g_clear_object(&self->update);
+	}
 	window_disconnect_session(self);
 	g_clear_object(&self->session);
 	g_clear_object(&self->store);
@@ -1912,6 +2100,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 	                                action_copy_transcript);
 	gtk_widget_class_install_action(widget_class, "win.about", NULL,
 	                                action_about);
+	gtk_widget_class_install_action(widget_class, "win.check-updates", NULL,
+	                                action_check_updates);
 	gtk_widget_class_install_action(widget_class, "win.shortcuts", NULL,
 	                                action_shortcuts);
 

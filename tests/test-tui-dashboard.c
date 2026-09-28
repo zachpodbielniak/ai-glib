@@ -398,6 +398,9 @@ main(int argc, char **argv)
 	g_autofree gchar *test_dir = NULL;
 	g_autofree gchar *out_dir = NULL;
 	g_autofree gchar *tmux_path = NULL;
+	/* Never check for, let alone install, a real update from a test. */
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
 	g_test_init(&argc, &argv, NULL);
 	test_dir = g_path_get_dirname(argv[0]); out_dir = g_path_get_dirname(test_dir);
 	{ g_autofree gchar *relative = g_build_filename(out_dir, "bin", "ai-tui", NULL);

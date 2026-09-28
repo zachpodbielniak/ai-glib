@@ -406,7 +406,7 @@ test_invalid_retry(Box *box, gconstpointer data)
 {
 	const gchar *args[] = { "--setup", NULL };
 	g_autofree gchar *input = g_strdup_printf(
-		"bad\n0\n4\n1\n-1\n99999\n%u\n0\n99999\n2\n\ndefault\nmanual\nmaybe\ny\n",
+		"bad\n0\n5\n1\n-1\n99999\n%u\n0\n99999\n2\n\ndefault\nmanual\nmaybe\ny\n",
 		provider_choice(AI_PROVIDER_GROK_BUILD));
 
 	(void)data;
@@ -415,6 +415,45 @@ test_invalid_retry(Box *box, gconstpointer data)
 	g_assert_nonnull(strstr(box->out, "default is reserved"));
 	g_assert_nonnull(strstr(box->out, "Enter y to save"));
 	assert_saved(box, "apps/ai/default_model", "manual");
+}
+
+/* Scope 4 writes updates.check and leaves every other key alone. */
+static void
+test_setup_update_check(Box *box, gconstpointer data)
+{
+	const gchar *args[] = { "--setup", NULL };
+	const gchar *bad = "updates: [unclosed\n";
+	g_autofree gchar *path = g_build_filename(box->dir, CONFIG_FILE, NULL);
+	GStatBuf st;
+
+	(void)data;
+	g_assert_cmpint(run_box(box, FALSE, args, "4\ny\n", NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Background update checks enabled"));
+	assert_saved(box, "updates/check", "true");
+	g_assert_cmpint(g_stat(path, &st), ==, 0);
+	g_assert_cmpuint(st.st_mode & 0777, ==, 0600);
+
+	box_write(box, CONFIG_FILE, SAVED_CONFIG);
+	g_assert_cmpint(run_box(box, FALSE, args, "4\nmaybe\nn\n", NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Enter y to enable"));
+	g_assert_nonnull(strstr(box->out, "left off"));
+	assert_saved(box, "updates/check", "false");
+	assert_saved(box, "apps/ai/default_model", "ai-saved");
+	assert_saved(box, "timeout", "77");
+	assert_saved(box, "providers/openai/api_key", "fake-preserved-key");
+
+	g_assert_cmpint(run_box(box, FALSE, args, "4\nq\n", NULL), ==, 0);
+	g_assert_nonnull(strstr(box->out, "Setup cancelled"));
+	assert_saved(box, "updates/check", "false");
+	assert_saved(box, "apps/ai/extra", "retained");
+
+	box_write(box, CONFIG_FILE, bad);
+	g_assert_cmpint(run_box(box, FALSE, args, "4\ny\n", NULL), !=, 0);
+	g_assert_nonnull(strstr(box->err, "could not save defaults"));
+	{
+		g_autofree gchar *after = box_read(box, CONFIG_FILE);
+		g_assert_cmpstr(after, ==, bad);
+	}
 }
 
 /* A confirmed wizard cannot repair malformed/ambiguous YAML by overwriting it. */
@@ -1250,6 +1289,7 @@ main(int argc, char *argv[])
 	ADD("setup/update-scopes", test_update);
 	ADD("setup/cancel-eof", test_cancel);
 	ADD("setup/invalid-retry", test_invalid_retry);
+	ADD("setup/update-check", test_setup_update_check);
 	ADD("setup/malformed-unchanged", test_malformed);
 	ADD("setup/http-fallback", test_http_fallback);
 	ADD("setup/library-independent", test_library_independent);

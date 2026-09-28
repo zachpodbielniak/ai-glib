@@ -51,6 +51,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/ai-types.h \
+	$(SRCDIR)/core/ai-build-info.h \
 	$(SRCDIR)/core/ai-error.h \
 	$(SRCDIR)/core/ai-session-limit.h \
 	$(SRCDIR)/core/ai-enums.h \
@@ -146,6 +147,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-work-session.c \
 	$(SRCDIR)/harness/ai-work-context.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
+	$(SRCDIR)/core/ai-build-info.c \
+	$(SRCDIR)/core/ai-updater.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
@@ -332,8 +335,9 @@ $(YAML_GLIB_STATIC):
 .PHONY: all
 all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries gui
 
-# Generate config.h from template
-$(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
+# Generate config.h from template.  config.mk is a prerequisite because the
+# version lives there: without it a bump leaves the old number compiled in.
+$(OUTDIR)/config.h: $(SRCDIR)/config.h.in config.mk | $(OUTDIR)
 	@echo "Generating config.h..."
 	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
@@ -346,14 +350,26 @@ $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
 	     -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' \
 	     $< > $@
 
-# Generate ai-version.h from template
-$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
+# Generate ai-version.h from template (config.mk: see config.h above)
+$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in config.mk | $(OUTDIR)
 	@echo "Generating ai-version.h..."
 	@sed -e 's/@AI_GLIB_MAJOR_VERSION@/$(VERSION_MAJOR)/g' \
 	     -e 's/@AI_GLIB_MINOR_VERSION@/$(VERSION_MINOR)/g' \
 	     -e 's/@AI_GLIB_MICRO_VERSION@/$(VERSION_MICRO)/g' \
 	     -e 's/@AI_GLIB_VERSION@/$(VERSION)/g' \
 	     $< > $@
+
+# Build provenance: commit, dirty flag, date, source directory, install
+# paths.  FORCE runs the generator on every invocation; it rewrites the
+# header only when its content changed, so a commit (or a first edit
+# after one) recompiles ai-build-info.o and nothing else.  A dependency
+# on .git/HEAD would miss a commit on the current branch and a worktree,
+# whose HEAD is not under .git at all.
+$(OUTDIR)/ai-build-stamp.h: FORCE | $(OUTDIR)
+	@sh build-aux/gen-build-stamp.sh $@ "$(CURDIR)" "$(VERSION)" \
+		"$(PREFIX)" "$(LIBDIR)" "$(INCLUDEDIR)" "$(BUILD_TYPE)"
+
+$(OBJDIR)/core/ai-build-info.o: $(OUTDIR)/ai-build-stamp.h
 
 # Shared library
 .PHONY: shared
@@ -462,6 +478,11 @@ $(OUTDIR)/tests/test-ai-gui-work: $(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui
 		$(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
+$(OUTDIR)/tests/test-ai-gui-update: $(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)
@@ -469,6 +490,8 @@ $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-decision-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-linked-work-tui: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-cli-update: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-tui-update: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-loop-cli: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
@@ -478,7 +501,20 @@ test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 		$$test || exit 1; \
 	done
 	@$(MAKE) --no-print-directory test-gir-clean
+	@$(MAKE) --no-print-directory test-version
 	@echo "All tests passed!"
+
+# The newest heading in CHANGELOG.org must name the version in config.mk.
+# Catches a bump without its entry, and an entry without its bump.
+.PHONY: test-version
+test-version:
+	@TOP=$$(sed -n 's/^\* \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' CHANGELOG.org | head -n 1); \
+	if [ "$$TOP" != "$(VERSION)" ]; then \
+		echo "FAIL: config.mk says $(VERSION) but the newest CHANGELOG.org heading says '$$TOP'" >&2; \
+		echo "      Bump both together; see docs/contributing.org, Versioning." >&2; \
+		exit 1; \
+	fi; \
+	echo "PASS: version $(VERSION) matches CHANGELOG.org"
 
 .PHONY: test-verbose
 test-verbose: $(TEST_BINARIES) $(BIN_BINARIES)

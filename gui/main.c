@@ -11,7 +11,9 @@
  * window then does comes out of the library's view and harness layers.
  */
 
+#include <errno.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "ai-gui.h"
 #include "ai-gui-settings.h"
@@ -227,6 +229,23 @@ on_activate(
 	}
 }
 
+/*
+ * Restart after an update. Set by the window, acted on at the very end
+ * of main(): the application is unique on the session bus, so a new
+ * ai-gui started while this one still owns the name would hand itself
+ * to the process that is quitting and exit. Replacing this process
+ * after the run is over has no such race -- exec closes the bus
+ * connection, and the name goes with it.
+ */
+static gchar *restart_path = NULL;
+
+void
+ai_gui_request_restart(const gchar *path)
+{
+	g_free(restart_path);
+	restart_path = g_strdup(path);
+}
+
 gint
 main(
 	gint   argc,
@@ -250,7 +269,9 @@ main(
 
 	if (opt_version)
 	{
-		g_print("ai-gui %s (ai-glib)\n", AI_GLIB_VERSION_STRING);
+		g_autofree gchar *summary = ai_build_info_dup_summary();
+
+		g_print("ai-gui %s\n", summary);
 		return 0;
 	}
 
@@ -340,6 +361,15 @@ main(
 	g_free(startup_theme);
 	g_free(startup_color_scheme);
 	g_strfreev(opt_set);
+
+	if (restart_path != NULL)
+	{
+		char *const restart_argv[] = { restart_path, NULL };
+
+		execv(restart_path, restart_argv);
+		g_printerr("ai-gui: could not restart as %s: %s\n", restart_path, g_strerror(errno));
+		return 1;
+	}
 
 	return status;
 }

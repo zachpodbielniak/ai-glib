@@ -92,6 +92,8 @@ static const BuiltinCommand BUILTIN_COMMANDS[] = {
       "[INTERVAL] [PROMPT|/command] | list | show|pause|resume|run|delete ID|all | edit ID ... | stop", FALSE },
     { "goal",     "Keep taking turns until a condition holds, within a turn and time bound",
       "CONDITION [--turns N] [--time SPAN] | list | show|pause|resume|run|stop|delete ID|all | edit ID ...", FALSE },
+    { "update",   "Install the latest ai-glib, or show whether one is available",
+      "[status]", FALSE },
     { NULL, NULL, NULL, FALSE }
 };
 
