@@ -7,6 +7,63 @@
 
 static gchar *self_path;
 
+/* A real `get_usage` answer from Claude Code 2.1.283, trimmed. It keeps the
+ * null windows, an unrecognised window and a disabled credit pool, because
+ * those are what a normaliser has to ignore rather than report. */
+#define CLAUDE_USAGE \
+	"{\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{" \
+	"\"five_hour\":{\"utilization\":15,\"resets_at\":\"2026-09-28T02:30:00.424193+00:00\",\"limit_dollars\":null}," \
+	"\"seven_day\":{\"utilization\":21,\"resets_at\":\"2026-10-02T18:00:00.424211+00:00\"}," \
+	"\"seven_day_oauth_apps\":null,\"seven_day_opus\":null,\"seven_day_sonnet\":{\"utilization\":null,\"resets_at\":null}," \
+	"\"iguana_necktie\":{\"utilization\":0,\"resets_at\":\"2026-11-05T07:59:00+00:00\",\"limit_dollars\":250}," \
+	"\"extra_usage\":{\"is_enabled\":false,\"monthly_limit\":10000,\"used_credits\":0,\"utilization\":0,\"currency\":\"USD\",\"decimal_places\":2}," \
+	"\"model_scoped\":[{\"display_name\":\"Fable\",\"utilization\":0,\"resets_at\":\"2026-10-02T18:00:00+00:00\"}," \
+	"{\"display_name\":7,\"utilization\":50}]},\"behaviors\":null}"
+
+/* Claude Code's stream-json control channel. The stub insists on print mode,
+ * no MCP servers, and exactly one control request before it answers: a usage
+ * query that sent a prompt, or that started somebody's MCP servers, fails
+ * here rather than on a real account. */
+static gint
+claude_stub(gint argc, gchar **argv)
+{
+	const gchar *mode = g_getenv("REPORT_TEST_MODE");
+	const gchar *result = g_getenv("REPORT_TEST_RESULT");
+	g_autoptr(JsonParser) parser = json_parser_new();
+	g_autoptr(GString) args = g_string_new(NULL);
+	gchar line[8192];
+	JsonObject *root;
+	JsonObject *request;
+	const gchar *id;
+	gint i;
+	for (i = 1; i < argc; i++) g_string_append_printf(args, "%s ", argv[i]);
+	g_assert_cmpstr(args->str, ==, "-p --input-format stream-json --output-format stream-json --verbose --strict-mcp-config ");
+	if (g_strcmp0(mode, "exit") == 0) return 0;
+	g_assert_nonnull(fgets(line, sizeof line, stdin));
+	g_assert_true(json_parser_load_from_data(parser, line, -1, NULL));
+	root = json_node_get_object(json_parser_get_root(parser));
+	g_assert_cmpstr(json_object_get_string_member(root, "type"), ==, "control_request");
+	id = json_object_get_string_member(root, "request_id");
+	request = json_object_get_object_member(root, "request");
+	g_assert_cmpstr(json_object_get_string_member(request, "subtype"), ==, "get_usage");
+	g_assert_true(json_object_get_boolean_member(request, "skip_behaviors"));
+	if (g_strcmp0(mode, "stall") == 0) { g_usleep(10000000); return 0; }
+	/* Noise the reader has to skip: a system line, another request's answer. */
+	puts("{\"type\":\"system\",\"subtype\":\"init\"}");
+	puts("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"someone-else\",\"response\":{}}}");
+	if (g_strcmp0(mode, "invalid") == 0) puts("not json");
+	else if (g_strcmp0(mode, "unsupported") == 0)
+		printf("{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"Unsupported control request subtype: get_usage\"}}\n", id);
+	else if (g_strcmp0(mode, "error") == 0)
+		printf("{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"SECRET_MUST_NOT_LEAK\"}}\n", id);
+	else
+		printf("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":%s}}\n", id, result);
+	fflush(stdout);
+	/* Stay alive with stdin open: the caller, not EOF, ends this process. */
+	while (fgets(line, sizeof line, stdin) != NULL) ;
+	return 0;
+}
+
 /* The test executable doubles as a native CLI. Reject every method outside
  * initialization and the reporting protocol so tests cannot hide model turns. */
 static gint
@@ -248,6 +305,8 @@ test_panel(gconstpointer value)
 	if (tmux == NULL) { g_test_skip("tmux unavailable"); return; }
 	ai_cli_client_set_executable_path(client, self_path);
 	ai_cli_client_set_process_timeout_ms(client, 3000);
+	/* Claude reaches the panel only when its CLI predates get_usage. */
+	ai_cli_client_set_env(client, "REPORT_TEST_MODE", "unsupported");
 	ai_cli_client_set_env(client, "REPORT_TEST_RESULT", trust ? "Do you trust the contents of this project?"
 		: "Usage\nCurrent session\n25% used\nResets tomorrow\nWeekly\n75% remaining\nUnknown\n40%\n│ Gemini Pro 80% left │");
 	report = ai_cli_client_query_report(client, AI_CLI_REPORT_USAGE, 20, NULL, &error);
@@ -261,10 +320,111 @@ test_panel(gconstpointer value)
 	g_assert_nonnull(strstr(json, "\"label\" : \"Gemini Pro\""));
 }
 
+static AiCliClient *
+claude_new(gboolean tmux, const gchar *mode, const gchar *result)
+{
+	AiCliClient *client = tmux ? AI_CLI_CLIENT(ai_claude_tmux_client_new())
+	                           : AI_CLI_CLIENT(ai_claude_code_client_new());
+	ai_cli_client_set_executable_path(client, self_path);
+	ai_cli_client_set_env(client, "REPORT_TEST_MODE", mode);
+	ai_cli_client_set_env(client, "REPORT_TEST_RESULT", result);
+	ai_cli_client_set_process_timeout_ms(client, 1500);
+	return client;
+}
+
+static JsonObject *
+entry_labelled(JsonArray *rows, const gchar *label)
+{
+	guint i;
+	for (i = 0; i < json_array_get_length(rows); i++)
+	{
+		JsonObject *row = json_array_get_object_element(rows, i);
+		if (g_strcmp0(json_object_get_string_member(row, "label"), label) == 0) return row;
+	}
+	return NULL;
+}
+
+/* The fix for a panel that always read "Unavailable": the structured
+ * answer, normalised to used_percent so ai-quota.h can say how much is left. */
+static void
+test_claude_usage(gconstpointer value)
+{
+	g_autoptr(AiCliClient) client = claude_new(GPOINTER_TO_INT(value), "ok", CLAUDE_USAGE);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiCliReport) report = ai_cli_client_query_report(client, AI_CLI_REPORT_USAGE, 20, NULL, &error);
+	g_autoptr(JsonNode) data = NULL;
+	JsonObject *obj, *row;
+	JsonArray *rows;
+	g_assert_no_error(error); g_assert_nonnull(report);
+	data = ai_cli_report_dup_data(report); obj = json_node_get_object(data);
+	g_assert_cmpstr(json_object_get_string_member(obj, "source"), ==, "claude get_usage");
+	g_assert_cmpstr(json_object_get_string_member(obj, "availability"), ==, "available");
+	g_assert_cmpstr(json_object_get_string_member(obj, "plan"), ==, "max");
+	rows = json_object_get_array_member(obj, "entries");
+	/* Session, weekly, Fable. Null windows, a null utilization, an unknown
+	 * key, a disabled credit pool and a non-string model label are not rows. */
+	g_assert_cmpuint(json_array_get_length(rows), ==, 3);
+	row = json_array_get_object_element(rows, 0);
+	g_assert_cmpstr(json_object_get_string_member(row, "label"), ==, "Session (5h)");
+	g_assert_cmpint(json_object_get_int_member(row, "used_percent"), ==, 15);
+	g_assert_cmpint(json_object_get_int_member(row, "window_minutes"), ==, 300);
+	g_assert_cmpstr(json_object_get_string_member(row, "reset_at"), ==, "2026-09-28T02:30:00Z");
+	row = entry_labelled(rows, "Weekly");
+	g_assert_nonnull(row);
+	g_assert_cmpint(json_object_get_int_member(row, "used_percent"), ==, 21);
+	g_assert_cmpint(json_object_get_int_member(row, "window_minutes"), ==, 10080);
+	row = entry_labelled(rows, "Weekly (Fable)");
+	g_assert_nonnull(row);
+	g_assert_cmpint(json_object_get_int_member(row, "used_percent"), ==, 0);
+	g_assert_null(entry_labelled(rows, "Weekly (Sonnet)"));
+}
+
+static void
+test_claude_failure(gconstpointer value)
+{
+	const gchar *mode = value;
+	g_autoptr(AiCliClient) client = claude_new(FALSE, mode,
+		g_str_equal(mode, "no-limits") ? "{\"subscription_type\":null,\"rate_limits_available\":false,\"rate_limits\":null}"
+		: g_str_equal(mode, "empty") ? "{\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":null}}"
+		: "{}");
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiCliReport) report = NULL;
+	gint64 started = g_get_monotonic_time();
+	ai_cli_client_set_process_timeout_ms(client, 400);
+	report = ai_cli_client_query_report(client, AI_CLI_REPORT_USAGE, 20, NULL, &error);
+	g_assert_null(report); g_assert_nonnull(error);
+	g_assert_null(strstr(error->message, "SECRET_MUST_NOT_LEAK"));
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 3000000);
+	if (g_str_equal(mode, "stall")) g_assert_error(error, AI_ERROR, AI_ERROR_TIMEOUT);
+	else if (g_str_equal(mode, "invalid")) g_assert_error(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR);
+	else if (g_str_equal(mode, "error") || g_str_equal(mode, "exit")) g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	else
+	{
+		/* "Your plan has no limits here" is an answer, not a breakage. */
+		g_assert_error(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED);
+		if (g_str_equal(mode, "no-limits")) g_assert_nonnull(strstr(error->message, "API key"));
+	}
+}
+
+/* Ollama transport runs another model through the claude launcher; a plan
+ * limit is meaningless there and nothing may be spawned to find that out. */
+static void
+test_claude_ollama(void)
+{
+	g_autoptr(AiCliClient) client = AI_CLI_CLIENT(ai_claude_code_client_new());
+	g_autoptr(GError) error = NULL;
+	ai_cli_client_set_executable_path(client, "/does/not/exist");
+	ai_cli_client_set_model(client, "ollama/qwen3");
+	g_assert_null(ai_cli_client_query_report(client, AI_CLI_REPORT_USAGE, 20, NULL, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED);
+	g_assert_nonnull(strstr(error->message, "ollama"));
+}
+
 int
 main(int argc, char **argv)
 {
 	gint result;
+	if (argc > 1 && g_str_equal(argv[1], "-p")) return claude_stub(argc, argv);
 	if (argc > 1 && (g_str_equal(argv[1], "app-server") || g_str_equal(argv[1], "agent") ||
 	    g_str_equal(argv[1], "/usage") || g_str_equal(argv[1], "--prompt-interactive"))) return native_stub(argc, argv);
 	g_test_init(&argc, &argv, NULL);
@@ -282,7 +442,16 @@ main(int argc, char **argv)
 	g_test_add_func("/cli-report/async-success", test_async_success);
 	g_test_add_func("/cli-report/validation", test_validation);
 	g_test_add_func("/cli-report/claude-cache", test_cache);
-	g_test_add_data_func("/cli-report/panel/claude", GINT_TO_POINTER(0), test_panel);
+	g_test_add_data_func("/cli-report/claude/usage/code", GINT_TO_POINTER(0), test_claude_usage);
+	g_test_add_data_func("/cli-report/claude/usage/tmux", GINT_TO_POINTER(1), test_claude_usage);
+	g_test_add_data_func("/cli-report/claude/failure/stall", "stall", test_claude_failure);
+	g_test_add_data_func("/cli-report/claude/failure/invalid", "invalid", test_claude_failure);
+	g_test_add_data_func("/cli-report/claude/failure/error", "error", test_claude_failure);
+	g_test_add_data_func("/cli-report/claude/failure/exit", "exit", test_claude_failure);
+	g_test_add_data_func("/cli-report/claude/failure/no-limits", "no-limits", test_claude_failure);
+	g_test_add_data_func("/cli-report/claude/failure/empty", "empty", test_claude_failure);
+	g_test_add_func("/cli-report/claude/ollama", test_claude_ollama);
+	g_test_add_data_func("/cli-report/panel/claude-fallback", GINT_TO_POINTER(0), test_panel);
 	g_test_add_data_func("/cli-report/panel/agy", GINT_TO_POINTER(1), test_panel);
 	g_test_add_data_func("/cli-report/panel/trust", GINT_TO_POINTER(2), test_panel);
 	result = g_test_run(); g_free(self_path); return result;
