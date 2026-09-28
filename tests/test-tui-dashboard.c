@@ -386,6 +386,116 @@ test_worktree_launch(void)
 	teardown();
 }
 
+/* A committed repository at @path, with hooks and signing out of the way. */
+static void
+make_repo(const gchar *path)
+{
+	g_autoptr(GSubprocess) child = NULL;
+	g_mkdir_with_parents(path, 0700);
+	child = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+		NULL, "git", "init", "--template=", "-q", path, NULL);
+	g_assert_nonnull(child); g_assert_true(g_subprocess_wait_check(child, NULL, NULL)); g_clear_object(&child);
+	child = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+		NULL, "git", "-C", path, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+		"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "seed", NULL);
+	g_assert_nonnull(child); g_assert_true(g_subprocess_wait_check(child, NULL, NULL));
+}
+
+/* Polls until tmux has a session called exactly @name, or gives up. */
+static gboolean
+wait_session(const gchar *name)
+{
+	gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	do
+	{
+		g_autofree gchar *found = tmux("list-sessions", "-F", "#{session_name}", NULL);
+		g_auto(GStrv) names = g_strsplit(found, "\n", -1);
+		if (g_strv_contains((const gchar * const *)names, name)) return TRUE;
+		g_usleep(50000);
+	} while (g_get_monotonic_time() < deadline);
+	return FALSE;
+}
+
+static guint
+window_count(const gchar *session)
+{
+	g_autofree gchar *target = g_strconcat("=", session, ":", NULL);
+	g_autofree gchar *windows = tmux("list-windows", "-t", target, "-F", "#{window_id}", NULL);
+	g_auto(GStrv) lines = g_strsplit(g_strchomp(windows), "\n", -1);
+	return g_strv_length(lines);
+}
+
+static gchar *
+project_option(const gchar *session)
+{
+	g_autofree gchar *target = g_strconcat("=", session, ":", NULL);
+	gchar *value = tmux("show-options", "-t", target, "-qv", "@ai_project", NULL);
+	return g_strchomp(value);
+}
+
+/* One tmux session per project, one window per worker: a launch from the
+ * dashboard lands in its project's session, a second launch reuses it,
+ * and another repository with the same name gets a session of its own
+ * rather than a window in the wrong one. */
+static void
+test_project_sessions(void)
+{
+	g_autofree gchar *repo = NULL;
+	g_autofree gchar *other = NULL;
+	g_autofree gchar *expected = NULL;
+	g_autofree gchar *expected_other = NULL;
+	g_autofree gchar *value = NULL;
+	g_autofree gchar *real = NULL;
+	gint64 deadline;
+	setup();
+	repo = g_build_filename(sandbox, "work", "alpha", NULL);
+	other = g_build_filename(sandbox, "other", "alpha", NULL);
+	make_repo(repo); make_repo(other);
+	real = g_canonicalize_filename(repo, NULL);
+	expected = g_build_filename(real, ".git", NULL);
+	g_clear_pointer(&real, g_free);
+	real = g_canonicalize_filename(other, NULL);
+	expected_other = g_build_filename(real, ".git", NULL);
+	/* A registered session, not a dashboard-only one: 'n' from an
+	 * unregistered dashboard opens its own prompt instead. */
+	start_at("dash", "--no-dashboard", repo);
+	g_assert_true(wait_text("dash", "COMPOSE"));
+	key("dash", "C-\\"); g_assert_true(wait_text("dash", "PROJECT DASHBOARD"));
+	key("dash", "n");
+	g_assert_true(wait_session("alpha"));
+	value = project_option("alpha");
+	g_assert_cmpstr(value, ==, expected);
+	g_assert_true(wait_text("alpha", "COMPOSE"));
+	g_assert_cmpuint(window_count("alpha"), ==, 1);
+	g_assert_cmpuint(window_count("dash"), ==, 1);
+	/* The second worker is a second window in the same session. */
+	key("dash", "n");
+	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	while (window_count("alpha") < 2 && g_get_monotonic_time() < deadline) g_usleep(50000);
+	g_assert_cmpuint(window_count("alpha"), ==, 2);
+	/* The dashboard groups rows under the project, root included. */
+	g_assert_true(wait_text("dash", "alpha - 3 sessions"));
+	demonstrate("dash", "Workers grouped under their project heading");
+	/* Same name, different repository: its own session, never a window
+	 * in somebody else's. */
+	start_at("dash2", "--no-dashboard", other);
+	g_assert_true(wait_text("dash2", "COMPOSE"));
+	key("dash2", "C-\\"); g_assert_true(wait_text("dash2", "PROJECT DASHBOARD"));
+	key("dash2", "n");
+	g_assert_true(wait_session("alpha-2"));
+	g_clear_pointer(&value, g_free);
+	value = project_option("alpha-2");
+	g_assert_cmpstr(value, ==, expected_other);
+	g_assert_cmpuint(window_count("alpha"), ==, 2);
+	/* Exactly the sessions asked for: never a runaway of alpha-N. */
+	{
+		g_autofree gchar *all = tmux("list-sessions", "-F", "#{session_name}", NULL);
+		g_auto(GStrv) names = g_strsplit(g_strchomp(all), "\n", -1);
+		g_assert_cmpuint(g_strv_length(names), ==, 4);
+	}
+	teardown();
+}
+
 static void
 test_skipped(void)
 {
@@ -417,6 +527,7 @@ main(int argc, char **argv)
 	g_test_add_func("/dashboard/resume", test_resume);
 	g_test_add_func("/dashboard/title-optout", test_title_optout);
 	g_test_add_func("/dashboard/worktree-launch", test_worktree_launch);
+	g_test_add_func("/dashboard/project-sessions", test_project_sessions);
 	{
 		gint result = g_test_run(); g_free(binary); return result;
 	}

@@ -71,6 +71,43 @@ test_panel_wrapping(void)
 	fclose(output);
 }
 
+/* The project a session belongs to, named the way the dashboard names it,
+ * with its branch. A long branch wraps rather than pushing into the next
+ * column, and a missing branch is omitted rather than printed empty. */
+static void
+test_project_panel(void)
+{
+	FILE *input = tmpfile();
+	FILE *output = tmpfile();
+	SCREEN *screen;
+	gint next;
+
+	g_assert_nonnull(input);
+	g_assert_nonnull(output);
+	screen = newterm("xterm", output, input);
+	g_assert_nonnull(screen);
+	resize_term(24, 120);
+	erase();
+	next = panel_project(3, 90, 28, "/home/z/src/ai-glib/.git", "feat/projects-and-claude-usage", A_NORMAL);
+	assert_row(3, 90, "Project: ai-glib");
+	assert_row(4, 90, "Branch:");
+	assert_row(5, 90, "feat/projects-and-claude-usa");
+	assert_row(6, 90, "ge");
+	g_assert_cmpint(next, ==, 7);
+	erase();
+	next = panel_project(3, 90, 28, "/tmp/scratch", "", A_NORMAL);
+	assert_row(3, 90, "Project: scratch");
+	g_assert_cmpint(next, ==, 4);
+	erase();
+	next = panel_project(3, 90, 28, NULL, NULL, A_NORMAL);
+	assert_row(3, 90, "Project: Untitled");
+	g_assert_cmpint(next, ==, 4);
+	endwin();
+	delscreen(screen);
+	fclose(input);
+	fclose(output);
+}
+
 static void
 test_usage_panel(void)
 {
@@ -163,5 +200,6 @@ main(gint argc, gchar **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/ai-glib/tui/panel-wrapping", test_panel_wrapping);
 	g_test_add_func("/ai-glib/tui/usage-panel", test_usage_panel);
+	g_test_add_func("/ai-glib/tui/project-panel", test_project_panel);
 	return g_test_run();
 }

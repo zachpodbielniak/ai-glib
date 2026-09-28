@@ -1699,6 +1699,11 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+	/* The registry's project when there is one; the working directory
+	 * names itself the same way until then. */
+	y = panel_project(y, x, 28,
+		app->work != NULL ? work_field(app->work, "project") : ai_conversation_get_working_directory(app->conversation),
+		app->work != NULL ? work_field(app->work, "branch") : NULL, theme_attr(PAIR_SURFACE));
 	ai_quota_refresh(&app->usage, provider, app->running && !app->dashboard);
 	y = panel_usage(y + 1, x, 28, &app->usage,
 		theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, theme_attr(PAIR_SURFACE));

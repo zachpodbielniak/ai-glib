@@ -57,6 +57,36 @@ panel_text(gint y, gint x, gint width, const gchar *text, attr_t attr, gboolean 
 	return y;
 }
 
+/**
+ * panel_project:
+ * @y: first screen row
+ * @x: left screen column
+ * @width: available terminal columns
+ * @project: (nullable): the session's project identity
+ * @branch: (nullable): its branch
+ * @attr: terminal attributes
+ *
+ * Names the session's project with ai_project_label_for_path(), the same
+ * label the dashboard, the GUI and `ai project` use, and its branch when
+ * there is one.
+ *
+ * Returns: the next available row
+ */
+static inline gint
+panel_project(gint y, gint x, gint width, const gchar *project, const gchar *branch, attr_t attr)
+{
+	g_autofree gchar *label = ai_project_label_for_path(project);
+	g_autofree gchar *line = g_strdup_printf("Project: %s", label);
+
+	y = panel_text(y, x, width, line, attr, FALSE);
+	if (branch != NULL && *branch != '\0')
+	{
+		g_autofree gchar *text = g_strdup_printf("Branch: %s", branch);
+		y = panel_text(y, x, width, text, attr, FALSE);
+	}
+	return y;
+}
+
 /* Quota rows stay compact so a long native label cannot consume the sidebar.
  * panel_text still performs the shared control/UTF-8 sanitation. */
 static inline gint
