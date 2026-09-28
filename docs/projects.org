@@ -41,7 +41,7 @@ and ai-gui, and the names had drifted apart. Both now call the library.
 
 =ai_project_find()= resolves what a person typed:
 
-- Anything containing a =/= is a path. It matches the project whose
+- Anything containing a =/=, and =.= or =..=, is a path. It matches the project whose
   identity, root or any session directory contains it, the deepest match
   winning, so a worktree nested in another project's checkout still
   resolves to its own project. Matching is on whole path components:

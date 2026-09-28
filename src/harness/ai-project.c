@@ -483,7 +483,7 @@ path_score(AiProject *project, const gchar *path)
  *
  * Resolves what a person typed to one project.
  *
- * A path --- anything containing a separator --- matches the project
+ * A path --- anything containing a separator, or "." or ".." --- matches the project
  * whose identity, main checkout or any session directory contains it,
  * the deepest one winning. Otherwise @query is a name, compared
  * case-insensitively. A name two projects share is an error that lists
@@ -515,7 +515,10 @@ ai_project_find(
 		return NULL;
 	}
 
-	if (strchr(query, G_DIR_SEPARATOR) != NULL)
+	/* "." and ".." have no separator but are paths all the same:
+	 * `ai project show .` means this directory, not a project called ".". */
+	if (strchr(query, G_DIR_SEPARATOR) != NULL ||
+	    g_str_equal(query, ".") || g_str_equal(query, ".."))
 	{
 		g_autofree gchar *path = g_canonicalize_filename(query, NULL);
 

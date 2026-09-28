@@ -202,6 +202,22 @@ test_find(Fixture *fx, gconstpointer data)
 		g_assert_cmpstr(ai_project_get_id(found), ==, "/b/dup/.git");
 	}
 	{
+		/* "." and ".." are paths, not names, so `ai project show .` works. */
+		g_autofree gchar *here = g_get_current_dir();
+		g_autofree gchar *parent = g_path_get_dirname(here);
+		g_autolist(AiProject) local = NULL;
+		g_autoptr(AiProject) dot = NULL;
+		g_autoptr(AiProject) dotdot = NULL;
+		save_session(fx, "/r/here/.git", here, "IDLE", TRUE, "cwd");
+		save_session(fx, "/r/up/.git", parent, "IDLE", TRUE, "parent");
+		local = ai_project_list(fx->dir, NULL);
+		dot = ai_project_find(local, ".", NULL);
+		dotdot = ai_project_find(local, "..", NULL);
+		g_assert_nonnull(dot); g_assert_nonnull(dotdot);
+		g_assert_cmpstr(ai_project_get_id(dot), ==, "/r/here/.git");
+		g_assert_cmpstr(ai_project_get_id(dotdot), ==, "/r/up/.git");
+	}
+	{
 		/* A sibling that only shares a prefix is not inside the root. */
 		g_autoptr(GError) error = NULL;
 		g_assert_null(ai_project_find(projects, "/r/alphabet", &error));
