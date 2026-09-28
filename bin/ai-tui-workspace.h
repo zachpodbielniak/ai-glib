@@ -62,24 +62,11 @@ work_pane_valid(const gchar *pane)
 	return TRUE;
 }
 
-static gint
-work_priority(const gchar *state)
-{
-	const gchar *states[] = {"INPUT", "ERROR", "WORK", "DONE", "STOPPED", "IDLE", "DISCONNECTED"};
-	guint i;
-	for (i = 0; i < G_N_ELEMENTS(states); i++) if (g_str_equal(state, states[i])) return i;
-	return 6;
-}
-
+/* The one order, from the library, as a g_ptr_array_sort() adaptor. */
 static gint
 work_compare(gconstpointer a, gconstpointer b)
 {
-	AiWorkSession *left = *(AiWorkSession * const *)a;
-	AiWorkSession *right = *(AiWorkSession * const *)b;
-	gint order = work_priority(work_field(left, "status")) - work_priority(work_field(right, "status"));
-	if (order != 0) return order;
-	order = g_strcmp0(work_field(left, "project"), work_field(right, "project"));
-	return order != 0 ? order : g_strcmp0(ai_work_session_get_id(left), ai_work_session_get_id(right));
+	return ai_work_session_compare(*(AiWorkSession * const *)a, *(AiWorkSession * const *)b);
 }
 
 /* Serialized across ai-tui processes on this machine. The worker never touches
@@ -165,7 +152,7 @@ work_title_thread(GTask *task, gpointer source, gpointer data, GCancellable *can
 		if (stamp == NULL) continue;
 		*stamp++ = '\0';
 		age = g_get_real_time() / G_USEC_PER_SEC - g_ascii_strtoll(stamp, NULL, 10);
-		if (age >= 0 && age <= 15 && *lines[i] && (!*best || work_priority(lines[i]) < work_priority(best))) best = lines[i];
+		if (age >= 0 && age <= 15 && *lines[i] && (!*best || ai_work_session_status_priority(lines[i]) < ai_work_session_status_priority(best))) best = lines[i];
 	}
 	/* Respect a user rename made since our last write. */
 	if (*values[3] && !g_str_equal(values[1], values[3]))
@@ -405,9 +392,7 @@ work_draw(App *app)
 	for (i = first; app->work_rows != NULL && i < app->work_rows->len && y < LINES - 4; i++, y++)
 	{
 		AiWorkSession *row = g_ptr_array_index(app->work_rows, i);
-		g_autofree gchar *project_path = g_str_has_suffix(work_field(row, "project"), "/.git") ?
-			g_path_get_dirname(work_field(row, "project")) : g_strdup(work_field(row, "project"));
-		g_autofree gchar *project = g_path_get_basename(project_path);
+		g_autofree gchar *project = ai_project_label_for_path(work_field(row, "project"));
 		g_auto(GStrv) links = ai_work_session_dup_links(row);
 		g_autoptr(GString) badges = g_string_new("");
 		g_autofree gchar *line = NULL;

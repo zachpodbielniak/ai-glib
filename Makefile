@@ -50,6 +50,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-laya-client.h \
 	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
+	$(SRCDIR)/harness/ai-project.h \
 	$(SRCDIR)/ai-types.h \
 	$(SRCDIR)/core/ai-build-info.h \
 	$(SRCDIR)/core/ai-error.h \
@@ -145,6 +146,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-laya-client.c \
 	$(SRCDIR)/agent/ai-mock-decider.c \
 	$(SRCDIR)/harness/ai-work-session.c \
+	$(SRCDIR)/harness/ai-project.c \
 	$(SRCDIR)/harness/ai-work-context.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
 	$(SRCDIR)/core/ai-build-info.c \
