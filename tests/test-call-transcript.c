@@ -118,6 +118,52 @@ written_as_the_call_goes(void)
 	g_assert_nonnull(error);
 }
 static void
+tool_lines(void)
+{
+	g_autofree gchar *dir = g_dir_make_tmp("call-transcript-XXXXXX", NULL);
+	g_autoptr(GDateTime) start = g_date_time_new_utc(2026, 9, 29, 16, 0, 0);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiCallTranscript) transcript =
+		ai_call_transcript_open(dir, "!room:example.org", start, &error);
+	g_autoptr(GPtrArray) lines = NULL;
+	GString *big = g_string_new(NULL);
+	JsonObject *arguments;
+	const gchar *result;
+	guint i;
+	g_assert_nonnull(transcript);
+	g_assert_true(ai_call_transcript_append_tool(transcript, start, "read",
+												 "{\"path\":\"/tmp/notes.txt\",\"limit\":5}",
+												 "line one\nline two", FALSE, &error));
+	/* A result is capped, on a character boundary, and says so. */
+	for (i = 0; i < 6000; i++)
+		g_string_append(big, "\303\251");
+	g_assert_true(ai_call_transcript_append_tool(transcript, start, "bash", "not json {",
+												 big->str, TRUE, &error));
+	g_assert_no_error(error);
+	lines = read_lines(ai_call_transcript_get_path(transcript));
+	g_assert_cmpuint(lines->len, ==, 3);
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "type"), ==, "tool");
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "name"), ==, "read");
+	/* Arguments stay structured, not a string of JSON inside JSON. */
+	arguments = json_object_get_object_member(line(lines, 1), "arguments");
+	g_assert_nonnull(arguments);
+	g_assert_cmpstr(json_object_get_string_member(arguments, "path"), ==, "/tmp/notes.txt");
+	g_assert_cmpint(json_object_get_int_member(arguments, "limit"), ==, 5);
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "result"), ==,
+					"line one\nline two");
+	g_assert_false(json_object_get_boolean_member(line(lines, 1), "is_error"));
+	g_assert_false(json_object_has_member(line(lines, 1), "result_truncated"));
+	/* Arguments that are not JSON are kept verbatim as a string. */
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 2), "arguments"), ==,
+					"not json {");
+	g_assert_true(json_object_get_boolean_member(line(lines, 2), "is_error"));
+	g_assert_true(json_object_get_boolean_member(line(lines, 2), "result_truncated"));
+	result = json_object_get_string_member(line(lines, 2), "result");
+	g_assert_true(g_utf8_validate(result, -1, NULL));
+	g_assert_cmpint(g_utf8_strlen(result, -1), ==, 4000);
+	g_string_free(big, TRUE);
+}
+static void
 one_file_per_call(void)
 {
 	g_autofree gchar *dir = g_dir_make_tmp("call-transcript-XXXXXX", NULL);
@@ -186,6 +232,7 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/call-transcript/written-as-the-call-goes",
 					written_as_the_call_goes);
 	g_test_add_func("/voice/call-transcript/one-file-per-call", one_file_per_call);
+	g_test_add_func("/voice/call-transcript/tool-lines", tool_lines);
 	g_test_add_func("/voice/call-transcript/default-dir", default_dir);
 	g_test_add_func("/voice/call-transcript/hook", hook);
 	return g_test_run();

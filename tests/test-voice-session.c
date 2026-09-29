@@ -300,6 +300,61 @@ read_fixture(Fixture *f, gconstpointer data)
 	g_unlink(path);
 	g_rmdir(directory);
 }
+/* Every tool the model ran during a call is reported, with what it was
+ * asked and what it answered, whether or not it succeeded. */
+typedef struct {
+	gchar *name, *arguments, *result;
+	gboolean is_error;
+	guint count;
+} ToolSeen;
+static void
+on_tool(AiVoiceSession *s, const gchar *name, const gchar *arguments, const gchar *result,
+		gboolean is_error, gpointer data)
+{
+	ToolSeen *seen = data;
+	seen->count++;
+	g_free(seen->name);
+	g_free(seen->arguments);
+	g_free(seen->result);
+	seen->name = g_strdup(name);
+	seen->arguments = g_strdup(arguments);
+	seen->result = g_strdup(result);
+	seen->is_error = is_error;
+}
+static void
+tool_reported(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-tool-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	ToolSeen seen = {0};
+	g_assert_true(g_file_set_contents(path, "voice fixture content", -1, NULL));
+	g_signal_connect(f->session, "tool", G_CALLBACK(on_tool), &seen);
+	if (data == NULL)
+		ai_mock_provider_push_tool_use(f->provider, "read", input);
+	else
+		ai_mock_provider_push_tool_use(f->provider, "read",
+									   "{\"path\":\"/definitely-missing-voice-fixture\"}");
+	ai_mock_provider_push_text(f->provider, "Done.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_signal_handlers_disconnect_by_data(f->session, &seen);
+	g_assert_cmpuint(seen.count, ==, 1);
+	g_assert_cmpstr(seen.name, ==, "read");
+	g_assert_nonnull(strstr(seen.arguments, "\"path\""));
+	if (data == NULL) {
+		g_assert_false(seen.is_error);
+		g_assert_nonnull(strstr(seen.result, "voice fixture content"));
+	} else {
+		g_assert_true(seen.is_error);
+		g_assert_cmpstr(seen.result, !=, "");
+	}
+	g_free(seen.name);
+	g_free(seen.arguments);
+	g_free(seen.result);
+	g_unlink(path);
+	g_rmdir(directory);
+}
 static void
 background(Fixture *f, gconstpointer data)
 {
@@ -731,6 +786,10 @@ main(int argc, char **argv)
 			   spoken_interrupted, teardown);
 	g_test_add("/voice/session/silent-failure-not-spoken", Fixture, NULL, setup,
 			   silent_failure_not_spoken, teardown);
+	g_test_add("/voice/session/tool-reported", Fixture, NULL, setup, tool_reported,
+			   teardown);
+	g_test_add("/voice/session/tool-error-reported", Fixture, GINT_TO_POINTER(2), setup,
+			   tool_reported, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,

@@ -572,6 +572,24 @@ interrupt_turn(AiVoiceSession *self)
 	g_string_truncate(self->pending_text, 0);
 	self->generation++;
 }
+/* A tool that ran has run, even in a turn since interrupted: report it for
+ * any generation. */
+static void
+report_tool(AiVoiceSession *self, AiEvent *event)
+{
+	AiToolUse *use = ai_event_get_tool_use(event);
+	AiToolResult *result = ai_event_get_tool_result(event);
+	JsonNode *input = use != NULL ? ai_tool_use_get_input(use) : NULL;
+	g_autofree gchar *arguments = input != NULL ? json_to_string(input, FALSE) : NULL;
+	const gchar *name = use != NULL ? ai_tool_use_get_name(use) : NULL;
+	const gchar *content = result != NULL ? ai_tool_result_get_content(result) : NULL;
+	if (result == NULL)
+		return;
+	g_signal_emit_by_name(self, "tool", name != NULL ? name : "",
+						  arguments != NULL ? arguments : "{}",
+						  content != NULL ? content : "",
+						  ai_tool_result_get_is_error(result));
+}
 static void
 worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *event,
 			const gchar *text, const GError *error)
@@ -579,6 +597,9 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	if (self->stopped)
 		return;
+	if (kind == AI_VOICE_MAIL_EVENT && event != NULL &&
+		ai_event_get_kind(event) == AI_EVENT_TOOL_FINISHED)
+		report_tool(self, event);
 	if (kind == AI_VOICE_MAIL_AGENT) {
 		if (!g_hash_table_contains(self->notices, text)) {
 			Line *notice = g_new0(Line, 1);
@@ -1131,6 +1152,20 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 */
 	g_signal_new("reply", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
 				 NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+	/**
+	 * AiVoiceSession::tool:
+	 * @self: the session
+	 * @name: the tool's name
+	 * @arguments: its input, as JSON text
+	 * @result: what it returned, or its error message
+	 * @is_error: whether it failed
+	 *
+	 * Emitted once per tool call that finished, including calls from a turn
+	 * that was since interrupted: the tool ran either way.
+	 */
+	g_signal_new("tool", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+				 G_TYPE_NONE, 4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+				 G_TYPE_BOOLEAN);
 	/**
 	 * AiVoiceSession::spoken:
 	 * @self: the session

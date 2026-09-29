@@ -202,6 +202,59 @@ ai_call_transcript_append_spoken(AiCallTranscript *self, GDateTime *at,
 	g_return_val_if_fail(at != NULL && speaker != NULL && text != NULL, FALSE);
 	return append_line(self, at, "assistant", speaker, text, complete ? 1 : 0, error);
 }
+#define TOOL_RESULT_MAX_CHARS 4000
+gboolean
+ai_call_transcript_append_tool(AiCallTranscript *self, GDateTime *at, const gchar *name,
+							   const gchar *arguments, const gchar *result,
+							   gboolean is_error, GError **error)
+{
+	g_autoptr(JsonBuilder) builder = NULL;
+	g_autoptr(JsonParser) parser = NULL;
+	g_autoptr(JsonNode) root = NULL;
+	g_autofree gchar *when = NULL, *line = NULL, *valid = NULL, *kept = NULL;
+	gboolean truncated;
+	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
+	g_return_val_if_fail(at != NULL && name != NULL && arguments != NULL && result != NULL,
+						 FALSE);
+	if (self->closed) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_CLOSED, "Transcript %s is closed",
+					self->path);
+		return FALSE;
+	}
+	/* A file read or a command's output can be megabytes; the transcript is a
+	 * record of the call, not an archive of everything a tool returned. */
+	valid = g_utf8_make_valid(result, -1);
+	truncated = g_utf8_strlen(valid, -1) > TOOL_RESULT_MAX_CHARS;
+	kept = truncated ? g_utf8_substring(valid, 0, TOOL_RESULT_MAX_CHARS) : g_strdup(valid);
+	builder = json_builder_new();
+	when = timestamp(at);
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "type");
+	json_builder_add_string_value(builder, "tool");
+	json_builder_set_member_name(builder, "at");
+	json_builder_add_string_value(builder, when);
+	json_builder_set_member_name(builder, "name");
+	json_builder_add_string_value(builder, name);
+	json_builder_set_member_name(builder, "arguments");
+	parser = json_parser_new();
+	if (json_parser_load_from_data(parser, arguments, -1, NULL) &&
+		json_parser_get_root(parser) != NULL)
+		json_builder_add_value(builder, json_node_copy(json_parser_get_root(parser)));
+	else
+		json_builder_add_string_value(builder, arguments);
+	json_builder_set_member_name(builder, "result");
+	json_builder_add_string_value(builder, kept);
+	if (truncated) {
+		json_builder_set_member_name(builder, "result_truncated");
+		json_builder_add_boolean_value(builder, TRUE);
+	}
+	json_builder_set_member_name(builder, "is_error");
+	json_builder_add_boolean_value(builder, is_error);
+	json_builder_end_object(builder);
+	root = json_builder_get_root(builder);
+	line = json_to_string(root, FALSE);
+	return write_line(self, line, error);
+}
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error)
 {

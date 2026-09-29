@@ -72,6 +72,7 @@ Signals, on the session's constructing thread-default context:
 | =transcript= | display name, text, final boolean |
 | =reply= | text segment submitted for synthesis |
 | =spoken= | segment whose audio was played, and whether it played to the end |
+| =tool= | name, JSON arguments, result and error flag of a finished tool call |
 | =state-changed= | =AiVoiceState= (registered GEnum) |
 | =error= | =GError= |
 
@@ -407,6 +408,7 @@ header whose =end= and =duration_ms= are still =null=:
 #+begin_example
 {"type":"call","room":"!abc:example.org","start":"2026-01-01T12:00:00Z","end":null,"duration_ms":null}
 {"type":"utterance","at":"2026-01-01T12:00:04Z","role":"caller","speaker":"Caller","text":"What's on today?"}
+{"type":"tool","at":"2026-01-01T12:00:05Z","name":"calendar","arguments":{"day":"today"},"result":"free until noon","is_error":false}
 {"type":"utterance","at":"2026-01-01T12:00:06Z","role":"assistant","speaker":"@assistant:example.org","text":"Nothing until noon.","complete":true}
 #+end_example
 
@@ -420,6 +422,15 @@ ends, with the assistant's Matrix ID as =speaker=. =complete= is =false= when
 the caller interrupted it. The text is then the whole segment, of which the
 caller heard only the beginning. A segment that produced no audio, because
 synthesis failed first, is not written, because nobody heard it.
+
+Each tool call the assistant made is a =tool= line, written when the tool
+finishes. It has the tool's name, its =arguments= as structured JSON (kept as a
+string when they do not parse), its =result= and =is_error=. Results are capped
+at 4000 characters on a character boundary, with =result_truncated= set when
+that happens: a file read or a command's output can be megabytes. A call from
+a turn that was then interrupted is still written, because the tool ran. Tools
+run by a wrapped CLI provider inside its own process are not visible to the
+session and do not appear.
 
 =transcript-hook= is a command line, split the way a shell would split it but
 not run by a shell. After the header is finalized it is started with the

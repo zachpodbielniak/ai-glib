@@ -233,6 +233,8 @@ transcript_on_disk(MatrixFixture *f, gconstpointer data)
 	path = g_strdup(ai_call_transcript_get_path(call->transcript));
 	g_signal_emit_by_name(call->voice, "transcript", "Caller", "partial words", FALSE);
 	g_signal_emit_by_name(call->voice, "transcript", "Caller", "What's on today?", TRUE);
+	g_signal_emit_by_name(call->voice, "tool", "calendar", "{\"day\":\"today\"}",
+						  "free until noon", FALSE);
 	g_signal_emit_by_name(call->voice, "spoken", "Nothing until noon.", TRUE);
 	/* Before hangup: the utterance is already there, the end is not. */
 	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
@@ -243,6 +245,9 @@ transcript_on_disk(MatrixFixture *f, gconstpointer data)
 	g_assert_nonnull(strstr(contents, "\"role\":\"assistant\""));
 	g_assert_nonnull(strstr(contents, "\"speaker\":\"@assistant:test\""));
 	g_assert_nonnull(strstr(contents, "\"text\":\"Nothing until noon.\""));
+	g_assert_nonnull(strstr(contents, "\"type\":\"tool\""));
+	g_assert_nonnull(strstr(contents, "\"name\":\"calendar\""));
+	g_assert_nonnull(strstr(contents, "\"result\":\"free until noon\""));
 	g_clear_pointer(&contents, g_free);
 	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
 	shutdown_app(a);

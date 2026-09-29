@@ -22,6 +22,12 @@ gboolean
 ai_call_transcript_append_spoken(AiCallTranscript *self, GDateTime *at,
 								 const gchar *speaker, const gchar *text, gboolean complete,
 								 GError **error);
+/* A tool the assistant ran. ARGUMENTS is JSON text, stored structured when it
+ * parses and verbatim otherwise. RESULT is capped at 4000 characters. */
+gboolean
+ai_call_transcript_append_tool(AiCallTranscript *self, GDateTime *at, const gchar *name,
+							   const gchar *arguments, const gchar *result,
+							   gboolean is_error, GError **error);
 /* Rewrites the header with END and the duration, atomically. Idempotent. */
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error);

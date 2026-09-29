@@ -397,6 +397,22 @@ voice_spoken(AiVoiceSession *voice, const gchar *text, gboolean complete, gpoint
 		g_clear_object(&call->transcript);
 	}
 }
+static void
+voice_tool(AiVoiceSession *voice, const gchar *name, const gchar *arguments,
+		   const gchar *result, gboolean is_error, gpointer data)
+{
+	Call *call = data;
+	g_autoptr(GDateTime) now = NULL;
+	g_autoptr(GError) error = NULL;
+	if (call->transcript == NULL)
+		return;
+	now = g_date_time_new_now_utc();
+	if (!ai_call_transcript_append_tool(call->transcript, now, name, arguments, result,
+										is_error, &error)) {
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
+		g_clear_object(&call->transcript);
+	}
+}
 /* One file per answered call; failure costs the transcript, never the call. */
 static void
 open_transcript(Call *call)
@@ -604,6 +620,7 @@ maybe_connect(Call *call)
 	g_signal_connect(call->voice, "state-changed", G_CALLBACK(voice_state), call);
 	g_signal_connect(call->voice, "transcript", G_CALLBACK(voice_transcript), call);
 	g_signal_connect(call->voice, "spoken", G_CALLBACK(voice_spoken), call);
+	g_signal_connect(call->voice, "tool", G_CALLBACK(voice_tool), call);
 	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
