@@ -15,6 +15,9 @@ static const Setting settings[] = {
 	{"jwt-url", "AI_CALL_JWT_URL", NULL, 0, 0, 0},
 	{"focus-url", "AI_CALL_FOCUS_URL", NULL, 0, 0, 0},
 	{"outbound-path", "AI_CALL_OUTBOUND_PATH", NULL, 0, 0, 0},
+	/* Unset: $XDG_STATE_HOME/ai-glib/calls. Empty: no transcripts. */
+	{"transcript-dir", "AI_CALL_TRANSCRIPT_DIR", NULL, 0, 0, 0},
+	{"transcript-hook", "AI_CALL_TRANSCRIPT_HOOK", NULL, 0, 0, 0},
 	{"synthesis-error-message", "AI_VOICE_SYNTHESIS_ERROR_MESSAGE",
 	 "Sorry, the speech service is unavailable. Please try again.", 0, 0, 0},
 	{"goodbye-message", "AI_CALL_GOODBYE_MESSAGE", "Goodbye.", 0, 0, 0},

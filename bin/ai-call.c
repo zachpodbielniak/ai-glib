@@ -5,6 +5,7 @@
 #include "core/ai-json-util.h"
 #include "call/ai-call-config.h"
 #include "call/ai-call-speech-cache.h"
+#include "call/ai-call-transcript.h"
 
 #define MEMBER "org.matrix.msc3401.call.member"
 #define RING "org.matrix.msc4075.rtc.notification"
@@ -24,6 +25,8 @@ struct _App {
 	gchar *homeserver, *mxid, *access, *device, *jwt_url, *foci;
 	gchar *stt_url, *tts_url, *livekit_url, *identity, *model;
 	gchar *since, *drop_path, *greeting, *outbound_greeting;
+	/* NULL directory: no transcripts. Resolved once from the call config. */
+	gchar *transcript_dir, *transcript_hook;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -46,6 +49,8 @@ struct _Call {
 	gboolean goodbye_pending, goodbye_done, media_joined;
 	gint64 started_at;
 	gint64 answer_deadline, answered_at, transcript_at;
+	GDateTime *began;
+	AiCallTranscript *transcript;
 };
 typedef struct {
 	App *app;
@@ -58,6 +63,8 @@ static void
 sync_next(App *app);
 static void
 close_call(Call *call);
+static void
+finish_transcript(Call *call);
 static void
 maybe_connect(Call *call);
 static void
@@ -103,6 +110,8 @@ call_unref(gpointer data)
 	g_clear_object(&call->voice);
 	g_clear_object(&call->transport);
 	g_clear_object(&call->synthesizer);
+	g_clear_object(&call->transcript);
+	g_clear_pointer(&call->began, g_date_time_unref);
 	g_free(call->room);
 	g_free(call->key);
 	g_free(call->tx_token);
@@ -286,6 +295,7 @@ close_call(Call *call)
 		  call->transcripts, call->errors, transport_counter(call, "reconnect-count"),
 		  transport_counter(call, "dropped-buffers"),
 		  transport_counter(call, "late-buffers"));
+	finish_transcript(call);
 	call->clearing = TRUE;
 	if (call->answer_source != 0) {
 		g_source_remove(call->answer_source);
@@ -360,7 +370,50 @@ voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 		call->transcripts++;
 		call->transcript_at = g_get_monotonic_time();
 		g_print("Transcript [%s]: %s\n", speaker, text);
+		if (call->transcript != NULL) {
+			g_autoptr(GDateTime) now = g_date_time_new_now_utc();
+			g_autoptr(GError) error = NULL;
+			if (!ai_call_transcript_append(call->transcript, now, speaker, text, &error)) {
+				/* Report once and stop: a full disk would otherwise log per line. */
+				g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s",
+					  error->message);
+				g_clear_object(&call->transcript);
+			}
+		}
 	}
+}
+/* One file per answered call; failure costs the transcript, never the call. */
+static void
+open_transcript(Call *call)
+{
+	g_autoptr(GError) error = NULL;
+	if (call->app->transcript_dir == NULL || call->transcript != NULL)
+		return;
+	call->transcript = ai_call_transcript_open(call->app->transcript_dir, call->room,
+											   call->began, &error);
+	if (call->transcript == NULL)
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript unavailable: %s", error->message);
+	else
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript: room=%s path=%s", call->room,
+			  ai_call_transcript_get_path(call->transcript));
+}
+static void
+finish_transcript(Call *call)
+{
+	g_autoptr(GDateTime) now = g_date_time_new_now_utc();
+	g_autoptr(GError) error = NULL;
+	const gchar *path;
+	if (call->transcript == NULL)
+		return;
+	path = ai_call_transcript_get_path(call->transcript);
+	if (!ai_call_transcript_close(call->transcript, now, &error)) {
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript not finalized: %s", error->message);
+		g_clear_error(&error);
+	}
+	if (call->app->transcript_hook != NULL &&
+		!ai_call_transcript_run_hook(call->app->transcript_hook, path, &error))
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript hook not started: %s",
+			  error->message);
 }
 static void
 first_pcm(AiSpeechSynthesizer *synth, GBytes *pcm, guint sample_rate, gpointer data)
@@ -535,6 +588,7 @@ maybe_connect(Call *call)
 	g_signal_connect(call->transport, "error", G_CALLBACK(terminal_media_error), call);
 	g_signal_connect(call->voice, "state-changed", G_CALLBACK(voice_state), call);
 	g_signal_connect(call->voice, "transcript", G_CALLBACK(voice_transcript), call);
+	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
 	ai_audio_transport_join_async(call->transport, call->room, call->tx_token, NULL,
@@ -703,6 +757,7 @@ start_call(App *app, const gchar *room, const gchar *opening, const gchar *targe
 	g_ref_count_init(&call->refs);
 	call->app = app;
 	call->started_at = g_get_monotonic_time();
+	call->began = g_date_time_new_now_utc();
 	call->room = g_strdup(room);
 	call->key = g_strdup_printf("_%s_%s_m.call", app->mxid, app->device);
 	call->opening = g_strdup(opening);
@@ -1243,7 +1298,15 @@ main(int argc, char **argv)
 	}
 	g_object_get(call_config, "device", &app.device, "jwt-url", &app.jwt_url, "focus-url",
 				 &app.foci, "outbound-path", &app.drop_path, "greeting", &app.greeting,
-				 "outbound-greeting", &app.outbound_greeting, NULL);
+				 "outbound-greeting", &app.outbound_greeting, "transcript-dir",
+				 &app.transcript_dir, "transcript-hook", &app.transcript_hook, NULL);
+	/* Unset means the XDG default; an empty string turns transcripts off. */
+	if (app.transcript_dir == NULL)
+		app.transcript_dir = ai_call_transcript_default_dir();
+	else if (*app.transcript_dir == '\0')
+		g_clear_pointer(&app.transcript_dir, g_free);
+	if (app.transcript_hook != NULL && *app.transcript_hook == '\0')
+		g_clear_pointer(&app.transcript_hook, g_free);
 	if (app.drop_path == NULL)
 		app.drop_path =
 			g_build_filename(g_get_user_runtime_dir(), "ai-outbound-call.json", NULL);
@@ -1295,6 +1358,8 @@ cleanup:
 	g_free(app.drop_path);
 	g_free(app.greeting);
 	g_free(app.outbound_greeting);
+	g_free(app.transcript_dir);
+	g_free(app.transcript_hook);
 	return app.exit_status;
 fail:
 	g_printerr("ai-call: %s\n", error != NULL ? error->message : "startup failed");

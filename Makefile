@@ -610,7 +610,14 @@ $(CALL_SPEECH_CACHE_OBJECT): bin/call/ai-call-speech-cache.c bin/call/ai-call-sp
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_SPEECH_CACHE_OBJECT)
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-speech-cache: $(CALL_SPEECH_CACHE_OBJECT)
 $(OUTDIR)/tests/test-call-speech-cache: EXTRA_LINK_OBJECTS = $(CALL_SPEECH_CACHE_OBJECT)
--include $(CALL_CONFIG_OBJECT:.o=.d) $(CALL_SPEECH_CACHE_OBJECT:.o=.d)
+CALL_TRANSCRIPT_OBJECT = $(OBJDIR)/bin/ai-call-transcript.o
+$(CALL_TRANSCRIPT_OBJECT): bin/call/ai-call-transcript.c bin/call/ai-call-transcript.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_TRANSCRIPT_OBJECT)
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-transcript: $(CALL_TRANSCRIPT_OBJECT)
+$(OUTDIR)/tests/test-call-transcript: EXTRA_LINK_OBJECTS = $(CALL_TRANSCRIPT_OBJECT)
+-include $(CALL_CONFIG_OBJECT:.o=.d) $(CALL_SPEECH_CACHE_OBJECT:.o=.d) $(CALL_TRANSCRIPT_OBJECT:.o=.d)
 
 # Real-media validation is opt-in; callers supply the installed plugin search path.
 .PHONY: soak test-voice-endurance

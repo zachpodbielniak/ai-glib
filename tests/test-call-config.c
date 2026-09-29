@@ -66,10 +66,34 @@ settings(void)
 	g_clear_error(&error);
 	g_unlink(path);
 }
+static void
+transcript_settings(void)
+{
+	g_autoptr(AiCallConfig) config = ai_call_config_new();
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *dir = NULL, *hook = NULL;
+	/* Unset means the XDG default directory and no hook. */
+	g_object_get(config, "transcript-dir", &dir, "transcript-hook", &hook, NULL);
+	g_assert_null(dir);
+	g_assert_null(hook);
+	g_setenv("AI_CALL_TRANSCRIPT_DIR", "/tmp/fixture-calls", TRUE);
+	g_setenv("AI_CALL_TRANSCRIPT_HOOK", "fixture-hook --flag", TRUE);
+	g_assert_true(ai_call_config_apply_environment(config, &error));
+	g_unsetenv("AI_CALL_TRANSCRIPT_DIR");
+	g_unsetenv("AI_CALL_TRANSCRIPT_HOOK");
+	g_object_get(config, "transcript-dir", &dir, "transcript-hook", &hook, NULL);
+	g_assert_cmpstr(dir, ==, "/tmp/fixture-calls");
+	g_assert_cmpstr(hook, ==, "fixture-hook --flag");
+	g_clear_pointer(&dir, g_free);
+	g_assert_true(ai_call_config_set_text(config, "transcript-dir", "", &error));
+	g_object_get(config, "transcript-dir", &dir, NULL);
+	g_assert_cmpstr(dir, ==, "");
+}
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, G_TEST_OPTION_ISOLATE_DIRS, NULL);
 	g_test_add_func("/voice/call-config/validated-overlays", settings);
+	g_test_add_func("/voice/call-config/transcripts", transcript_settings);
 	return g_test_run();
 }

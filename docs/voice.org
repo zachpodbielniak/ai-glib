@@ -339,6 +339,8 @@ ai_call:
   deadline-message: "Please try again shortly."
   transcription-error-message: "Please repeat that."
   synthesis-error-message: "Speech is temporarily unavailable. Please try again."
+  transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
+  transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -357,6 +359,8 @@ The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables 
 fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE= and
 =AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE= and =AI_VOICE_SYNTHESIS_ERROR_MESSAGE=.
 =AI_CALL_GOODBYE_MESSAGE= overrides the shutdown line.
+=AI_CALL_TRANSCRIPT_DIR= and =AI_CALL_TRANSCRIPT_HOOK= set the transcript
+directory and hook described under [[*Call transcripts][Call transcripts]].
 
 At startup, the binary asynchronously synthesizes the configured synthesis-error
 line into a bounded in-memory cache. Prewarming has a four-second deadline and
@@ -386,6 +390,39 @@ that budget. Empty goodbye text disables this attempt. Matrix membership
 clearing and its retries follow independently; the two-second audio budget is
 not a deadline for successful Matrix cleanup.
 
+** Call transcripts
+
+Each answered call gets one JSON Lines file in =transcript-dir=, which defaults
+to =$XDG_STATE_HOME/ai-glib/calls=. An empty =transcript-dir= turns transcripts
+off. The directory is created =0700= and each file =0600=. File names are the
+UTC start time, a digest of the room id and a random suffix. The room id itself
+carries a server name, so it goes inside the file rather than into its name.
+
+The file is opened when the call's audio is set up. The first line is the
+header, and each final utterance is appended, and synced to disk, as it is
+recognized. A crash therefore keeps everything said up to that moment, under a
+header whose =end= and =duration_ms= are still =null=:
+
+#+begin_example
+{"type":"call","room":"!abc:example.org","start":"2026-01-01T12:00:00Z","end":null,"duration_ms":null}
+{"type":"utterance","at":"2026-01-01T12:00:04Z","speaker":"Caller","text":"What's on today?"}
+#+end_example
+
+At hangup the header is rewritten atomically with =end= and =duration_ms=.
+Times are UTC ISO 8601, with milliseconds only when they are not zero.
+=speaker= is the participant's display name. Only final transcripts are
+written: partials are revisions, not things that were said. The assistant's
+own replies are not written.
+
+=transcript-hook= is a command line, split the way a shell would split it but
+not run by a shell. After the header is finalized it is started with the
+transcript path appended as its last argument, and it is not waited for. That
+is where a deployment posts a summary or files the transcript elsewhere. A
+failed write, a failed hook or a failed start is logged at INFO and never
+affects the call. The hook is started by the service, so it shares the
+service's lifetime: under systemd, a stop that kills the whole control group
+also kills a hook that is still running.
+
 Outbound JSON drop files use the Python answerer's =room_id=, =message= and
 =target= fields. The file is consumed before starting the call. Ring events
 use =org.matrix.msc4075.rtc.notification= with an =m.reference= to the member
@@ -395,7 +432,8 @@ context. Call setup and cleanup support more than one room.
 
 * Verification
 
-Offline GTests: =test-voice-session= (turns, barge-in, speakers, deadline,
+Offline GTests: =test-call-transcript= (file format, permissions, crash
+survival, close, hook argument passing), =test-voice-session= (turns, barge-in, speakers, deadline,
 read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
 ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
 =test-voice-activity= and

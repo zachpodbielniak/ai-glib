@@ -2,6 +2,7 @@
 #include "voice-mocks.h"
 #include <libsoup/soup.h>
 #include <stdarg.h>
+#include <glib/gstdio.h>
 static void
 joined_mock(AiAudioTransport *self, const gchar *room, const gchar *token,
 			GCancellable *cancel, GAsyncReadyCallback cb, gpointer data)
@@ -201,6 +202,62 @@ answer_cleanup(MatrixFixture *f, gconstpointer data)
 	g_main_loop_run(a->loop);
 	g_source_remove(timeout);
 	g_assert_cmpuint(f->clears, ==, GPOINTER_TO_INT(data) ? 2 : 1);
+}
+/* A whole call through ai-call: what the caller says is on disk as they say
+ * it, the header is completed at hangup, and the hook gets the path. */
+static void
+transcript_on_disk(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-transcripts-XXXXXX", NULL);
+	g_autofree gchar *calls = g_build_filename(dir, "calls", NULL);
+	g_autofree gchar *script = g_build_filename(dir, "hook.sh", NULL);
+	g_autofree gchar *marker = g_build_filename(dir, "hook-ran", NULL);
+	g_autofree gchar *path = NULL, *contents = NULL, *seen = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	Call *call;
+	guint timeout;
+	g_assert_true(g_file_set_contents(
+		script, "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/hook-ran\"\n", -1,
+		NULL));
+	g_assert_cmpint(g_chmod(script, 0755), ==, 0);
+	a->transcript_dir = calls;
+	a->transcript_hook = script;
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while ((!call->greeted || call->transcript == NULL) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_nonnull(call->transcript);
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	g_signal_emit_by_name(call->voice, "transcript", "Caller", "partial words", FALSE);
+	g_signal_emit_by_name(call->voice, "transcript", "Caller", "What's on today?", TRUE);
+	/* Before hangup: the utterance is already there, the end is not. */
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_nonnull(strstr(contents, "\"end\":null"));
+	g_assert_nonnull(strstr(contents, "\"speaker\":\"Caller\""));
+	g_assert_nonnull(strstr(contents, "\"text\":\"What's on today?\""));
+	g_assert_null(strstr(contents, "partial words"));
+	g_clear_pointer(&contents, g_free);
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_null(strstr(contents, "\"end\":null"));
+	g_assert_nonnull(strstr(contents, "\"duration_ms\":"));
+	g_assert_nonnull(strstr(contents, "\"room\":\"!room:test\""));
+	limit = g_get_monotonic_time() + 3000000;
+	while (!g_file_test(marker, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_usleep(100000);
+	g_assert_true(g_file_get_contents(marker, &seen, NULL, NULL));
+	g_assert_cmpstr(seen, ==, path);
+	a->transcript_dir = a->transcript_hook = NULL;
 }
 static void
 summary_log(const gchar *domain, GLogLevelFlags level, const gchar *message,
@@ -424,6 +481,8 @@ main(int argc, char **argv)
 			   matrix_setup, signal_goodbye, matrix_teardown);
 	g_test_add("/voice/matrix/goodbye-timeout", MatrixFixture, NULL, matrix_setup,
 			   signal_goodbye, matrix_teardown);
+	g_test_add("/voice/matrix/transcript-on-disk", MatrixFixture, NULL, matrix_setup,
+			   transcript_on_disk, matrix_teardown);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,
 			   answer_cleanup, matrix_teardown);
 	g_test_add("/voice/matrix/cleanup-retry", MatrixFixture, GINT_TO_POINTER(1),
