@@ -713,6 +713,7 @@ typedef struct
 
     AiResponse       *response;
     GString          *current_text;
+    GPtrArray        *tool_uses;  /* AiToolUse, in arrival order */
 
     gboolean          stream_started;
 } OllamaStreamData;
@@ -727,6 +728,7 @@ ollama_stream_data_free(OllamaStreamData *data)
     g_clear_object(&data->data_stream);
     g_clear_object(&data->cancellable);
     g_clear_object(&data->response);
+    g_clear_pointer(&data->tool_uses, g_ptr_array_unref);
 
     if (data->current_text != NULL)
     {
@@ -734,6 +736,81 @@ ollama_stream_data_free(OllamaStreamData *data)
     }
 
     g_slice_free(OllamaStreamData, data);
+}
+
+/*
+ * Tool calls can arrive in any chunk. Current Ollama sends them in a chunk
+ * of their own and then ends the stream with an empty `done` message;
+ * older builds put them on the final message. Reading only the final one
+ * lost the call outright: the turn ended with neither text nor a tool, and
+ * a voice caller heard nothing at all. An id seen twice is kept once.
+ */
+static void
+ollama_collect_tool_calls(
+    OllamaStreamData *data,
+    JsonObject       *message
+){
+    static guint synthetic_id_counter = 0;
+    JsonArray *tool_calls = ai_json_get_array(message, "tool_calls");
+    guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
+    guint i;
+
+    for (i = 0; i < len; i++)
+    {
+        JsonObject *tc = ai_json_array_get_object(tool_calls, i);
+        const gchar *tc_id = ai_json_get_string(tc, "id", NULL);
+        JsonObject *func = ai_json_get_object(tc, "function");
+        JsonNode *args_node;
+        const gchar *name;
+        AiToolUse *tool_use;
+        g_autofree gchar *synthetic_id = NULL;
+        guint j;
+        gboolean seen = FALSE;
+
+        if (func == NULL)
+        {
+            continue;
+        }
+
+        if (tc_id != NULL && tc_id[0] != '\0')
+        {
+            for (j = 0; j < data->tool_uses->len && !seen; j++)
+            {
+                seen = g_strcmp0(ai_tool_use_get_id(
+                    g_ptr_array_index(data->tool_uses, j)), tc_id) == 0;
+            }
+
+            if (seen)
+            {
+                continue;
+            }
+        }
+
+        name = ai_json_get_string(func, "name", "");
+        args_node = ai_json_get_node(func, "arguments");
+
+        if (tc_id == NULL || tc_id[0] == '\0')
+        {
+            synthetic_id = g_strdup_printf("call_ollama_%u", ++synthetic_id_counter);
+            tc_id = synthetic_id;
+        }
+
+        if (args_node == NULL)
+        {
+            tool_use = ai_tool_use_new(tc_id, name, NULL);
+        }
+        else if (JSON_NODE_HOLDS_VALUE(args_node))
+        {
+            tool_use = ai_tool_use_new_from_json_string(
+                tc_id, name, json_node_get_string(args_node));
+        }
+        else
+        {
+            tool_use = ai_tool_use_new(tc_id, name, args_node);
+        }
+
+        g_ptr_array_add(data->tool_uses, tool_use);
+    }
 }
 
 static void
@@ -778,6 +855,7 @@ ollama_process_stream_chunk(
 
         data->response = ai_response_new("", model);
         data->current_text = g_string_new("");
+        data->tool_uses = g_ptr_array_new_with_free_func(g_object_unref);
         data->stream_started = TRUE;
 
         g_signal_emit_by_name(data->client, "stream-start");
@@ -791,6 +869,8 @@ ollama_process_stream_chunk(
     {
         JsonObject  *message = ai_json_get_object(obj, "message");
         const gchar *content = ai_json_get_string(message, "content", "");
+
+        ollama_collect_tool_calls(data, message);
 
         if (content[0] != '\0')
         {
@@ -838,65 +918,20 @@ ollama_process_stream_chunk(
             ai_response_add_content_block(data->response, (AiContentBlock *)g_steal_pointer(&text_content));
         }
 
-        /* Then tool calls if present on the final message */
+        /* Then every tool call the stream carried, in arrival order */
         {
-            JsonObject *message = ai_json_get_object(obj, "message");
+            guint i;
 
+            for (i = 0; i < data->tool_uses->len; i++)
             {
-                JsonArray *tool_calls = ai_json_get_array(message, "tool_calls");
-                guint len = tool_calls != NULL ? json_array_get_length(tool_calls) : 0;
-                guint i;
-                static guint synthetic_id_counter = 0;
+                ai_response_add_content_block(data->response,
+                    g_object_ref(g_ptr_array_index(data->tool_uses, i)));
+                tool_use_present = TRUE;
+            }
 
-                for (i = 0; i < len; i++)
-                {
-                    JsonObject *tc = ai_json_array_get_object(tool_calls, i);
-                    const gchar *tc_id = ai_json_get_string(tc, "id", NULL);
-                    JsonObject *func = ai_json_get_object(tc, "function");
-                    JsonNode *args_node;
-                    const gchar *name;
-                    g_autoptr(AiToolUse) tool_use = NULL;
-                    g_autofree gchar *synthetic_id = NULL;
-
-                    if (func == NULL)
-                    {
-                        continue;
-                    }
-
-                    name = ai_json_get_string(func, "name", "");
-                    args_node = ai_json_get_node(func, "arguments");
-
-                    if (tc_id == NULL || tc_id[0] == '\0')
-                    {
-                        synthetic_id = g_strdup_printf("call_ollama_%u",
-                                                        ++synthetic_id_counter);
-                        tc_id = synthetic_id;
-                    }
-
-                    if (args_node == NULL)
-                    {
-                        tool_use = ai_tool_use_new(tc_id, name, NULL);
-                    }
-                    else if (JSON_NODE_HOLDS_VALUE(args_node))
-                    {
-                        const gchar *args_str = json_node_get_string(args_node);
-                        tool_use = ai_tool_use_new_from_json_string(
-                            tc_id, name, args_str);
-                    }
-                    else
-                    {
-                        tool_use = ai_tool_use_new(tc_id, name, args_node);
-                    }
-
-                    ai_response_add_content_block(data->response,
-                        (AiContentBlock *)g_steal_pointer(&tool_use));
-                    tool_use_present = TRUE;
-                }
-
-                if (tool_use_present)
-                {
-                    ai_response_set_stop_reason(data->response, AI_STOP_REASON_TOOL_USE);
-                }
+            if (tool_use_present)
+            {
+                ai_response_set_stop_reason(data->response, AI_STOP_REASON_TOOL_USE);
             }
         }
 

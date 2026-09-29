@@ -206,6 +206,7 @@ Model gotchas:
 - Outbound =tool_calls[].function.arguments= is sent as a JSON *object*, not a JSON-encoded string. Ollama's =/api/chat= rejects the OpenAI Chat-Completions string form (=HTTP 400=). ai-glib's =ai_openai_shared_serialize_messages_array()= handles this via the =AI_OPENAI_SERIALIZE_ARGS_AS_OBJECT= flag, set automatically by the Ollama client.
 - Inbound =function.arguments= may arrive either as a parsed object or as a JSON-encoded string depending on the model; ai-glib handles both shapes transparently.
 - Tool-call IDs are sometimes omitted by the server; ai-glib synthesizes =call_ollama_<N>= ids in that case so the multi-turn loop can match results to calls.
+- When streaming, tool calls are read from every chunk, not only the final one. Current Ollama sends them in a chunk of their own and ends the stream with an empty =done= message. A reader that looked only at the last message lost the call, and the turn ended with neither text nor a tool. A tool call whose id was already seen is kept once.
 
 ** Links
 - [[https://ollama.ai/][Ollama Website]]

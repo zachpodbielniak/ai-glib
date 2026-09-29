@@ -775,6 +775,59 @@ test_ollama_stream_ndjson(void)
 	tserver_free(ts);
 }
 
+/*
+ * Tool calls can arrive in any chunk. Current Ollama sends them in a chunk
+ * of their own and ends with an empty `done` message -- this is the exact
+ * shape a live call received -- and a reader that looked only at the final
+ * message lost the call, ending the turn with nothing to say. Older builds
+ * put them on the final message; that must keep working.
+ */
+static const gchar *ollama_tool_early_body =
+	"{\"model\":\"gemma4\",\"done\":false,\"message\":{\"role\":\"assistant\","
+	"\"content\":\"\",\"tool_calls\":[{\"id\":\"call_kbvrtu6b\",\"function\":"
+	"{\"index\":0,\"name\":\"grep\",\"arguments\":{\"pattern\":\"garden\"}}}]}}\n"
+	"{\"model\":\"gemma4\",\"done\":false,"
+	"\"message\":{\"role\":\"assistant\",\"content\":\"\"}}\n"
+	"{\"model\":\"gemma4\",\"done\":true,\"done_reason\":\"stop\","
+	"\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+	"\"prompt_eval_count\":138,\"eval_count\":13}\n";
+static const gchar *ollama_tool_final_body =
+	"{\"model\":\"llama3.2\",\"done\":true,\"done_reason\":\"stop\","
+	"\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":"
+	"[{\"function\":{\"name\":\"grep\",\"arguments\":{\"pattern\":\"garden\"}}}]},"
+	"\"prompt_eval_count\":11,\"eval_count\":7}\n";
+
+static void
+test_ollama_stream_tool_calls(gconstpointer data)
+{
+	TServer *ts = tserver_new();
+	g_autoptr(AiOllamaClient) client = NULL;
+	Turn *turn;
+	GList *l;
+	guint tools = 0;
+
+	tserver_set_response_full(ts, SOUP_STATUS_OK, "application/x-ndjson", data);
+	client = make_ollama(ts);
+	turn = stream_once(client, NULL);
+
+	g_assert_no_error(turn->error);
+	g_assert_nonnull(turn->response);
+	for (l = ai_response_get_content_blocks(turn->response); l != NULL; l = l->next) {
+		if (!AI_IS_TOOL_USE(l->data))
+			continue;
+		tools++;
+		g_assert_cmpstr(ai_tool_use_get_name(l->data), ==, "grep");
+		g_assert_cmpstr(json_object_get_string_member(
+			json_node_get_object(ai_tool_use_get_input(l->data)), "pattern"), ==, "garden");
+	}
+	g_assert_cmpuint(tools, ==, 1);
+	g_assert_cmpint(ai_response_get_stop_reason(turn->response), ==,
+	                AI_STOP_REASON_TOOL_USE);
+
+	turn_free(turn);
+	tserver_free(ts);
+}
+
 /* ------------------------------------------------------------------ */
 /* Failure paths                                                       */
 /* ------------------------------------------------------------------ */
@@ -1522,6 +1575,10 @@ main(int argc, char *argv[])
 	                test_ollama_chat_round_trip);
 	g_test_add_func("/ai-glib/http-chat/ollama/usage", test_ollama_chat_usage);
 	g_test_add_func("/ai-glib/http-chat/ollama/stream", test_ollama_stream_ndjson);
+	g_test_add_data_func("/ai-glib/http-chat/ollama/stream-tool-early", ollama_tool_early_body,
+	                     test_ollama_stream_tool_calls);
+	g_test_add_data_func("/ai-glib/http-chat/ollama/stream-tool-final", ollama_tool_final_body,
+	                     test_ollama_stream_tool_calls);
 
 	g_test_add_func("/ai-glib/http-chat/error/http-500", test_chat_http_error);
 	g_test_add_func("/ai-glib/http-chat/error/unauthorized", test_chat_unauthorized);
