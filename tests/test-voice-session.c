@@ -748,6 +748,100 @@ silent_failure_not_spoken(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(spoken->texts->len, ==, 0);
 	spoken_free(f, spoken);
 }
+/* While a tool runs and nothing has been said, one short line fills the
+ * silence -- but only once it has gone on long enough to notice, and only
+ * once per turn. It plays while the tool keeps working. */
+static void
+progress_setup(Fixture *f, guint delay_ms, guint provider_delay_ms)
+{
+	g_object_set(f->session, "tool-progress-message", "One moment, let me check.",
+				 "tool-progress-delay-ms", delay_ms, NULL);
+	ai_mock_provider_set_delay_ms(f->provider, provider_delay_ms);
+}
+static void
+tool_progress_slow(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "content", -1, NULL));
+	progress_setup(f, 50, 300);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "Found nothing.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	iterate_for(100);
+	g_unlink(path);
+	g_rmdir(directory);
+	/* Once, however many tools ran, and the answer after it. */
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "One moment, let me check.");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Found nothing.");
+	{
+		guint i, fillers = 0;
+		for (i = 0; i < f->tts->texts->len; i++)
+			fillers += g_str_equal(g_ptr_array_index(f->tts->texts, i),
+								   "One moment, let me check.");
+		g_assert_cmpuint(fillers, ==, 1);
+	}
+}
+static void
+tool_progress_fast(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "quick", -1, NULL));
+	/* The answer lands long before the delay: nothing to fill. */
+	progress_setup(f, 2000, 0);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "Quick answer.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	iterate_for(100);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Quick answer.");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+static void
+tool_progress_not_an_answer(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "content", -1, NULL));
+	/* The filler is not a reply: a turn that then ends with nothing still
+	 * says so. */
+	progress_setup(f, 50, 300);
+	g_object_set(f->session, "empty-reply-message", "I came up empty.", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "One moment, let me check.");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "I came up empty.");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+static void
+tool_progress_disabled(Fixture *f, gconstpointer data)
+{
+	progress_setup(f, 50, 300);
+	g_object_set(f->session, "tool-progress-message", "", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", "{\"path\":\"/definitely-missing\"}");
+	ai_mock_provider_push_text(f->provider, "Done.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	iterate_for(100);
+	{
+		guint i;
+		for (i = 0; i < f->tts->texts->len; i++)
+			g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), !=,
+							"One moment, let me check.");
+	}
+}
 static void
 recovery_pauses_deadline(Fixture *f, gconstpointer data)
 {
@@ -824,6 +918,14 @@ main(int argc, char **argv)
 			   empty_reply_spoken, teardown);
 	g_test_add("/voice/session/symbols-only-reply-spoken", Fixture, NULL, setup,
 			   symbols_only_reply_spoken, teardown);
+	g_test_add("/voice/session/tool-progress-slow", Fixture, NULL, setup,
+			   tool_progress_slow, teardown);
+	g_test_add("/voice/session/tool-progress-fast", Fixture, NULL, setup,
+			   tool_progress_fast, teardown);
+	g_test_add("/voice/session/tool-progress-not-an-answer", Fixture, NULL, setup,
+			   tool_progress_not_an_answer, teardown);
+	g_test_add("/voice/session/tool-progress-disabled", Fixture, NULL, setup,
+			   tool_progress_disabled, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,

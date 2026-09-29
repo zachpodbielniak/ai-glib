@@ -595,20 +595,23 @@ maybe_connect(Call *call)
 	if (app->call_config != NULL) {
 		guint timeout, tts_timeout, silence, mode, deadline, barge_in;
 		g_autofree gchar *fallback = NULL, *transcription_error = NULL,
-						 *synthesis_error = NULL, *empty_reply = NULL;
+						 *synthesis_error = NULL, *empty_reply = NULL, *progress = NULL;
+		guint progress_delay;
 		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "tts-timeout-ms",
 					 &tts_timeout, "trailing-silence-ms", &silence, "vad-mode", &mode,
 					 "turn-deadline-ms", &deadline, "barge-in-ms", &barge_in,
 					 "deadline-message", &fallback, "transcription-error-message",
 					 &transcription_error, "synthesis-error-message", &synthesis_error,
-					 "empty-reply-message", &empty_reply, NULL);
+					 "empty-reply-message", &empty_reply, "tool-progress-message", &progress,
+					 "tool-progress-delay-ms", &progress_delay, NULL);
 		g_object_set(stt, "timeout-ms", timeout, NULL);
 		g_object_set(tts, "timeout-ms", tts_timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
 		g_object_set(call->voice, "turn-deadline-ms", deadline, "deadline-message",
 					 fallback, "transcription-error-message", transcription_error,
 					 "barge-in-ms", barge_in, "synthesis-error-message", synthesis_error,
-					 "empty-reply-message", empty_reply, NULL);
+					 "empty-reply-message", empty_reply, "tool-progress-message", progress,
+					 "tool-progress-delay-ms", progress_delay, NULL);
 	}
 	if (app->speech_cache != NULL) {
 		fallback_ready(app->speech_cache, call->voice);

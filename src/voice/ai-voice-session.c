@@ -63,8 +63,12 @@ struct _AiVoiceSession {
 	AiVoiceWorker *worker;
 	AiConversation *conversation;
 	gchar *deadline_message, *transcription_error_message, *synthesis_error_message;
-	gchar *empty_reply_message;
+	gchar *empty_reply_message, *tool_progress_message;
 	guint turn_lines; /* lines queued since the current provider turn began */
+	guint tool_progress_delay_ms;
+	GSource *progress; /* pending tool-progress line, held for teardown */
+	guint64 progress_generation;
+	gboolean progress_used; /* at most one per turn */
 	GBytes *fallback_pcm;
 	guint fallback_sample_rate;
 	GMainContext *context;
@@ -96,7 +100,9 @@ enum {
 	PROP_FALLBACK_PCM,
 	PROP_FALLBACK_SAMPLE_RATE,
 	PROP_BARGE_IN_CONFIRM,
-	PROP_EMPTY_REPLY_MESSAGE
+	PROP_EMPTY_REPLY_MESSAGE,
+	PROP_TOOL_PROGRESS_MESSAGE,
+	PROP_TOOL_PROGRESS_DELAY
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -278,7 +284,8 @@ speakable(const gchar *text)
 	return g_string_free(out, FALSE);
 }
 static void
-queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
+queue_line_full(AiVoiceSession *self, const gchar *text, gboolean remember,
+				gboolean counted)
 {
 	Line *line;
 	g_autofree gchar *valid = NULL;
@@ -300,7 +307,50 @@ queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
 	line->text = g_steal_pointer(&spoken);
 	line->remember = remember;
 	g_queue_push_tail(&self->lines, line);
-	self->turn_lines++;
+	if (counted)
+		self->turn_lines++;
+}
+static void
+queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
+{
+	queue_line_full(self, text, remember, TRUE);
+}
+static void
+clear_progress(AiVoiceSession *self)
+{
+	if (self->progress == NULL)
+		return;
+	g_source_destroy(self->progress);
+	g_clear_pointer(&self->progress, g_source_unref);
+}
+static void
+pump(AiVoiceSession *self);
+/* Fires only if the tool is still running and nothing has been said: a
+ * quick lookup, or a model that already said "let me look", hears nothing. */
+static gboolean
+progress_fire(gpointer data)
+{
+	AiVoiceSession *self = data;
+	g_clear_pointer(&self->progress, g_source_unref);
+	if (self->stopped || !self->provider_pending ||
+		self->progress_generation != self->generation || self->turn_lines != 0)
+		return G_SOURCE_REMOVE;
+	/* Not counted: it is not a reply, so an empty turn still says so. */
+	queue_line_full(self, self->tool_progress_message, FALSE, FALSE);
+	pump(self);
+	return G_SOURCE_REMOVE;
+}
+static void
+tool_started(AiVoiceSession *self)
+{
+	if (self->progress_used || self->tool_progress_message == NULL ||
+		*self->tool_progress_message == '\0' || self->turn_lines != 0)
+		return;
+	self->progress_used = TRUE;
+	self->progress_generation = self->generation;
+	self->progress = g_timeout_source_new(self->tool_progress_delay_ms);
+	g_source_set_callback(self->progress, progress_fire, self, NULL);
+	g_source_attach(self->progress, self->context);
 }
 static gboolean
 terminator(gchar c)
@@ -490,6 +540,8 @@ start_turn(AiVoiceSession *self, const gchar *text)
 	self->turn_cancel = g_cancellable_new();
 	g_string_truncate(self->spoken, 0);
 	self->turn_lines = 0;
+	self->progress_used = FALSE;
+	clear_progress(self);
 	state(self, AI_VOICE_THINKING);
 	self->deadline = g_timeout_source_new(self->deadline_ms);
 	g_source_set_callback(self->deadline, deadline, self, NULL);
@@ -558,6 +610,7 @@ static void
 interrupt_turn(AiVoiceSession *self)
 {
 	clear_deadline(self);
+	clear_progress(self);
 	self->paused_deadline_us = 0;
 	if (self->turn_cancel != NULL)
 		g_cancellable_cancel(self->turn_cancel);
@@ -615,6 +668,7 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 		}
 	} else if (kind == AI_VOICE_MAIL_DONE) {
 		if (generation == self->provider_generation) {
+			clear_progress(self);
 			self->provider_pending = FALSE;
 			clear_deadline(self);
 			self->paused_deadline_us = 0;
@@ -643,7 +697,9 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 		}
 	} else if (generation == self->generation) {
 		AiEventKind k = ai_event_get_kind(event);
-		if (k == AI_EVENT_TEXT_DELTA) {
+		if (k == AI_EVENT_TOOL_STARTED)
+			tool_started(self);
+		else if (k == AI_EVENT_TEXT_DELTA) {
 			if (self->pending_text->len < 65536)
 				g_string_append(self->pending_text, ai_event_get_text(event));
 			segment(self, FALSE);
@@ -960,6 +1016,7 @@ finalize(GObject *object)
 	g_free(self->transcription_error_message);
 	g_free(self->synthesis_error_message);
 	g_free(self->empty_reply_message);
+	g_free(self->tool_progress_message);
 	g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->finalize(object);
 }
@@ -985,6 +1042,10 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_string(value, self->synthesis_error_message);
 	else if (id == PROP_EMPTY_REPLY_MESSAGE)
 		g_value_set_string(value, self->empty_reply_message);
+	else if (id == PROP_TOOL_PROGRESS_MESSAGE)
+		g_value_set_string(value, self->tool_progress_message);
+	else if (id == PROP_TOOL_PROGRESS_DELAY)
+		g_value_set_uint(value, self->tool_progress_delay_ms);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1025,6 +1086,11 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->fallback_pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
 	} else if (id == PROP_FALLBACK_SAMPLE_RATE)
 		self->fallback_sample_rate = g_value_get_uint(value);
+	else if (id == PROP_TOOL_PROGRESS_MESSAGE) {
+		g_free(self->tool_progress_message);
+		self->tool_progress_message = g_value_dup_string(value);
+	} else if (id == PROP_TOOL_PROGRESS_DELAY)
+		self->tool_progress_delay_ms = g_value_get_uint(value);
 	else if (id == PROP_EMPTY_REPLY_MESSAGE) {
 		g_free(self->empty_reply_message);
 		self->empty_reply_message = g_value_dup_string(value);
@@ -1100,6 +1166,19 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 			"barge-in-ms", "Barge-in debounce",
 			"Consecutive speech required before recognition or interruption", 10, 5000,
 			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_TOOL_PROGRESS_MESSAGE,
+		g_param_spec_string("tool-progress-message", "Tool progress message",
+							"Spoken once per turn when a tool has run for "
+							"tool-progress-delay-ms with nothing said yet. Empty disables it",
+							"One moment, let me check.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_TOOL_PROGRESS_DELAY,
+		g_param_spec_uint("tool-progress-delay-ms", "Tool progress delay",
+						  "How long a tool must run in silence before the progress line",
+						  0, 60000, 1500,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_EMPTY_REPLY_MESSAGE,
 		g_param_spec_string("empty-reply-message", "Empty reply message",

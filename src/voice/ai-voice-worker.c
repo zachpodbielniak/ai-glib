@@ -110,7 +110,8 @@ on_event(AiConversation *conversation, AiEvent *event, gpointer data)
 static void
 on_tool_event(AiToolExecutor *executor, AiEvent *event, gpointer data)
 {
-	if (ai_event_get_kind(event) == AI_EVENT_TOOL_FINISHED &&
+	AiEventKind kind = ai_event_get_kind(event);
+	if ((kind == AI_EVENT_TOOL_STARTED || kind == AI_EVENT_TOOL_FINISHED) &&
 		g_strcmp0(ai_event_get_source(event), "AiToolExecutor") == 0)
 		post(data, AI_VOICE_MAIL_EVENT, event, NULL, NULL);
 }
