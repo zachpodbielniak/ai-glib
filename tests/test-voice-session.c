@@ -355,6 +355,36 @@ tool_reported(Fixture *f, gconstpointer data)
 	g_unlink(path);
 	g_rmdir(directory);
 }
+/* A turn that ends with nothing to say must say so. Silence reads to a
+ * caller as a dropped call, and they cannot see a log. */
+static void
+empty_reply_spoken(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "empty-reply-message", "I came up empty on that one.", NULL);
+	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+						  "Provider turn ended with nothing to say*");
+	ai_mock_provider_push_text(f->provider, "");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_test_assert_expected_messages();
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "I came up empty on that one.");
+}
+/* A reply that is only unpronounceable symbols is also nothing to say. */
+static void
+symbols_only_reply_spoken(Fixture *f, gconstpointer data)
+{
+	gchar *message = NULL;
+	g_object_get(f->session, "empty-reply-message", &message, NULL);
+	g_assert_nonnull(message);
+	g_assert_cmpstr(message, !=, "");
+	ai_mock_provider_push_text(f->provider, "\360\237\230\210");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, message);
+	g_free(message);
+}
 static void
 background(Fixture *f, gconstpointer data)
 {
@@ -790,6 +820,10 @@ main(int argc, char **argv)
 			   teardown);
 	g_test_add("/voice/session/tool-error-reported", Fixture, GINT_TO_POINTER(2), setup,
 			   tool_reported, teardown);
+	g_test_add("/voice/session/empty-reply-spoken", Fixture, NULL, setup,
+			   empty_reply_spoken, teardown);
+	g_test_add("/voice/session/symbols-only-reply-spoken", Fixture, NULL, setup,
+			   symbols_only_reply_spoken, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,

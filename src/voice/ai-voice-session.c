@@ -63,6 +63,8 @@ struct _AiVoiceSession {
 	AiVoiceWorker *worker;
 	AiConversation *conversation;
 	gchar *deadline_message, *transcription_error_message, *synthesis_error_message;
+	gchar *empty_reply_message;
+	guint turn_lines; /* lines queued since the current provider turn began */
 	GBytes *fallback_pcm;
 	guint fallback_sample_rate;
 	GMainContext *context;
@@ -93,7 +95,8 @@ enum {
 	PROP_SYNTHESIS_ERROR_MESSAGE,
 	PROP_FALLBACK_PCM,
 	PROP_FALLBACK_SAMPLE_RATE,
-	PROP_BARGE_IN_CONFIRM
+	PROP_BARGE_IN_CONFIRM,
+	PROP_EMPTY_REPLY_MESSAGE
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -297,6 +300,7 @@ queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
 	line->text = g_steal_pointer(&spoken);
 	line->remember = remember;
 	g_queue_push_tail(&self->lines, line);
+	self->turn_lines++;
 }
 static gboolean
 terminator(gchar c)
@@ -485,6 +489,7 @@ start_turn(AiVoiceSession *self, const gchar *text)
 	g_clear_object(&self->turn_cancel);
 	self->turn_cancel = g_cancellable_new();
 	g_string_truncate(self->spoken, 0);
+	self->turn_lines = 0;
 	state(self, AI_VOICE_THINKING);
 	self->deadline = g_timeout_source_new(self->deadline_ms);
 	g_source_set_callback(self->deadline, deadline, self, NULL);
@@ -624,6 +629,16 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 				if (text != NULL)
 					g_string_append(self->pending_text, text);
 				segment(self, TRUE);
+				/* No text, no tool error, nothing pronounceable: a model that
+				 * returns an empty turn, or a tool call a provider failed to
+				 * read, would otherwise end in silence the caller cannot tell
+				 * from a dropped call. */
+				if (self->turn_lines == 0) {
+					g_log("ai-glib", G_LOG_LEVEL_INFO,
+						  "Provider turn ended with nothing to say; speaking the "
+						  "empty-reply message");
+					queue_line(self, self->empty_reply_message, FALSE);
+				}
 			}
 		}
 	} else if (generation == self->generation) {
@@ -944,6 +959,7 @@ finalize(GObject *object)
 	g_free(self->deadline_message);
 	g_free(self->transcription_error_message);
 	g_free(self->synthesis_error_message);
+	g_free(self->empty_reply_message);
 	g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->finalize(object);
 }
@@ -967,6 +983,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_object(value, self->synthesizer);
 	else if (id == PROP_SYNTHESIS_ERROR_MESSAGE)
 		g_value_set_string(value, self->synthesis_error_message);
+	else if (id == PROP_EMPTY_REPLY_MESSAGE)
+		g_value_set_string(value, self->empty_reply_message);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1007,7 +1025,10 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->fallback_pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
 	} else if (id == PROP_FALLBACK_SAMPLE_RATE)
 		self->fallback_sample_rate = g_value_get_uint(value);
-	else if (id == PROP_SYNTHESIS_ERROR_MESSAGE) {
+	else if (id == PROP_EMPTY_REPLY_MESSAGE) {
+		g_free(self->empty_reply_message);
+		self->empty_reply_message = g_value_dup_string(value);
+	} else if (id == PROP_SYNTHESIS_ERROR_MESSAGE) {
 		g_free(self->synthesis_error_message);
 		self->synthesis_error_message = g_value_dup_string(value);
 	} else if (id == PROP_ACTIVITY)
@@ -1079,6 +1100,14 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 			"barge-in-ms", "Barge-in debounce",
 			"Consecutive speech required before recognition or interruption", 10, 5000,
 			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_EMPTY_REPLY_MESSAGE,
+		g_param_spec_string("empty-reply-message", "Empty reply message",
+							"Spoken when a provider turn ends with nothing to say. Empty "
+							"disables it",
+							"Sorry, I didn't come up with an answer to that. Could you "
+							"ask me again?",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_BARGE_IN_CONFIRM,
 		g_param_spec_boolean(

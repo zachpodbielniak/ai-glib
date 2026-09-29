@@ -340,6 +340,7 @@ ai_call:
   max-agents: 4
   deadline-message: "Please try again shortly."
   transcription-error-message: "Please repeat that."
+  empty-reply-message: "I came up empty on that. Ask me again?"
   synthesis-error-message: "Speech is temporarily unavailable. Please try again."
   transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
   transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
@@ -358,8 +359,12 @@ There are no compiled personal paths, Matrix domains, participant names or UID.
 The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables use the =AI_CALL_= prefix. Numeric policy overrides are
 =AI_VOICE_TURN_DEADLINE_MS=, =AI_VOICE_TRAILING_SILENCE_MS=,
 =AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS=, =AI_VOICE_TTS_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
-fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE= and
-=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE= and =AI_VOICE_SYNTHESIS_ERROR_MESSAGE=.
+fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE=,
+=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE=, =AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and
+=AI_VOICE_EMPTY_REPLY_MESSAGE=. The last is spoken when a provider turn ends with
+nothing pronounceable, whether the model returned nothing or a tool call went
+unread. A caller cannot see a log, and to them silence is indistinguishable
+from a dropped call. An empty value disables it.
 =AI_CALL_GOODBYE_MESSAGE= overrides the shutdown line.
 =AI_CALL_TRANSCRIPT_DIR= and =AI_CALL_TRANSCRIPT_HOOK= set the transcript
 directory and hook described under [[*Call transcripts][Call transcripts]].
@@ -579,6 +584,7 @@ as in the media-test example above.
 |---------+-----------------------+------------------|
 | Short VAD noise burst | Playback continues; no recognition opens | A barge-in decision appears only after confirmed speech reaches the configured threshold |
 | Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
+| Provider turn ends with no text and no tool error | The =empty-reply-message= line, never silence | "Provider turn ended with nothing to say" |
 | Own voice echoed back by the caller's speaker | Playback continues; the echo is not answered | "possible barge-in", then "ignoring transcript ... repeats our own recent speech" |
 | STT ready/final timeout or server error | One configured transcription-error line when speech output is available; next turn can proceed | Specific recognition error or server detail |
 | TTS unreachable, truncated response or inactivity timeout | One cached synthesis-error line; if no cache exists, one bounded synthesis attempt, then listening | Specific connection/protocol/timeout error; cache readiness or unavailability |

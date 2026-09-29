@@ -36,6 +36,8 @@ static const Setting settings[] = {
 	{"max-agents", "AI_VOICE_MAX_AGENTS", NULL, 4, 1, 128},
 	{"deadline-message", "AI_VOICE_DEADLINE_MESSAGE",
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
+	{"empty-reply-message", "AI_VOICE_EMPTY_REPLY_MESSAGE",
+	 "Sorry, I didn't come up with an answer to that. Could you ask me again?", 0, 0, 0},
 	{"transcription-error-message", "AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE",
 	 "Sorry, I could not transcribe that. Please try again.", 0, 0, 0}};
 struct _AiCallConfig {
