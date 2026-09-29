@@ -30,7 +30,7 @@ typedef struct {
 	gchar *name;
 	GByteArray *frames, *onset;
 	guint speech_ms;
-	gboolean recognizing, ended;
+	gboolean recognizing, ended, pending_barge;
 } Participant;
 typedef struct {
 	AiVoiceSession *session;
@@ -49,6 +49,10 @@ typedef struct {
 	gchar *text;
 	gboolean remember, notice, fallback;
 } Line;
+typedef struct {
+	gchar *text;
+	gint64 at;
+} Said;
 
 struct _AiVoiceSession {
 	GObject parent_instance;
@@ -63,7 +67,7 @@ struct _AiVoiceSession {
 	guint fallback_sample_rate;
 	GMainContext *context;
 	GHashTable *participants, *notices;
-	GQueue turns, lines, pending_notices;
+	GQueue turns, lines, pending_notices, said;
 	GString *pending_text, *spoken;
 	Speech *speech;
 	GCancellable *turn_cancel;
@@ -72,7 +76,7 @@ struct _AiVoiceSession {
 	gint64 paused_deadline_us;
 	guint64 generation, provider_generation;
 	AiVoiceState state;
-	gboolean stopped, provider_pending, media_recovering;
+	gboolean stopped, provider_pending, media_recovering, barge_in_confirm;
 };
 enum {
 	PROP_0,
@@ -88,7 +92,8 @@ enum {
 	PROP_TRANSCRIPTION_ERROR_MESSAGE,
 	PROP_SYNTHESIS_ERROR_MESSAGE,
 	PROP_FALLBACK_PCM,
-	PROP_FALLBACK_SAMPLE_RATE
+	PROP_FALLBACK_SAMPLE_RATE,
+	PROP_BARGE_IN_CONFIRM
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -104,6 +109,79 @@ line_free(gpointer data)
 	Line *line = data;
 	g_free(line->text);
 	g_free(line);
+}
+static void
+said_free(gpointer data)
+{
+	Said *said = data;
+	g_free(said->text);
+	g_free(said);
+}
+/* What we said recently, so our own voice coming back through a caller's
+ * speaker is recognised as echo rather than answered as a turn. */
+#define ECHO_WINDOW_US (20 * G_USEC_PER_SEC)
+static void
+remember_said(AiVoiceSession *self, const gchar *text)
+{
+	Said *said = g_new0(Said, 1);
+	said->text = g_strdup(text);
+	said->at = g_get_monotonic_time();
+	g_queue_push_tail(&self->said, said);
+	while (g_queue_get_length(&self->said) > 16)
+		said_free(g_queue_pop_head(&self->said));
+}
+static void
+add_words(GHashTable *words, const gchar *text)
+{
+	GString *word = g_string_new(NULL);
+	const gchar *p;
+	for (p = text;; p = g_utf8_next_char(p)) {
+		gunichar c = *p != '\0' ? g_utf8_get_char(p) : 0;
+		if (c != 0 && g_unichar_isalnum(c)) {
+			g_string_append_unichar(word, g_unichar_tolower(c));
+			continue;
+		}
+		if (word->len != 0)
+			g_hash_table_add(words, g_strdup(word->str));
+		g_string_truncate(word, 0);
+		if (c == 0)
+			break;
+	}
+	g_string_free(word, TRUE);
+}
+/* Echo when at least four in five of the words heard are words we just said. */
+static gboolean
+is_echo(AiVoiceSession *self, const gchar *text)
+{
+	g_autoptr(GHashTable) ours = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	g_autoptr(GHashTable) heard = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	gint64 now = g_get_monotonic_time();
+	guint total = 0, matched = 0;
+	GHashTableIter iter;
+	gpointer word;
+	GList *l;
+	for (l = self->said.head; l != NULL; l = l->next) {
+		Said *said = l->data;
+		if (now - said->at <= ECHO_WINDOW_US)
+			add_words(ours, said->text);
+	}
+	add_words(heard, text);
+	g_hash_table_iter_init(&iter, heard);
+	while (g_hash_table_iter_next(&iter, &word, NULL)) {
+		total++;
+		if (g_hash_table_contains(ours, word))
+			matched++;
+	}
+	return total != 0 && matched * 5 >= total * 4;
+}
+static gboolean
+has_words(const gchar *text)
+{
+	const gchar *p;
+	for (p = text; p != NULL && *p != '\0'; p = g_utf8_next_char(p))
+		if (g_unichar_isalnum(g_utf8_get_char(p)))
+			return TRUE;
+	return FALSE;
 }
 static void
 participant_free(gpointer data)
@@ -442,6 +520,7 @@ pump(AiVoiceSession *self)
 		self->speech = s;
 		line_free(line);
 		state(self, AI_VOICE_SPEAKING);
+		remember_said(self, s->text);
 		g_signal_emit_by_name(self, "reply", s->text);
 		if (s->fallback && self->fallback_pcm != NULL) {
 			s->synthesized = TRUE;
@@ -594,8 +673,17 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 				g_byte_array_append(p->onset, samples, size);
 			}
 			if (p->speech_ms >= self->barge_in_ms) {
-				if (self->state == AI_VOICE_SPEAKING ||
-					self->state == AI_VOICE_THINKING) {
+				/* While we are talking, sound alone may be our own voice
+				 * returning through the caller's speaker. Listen, and let
+				 * words decide whether this is an interruption. */
+				if (self->state == AI_VOICE_SPEAKING && self->barge_in_confirm) {
+					if (!p->pending_barge)
+						g_log("ai-glib", G_LOG_LEVEL_INFO,
+							  "possible barge-in by %s after %u ms of speech, waiting for words",
+							  p->name, p->speech_ms);
+					p->pending_barge = TRUE;
+				} else if (self->state == AI_VOICE_SPEAKING ||
+						   self->state == AI_VOICE_THINKING) {
 					g_log("ai-glib", G_LOG_LEVEL_INFO,
 						  "barge-in by %s after %u ms of speech, cancelling %s", p->name,
 						  p->speech_ms,
@@ -633,7 +721,8 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					}
 					fed_onset = TRUE;
 				}
-				state(self, AI_VOICE_TRANSCRIBING);
+				if (!p->pending_barge)
+					state(self, AI_VOICE_TRANSCRIBING);
 				if (self->stopped ||
 					g_hash_table_lookup(self->participants, speaker) != p)
 					return;
@@ -660,6 +749,15 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 	}
 }
 static void
+confirm_barge(AiVoiceSession *self, Participant *p)
+{
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "barge-in by %s confirmed by speech, cancelling %s",
+		  p->name, self->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
+	p->pending_barge = FALSE;
+	interrupt_turn(self);
+	state(self, AI_VOICE_TRANSCRIBING);
+}
+static void
 transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *text,
 		   gboolean final, gpointer data)
 {
@@ -667,19 +765,33 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	Participant *p = g_hash_table_lookup(self->participants, speaker);
 	g_autofree gchar *labelled = NULL;
 	g_autofree gchar *trimmed = NULL;
+	gboolean pending;
 	if (self->stopped || p == NULL)
 		return;
 	if (!final) {
+		if (p->pending_barge && has_words(text) && !is_echo(self, text))
+			confirm_barge(self, p);
 		g_signal_emit_by_name(self, "transcript", p->name, text, FALSE);
 		return;
 	}
 	trimmed = g_strdup(text != NULL ? text : "");
 	text = g_strstrip(trimmed);
+	pending = p->pending_barge;
 	p->recognizing = FALSE;
 	p->ended = FALSE;
+	p->pending_barge = FALSE;
 	p->speech_ms = 0;
 	g_byte_array_set_size(p->onset, 0);
 	ai_voice_activity_reset(self->activity, speaker);
+	if (*text != '\0' && (pending || self->state == AI_VOICE_SPEAKING) &&
+		is_echo(self, text)) {
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "ignoring transcript from %s: it repeats our own recent speech", p->name);
+		pump(self);
+		return;
+	}
+	if (pending && has_words(text))
+		confirm_barge(self, p);
 	if (text != NULL && *text != '\0' && g_queue_get_length(&self->turns) < 32) {
 		labelled = g_strdup_printf("[%s]: %s", p->name, text);
 		g_queue_push_tail(&self->turns, g_steal_pointer(&labelled));
@@ -700,6 +812,7 @@ stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
 	if (p != NULL) {
 		p->recognizing = FALSE;
 		p->ended = FALSE;
+		p->pending_barge = FALSE;
 		p->speech_ms = 0;
 		g_byte_array_set_size(p->onset, 0);
 	}
@@ -800,6 +913,7 @@ finalize(GObject *object)
 	g_queue_clear_full(&self->lines, line_free);
 	g_queue_clear_full(&self->turns, g_free);
 	g_queue_clear_full(&self->pending_notices, line_free);
+	g_queue_clear_full(&self->said, said_free);
 	g_string_free(self->pending_text, TRUE);
 	g_string_free(self->spoken, TRUE);
 	g_free(self->deadline_message);
@@ -816,6 +930,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->deadline_ms);
 	else if (id == PROP_BARGE_IN)
 		g_value_set_uint(value, self->barge_in_ms);
+	else if (id == PROP_BARGE_IN_CONFIRM)
+		g_value_set_boolean(value, self->barge_in_confirm);
 	else if (id == PROP_STATE)
 		g_value_set_enum(value, self->state);
 	else if (id == PROP_TRANSPORT)
@@ -849,6 +965,8 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->deadline_ms = g_value_get_uint(value);
 	else if (id == PROP_BARGE_IN)
 		self->barge_in_ms = g_value_get_uint(value);
+	else if (id == PROP_BARGE_IN_CONFIRM)
+		self->barge_in_confirm = g_value_get_boolean(value);
 	else if (id == PROP_TRANSPORT)
 		g_set_object(&self->transport, g_value_get_object(value));
 	else if (id == PROP_RECOGNIZER)
@@ -936,6 +1054,13 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 			"barge-in-ms", "Barge-in debounce",
 			"Consecutive speech required before recognition or interruption", 10, 5000,
 			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_BARGE_IN_CONFIRM,
+		g_param_spec_boolean(
+			"barge-in-confirm", "Confirm barge-in",
+			"While speaking, interrupt only once recognized words arrive that are not an "
+			"echo of our own recent speech. FALSE interrupts on voice activity alone",
+			TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TURN_DEADLINE,
 		g_param_spec_uint("turn-deadline-ms", "Turn deadline", "Maximum turn duration", 1,
@@ -1028,6 +1153,7 @@ ai_voice_session_init(AiVoiceSession *self)
 	self->spoken = g_string_new(NULL);
 	self->deadline_ms = 20000;
 	self->barge_in_ms = 250;
+	self->barge_in_confirm = TRUE;
 }
 /**
  * ai_voice_session_new:

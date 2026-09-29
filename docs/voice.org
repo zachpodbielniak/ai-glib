@@ -121,8 +121,18 @@ onset audio is buffered in memory and replayed to STT so initial words are
 preserved. Greetings and all =ai_voice_session_say()= notices use this same
 debounce, including while waiting for the first synthesized audio.
 
-Once the threshold is reached during thinking or speaking, the session logs
-an INFO decision with the speaker and speech duration and cancels the provider run's
+While speaking, reaching the threshold is not yet an interruption. A caller
+on speakerphone sends our own voice back, and to VAD that is speech. The
+session opens recognition and logs a "possible barge-in", and playback
+continues. It interrupts only when a partial or final transcript carries
+words, and at least four in five of those words are not words we said in the
+last 20 seconds. A transcript that only repeats our recent speech is logged as
+echo and dropped rather than answered, and an empty final lets playback run
+on. Set =barge-in-confirm= to FALSE to interrupt on VAD alone, as before. The
+cost is the partial-transcript delay, a few hundred milliseconds.
+
+Once an interruption is decided, during thinking (on VAD alone) or during
+speaking (once confirmed), the session logs an INFO decision and cancels the provider run's
 =GCancellable= and the current synthesis/playback cancellable, then flushes the
 transport queue. An old turn cannot enqueue speech into its successor.
 
@@ -513,6 +523,7 @@ as in the media-test example above.
 |---------+-----------------------+------------------|
 | Short VAD noise burst | Playback continues; no recognition opens | A barge-in decision appears only after confirmed speech reaches the configured threshold |
 | Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
+| Own voice echoed back by the caller's speaker | Playback continues; the echo is not answered | "possible barge-in", then "ignoring transcript ... repeats our own recent speech" |
 | STT ready/final timeout or server error | One configured transcription-error line when speech output is available; next turn can proceed | Specific recognition error or server detail |
 | TTS unreachable, truncated response or inactivity timeout | One cached synthesis-error line; if no cache exists, one bounded synthesis attempt, then listening | Specific connection/protocol/timeout error; cache readiness or unavailability |
 | Publisher/receiver media error | Speech pauses during recovery and resumes, possibly with a short repeated prefix | GStreamer element/debug reason, attempt number and retry delay, recovery result |

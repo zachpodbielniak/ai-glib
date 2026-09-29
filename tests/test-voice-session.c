@@ -129,7 +129,17 @@ barge_in(Fixture *f, gconstpointer data)
 		g_usleep(1000);
 	}
 	g_assert_nonnull(f->tts->held);
+	if (data != NULL)
+		g_object_set(f->session, "barge-in-confirm", FALSE, NULL);
 	frame(f, "caller", 1);
+	if (data == NULL) {
+		/* Sound alone is not an interruption while speaking: it may be our own
+		 * voice coming back through the caller's speaker. Words are. */
+		g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+		g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+		g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+		g_signal_emit_by_name(f->stt, "transcript", "caller", "wait a moment", FALSE);
+	}
 	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 	g_assert_cmpuint(f->transport->flushes, ==, 1);
 	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_TRANSCRIBING);
@@ -138,6 +148,61 @@ barge_in(Fixture *f, gconstpointer data)
 		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
 		g_assert_cmpstr(text, ==, "First sentence.");
 	}
+}
+/* Hold the reply on its second segment, then let the caller's line carry
+ * something while the assistant is still talking. */
+static void
+speak_and_hold(Fixture *f)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	f->tts->hold_after = 2;
+	ai_mock_provider_push_text(f->provider, "First sentence. Unspoken ending.");
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	frame(f, "caller", 1);
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+}
+static void
+echo_is_not_a_turn(Fixture *f, gconstpointer data)
+{
+	guint heard;
+	speak_and_hold(f);
+	heard = f->speakers->len;
+	/* What the caller's microphone picked up was our own first sentence. */
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "first sentence", FALSE);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "First sentence.", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->speakers->len, ==, heard);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
+}
+static void
+noise_is_not_a_turn(Fixture *f, gconstpointer data)
+{
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
+}
+static void
+final_words_interrupt(Fixture *f, gconstpointer data)
+{
+	guint heard;
+	speak_and_hold(f);
+	heard = f->speakers->len;
+	/* No partial arrived; the final alone is enough, and it becomes the turn. */
+	ai_mock_provider_push_text(f->provider, "Stopping.");
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "Hold on, stop.", TRUE);
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, 1);
+	g_assert_cmpuint(f->speakers->len, ==, heard + 1);
 }
 static void
 speakers(Fixture *f, gconstpointer data)
@@ -293,6 +358,7 @@ stalled_turn(Fixture *f, gconstpointer data)
 		g_assert_nonnull(f->tts->held);
 		g_assert_cmpint(g_atomic_int_get(&stalled->cancelled), ==, 0);
 		frame(f, "caller", 1);
+		g_signal_emit_by_name(f->stt, "transcript", "caller", "never mind", FALSE);
 		g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 		g_assert_cmpuint(f->transport->flushes, >=, 1);
 	}
@@ -370,8 +436,13 @@ debounce_notice(Fixture *f, gconstpointer data)
 	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 	g_test_expect_message(
 		"ai-glib", G_LOG_LEVEL_INFO,
-		"barge-in by Caller after 250 ms of speech, cancelling speaking");
+		"possible barge-in by Caller after 250 ms of speech, waiting for words");
 	frame(f, "caller", 1);
+	g_test_assert_expected_messages();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+						  "barge-in by Caller confirmed by speech, cancelling speaking");
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "stop", FALSE);
 	g_test_assert_expected_messages();
 	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
@@ -580,6 +651,14 @@ main(int argc, char **argv)
 			   setup, tool_error_multibyte, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
+	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,
+			   barge_in, teardown);
+	g_test_add("/voice/session/echo-is-not-a-turn", Fixture, NULL, setup,
+			   echo_is_not_a_turn, teardown);
+	g_test_add("/voice/session/noise-is-not-a-turn", Fixture, NULL, setup,
+			   noise_is_not_a_turn, teardown);
+	g_test_add("/voice/session/final-words-interrupt", Fixture, NULL, setup,
+			   final_words_interrupt, teardown);
 	g_test_add("/voice/session/speakers", Fixture, NULL, setup, speakers, teardown);
 	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
 	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);
