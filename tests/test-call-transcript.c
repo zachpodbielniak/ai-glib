@@ -84,17 +84,28 @@ written_as_the_call_goes(void)
 					"2026-09-29T16:00:03Z");
 	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "speaker"), ==,
 					"Caller");
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "role"), ==, "caller");
+	/* "complete" belongs to the assistant's lines; a caller's final is final. */
+	g_assert_false(json_object_has_member(line(lines, 1), "complete"));
 	g_assert_cmpstr(json_object_get_string_member(line(lines, 1), "text"), ==,
 					"Hello \"Sam\",\nwhat's on — today? \360\237\230\210");
 	g_clear_pointer(&lines, g_ptr_array_unref);
 
 	g_assert_true(ai_call_transcript_append(transcript, later, "Second", "Bye.", &error));
+	g_assert_true(ai_call_transcript_append_spoken(transcript, later, "@assistant:example.org",
+												   "Goodbye then. See you", FALSE, &error));
 	g_assert_true(ai_call_transcript_close(transcript, end, &error));
 	g_assert_no_error(error);
 	/* Closing twice changes nothing and is not an error. */
 	g_assert_true(ai_call_transcript_close(transcript, end, &error));
 	lines = read_lines(path);
-	g_assert_cmpuint(lines->len, ==, 3);
+	g_assert_cmpuint(lines->len, ==, 4);
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 3), "role"), ==, "assistant");
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 3), "speaker"), ==,
+					"@assistant:example.org");
+	g_assert_cmpstr(json_object_get_string_member(line(lines, 3), "text"), ==,
+					"Goodbye then. See you");
+	g_assert_false(json_object_get_boolean_member(line(lines, 3), "complete"));
 	g_assert_cmpstr(json_object_get_string_member(line(lines, 0), "end"), ==,
 					"2026-09-29T16:00:42.500Z");
 	g_assert_cmpint(json_object_get_int_member(line(lines, 0), "duration_ms"), ==, 42500);

@@ -150,15 +150,14 @@ ai_call_transcript_open(const gchar *dir, const gchar *room, GDateTime *start,
 		return NULL;
 	return g_steal_pointer(&self);
 }
-gboolean
-ai_call_transcript_append(AiCallTranscript *self, GDateTime *at, const gchar *speaker,
-						  const gchar *text, GError **error)
+/* COMPLETE < 0 omits the member: a caller's final transcript is final. */
+static gboolean
+append_line(AiCallTranscript *self, GDateTime *at, const gchar *role,
+			const gchar *speaker, const gchar *text, gint complete, GError **error)
 {
 	g_autoptr(JsonBuilder) builder = NULL;
 	g_autoptr(JsonNode) root = NULL;
 	g_autofree gchar *when = NULL, *line = NULL;
-	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
-	g_return_val_if_fail(at != NULL && speaker != NULL && text != NULL, FALSE);
 	if (self->closed) {
 		g_set_error(error, G_IO_ERROR, G_IO_ERROR_CLOSED, "Transcript %s is closed",
 					self->path);
@@ -171,14 +170,37 @@ ai_call_transcript_append(AiCallTranscript *self, GDateTime *at, const gchar *sp
 	json_builder_add_string_value(builder, "utterance");
 	json_builder_set_member_name(builder, "at");
 	json_builder_add_string_value(builder, when);
+	json_builder_set_member_name(builder, "role");
+	json_builder_add_string_value(builder, role);
 	json_builder_set_member_name(builder, "speaker");
 	json_builder_add_string_value(builder, speaker);
 	json_builder_set_member_name(builder, "text");
 	json_builder_add_string_value(builder, text);
+	if (complete >= 0) {
+		json_builder_set_member_name(builder, "complete");
+		json_builder_add_boolean_value(builder, complete != 0);
+	}
 	json_builder_end_object(builder);
 	root = json_builder_get_root(builder);
 	line = json_to_string(root, FALSE);
 	return write_line(self, line, error);
+}
+gboolean
+ai_call_transcript_append(AiCallTranscript *self, GDateTime *at, const gchar *speaker,
+						  const gchar *text, GError **error)
+{
+	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
+	g_return_val_if_fail(at != NULL && speaker != NULL && text != NULL, FALSE);
+	return append_line(self, at, "caller", speaker, text, -1, error);
+}
+gboolean
+ai_call_transcript_append_spoken(AiCallTranscript *self, GDateTime *at,
+								 const gchar *speaker, const gchar *text, gboolean complete,
+								 GError **error)
+{
+	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
+	g_return_val_if_fail(at != NULL && speaker != NULL && text != NULL, FALSE);
+	return append_line(self, at, "assistant", speaker, text, complete ? 1 : 0, error);
 }
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error)

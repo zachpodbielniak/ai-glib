@@ -71,6 +71,7 @@ Signals, on the session's constructing thread-default context:
 |--------+------------|
 | =transcript= | display name, text, final boolean |
 | =reply= | text segment submitted for synthesis |
+| =spoken= | segment whose audio was played, and whether it played to the end |
 | =state-changed= | =AiVoiceState= (registered GEnum) |
 | =error= | =GError= |
 
@@ -405,14 +406,20 @@ header whose =end= and =duration_ms= are still =null=:
 
 #+begin_example
 {"type":"call","room":"!abc:example.org","start":"2026-01-01T12:00:00Z","end":null,"duration_ms":null}
-{"type":"utterance","at":"2026-01-01T12:00:04Z","speaker":"Caller","text":"What's on today?"}
+{"type":"utterance","at":"2026-01-01T12:00:04Z","role":"caller","speaker":"Caller","text":"What's on today?"}
+{"type":"utterance","at":"2026-01-01T12:00:06Z","role":"assistant","speaker":"@assistant:example.org","text":"Nothing until noon.","complete":true}
 #+end_example
 
 At hangup the header is rewritten atomically with =end= and =duration_ms=.
 Times are UTC ISO 8601, with milliseconds only when they are not zero.
-=speaker= is the participant's display name. Only final transcripts are
-written: partials are revisions, not things that were said. The assistant's
-own replies are not written.
+=role= is =caller= or =assistant=. A caller's =speaker= is their display name,
+and only their final transcripts are written: partials are revisions, not
+things that were said. The assistant's lines come from the session's =spoken=
+signal: one per segment whose audio actually played, written when playback
+ends, with the assistant's Matrix ID as =speaker=. =complete= is =false= when
+the caller interrupted it. The text is then the whole segment, of which the
+caller heard only the beginning. A segment that produced no audio, because
+synthesis failed first, is not written, because nobody heard it.
 
 =transcript-hook= is a command line, split the way a shell would split it but
 not run by a shell. After the header is finalized it is started with the

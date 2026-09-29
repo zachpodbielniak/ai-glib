@@ -16,6 +16,12 @@ ai_call_transcript_open(const gchar *dir, const gchar *room, GDateTime *start,
 gboolean
 ai_call_transcript_append(AiCallTranscript *self, GDateTime *at, const gchar *speaker,
 						  const gchar *text, GError **error);
+/* What the assistant said. COMPLETE is FALSE when the caller interrupted it,
+ * so TEXT is what was being said, not all of what was heard. */
+gboolean
+ai_call_transcript_append_spoken(AiCallTranscript *self, GDateTime *at,
+								 const gchar *speaker, const gchar *text, gboolean complete,
+								 GError **error);
 /* Rewrites the header with END and the duration, atomically. Idempotent. */
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error);

@@ -39,7 +39,7 @@ typedef struct {
 	guint64 generation;
 	guint pending;
 	gsize queued;
-	gboolean synthesized, discarded, remember, notice, fallback;
+	gboolean synthesized, discarded, remember, notice, fallback, heard;
 } Speech;
 typedef struct {
 	Speech *speech;
@@ -381,6 +381,9 @@ speech_complete(Speech *s)
 	if (!s->synthesized || s->pending != 0)
 		return;
 	self->speech = NULL;
+	/* Only speech that reached the caller was said; cut short is still said. */
+	if (s->heard)
+		g_signal_emit_by_name(self, "spoken", s->text, !s->discarded);
 	if (!s->discarded && s->generation == self->generation && s->remember) {
 		if (self->spoken->len != 0)
 			g_string_append_c(self->spoken, ' ');
@@ -405,7 +408,8 @@ played(GObject *source, GAsyncResult *result, gpointer data)
 											 &error)) {
 		s->discarded = TRUE;
 		report(s->session, error);
-	}
+	} else
+		s->heard = TRUE;
 	s->pending--;
 	s->queued -= p->size;
 	g_free(p);
@@ -1127,6 +1131,17 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 */
 	g_signal_new("reply", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
 				 NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+	/**
+	 * AiVoiceSession::spoken:
+	 * @self: the session
+	 * @text: a segment of which at least some audio was played
+	 * @complete: FALSE when playback was cut short, by barge-in or failure
+	 *
+	 * Emitted once per segment after its playback ends, in order. A segment
+	 * that produced no audio at all is not reported: nobody heard it.
+	 */
+	g_signal_new("spoken", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+				 NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_BOOLEAN);
 	/**
 	 * AiVoiceSession::state-changed:
 	 * @self: the session

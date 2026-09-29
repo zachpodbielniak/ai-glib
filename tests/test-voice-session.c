@@ -587,6 +587,82 @@ streamed_segments(Fixture *f, gconstpointer data)
 	for (i = 0; streamed_spoken[i] != NULL; i++)
 		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, streamed_spoken[i]);
 }
+/* What the assistant actually said, as the caller heard it: one report per
+ * segment that produced audio, marked complete or cut off. */
+typedef struct {
+	GPtrArray *texts;
+	GArray *complete;
+} Spoken;
+static void
+on_spoken(AiVoiceSession *s, const gchar *text, gboolean complete, gpointer data)
+{
+	Spoken *spoken = data;
+	g_ptr_array_add(spoken->texts, g_strdup(text));
+	g_array_append_val(spoken->complete, complete);
+}
+static Spoken *
+watch_spoken(Fixture *f)
+{
+	Spoken *spoken = g_new0(Spoken, 1);
+	spoken->texts = g_ptr_array_new_with_free_func(g_free);
+	spoken->complete = g_array_new(FALSE, FALSE, sizeof(gboolean));
+	g_signal_connect(f->session, "spoken", G_CALLBACK(on_spoken), spoken);
+	return spoken;
+}
+static void
+spoken_free(Fixture *f, Spoken *spoken)
+{
+	g_signal_handlers_disconnect_by_data(f->session, spoken);
+	g_ptr_array_unref(spoken->texts);
+	g_array_unref(spoken->complete);
+	g_free(spoken);
+}
+static void
+spoken_complete(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	ai_mock_provider_push_text(f->provider, "Hello Caller. Second line.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpuint(spoken->texts->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 0), ==, "Hello Caller.");
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 1), ==, "Second line.");
+	g_assert_true(g_array_index(spoken->complete, gboolean, 0));
+	g_assert_true(g_array_index(spoken->complete, gboolean, 1));
+	spoken_free(f, spoken);
+}
+static void
+spoken_interrupted(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "wait a moment", FALSE);
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	drain();
+	g_assert_cmpuint(spoken->texts->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 0), ==, "First sentence.");
+	g_assert_true(g_array_index(spoken->complete, gboolean, 0));
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 1), ==, "Unspoken ending.");
+	g_assert_false(g_array_index(spoken->complete, gboolean, 1));
+	spoken_free(f, spoken);
+}
+static void
+silent_failure_not_spoken(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	f->tts->hold_after = 1;
+	f->tts->delay_audio = TRUE;
+	g_object_set(f->session, "synthesis-error-message", "", NULL);
+	ai_voice_session_say(f->session, "Never heard.");
+	g_assert_nonnull(f->tts->held);
+	g_task_return_new_error(f->tts->held, G_IO_ERROR, G_IO_ERROR_FAILED, "TTS down");
+	g_clear_object(&f->tts->held);
+	drain();
+	/* No audio reached the caller, so nothing was said. */
+	g_assert_cmpuint(spoken->texts->len, ==, 0);
+	spoken_free(f, spoken);
+}
 static void
 recovery_pauses_deadline(Fixture *f, gconstpointer data)
 {
@@ -649,6 +725,12 @@ main(int argc, char **argv)
 			   setup, tool_error_multibyte, teardown);
 	g_test_add("/voice/session/tool-error-multibyte/1", Fixture, GUINT_TO_POINTER(2),
 			   setup, tool_error_multibyte, teardown);
+	g_test_add("/voice/session/spoken-complete", Fixture, NULL, setup, spoken_complete,
+			   teardown);
+	g_test_add("/voice/session/spoken-interrupted", Fixture, NULL, setup,
+			   spoken_interrupted, teardown);
+	g_test_add("/voice/session/silent-failure-not-spoken", Fixture, NULL, setup,
+			   silent_failure_not_spoken, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,
