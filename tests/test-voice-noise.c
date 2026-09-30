@@ -52,7 +52,16 @@ tail_rms(const gchar *level)
 static void
 noise_is_suppressed(void)
 {
-	gdouble off = tail_rms(NULL), high = tail_rms("high");
+	gdouble off, high;
+	/* webrtcdsp is optional (gst-plugins-bad); without it there is nothing to test. */
+	gst_init(NULL, NULL);
+	if (gst_element_factory_find("webrtcdsp") == NULL ||
+		gst_element_factory_find("audiotestsrc") == NULL) {
+		g_test_skip("webrtcdsp or audiotestsrc unavailable");
+		return;
+	}
+	off = tail_rms(NULL);
+	high = tail_rms("high");
 	g_test_message("pink noise rms: off=%.1f high=%.1f", off, high);
 	g_assert_cmpfloat(off, >, 500);
 	/* At least a 4x (12 dB) drop once the suppressor has converged. */
