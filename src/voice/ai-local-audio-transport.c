@@ -224,11 +224,19 @@ tick(gpointer data)
 	if (!GST_CLOCK_TIME_IS_VALID(base) || now < base)
 		return G_SOURCE_CONTINUE;
 	now -= base;
-	while ((o = g_queue_peek_head(&self->playback)) != NULL &&
+	/* Completing a write runs its callback here, and a caller that hangs up
+	 * when its last line has played leaves from inside it: keep this object
+	 * alive, and stop if the pipeline went with it. */
+	g_object_ref(self);
+	while (self->pipeline != NULL && (o = g_queue_peek_head(&self->playback)) != NULL &&
 		   o->offset == g_bytes_get_size(o->pcm) && now >= o->end) {
 		g_queue_pop_head(&self->playback);
 		g_task_return_boolean(o->task, TRUE);
 		output_free(o);
+	}
+	if (self->pipeline == NULL) {
+		g_object_unref(self);
+		return G_SOURCE_REMOVE;
 	}
 	target = now + LEAD;
 	/* Bounded catch-up after a stalled main loop; the sink drops what is late. */
@@ -247,6 +255,7 @@ tick(gpointer data)
 		}
 		push_chunk(self, o);
 	}
+	g_object_unref(self);
 	return G_SOURCE_CONTINUE;
 }
 static void

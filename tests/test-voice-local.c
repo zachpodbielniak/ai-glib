@@ -302,6 +302,39 @@ test_continuous(void)
 	g_assert_cmpuint(c.breaks, ==, 0);
 	g_free(h.speaker);
 }
+static void
+leave_when_written(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Write *w = data;
+	ai_audio_transport_write_pcm_finish(AI_AUDIO_TRANSPORT(source), result, &w->error);
+	/* What ai-call does when its goodbye finishes playing. */
+	ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(source), NULL, NULL, NULL);
+	w->done = TRUE;
+}
+/* The last write's completion is where a program hangs up. The pipeline is
+ * gone when the callback returns, and the playback tick that completed the
+ * write must not go on pushing into it. */
+static void
+test_leave_from_completion(void)
+{
+	g_autoptr(GBytes) pcm = tone(16000, 200);
+	Heard h = {0};
+	Write w = {0};
+	AiLocalAudioTransport *t;
+	if (!available()) {
+		g_test_skip("GStreamer test elements unavailable");
+		return;
+	}
+	t = start("audiotestsrc is-live=true wave=silence", "fakesink sync=true", FALSE, &h);
+	ai_audio_transport_write_pcm_async(AI_AUDIO_TRANSPORT(t), pcm, 16000, NULL,
+									   leave_when_written, &w);
+	wait_for(&w.done, 5000);
+	g_assert_true(w.done);
+	g_assert_no_error(w.error);
+	pump(200);
+	g_object_unref(t);
+	g_free(h.speaker);
+}
 /* A description that does not parse is a join error, not a crash. */
 static void
 test_bad_device(void)
@@ -329,6 +362,7 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/local/playback-paced", test_playback);
 	g_test_add_func("/voice/local/flush", test_flush);
 	g_test_add_func("/voice/local/continuous", test_continuous);
+	g_test_add_func("/voice/local/leave-from-completion", test_leave_from_completion);
 	g_test_add_func("/voice/local/bad-device", test_bad_device);
 	return g_test_run();
 }
