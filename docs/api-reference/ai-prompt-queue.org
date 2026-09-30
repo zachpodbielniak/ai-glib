@@ -1,0 +1,58 @@
+* AiPromptQueue
+A bounded FIFO of pending submissions. The object stores text and
+attachment references; the host decides when a turn has finished and pops
+a batch. Use it from one main context. It creates no sources.
+
+See [[file:../message-queue.org][Queued follow-ups and side questions]] for
+the TUI behaviour this exists to support.
+
+** Constructing
+#+begin_src C
+AiPromptQueue *ai_prompt_queue_new (void);
+#+end_src
+
+** Properties
+| Property      | Type    | Default | Means                                         |
+|---------------+---------+---------+-----------------------------------------------|
+| =length=      | uint    | 0       | read-only; pending submissions before coalescing |
+| =max-length=  | uint    | 32      | capacity; lowering does not discard existing entries |
+| =coalesce=    | boolean | =TRUE=  | join adjacent text-only entries on pop        |
+
+=notify::length= fires after a successful push, pop or clear.
+
+** Push, peek, pop
+#+begin_src C
+gboolean     ai_prompt_queue_push  (AiPromptQueue  *self,
+                                    const gchar    *text,
+                                    GList          *images,
+                                    gboolean        separate,
+                                    GError        **error);
+guint        ai_prompt_queue_get_length (AiPromptQueue *self);
+const gchar *ai_prompt_queue_peek  (AiPromptQueue  *self,
+                                    GList         **images);
+gchar       *ai_prompt_queue_pop   (AiPromptQueue  *self,
+                                    GList         **images);
+void         ai_prompt_queue_clear (AiPromptQueue  *self);
+#+end_src
+
+=push()= copies text and references each =AiImageContent=. Rejection leaves
+the queue unchanged. Text is UTF-8 and at most 1 MiB. Empty text is allowed
+only with attachments. Mark slash commands =separate=; attachments always
+form their own batch. A full queue reports =AI_ERROR_INVALID_REQUEST=.
+
+=peek()= inspects the oldest submission without coalescing or removing it.
+The text and attachment list are borrowed until the next pop, clear or
+destruction.
+
+=pop()= takes the oldest batch. With =coalesce= enabled, adjacent text-only
+entries are joined with two newlines, up to 1 MiB. A separate entry is a
+barrier: commands and attachments are never merged or reordered across it.
+The returned text is =transfer full=; =images=, when requested, is
+=transfer full=.
+
+=clear()= discards pending submissions only. It does not affect an in-flight
+turn.
+
+** See also
+[[file:ai-conversation.org][AiConversation]] ·
+[[file:../message-queue.org][Queued follow-ups and side questions]]

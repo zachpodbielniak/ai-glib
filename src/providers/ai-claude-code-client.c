@@ -2968,6 +2968,7 @@ ai_claude_code_client_list_models_async(
     models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_SONNET));
     models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_HAIKU));
     models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_FABLE_5));
+    models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_OPUS_5_5));
     models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_OPUS_5));
     models = g_list_append(models, g_strdup(AI_CLAUDE_CODE_MODEL_SONNET_5));
 

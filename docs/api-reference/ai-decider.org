@@ -1,0 +1,22 @@
+#+TITLE: AiDecider
+
+=AiDecider= is the decision capability interface. =AiLayaClient= implements it
+using HTTP and =AiMockDecider= implements it with fixtures. It does not require
+or imply =AiProvider= chat support.
+
+See [[file:../laya-integration.org][Typed decisions with Laya]] for the request schema, properties,
+return values, cancellation, ownership, CLI/TUI usage and offline deployment.
+
+- =ai_decider_decide_async()= snapshots and validates an =AiDecisionRequest=.
+- =ai_decider_decide_finish()= returns an owned =AiDecisionResponse= or an error.
+- =ai_decider_decide()= blocks on a private thread-default context.
+- =ai_decision_request_add_boolean()=, =add_choice()= and =add_score()= add
+  typed questions with unique identifiers. Failed additions leave the request
+  unchanged.
+- Response getters borrow strings and return probabilities unchanged. The
+  caller owns strings from =dup_json()= and =format()=.
+
+All four object types support =g_autoptr()=. Callback delivery follows the
+calling thread's main context. Mutating a client or request concurrently from
+multiple threads requires caller synchronisation; asynchronous requests own
+independent snapshots and operation state.

@@ -56,7 +56,8 @@ ai_claude_tmux_client_build_session_argv(
     const gchar *model,
     const gchar *effort,
     gboolean     skip_permissions,
-    const gchar *mcp_config_path
+    const gchar *mcp_config_path,
+    const gchar *permission_mode
 );
 
 /*

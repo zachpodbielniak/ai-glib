@@ -11,7 +11,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/claude.org][Claude]] | Anthropic's Claude models | claude-sonnet-5          |
 | [[file:providers/openai.org][OpenAI]] | OpenAI GPT models         | gpt-5.5                  |
 | [[file:providers/gemini.org][Gemini]] | Google's Gemini models    | gemini-3.5-flash         |
-| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4.3                 |
+| [[file:providers/grok.org][Grok]]     | xAI's Grok models         | grok-4.7                 |
 | [[file:providers/ollama.org][Ollama]] | Local models via Ollama   | gpt-oss:20b              |
 
 *** CLI Wrappers
@@ -20,7 +20,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/claude-code.org][Claude Code]]      | Anthropic's Claude Code CLI (=--print=)        | sonnet                             |
 | [[file:providers/claude-code-tmux.org][Claude Code (tmux)]] | Claude Code CLI via an interactive tmux session | sonnet                          |
 | [[file:providers/opencode.org][OpenCode]]            | Multi-provider CLI (Anthropic, OpenAI, Google) | anthropic/claude-sonnet-5          |
-| [[file:providers/grok-build.org][Grok Build]]        | xAI's =grok= coding agent CLI (headless)       | grok-4.6                           |
+| [[file:providers/grok-build.org][Grok Build]]        | xAI's =grok= coding agent CLI (headless)       | grok-4.7                           |
 | [[file:providers/antigravity.org][Antigravity]]      | Google's =agy= coding agent CLI (headless)     | gemini-3.7-flash-high              |
 | [[file:providers/cursor.org][Cursor]]            | Cursor's =cursor-agent= CLI (headless)         | auto                               |
 | [[file:providers/codex-cli.org][Codex CLI]] | OpenAI =codex exec= CLI (headless) | gpt-6-astra |
@@ -31,15 +31,19 @@ see their provider pages.
 
 ** Documentation
 *** Getting Started
+- [[file:laya-integration.org][Typed decisions with Laya]] - Library, CLI and TUI classification without bundled weights
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
 - [[file:provider-switching.org][Provider switching]] - Continue one =AiConversation= on another provider
 - [[file:native-session.org][Native session import]] - Read a wrapped CLI's own transcript so a switch does not lose it
 - [[file:tui.org][ai-tui]] - The terminal agent harness
+- [[file:gui.org][ai-gui]] - The GTK4 desktop client
+- [[file:message-queue.org][Queued follow-ups and /btw]] - Coalesced next turns and independent side questions
 - [[file:mcp.org][MCP hosting]] - Opt-in conversation, TODO, and agent control with CLI provider injection
 - [[file:cli.org][The =ai= CLI]] - Command-line front-end for every provider
 - [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON
+- [[file:updating.org][Versions and self-update]] - Build provenance, =--check-update=, =--update= and =/update=
 
 *** Voice
 | Guide | Description |
@@ -68,6 +72,7 @@ see their provider pages.
 
 *** Commands, skills and agents
 - [[file:harness.org][The harness layer]] - Reading the other harnesses' files, @ mentions, completion
+- [[file:loops-and-goals.org][Loops and goals]] - /loop and /goal: scheduled prompts and bounded goals, in every front-end
 - [[file:commands.org][Authoring commands, skills and agents]] - File formats, with worked examples
 
 *** Observing a turn
@@ -95,6 +100,7 @@ see their provider pages.
 - [[file:api-reference/ai-view-block.org][AiViewBlock]] - Blocks and the render contract
 - [[file:api-reference/ai-tool-call.org][AiToolCall]] - Tool calls and how they read
 - [[file:api-reference/ai-conversation.org][AiConversation]] - Drives a provider into a transcript
+- [[file:api-reference/ai-prompt-queue.org][AiPromptQueue]] - Bounded FIFO of follow-up submissions
 
 *** Examples
 - [[file:examples/index.org][Examples Index]] - All examples
@@ -180,3 +186,8 @@ configuration, supported APIs, examples and compatibility limits.
 * Video generation
 
 Generate MP4 artifacts with =ai --video-gen -p grok= or =-p grok-build=. The same functionality is available through =AiVideoGenerator= and =AiVideoRequest= for text-to-video, image animation and reference-conditioned video with optional preset voices. See [[file:api-reference/ai-video-generator.org][the video interface]], [[file:cli.org][CLI flags and examples]], and [[file:specs/xai-imagine-provenance.org][Imagine specification snapshots]]. Grok Build also implements =AiImageGenerator= through its =image_gen= and =image_edit= tools.
+
+- [[file:dashboard.org][Project dashboard and linked work]]
+
+See [[file:linked-work.org][Linked work available to the model]] for automatic issue/PR
+retrieval, connector errors and host integration.

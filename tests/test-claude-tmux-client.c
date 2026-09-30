@@ -51,7 +51,7 @@ test_tmux_session_argv_plain_fresh(void)
     g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "sonnet", NULL, FALSE, NULL);
+        "sonnet", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 0), ==, "tmux");
     g_assert_cmpstr(AT(argv, 1), ==, "-L");
@@ -86,7 +86,7 @@ test_tmux_session_argv_dedicated_socket(void)
     g_autoptr(GPtrArray) argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "libreclaw", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "sonnet", NULL, FALSE, NULL);
+        "sonnet", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 1), ==, "-L");
     g_assert_cmpstr(AT(argv, 2), ==, "libreclaw");
@@ -217,7 +217,7 @@ test_tmux_session_argv_ollama_fresh(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "ollama/glm-5.2:cloud", NULL, FALSE, NULL);
+        "ollama/glm-5.2:cloud", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 9), ==, "--");
     g_assert_cmpstr(AT(argv, 10), ==, "ollama");
@@ -248,7 +248,7 @@ test_tmux_session_argv_ollama_resume(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ TRUE, "SID", "/tmp/settings.json",
-        "ollama/x", NULL, FALSE, NULL);
+        "ollama/x", NULL, FALSE, NULL, NULL);
 
     g_assert_cmpstr(AT(argv, 10), ==, "ollama");
     g_assert_cmpstr(AT(argv, 15), ==, "--");
@@ -275,7 +275,7 @@ test_tmux_session_argv_ollama_effort_skip(void)
     argv = ai_claude_tmux_client_build_session_argv(
         "tmux", "sock", "sess", "/work", "/usr/bin/claude",
         /* resuming */ FALSE, "SID", "/tmp/settings.json",
-        "ollama/x", "high", TRUE, NULL);
+        "ollama/x", "high", TRUE, NULL, NULL);
 
     for (i = 0; i < argv->len && g_ptr_array_index(argv, i) != NULL; i++)
     {
@@ -329,6 +329,36 @@ test_default_model(void)
     const gchar *m = ai_cli_client_get_model(AI_CLI_CLIENT(client));
     g_assert_cmpstr(m, ==, AI_CLAUDE_TMUX_DEFAULT_MODEL);
     g_assert_cmpstr(m, ==, "sonnet");
+}
+
+static void
+tmux_models_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+    const gchar *expected[] = {
+        "fable", "opus", "sonnet", "haiku",
+        "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"
+    };
+    g_autoptr(GError) error = NULL;
+    GList *models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
+    GList *item;
+    guint i = 0;
+
+    g_assert_no_error(error);
+    g_assert_cmpuint(g_list_length(models), ==, G_N_ELEMENTS(expected));
+    for (item = models; item != NULL; item = item->next)
+        g_assert_cmpstr(item->data, ==, expected[i++]);
+    g_list_free_full(models, g_free);
+    g_main_loop_quit(data);
+}
+
+static void
+test_lists_opus_5_5(void)
+{
+    g_autoptr(AiClaudeTmuxClient) client = ai_claude_tmux_client_new();
+    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+
+    ai_provider_list_models_async(AI_PROVIDER(client), NULL, tmux_models_done, loop);
+    g_main_loop_run(loop);
 }
 
 static void
@@ -1978,6 +2008,7 @@ main(int argc, char *argv[])
     g_test_add_func("/claude-tmux/new", test_new);
     g_test_add_func("/claude-tmux/new-with-config", test_new_with_config);
     g_test_add_func("/claude-tmux/default-model", test_default_model);
+    g_test_add_func("/claude-tmux/lists-opus-5-5", test_lists_opus_5_5);
     g_test_add_func("/claude-tmux/provider-interface", test_provider_interface);
     g_test_add_func("/claude-tmux/cancel/precancelled-no-spawn",
                     test_chat_precancelled_returns_cancelled);

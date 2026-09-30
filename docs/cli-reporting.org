@@ -33,6 +33,18 @@ Native panel adapters need =tmux=. They create an isolated private server/socket
 
 Panel text is a compatibility fallback rather than a stable provider protocol. Such reports are marked =partial=. Percentage direction is recorded only when the source says used, remaining, or left; unlabeled percentages remain direction-unknown. Reset descriptions remain =reset_text= rather than guessed timestamps. Native display changes can require adapter updates. Claude history is also =partial= because its cache can lag and its token totals do not imply subscription cost.
 
+* Front-end quota display
+The =ai-tui= session panel and the =ai-gui= header indicator consume this
+same asynchronous report API and render allowances as *percent remaining*
+for every provider. For example,
+Codex's wire =usedPercent: 25= becomes =used_percent: 25= in the report and
+75% remaining in the sidebar; a native panel's explicit 75% remaining is
+already in that direction. The CLI JSON schema preserves source direction
+and is unchanged. Unknown-direction =percent= values are not converted.
+Both front-ends read =src/core/ai-quota.h=, so the direction rule and the
+rounding are one decision rather than two. See [[file:tui.org][the TUI guide]] and
+[[file:gui.org][the ai-gui guide]] for refresh, unavailable and stale behavior.
+
 * C API
 Include =<ai-glib.h>=. Queries are additive API on =AiCliClient=; existing provider and chat methods are unchanged.
 

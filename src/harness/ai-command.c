@@ -22,6 +22,15 @@
 /* How much of a shell substitution's output is kept. */
 #define SHELL_OUTPUT_MAX (64 * 1024)
 
+/*
+ * A skill that shares a built-in's name is listed and invoked as
+ * "name (skill)". The bare name stays the built-in. The marker is a
+ * whole argument, so "/help (skill) review" runs the skill and
+ * "/help (skilful)" stays the built-in.
+ */
+#define AI_COMMAND_SKILL_ALIAS_MARK   "(skill)"
+#define AI_COMMAND_SKILL_ALIAS_SUFFIX " " AI_COMMAND_SKILL_ALIAS_MARK
+
 /* ================================================================
  * The built-in commands
  * ================================================================ */
@@ -39,34 +48,53 @@ typedef struct
     const gchar *name;
     const gchar *description;
     const gchar *argument_hint;
+    /* May a /loop run it unattended? Only what reports or writes a
+     * file: nothing that changes the session, the provider or the
+     * schedule itself. /clear on a timer would wipe the session that
+     * owns the timer. */
+    gboolean     schedulable;
 } BuiltinCommand;
 
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
-    { "help",     "List every command, skill and agent",        NULL },
-    { "clear",    "Empty the transcript and the history",       NULL },
-    { "reset",    "Start a fresh session and return to the splash screen", NULL },
-    { "quit",     "Leave",                                      NULL },
-    { "exit",     "Leave, same as /quit",                       NULL },
-    { "model",    "List models or switch with /model MODEL_ID", "[model]" },
-    { "provider", "List providers or switch with /provider NAME", "[provider]" },
-    { "effort",   "List effort levels or switch with /effort LEVEL", "[level]" },
-    { "tools",    "List the tools the model can call",          NULL },
-    { "commands", "List commands, and what shadows what",       NULL },
-    { "skills",   "List skills",                                NULL },
-    { "agents",   "List agents",                                NULL },
-    { "reload",   "Rescan the command, skill and agent paths",  NULL },
-    { "cwd",      "Show or change the working directory",       "[path]" },
+    { "decide", "Classify text with a separately managed Laya server", "--question QUESTION TEXT | --request FILE", TRUE },
+    { "work", "Load linked issue or PR as an assignment", "<URL>", FALSE },
+    { "project", "Open a project in a tmux window", "[directory]", FALSE },
+    { "dashboard", "Toggle project dashboard", NULL, FALSE },
+    { "links", "List linked issues and pull requests", NULL, TRUE },
+    { "issue", "Link or unlink an issue", "<link|unlink> <URL>", FALSE },
+    { "pr", "Link or unlink a pull request", "<link|unlink> <URL>", FALSE },
+    { "btw",      "Ask a side question without interrupting the current turn", "<question>", TRUE },
+    { "help",     "List every command, skill and agent",        NULL, TRUE },
+    { "clear",    "Empty the transcript and the history",       NULL, FALSE },
+    { "reset",    "Start a fresh session and return to the splash screen", NULL, FALSE },
+    { "quit",     "Leave",                                      NULL, FALSE },
+    { "exit",     "Leave, same as /quit",                       NULL, FALSE },
+    { "model",    "Open the model picker, or switch with /model MODEL_ID", "[model]", FALSE },
+    { "provider", "List providers or switch with /provider NAME", "[provider]", FALSE },
+    { "effort",   "List effort levels or switch with /effort LEVEL", "[level]", FALSE },
+    { "tools",    "List the tools the model can call",          NULL, TRUE },
+    { "commands", "List commands, and what shadows what",       NULL, TRUE },
+    { "skills",   "List skills",                                NULL, TRUE },
+    { "agents",   "List agents",                                NULL, TRUE },
+    { "reload",   "Rescan the command, skill and agent paths",  NULL, TRUE },
+    { "cwd",      "Show or change the working directory",       "[path]", FALSE },
     { "context",  "Show or drop history carried from a previous provider",
-      "[clear]" },
-    { "todos",    "Show the current todo list",                 NULL },
-    { "running",  "Show background agents and what they are doing", NULL },
-    { "kill",     "Stop a background agent",                    "<id|all>" },
+      "[clear]", FALSE },
+    { "todos",    "Show the current todo list",                 NULL, TRUE },
+    { "running",  "Show background agents and what they are doing", NULL, TRUE },
+    { "kill",     "Stop a background agent",                    "<id|all>", FALSE },
     { "expand",   "Show what a line would send, without sending it",
-      "<line>" },
-    { "save",     "Write the transcript to a file",             "<path>" },
+      "<line>", TRUE },
+    { "save",     "Write the transcript to a file",             "<path>", TRUE },
     { "export",   "Write the transcript as markdown or org",
-      "<text|markdown|org> [path]" },
-    { NULL, NULL, NULL }
+      "<text|markdown|org> [path]", TRUE },
+    { "loop",     "Repeat a prompt or /command on an interval, or at a pace the model picks",
+      "[INTERVAL] [PROMPT|/command] | list | show|pause|resume|run|delete ID|all | edit ID ... | stop", FALSE },
+    { "goal",     "Keep taking turns until a condition holds, within a turn and time bound",
+      "CONDITION [--turns N] [--time SPAN] | list | show|pause|resume|run|stop|delete ID|all | edit ID ...", FALSE },
+    { "update",   "Install the latest ai-glib, or show whether one is available",
+      "[status]", FALSE },
+    { NULL, NULL, NULL, FALSE }
 };
 
 /* ================================================================
@@ -82,6 +110,7 @@ struct _AiCommand
     gchar         *argument_hint;
     AiCommandKind  kind;
     AiResource    *resource;
+    gboolean       schedulable;
 };
 
 G_DEFINE_TYPE(AiCommand, ai_command, G_TYPE_OBJECT)
@@ -225,6 +254,41 @@ ai_command_get_kind(AiCommand *self)
     g_return_val_if_fail(AI_IS_COMMAND(self), AI_COMMAND_BUILTIN);
 
     return self->kind;
+}
+
+/**
+ * ai_command_get_schedulable:
+ * @self: an #AiCommand
+ *
+ * Whether a scheduled loop may run this command unattended. A command
+ * from a file always may -- it expands to text for the model. A built-in
+ * may only when it reports or writes a file rather than changing the
+ * session.
+ *
+ * Returns: %TRUE when a loop may run it
+ */
+gboolean
+ai_command_get_schedulable(AiCommand *self)
+{
+    g_return_val_if_fail(AI_IS_COMMAND(self), FALSE);
+
+    return self->kind != AI_COMMAND_BUILTIN || self->schedulable;
+}
+
+/**
+ * ai_command_set_schedulable:
+ * @self: an #AiCommand
+ * @schedulable: whether a loop may run it
+ *
+ * For an embedder's own built-ins. The ones ai-glib ships are decided by
+ * its command table.
+ */
+void
+ai_command_set_schedulable(AiCommand *self, gboolean schedulable)
+{
+    g_return_if_fail(AI_IS_COMMAND(self));
+
+    self->schedulable = schedulable;
 }
 
 /**
@@ -966,6 +1030,8 @@ ai_command_set_init(AiCommandSet *self)
                                                     entry->description,
                                                     entry->argument_hint);
 
+        command->schedulable = entry->schedulable;
+
         g_hash_table_replace(self->builtins, g_strdup(entry->name), command);
     }
 }
@@ -1040,6 +1106,145 @@ ai_command_set_get_shell_policy(AiCommandSet *self)
 }
 
 /*
+ * Wrap @resource under an invocation name that is not its file name.
+ *
+ * Used when a skill has to stay reachable without taking the built-in's
+ * spelling. The resource itself is unchanged, so anything that keys on
+ * ai_resource_get_name() still sees the name on disk.
+ */
+static AiCommand *
+command_for_resource_named(
+    AiResource  *resource,
+    const gchar *name
+){
+    AiCommand *command;
+
+    command = ai_command_new_for_resource(resource);
+    g_free(command->name);
+    command->name = g_strdup(name);
+
+    return command;
+}
+
+/* TRUE when @name is "<builtin> (skill)". @base is the part before the
+ * suffix, transfer full, and only set on success. */
+static gboolean
+command_skill_alias_base(
+    const gchar *name,
+    gchar      **base
+){
+    gsize suffix_len;
+    gsize len;
+
+    if (base != NULL)
+    {
+        *base = NULL;
+    }
+
+    if (name == NULL)
+    {
+        return FALSE;
+    }
+
+    suffix_len = strlen(AI_COMMAND_SKILL_ALIAS_SUFFIX);
+    len = strlen(name);
+
+    if (len <= suffix_len ||
+        strcmp(name + (len - suffix_len), AI_COMMAND_SKILL_ALIAS_SUFFIX) != 0)
+    {
+        return FALSE;
+    }
+
+    if (base != NULL)
+    {
+        *base = g_strndup(name, len - suffix_len);
+    }
+
+    return TRUE;
+}
+
+/*
+ * The skill hidden behind a built-in, addressed by its alias spelling.
+ *
+ * Only a built-in collision produces this name. A skill that already
+ * owns its bare name is looked up as that name, and a file that happens
+ * to be called "foo (skill)" is left to the ordinary search.
+ */
+static AiCommand *
+lookup_builtin_skill_alias(
+    AiCommandSet *self,
+    const gchar  *name
+){
+    g_autofree gchar *base = NULL;
+    g_autofree gchar *alias = NULL;
+    AiResource       *resource;
+
+    if (!command_skill_alias_base(name, &base))
+    {
+        return NULL;
+    }
+
+    if (!g_hash_table_contains(self->builtins, base) || self->registry == NULL)
+    {
+        return NULL;
+    }
+
+    resource = ai_resource_registry_lookup(self->registry, AI_RESOURCE_SKILL,
+                                           base);
+
+    if (resource == NULL)
+    {
+        return NULL;
+    }
+
+    alias = g_strdup_printf("%s%s", base, AI_COMMAND_SKILL_ALIAS_SUFFIX);
+
+    return command_for_resource_named(resource, alias);
+}
+
+/*
+ * Arguments that follow a "(skill)" marker, or NULL when @rest is not
+ * that marker.
+ *
+ * The marker is one whitespace-delimited word. What follows it, leading
+ * whitespace included, is the skill's own arguments.
+ */
+static const gchar *
+skill_alias_arguments(const gchar *rest)
+{
+    const gchar *p;
+    gsize        mark_len;
+
+    if (rest == NULL)
+    {
+        return NULL;
+    }
+
+    p = rest;
+
+    while (*p == ' ' || *p == '\t')
+    {
+        p++;
+    }
+
+    mark_len = strlen(AI_COMMAND_SKILL_ALIAS_MARK);
+
+    if (strncmp(p, AI_COMMAND_SKILL_ALIAS_MARK, mark_len) != 0)
+    {
+        return NULL;
+    }
+
+    p += mark_len;
+
+    if (*p != '\0' && *p != ' ' && *p != '\t')
+    {
+        return NULL;
+    }
+
+    return p;
+}
+
+/*
  * The resource behind a name, looking at commands before skills.
  *
  * Agents are deliberately last: an agent is normally reached through the
@@ -1085,7 +1290,8 @@ lookup_resource(AiCommandSet *self, const gchar *name)
  *
  * A built-in always wins over a file of the same name. That is not
  * politeness --- a stray `quit.md` in a scanned directory must not be
- * able to take away the way out of the program.
+ * able to take away the way out of the program. A skill of that name is
+ * still reachable as `name (skill)`.
  *
  * Returns: (transfer full) (nullable): the command, or %NULL
  */
@@ -1095,6 +1301,7 @@ ai_command_set_lookup(
     const gchar  *name
 ){
     AiCommand  *builtin;
+    AiCommand  *aliased;
     AiResource *resource;
 
     g_return_val_if_fail(AI_IS_COMMAND_SET(self), NULL);
@@ -1105,6 +1312,13 @@ ai_command_set_lookup(
     if (builtin != NULL)
     {
         return g_object_ref(builtin);
+    }
+
+    aliased = lookup_builtin_skill_alias(self, name);
+
+    if (aliased != NULL)
+    {
+        return aliased;
     }
 
     resource = lookup_resource(self, name);
@@ -1130,9 +1344,11 @@ compare_commands(gconstpointer a, gconstpointer b)
  *
  * Every command, built-in and file-backed, sorted by name.
  *
- * One entry per name. A file shadowed by a built-in is omitted, and so
- * is a skill whose name a command already took --- this list answers
- * "what can I type", and typing it reaches exactly one of them.
+ * One entry per thing the user can type. A file shadowed by a built-in
+ * is omitted, and so is a skill whose name a file-backed command already
+ * took. A skill that collides with a built-in is the exception: it is
+ * listed again as `name (skill)`, because dropping it would hide the
+ * skill and keeping the bare name would let the skill take the built-in.
  *
  * Returns: (transfer full) (element-type AiCommand): the commands
  */
@@ -1162,9 +1378,9 @@ ai_command_set_list(AiCommandSet *self)
 
         /*
          * Kinds are walked in the same order ai_command_set_lookup()
-         * searches them, so the entry that appears is the one that would
-         * run. Listing a skill and a command with the same name would
-         * promise a choice the user does not have.
+         * searches them, so a file-backed command hides a skill of the
+         * same name. A built-in does not: the skill is listed separately
+         * as "name (skill)" and that spelling is what runs it.
          */
         for (k = 0; k < G_N_ELEMENTS(kinds); k++)
         {
@@ -1176,9 +1392,34 @@ ai_command_set_list(AiCommandSet *self)
             {
                 const gchar *name = ai_resource_get_name(iter_r->data);
 
-                if (name == NULL ||
-                    g_hash_table_contains(self->builtins, name) ||
-                    g_hash_table_contains(taken, name))
+                if (name == NULL)
+                {
+                    continue;
+                }
+
+                /*
+                 * The bare name belongs to the built-in. A skill is
+                 * offered beside it under "name (skill)"; a command
+                 * file or an agent of that name is not, because either
+                 * one could replace /quit.
+                 */
+                if (g_hash_table_contains(self->builtins, name))
+                {
+                    if (kinds[k] == AI_RESOURCE_SKILL)
+                    {
+                        g_autofree gchar *alias =
+                            g_strdup_printf("%s%s", name,
+                                            AI_COMMAND_SKILL_ALIAS_SUFFIX);
+
+                        out = g_list_prepend(
+                            out, command_for_resource_named(iter_r->data,
+                                                            alias));
+                    }
+
+                    continue;
+                }
+
+                if (g_hash_table_contains(taken, name))
                 {
                     continue;
                 }
@@ -1377,6 +1618,34 @@ ai_command_set_resolve(
     rest = line + 1 + name_len;
 
     command = ai_command_set_lookup(self, name);
+
+    /*
+     * "/help (skill)" is the skill, not the built-in with an argument
+     * of "(skill)". The marker is only special when a skill of that
+     * name actually exists; otherwise the built-in keeps the text.
+     */
+    if (command != NULL &&
+        ai_command_get_kind(command) == AI_COMMAND_BUILTIN)
+    {
+        const gchar *alias_arguments = skill_alias_arguments(rest);
+
+        if (alias_arguments != NULL)
+        {
+            g_autofree gchar     *alias_name = NULL;
+            g_autoptr(AiCommand)  skill = NULL;
+
+            alias_name = g_strdup_printf("%s%s", name,
+                                         AI_COMMAND_SKILL_ALIAS_SUFFIX);
+            skill = ai_command_set_lookup(self, alias_name);
+
+            if (skill != NULL)
+            {
+                g_clear_object(&command);
+                command = (AiCommand *)g_steal_pointer(&skill);
+                rest = alias_arguments;
+            }
+        }
+    }
 
     if (command == NULL)
     {

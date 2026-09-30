@@ -43,11 +43,12 @@ exists or is accepted.
 | Define                          | Model ID            |
 |---------------------------------+---------------------|
 | =AI_CLAUDE_TMUX_MODEL_FABLE_5=  | ="claude-fable-5"=  |
+| =AI_CLAUDE_TMUX_MODEL_OPUS_5_5= | ="claude-opus-5-5"= |
 | =AI_CLAUDE_TMUX_MODEL_OPUS_5=   | ="claude-opus-5"=   |
 | =AI_CLAUDE_TMUX_MODEL_SONNET_5= | ="claude-sonnet-5"= |
 
-=ai_provider_list_models()= reports all seven: the four aliases followed by
-the three pinned Claude 5 IDs.
+=ai_provider_list_models()= reports all eight: the four aliases followed by
+the pinned Claude 5 and Opus 5.5 IDs. Opus 5.5's id is =claude-opus-5-5=.
 
 ** Dedicated tmux socket (=-L=)
 Every tmux command this client runs is pinned to its own server socket via
@@ -372,3 +373,14 @@ preserving its SessionStart and Stop hooks. Enabling sets
 approval remains a separate setting. The dry-run command shows the generated
 settings file placeholder, not its eventual JSON contents.
 See [[file:../cli.org][CLI sandbox policies]] for supported provider values and scope.
+
+* Plan mode
+The =permission-mode= GObject property forwards Claude's native permission mode:
+
+#+begin_src bash
+ai -p claude-tmux --set permission-mode=plan --dry-run "Inspect the code"
+#+end_src
+
+It is emitted on fresh and resumed sessions. =skip-permissions= takes precedence
+when both are explicitly set. ai-tui's plan mode disables bypass while planning
+and restores the previous provider settings when leaving it.

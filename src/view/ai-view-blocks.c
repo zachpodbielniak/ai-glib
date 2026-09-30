@@ -10,6 +10,8 @@
 #include "config.h"
 
 #include "view/ai-view-blocks.h"
+#include "view/ai-markup.h"
+#include "view/ai-lsp.h"
 
 /* The agent block reads state out of live #AiAgent objects. The view
  * layer already reaches into the agent layer through #AiConversation,
@@ -117,13 +119,146 @@ ai_view_turn_block_get_text(AiViewTurnBlock *self)
  * Assistant prose
  * ================================================================ */
 
+typedef struct
+{
+	guint          generation;
+	gchar         *text;
+	volatile gint  cancelled;
+	AiViewTextBlock *block;
+} LspJob;
+
 struct _AiViewTextBlock
 {
     AiViewBlock parent_instance;
     GString    *text;
+    GArray     *tokens;
+    guint       lsp_generation;
+    gboolean    lsp_started;
 };
 
+/* Off unless a frontend asks. ai-gui renders the same blocks, and a
+ * language server is a subprocess a window should not start on its own. */
+static gboolean semantic_highlight = FALSE;
+
 G_DEFINE_TYPE(AiViewTextBlock, ai_view_text_block, AI_TYPE_VIEW_BLOCK)
+
+static void
+array_free(gpointer data)
+{
+	g_array_free(data, TRUE);
+}
+
+/* The task does not reference the block. A GTask source would, and then
+ * the last unref from the transcript would not run until the server had
+ * already finished — so nothing would ever cancel it. */
+static void
+lsp_block_gone(gpointer data, GObject *gone)
+{
+	LspJob *job = data;
+
+	(void)gone;
+	g_atomic_int_set(&job->cancelled, 1);
+	job->block = NULL;
+}
+
+static void
+lsp_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancellable)
+{
+	LspJob *job = data;
+	GArray *tokens;
+
+	(void)source;
+	(void)cancellable;
+	tokens = ai_lsp_semantic_tokens(job->text, &job->cancelled, NULL);
+	if (tokens == NULL)
+		tokens = g_array_new(FALSE, TRUE, sizeof(AiMarkupToken));
+	g_task_return_pointer(task, tokens, (GDestroyNotify)array_free);
+}
+
+static void
+lsp_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	LspJob *job = user_data;
+	AiViewTextBlock *self = job->block;
+	GArray *tokens = g_task_propagate_pointer(G_TASK(result), NULL);
+
+	(void)source;
+
+	if (self != NULL)
+		g_object_weak_unref(G_OBJECT(self), lsp_block_gone, job);
+	if (self != NULL && job->generation == self->lsp_generation && tokens != NULL)
+	{
+		if (self->tokens != NULL)
+			g_array_free(self->tokens, TRUE);
+		self->tokens = tokens;
+		ai_view_block_changed(AI_VIEW_BLOCK(self));
+	}
+	else if (tokens != NULL)
+		g_array_free(tokens, TRUE);
+	g_free(job->text);
+	g_free(job);
+}
+
+static gboolean
+lsp_wanted(const gchar *text)
+{
+	g_autoptr(GArray) fences = NULL;
+	guint i;
+	const gchar *env = g_getenv("AI_LSP");
+
+	if (!semantic_highlight)
+		return FALSE;
+	if (env != NULL && (g_ascii_strcasecmp(env, "off") == 0 || g_strcmp0(env, "0") == 0))
+		return FALSE;
+	fences = ai_markup_fences(text);
+	for (i = 0; i < fences->len; i++)
+	{
+		AiMarkupFence *fence = &g_array_index(fences, AiMarkupFence, i);
+
+		if (ai_lsp_command_for_language(fence->language) != NULL)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static void
+lsp_start(AiViewTextBlock *self)
+{
+	GTask *task;
+	LspJob *job;
+
+	if (!ai_view_block_get_complete(AI_VIEW_BLOCK(self)) || self->lsp_started)
+		return;
+	if (!lsp_wanted(self->text->str))
+		return;
+	self->lsp_started = TRUE;
+	self->lsp_generation++;
+	job = g_new0(LspJob, 1);
+	job->generation = self->lsp_generation;
+	job->text = g_strdup(self->text->str);
+	job->block = self;
+	g_object_weak_ref(G_OBJECT(self), lsp_block_gone, job);
+	task = g_task_new(NULL, NULL, lsp_done, job);
+	/* task_data is what the thread function receives. The callback
+	 * data is a different pointer, and it is NULL in the thread when
+	 * the task has no source object. */
+	g_task_set_task_data(task, job, NULL);
+	g_task_run_in_thread(task, lsp_thread);
+	g_object_unref(task);
+}
+
+/**
+ * ai_view_text_block_set_semantic_highlight:
+ * @enabled: whether a finished prose block may ask a language server
+ *
+ * ai-tui turns this on. A block rendered anywhere else stays with the
+ * lexer, which needs no subprocess.
+ */
+void
+ai_view_text_block_set_semantic_highlight(gboolean enabled)
+{
+	semantic_highlight = enabled;
+}
 
 static AiViewBlockKind
 text_get_kind(AiViewBlock *block)
@@ -136,11 +271,9 @@ static AiRenderedText *
 text_render(AiViewBlock *block)
 {
     AiViewTextBlock *self = AI_VIEW_TEXT_BLOCK(block);
-    AiRenderedText *out = ai_rendered_text_new();
 
-    ai_rendered_text_append(out, self->text->str, AI_STYLE_DEFAULT);
-
-    return out;
+    lsp_start(self);
+    return ai_markup_render(self->text->str, self->tokens);
 }
 
 static void
@@ -149,6 +282,8 @@ ai_view_text_block_finalize(GObject *object)
     AiViewTextBlock *self = AI_VIEW_TEXT_BLOCK(object);
 
     g_string_free(self->text, TRUE);
+    if (self->tokens != NULL)
+        g_array_free(self->tokens, TRUE);
 
     G_OBJECT_CLASS(ai_view_text_block_parent_class)->finalize(object);
 }
@@ -207,6 +342,13 @@ ai_view_text_block_append(
     }
 
     g_string_append(self->text, text);
+    self->lsp_generation++;
+    self->lsp_started = FALSE;
+    if (self->tokens != NULL)
+    {
+        g_array_free(self->tokens, TRUE);
+        self->tokens = NULL;
+    }
     ai_view_block_changed(AI_VIEW_BLOCK(self));
 }
 

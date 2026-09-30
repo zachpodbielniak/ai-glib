@@ -486,6 +486,7 @@ test_config_save_rejected(void)
 	const gchar *invalid[] = {
 		"broken: [\n", "- sequence\n", "scalar\n", "", "{}\n---\n{}\n",
 		"apps: []\n", "apps: {ai: null}\n", "apps: {ai-tui: []}\n",
+		"apps: {ai-gui: []}\n",
 		"apps: {ai: {default_provider: typo}}\n",
 		"apps: {ai: {default_model: []}}\n",
 		"apps: {ai: {}, ai: {}}\n",
@@ -536,7 +537,7 @@ test_config_save_rejected(void)
 static void
 test_config_resolve_defaults(void)
 {
-	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	const gchar *scopes[] = {NULL, "ai", "ai-tui", "ai-gui"};
 	const struct {
 		const gchar *provider;
 		const gchar *model;
@@ -561,7 +562,8 @@ test_config_resolve_defaults(void)
 	g_autofree gchar *path = write_temp_yaml(
 		"default_provider: ollama\ndefault_model: configured\n"
 		"apps:\n  ai: {default_provider: ollama, default_model: configured}\n"
-		"  ai-tui: {default_provider: ollama, default_model: configured}\n");
+		"  ai-tui: {default_provider: ollama, default_model: configured}\n"
+		"  ai-gui: {default_provider: ollama, default_model: configured}\n");
 	AiProviderType provider;
 	guint i;
 	guint j;
@@ -800,7 +802,7 @@ test_config_null_models(void)
 static void
 test_config_invalid_utf8_model(void)
 {
-	const gchar *scopes[] = {NULL, "ai", "ai-tui"};
+	const gchar *scopes[] = {NULL, "ai", "ai-tui", "ai-gui"};
 	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
 	g_autofree gchar *directory = g_build_filename(sandbox, "ai-glib", NULL);
 	g_autofree gchar *path = g_build_filename(directory, "config.yaml", NULL);
@@ -880,6 +882,76 @@ test_config_yaml_edges(void)
 	g_unlink(path);
 }
 
+/* The updates: section, and that a malformed one rejects the file. */
+static void
+test_config_updates(void)
+{
+	g_autoptr(AiConfig) config = g_object_new(AI_TYPE_CONFIG, NULL);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *upstream = NULL;
+	g_autofree gchar *source_dir = NULL;
+	gboolean check = FALSE;
+	gboolean run_tests = TRUE;
+	guint interval = 0;
+	const gchar *bad[] = {
+		"updates: yes\n",
+		"updates:\n  check: maybe\n",
+		"updates:\n  interval: soon\n",
+		"updates:\n  interval: -5\n",
+		"updates:\n  run-tests: 1\n",
+		"updates:\n  upstream: [origin, master]\n",
+		"updates:\n  source-dir: {a: b}\n",
+	};
+	guint i;
+
+	/* Defaults: checks off, four hours, nothing configured. */
+	g_object_get(config, "update-check", &check, "update-interval", &interval,
+	             "update-upstream", &upstream, "update-source-dir", &source_dir,
+	             "update-run-tests", &run_tests, NULL);
+	g_assert_false(check);
+	g_assert_cmpuint(interval, ==, 4 * 60 * 60);
+	g_assert_null(upstream);
+	g_assert_null(source_dir);
+	g_assert_false(run_tests);
+
+	path = write_temp_yaml("updates:\n"
+	                       "  check: false\n"
+	                       "  interval: 3600\n"
+	                       "  upstream: fork/main\n"
+	                       "  source-dir: /src/ai-glib\n"
+	                       "  run-tests: true\n");
+	g_assert_true(ai_config_load_from_file(config, path, &error));
+	g_assert_no_error(error);
+	g_object_get(config, "update-check", &check, "update-interval", &interval,
+	             "update-upstream", &upstream, "update-source-dir", &source_dir,
+	             "update-run-tests", &run_tests, NULL);
+	g_assert_false(check);
+	g_assert_cmpuint(interval, ==, 3600);
+	g_assert_cmpstr(upstream, ==, "fork/main");
+	g_assert_cmpstr(source_dir, ==, "/src/ai-glib");
+	g_assert_true(run_tests);
+
+	{
+		g_autoptr(AiConfig) opted = g_object_new(AI_TYPE_CONFIG, NULL);
+
+		g_assert_true(g_file_set_contents(path, "updates:\n  check: true\n", -1, &error));
+		g_assert_true(ai_config_load_from_file(opted, path, &error));
+		g_assert_no_error(error);
+		g_object_get(opted, "update-check", &check, NULL);
+		g_assert_true(check);
+	}
+
+	for (i = 0; i < G_N_ELEMENTS(bad); i++)
+	{
+		g_assert_true(g_file_set_contents(path, bad[i], -1, &error));
+		g_assert_false(ai_config_load_from_file(config, path, &error));
+		g_assert_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR);
+		g_clear_error(&error);
+	}
+	g_unlink(path);
+}
+
 int
 main(
 	int   argc,
@@ -925,6 +997,7 @@ main(
 	g_test_add_func("/ai-glib/config/null-models", test_config_null_models);
 	g_test_add_func("/ai-glib/config/invalid-utf8-model", test_config_invalid_utf8_model);
 	g_test_add_func("/ai-glib/config/yaml-edges", test_config_yaml_edges);
+	g_test_add_func("/ai-glib/config/updates", test_config_updates);
 	result = g_test_run();
 	g_rmdir(sandbox);
 	g_free(sandbox);

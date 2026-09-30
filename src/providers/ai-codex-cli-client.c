@@ -789,7 +789,8 @@ static void free_models(gpointer data) { g_list_free_full(data, g_free); }
 static void
 list_models_async(AiProvider *provider, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer data)
 {
-    const gchar *models[] = { AI_CODEX_CLI_MODEL_GPT_6_ASTRA, AI_CODEX_CLI_MODEL_GPT_5_6_SOL,
+    const gchar *models[] = { AI_CODEX_CLI_MODEL_GPT_6_ASTRA, AI_CODEX_CLI_MODEL_GPT_6_SOL,
+        AI_CODEX_CLI_MODEL_GPT_6_LUNA, AI_CODEX_CLI_MODEL_GPT_5_6_SOL,
         AI_CODEX_CLI_MODEL_GPT_5_6_TERRA, AI_CODEX_CLI_MODEL_GPT_5_6_LUNA, AI_CODEX_CLI_MODEL_GPT_5_5,
         AI_CODEX_CLI_MODEL_GPT_5_4_MINI, AI_CODEX_CLI_MODEL_GPT_5_3_CODEX_SPARK };
     g_autoptr(GTask) task = g_task_new(provider, cancellable, callback, data);

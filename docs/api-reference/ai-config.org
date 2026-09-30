@@ -331,6 +331,8 @@ ai_config_save_defaults(
 
 Use ="ai"= or ="ai-tui"= for =app=. The app model getter returns a borrowed nullable string; an unset app uses Claude and its native model. Saving writes =apps.<app>.default_provider= and =apps.<app>.default_model= in the user configuration. Pass =NULL= for =app= to save top-level library defaults, or for =model= to select the provider's native model. The save operation returns FALSE with =GError= on failure and preserves unrelated configuration values. See [[file:../configuration.org][configuration]] for the complete schema and [[file:../cli.org][ai --setup]] for the confirmation-based UI.
 
+=ai_config_save_update_check()= writes only =updates.check=. Background checks stay off until that value is true. =ai --setup= scope =4= is the interactive path; it preserves every other key.
+
 *** Resolving a Selection
 #+begin_src C
 gboolean

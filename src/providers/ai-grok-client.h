@@ -29,10 +29,21 @@ G_DECLARE_FINAL_TYPE(AiGrokClient, ai_grok_client, AI, GROK_CLIENT, AiClient)
  *
  * The default model for Grok clients.
  */
-#define AI_GROK_DEFAULT_MODEL "grok-4.3"
+#define AI_GROK_DEFAULT_MODEL "grok-4.7"
 
 /*
- * Grok 4.3 Models (Latest)
+ * Grok 4.7 Models (Latest)
+ *
+ * Flagship as of 2026-09-21. grok-4.6 and grok-4.5 remain current API
+ * ids. grok-4.7-build-fast is a Grok Build CLI id, not an API id — see
+ * AI_GROK_BUILD_MODEL_GROK_4_7_BUILD_FAST.
+ */
+#define AI_GROK_MODEL_4_7                          "grok-4.7"
+#define AI_GROK_MODEL_4_6                          "grok-4.6"
+#define AI_GROK_MODEL_4_5                          "grok-4.5"
+
+/*
+ * Grok 4.3 Models
  *
  * xAI changed its naming convention from dash-separated (grok-4-1) to
  * dot-separated (grok-4.3) starting with the 4.20 generation.
@@ -95,7 +106,7 @@ G_DECLARE_FINAL_TYPE(AiGrokClient, ai_grok_client, AI, GROK_CLIENT, AiClient)
 /*
  * Convenience aliases
  */
-#define AI_GROK_MODEL_LATEST                AI_GROK_MODEL_4_3
+#define AI_GROK_MODEL_LATEST                AI_GROK_MODEL_4_7
 #define AI_GROK_MODEL_FAST                  AI_GROK_MODEL_4_20_NON_REASONING
 #define AI_GROK_MODEL_CODE                  AI_GROK_MODEL_BUILD_0_1
 

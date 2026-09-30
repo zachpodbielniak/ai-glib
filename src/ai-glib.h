@@ -16,6 +16,7 @@
 
 /* Version information */
 #include "ai-version.h"
+#include "core/ai-build-info.h"
 
 /* Forward type declarations */
 #include "ai-types.h"
@@ -31,6 +32,10 @@
 #include "core/ai-event-source.h"
 #include "core/ai-image-capabilities.h"
 #include "core/ai-embedder.h"
+#include "core/ai-decider.h"
+#include "model/ai-decision.h"
+#include "providers/ai-laya-client.h"
+#include "agent/ai-mock-decider.h"
 #include "core/ai-image-generator.h"
 #include "core/ai-video-generator.h"
 #include "core/ai-client.h"
@@ -50,6 +55,7 @@
 #include "view/ai-view-tool-block.h"
 #include "view/ai-transcript.h"
 #include "view/ai-conversation.h"
+#include "view/ai-prompt-queue.h"
 
 /* Model classes */
 #include "model/ai-usage.h"
@@ -112,11 +118,14 @@
 #include "agent/ai-mock-provider.h"
 
 /* Harness layer - commands, skills and agents on disk */
+#include "harness/ai-work-session.h"
 #include "harness/ai-resource.h"
 #include "harness/ai-resource-registry.h"
 #include "harness/ai-mention.h"
 #include "harness/ai-command.h"
 #include "harness/ai-completion.h"
+#include "harness/ai-loop.h"
+#include "harness/ai-loop-runner.h"
 
 #include "voice/ai-audio-transport.h"
 #include "voice/ai-speech-recognizer.h"

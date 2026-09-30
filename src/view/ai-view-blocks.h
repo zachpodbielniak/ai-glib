@@ -59,6 +59,9 @@ ai_view_text_block_append(
 const gchar *
 ai_view_text_block_get_text(AiViewTextBlock *self);
 
+void
+ai_view_text_block_set_semantic_highlight(gboolean enabled);
+
 /* --- Reasoning --- */
 
 #define AI_TYPE_VIEW_THINKING_BLOCK (ai_view_thinking_block_get_type())

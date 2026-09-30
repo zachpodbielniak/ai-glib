@@ -30,9 +30,12 @@
 #include <unistd.h>
 
 #include "ai-glib.h"
+#include "ai-decide-options.h"
 #include "ai-setup.h"
 #include "ai-launch.h"
 #include "ai-mcp-options.h"
+#include "ai-cli-update.h"
+#include "ai-loop-cli.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -60,6 +63,8 @@ static gboolean  opt_list_providers  = FALSE;
 static gboolean  opt_interactive     = FALSE;
 static gboolean  opt_no_expand       = FALSE;
 static gboolean  opt_version         = FALSE;
+static gboolean  opt_check_update    = FALSE;
+static gboolean  opt_update          = FALSE;
 static gboolean  opt_license         = FALSE;
 static gboolean  opt_setup           = FALSE;
 static gboolean  opt_usage           = FALSE;
@@ -169,6 +174,10 @@ static const GOptionEntry option_entries[] = {
 	  "Interactive multi-turn REPL (keeps history)", NULL },
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &opt_version,
 	  "Print version and exit", NULL },
+	{ "check-update", 0, 0, G_OPTION_ARG_NONE, &opt_check_update,
+	  "Fetch upstream and say whether a newer ai-glib is available (--json for JSON)", NULL },
+	{ "update", 0, 0, G_OPTION_ARG_NONE, &opt_update,
+	  "Pull, rebuild and install ai-glib from the checkout that built this binary", NULL },
 	{ "license", 0, 0, G_OPTION_ARG_NONE, &opt_license,
 	  "Print licensing information and exit", NULL },
 	{ "image-gen", 'I', 0, G_OPTION_ARG_NONE, &opt_image_gen,
@@ -722,6 +731,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 		g_autoptr(GError) error = NULL;
 		g_autoptr(GPtrArray) argv = NULL;
 		g_autofree gchar *claude_exe = NULL;
+		g_autofree gchar *permission_mode = NULL;
 		g_autofree gchar *cwd = g_get_current_dir();
 		const gchar *tmux_bin = g_getenv("TMUX_PATH");
 
@@ -737,6 +747,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 			tmux_bin = "tmux";
 
 		/* Representative session: a fresh session-id, sample paths. */
+		g_object_get(provider, "permission-mode", &permission_mode, NULL);
 		argv = ai_claude_tmux_client_build_session_argv(
 			tmux_bin,
 			ai_claude_tmux_client_get_socket_name(
@@ -745,7 +756,7 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 			/* resuming */ FALSE, "<session-id>", "<settings.json>",
 			opt_model, opt_effort, opt_skip_perms,
 			ai_claude_tmux_client_get_mcp_config_path(
-				AI_CLAUDE_TMUX_CLIENT(provider)));
+				AI_CLAUDE_TMUX_CLIENT(provider)), permission_mode);
 		print_argv((gchar **) argv->pdata);
 		return 0;
 	}
@@ -1459,6 +1470,7 @@ failed:
 	return 1;
 }
 
+
 int
 main(int argc, char *argv[])
 {
@@ -1473,11 +1485,18 @@ main(int argc, char *argv[])
 	GList                    *messages = NULL;
 	int                       status = 0;
 
+	if (argc > 1 && g_str_equal(argv[1], "decide"))
+		return decide_cli_main(argv + 1);
+
+	if (argc > 1 && (g_str_equal(argv[1], "loop") || g_str_equal(argv[1], "goal")))
+		return loop_cli_main(argc - 1, argv + 1);
+
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);
 	g_option_context_add_main_entries(ctx, mcp_option_entries, NULL);
 	g_option_context_set_summary(
 		ctx,
+		"Use ai decide --help for probability-based classification.\n"
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "
@@ -1515,6 +1534,7 @@ main(int argc, char *argv[])
 		"  ai --mcp-server --mcp-tools conversation_status,conversation_send\n"
 		"  ai --mcp-server --mcp-all-tools --mcp-no-inject\n"
 		"  ai --setup                       # choose defaults for one scope\n"
+		"  printf '4\\ny\\n' | ai --setup       # opt in to background update checks\n"
 		"  ai -p default -m default \"hi\"    # same defaults as ai \"hi\"\n"
 		"  ai \"why is the sky blue?\"\n"
 		"  git diff | ai -s \"Review this diff for bugs\"\n"
@@ -1539,9 +1559,21 @@ main(int argc, char *argv[])
 
 	if (opt_version)
 	{
-		printf("ai (ai-glib) %d.%d.%d\n", AI_VERSION_MAJOR,
-		       AI_VERSION_MINOR, AI_VERSION_MICRO);
+		g_autofree gchar *summary = ai_build_info_dup_summary();
+
+		printf("ai (ai-glib) %s\n", summary);
 		return 0;
+	}
+
+	if (opt_check_update || opt_update)
+	{
+		if ((opt_check_update && opt_update) || (opt_update && opt_report_json) || argc > 1)
+		{
+			g_printerr("ai: --check-update and --update take no prompt and cannot be combined; "
+			           "--json goes with --check-update\n");
+			return 2;
+		}
+		return opt_update ? ai_cli_run_update() : ai_cli_check_update(opt_report_json);
 	}
 
 	if (opt_license)

@@ -284,4 +284,21 @@ ai_conversation_send_input_finish(
     GError          **error
 );
 
+AiConversation *
+ai_conversation_fork(
+    AiConversation  *self,
+    GObject         *provider,
+    GError         **error
+);
+
+gboolean
+ai_conversation_get_plan_mode(AiConversation *self);
+
+gboolean
+ai_conversation_set_plan_mode(
+	AiConversation *self,
+	gboolean        enabled,
+	GError        **error
+);
+
 G_END_DECLS

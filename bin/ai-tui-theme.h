@@ -1,29 +1,16 @@
-/* Private terminal themes. SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Private terminal themes. SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * The palettes themselves live in src/core/ai-theme.h, shared with the
+ * GTK front-end. What is left here is the half only a terminal has:
+ * turning an 0xRRGGBB into the nearest xterm cube entry, and colour
+ * pairs.
+ */
 #pragma once
 
-typedef struct
-{
-	const gchar *name;
-	guint background;
-	guint surface;
-	guint text;
-	guint muted;
-	guint accent;
-	guint cyan;
-	guint green;
-	guint yellow;
-	guint red;
-	guint number;
-	guint function;
-} TuiTheme;
+#include "core/ai-theme.h"
 
-static const TuiTheme THEMES[] = {
-	{ "catppuccin-mocha", 0x1e1e2e, 0x313244, 0xcdd6f4, 0xa6adc8, 0xcba6f7, 0x89dceb, 0xa6e3a1, 0xf9e2af, 0xf38ba8, 0xfab387, 0x89b4fa },
-	{ "catppuccin-latte", 0xeff1f5, 0xdce0e8, 0x4c4f69, 0x6c6f85, 0x8839ef, 0x047e98, 0x40a02b, 0x9a6700, 0xd20f39, 0xfe640b, 0x1e66f5 },
-	{ "nord", 0x2e3440, 0x3b4252, 0xeceff4, 0xd8dee9, 0x88c0d0, 0x8fbcbb, 0xa3be8c, 0xebcb8b, 0xbf616a, 0xd08770, 0x88c0d0 },
-	{ "terminal", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-	{ "monochrome", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-};
+#define THEMES AI_THEMES
+typedef AiTheme TuiTheme;
 
 static guint theme_index;
 static gboolean theme_colour;

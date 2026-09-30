@@ -536,11 +536,41 @@ test_filesystem_providers(void)
 	g_type_class_unref(types);
 }
 
+static void
+test_plan_mode(Fixture *fixture, gconstpointer data)
+{
+	g_autoptr(McpToolResult) result = NULL;
+	g_autofree gchar *directory = g_dir_make_tmp("ai-plan-host-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "sample.txt", NULL);
+	(void)data;
+	ai_conversation_set_working_directory(fixture->conversation, directory);
+	g_assert_true(g_file_set_contents(path, "original", -1, NULL));
+	g_assert_true(ai_conversation_set_plan_mode(fixture->conversation, TRUE, NULL));
+	result = call(fixture, "write", "{\"path\":\"sample.txt\",\"content\":\"changed\"}");
+	g_assert_true(mcp_tool_result_get_is_error(result));
+	g_assert_nonnull(strstr(result_text(result), "plan mode"));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "agent_spawn", "{}");
+	g_assert_true(mcp_tool_result_get_is_error(result));
+	g_assert_nonnull(strstr(result_text(result), "plan mode"));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "read", "{\"path\":\"sample.txt\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_cmpstr(result_text(result), ==, "original");
+	g_assert_true(ai_conversation_set_plan_mode(fixture->conversation, FALSE, NULL));
+	g_clear_pointer(&result, mcp_tool_result_unref);
+	result = call(fixture, "write", "{\"path\":\"sample.txt\",\"content\":\"changed\"}");
+	g_assert_false(mcp_tool_result_get_is_error(result));
+	g_assert_cmpint(g_unlink(path), ==, 0);
+	g_assert_cmpint(g_rmdir(directory), ==, 0);
+}
+
 int
 main(int argc, char **argv)
 {
 	static const gchar * const status_only[] = { "conversation_status", NULL };
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/mcp/host/plan-mode", Fixture, NULL, setup, test_plan_mode, teardown);
 	g_test_add("/mcp/host/filesystem", Fixture, NULL, setup, test_filesystem, teardown);
 	g_test_add_func("/mcp/host/filesystem-providers", test_filesystem_providers);
 	g_test_add_func("/mcp/host/server-outlives-host", test_server_outlives_host);

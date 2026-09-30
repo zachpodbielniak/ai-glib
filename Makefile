@@ -45,7 +45,13 @@ include config.mk
 # Public headers (to be installed)
 PUBLIC_HEADERS = \
 	$(SRCDIR)/ai-glib.h \
+	$(SRCDIR)/core/ai-decider.h \
+	$(SRCDIR)/model/ai-decision.h \
+	$(SRCDIR)/providers/ai-laya-client.h \
+	$(SRCDIR)/agent/ai-mock-decider.h \
+	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/ai-types.h \
+	$(SRCDIR)/core/ai-build-info.h \
 	$(SRCDIR)/core/ai-error.h \
 	$(SRCDIR)/core/ai-session-limit.h \
 	$(SRCDIR)/core/ai-enums.h \
@@ -73,6 +79,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/view/ai-view-tool-block.h \
 	$(SRCDIR)/view/ai-transcript.h \
 	$(SRCDIR)/view/ai-conversation.h \
+	$(SRCDIR)/view/ai-prompt-queue.h \
 	$(SRCDIR)/model/ai-usage.h \
 	$(SRCDIR)/model/ai-todo.h \
 	$(SRCDIR)/model/ai-content-block.h \
@@ -127,11 +134,21 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/harness/ai-resource-registry.h \
 	$(SRCDIR)/harness/ai-mention.h \
 	$(SRCDIR)/harness/ai-command.h \
-	$(SRCDIR)/harness/ai-completion.h
+	$(SRCDIR)/harness/ai-completion.h \
+	$(SRCDIR)/harness/ai-loop.h \
+	$(SRCDIR)/harness/ai-loop-runner.h
 
 # Library source files
 LIB_SOURCES = \
+	$(SRCDIR)/core/ai-decider.c \
+	$(SRCDIR)/model/ai-decision.c \
+	$(SRCDIR)/providers/ai-laya-client.c \
+	$(SRCDIR)/agent/ai-mock-decider.c \
+	$(SRCDIR)/harness/ai-work-session.c \
+	$(SRCDIR)/harness/ai-work-context.c \
 	$(SRCDIR)/mcp/ai-mcp-host.c \
+	$(SRCDIR)/core/ai-build-info.c \
+	$(SRCDIR)/core/ai-updater.c \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
@@ -159,10 +176,13 @@ LIB_SOURCES = \
 	$(SRCDIR)/view/ai-tool-style.c \
 	$(SRCDIR)/view/ai-view-block.c \
 	$(SRCDIR)/view/ai-view-blocks.c \
+	$(SRCDIR)/view/ai-markup.c \
+	$(SRCDIR)/view/ai-lsp.c \
 	$(SRCDIR)/view/ai-view-tool-block.c \
 	$(SRCDIR)/view/ai-tool-preview.c \
 	$(SRCDIR)/view/ai-transcript.c \
 	$(SRCDIR)/view/ai-conversation.c \
+	$(SRCDIR)/view/ai-prompt-queue.c \
 	$(SRCDIR)/model/ai-usage.c \
 	$(SRCDIR)/model/ai-todo.c \
 	$(SRCDIR)/model/ai-content-block.c \
@@ -225,7 +245,9 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-resource-registry.c \
 	$(SRCDIR)/harness/ai-mention.c \
 	$(SRCDIR)/harness/ai-command.c \
-	$(SRCDIR)/harness/ai-completion.c
+	$(SRCDIR)/harness/ai-completion.c \
+	$(SRCDIR)/harness/ai-loop.c \
+	$(SRCDIR)/harness/ai-loop-runner.c
 
 PUBLIC_HEADERS += $(filter-out %-private.h,$(wildcard $(SRCDIR)/voice/*.h))
 LIB_SOURCES += $(wildcard $(SRCDIR)/voice/*.c)
@@ -260,6 +282,35 @@ endif
 
 BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
 
+# The GTK4 desktop client.
+#
+# Dropped -- loudly, once -- when gtk4/libadwaita are absent, the same
+# way ai-tui is dropped without ncursesw. Everything else here is
+# headless and still useful on a machine with no desktop toolkit.
+GUI_SOURCES = $(wildcard $(GUIDIR)/*.c)
+GUI_HEADERS = $(wildcard $(GUIDIR)/*.h)
+GUI_OBJECTS = $(patsubst $(GUIDIR)/%.c,$(OBJDIR)/gui/%.o,$(GUI_SOURCES))
+GUI_DEPS    = $(GUI_OBJECTS:.o=.d)
+GUI_BINARY  = $(OUTDIR)/bin/ai-gui
+
+# The GTK-free half of gui/: the session model, its store and the
+# helpers. tests/test-ai-gui-session.c links these directly, which is
+# only possible because none of them includes a toolkit header -- and is
+# the reason none of them does. A test that needed a display would pass
+# or fail by whose machine ran it.
+GUI_MODEL_SOURCES = \
+	$(GUIDIR)/ai-gui-content.c \
+	$(GUIDIR)/ai-gui-settings.c \
+	$(GUIDIR)/ai-gui-session.c \
+	$(GUIDIR)/ai-gui-session-store.c \
+	$(GUIDIR)/ai-gui-work.c \
+	$(GUIDIR)/ai-gui-util.c
+
+ifneq ($(HAVE_GTK),1)
+GUI_BINARY :=
+$(info Note: gtk4/libadwaita not found, skipping ai-gui. Fedora: layer gtk4-devel and libadwaita-devel into the image.)
+endif
+
 # Target-specific, so only the one binary that needs a terminal library
 # links against one.
 $(OUTDIR)/bin/ai-tui: CFLAGS += $(NCURSES_CFLAGS)
@@ -292,10 +343,11 @@ $(YAML_GLIB_STATIC):
 
 # Default target
 .PHONY: all
-all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries
+all: $(OUTDIR)/config.h $(OUTDIR)/ai-version.h shared static $(PROJECT_NAME)-1.0.pc gir binaries gui
 
-# Generate config.h from template
-$(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
+# Generate config.h from template.  config.mk is a prerequisite because the
+# version lives there: without it a bump leaves the old number compiled in.
+$(OUTDIR)/config.h: $(SRCDIR)/config.h.in config.mk | $(OUTDIR)
 	@echo "Generating config.h..."
 	@sed -e 's/@VERSION_MAJOR@/$(VERSION_MAJOR)/g' \
 	     -e 's/@VERSION_MINOR@/$(VERSION_MINOR)/g' \
@@ -308,14 +360,26 @@ $(OUTDIR)/config.h: $(SRCDIR)/config.h.in | $(OUTDIR)
 	     -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' \
 	     $< > $@
 
-# Generate ai-version.h from template
-$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in | $(OUTDIR)
+# Generate ai-version.h from template (config.mk: see config.h above)
+$(OUTDIR)/ai-version.h: $(SRCDIR)/ai-version.h.in config.mk | $(OUTDIR)
 	@echo "Generating ai-version.h..."
 	@sed -e 's/@AI_GLIB_MAJOR_VERSION@/$(VERSION_MAJOR)/g' \
 	     -e 's/@AI_GLIB_MINOR_VERSION@/$(VERSION_MINOR)/g' \
 	     -e 's/@AI_GLIB_MICRO_VERSION@/$(VERSION_MICRO)/g' \
 	     -e 's/@AI_GLIB_VERSION@/$(VERSION)/g' \
 	     $< > $@
+
+# Build provenance: commit, dirty flag, date, source directory, install
+# paths.  FORCE runs the generator on every invocation; it rewrites the
+# header only when its content changed, so a commit (or a first edit
+# after one) recompiles ai-build-info.o and nothing else.  A dependency
+# on .git/HEAD would miss a commit on the current branch and a worktree,
+# whose HEAD is not under .git at all.
+$(OUTDIR)/ai-build-stamp.h: FORCE | $(OUTDIR)
+	@sh build-aux/gen-build-stamp.sh $@ "$(CURDIR)" "$(VERSION)" \
+		"$(PREFIX)" "$(LIBDIR)" "$(INCLUDEDIR)" "$(BUILD_TYPE)"
+
+$(OBJDIR)/core/ai-build-info.o: $(OUTDIR)/ai-build-stamp.h
 
 # Shared library
 .PHONY: shared
@@ -397,10 +461,48 @@ check-headers:
 tests: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@:
 
+# Compiled with the model sources rather than through the generic test
+# rule, which only knows about one translation unit.
+$(OUTDIR)/tests/test-ai-gui-session: $(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-session.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-loops: $(TESTDIR)/test-ai-gui-loops.c $(GUI_MODEL_SOURCES) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-loops.c $(GUI_MODEL_SOURCES) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-content: $(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-content.c $(GUIDIR)/ai-gui-content.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-theme: $(TESTDIR)/test-ai-gui-theme.c $(GUIDIR)/ai-gui-settings.c $(GUI_HEADERS) $(SRCDIR)/core/ai-theme.h $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-theme.c $(GUIDIR)/ai-gui-settings.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-work: $(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-work.c $(GUIDIR)/ai-gui-work.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
+$(OUTDIR)/tests/test-ai-gui-update: $(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-decision-cli: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-linked-work-tui: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-cli-update: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-tui-update: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-ai-loop-cli: $(BIN_BINARIES)
 
 test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."
@@ -409,7 +511,20 @@ test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
 		$$test || exit 1; \
 	done
 	@$(MAKE) --no-print-directory test-gir-clean
+	@$(MAKE) --no-print-directory test-version
 	@echo "All tests passed!"
+
+# The newest heading in CHANGELOG.org must name the version in config.mk.
+# Catches a bump without its entry, and an entry without its bump.
+.PHONY: test-version
+test-version:
+	@TOP=$$(sed -n 's/^\* \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' CHANGELOG.org | head -n 1); \
+	if [ "$$TOP" != "$(VERSION)" ]; then \
+		echo "FAIL: config.mk says $(VERSION) but the newest CHANGELOG.org heading says '$$TOP'" >&2; \
+		echo "      Bump both together; see docs/contributing.org, Versioning." >&2; \
+		exit 1; \
+	fi; \
+	echo "PASS: version $(VERSION) matches CHANGELOG.org"
 
 .PHONY: test-verbose
 test-verbose: $(TEST_BINARIES) $(BIN_BINARIES)
@@ -468,6 +583,22 @@ examples: $(EXAMPLE_BINARIES)
 .PHONY: binaries
 binaries: $(BIN_BINARIES)
 
+# The GTK4 desktop client. Built as part of `all` when the toolkit is
+# present, and a notice rather than a failure when it is not.
+.PHONY: gui
+ifeq ($(HAVE_GTK),1)
+gui: $(GUI_BINARY)
+else
+gui:
+	@echo "Skipping ai-gui: $(GTK_PKG_DEPS) not found by pkg-config."
+	@echo "  Fedora: layer gtk4-devel and libadwaita-devel into the image."
+endif
+
+# Editing a gui/ header rebuilds everything in gui/ that included it.
+# The generated .d files cover this once a build has run; this covers
+# the first one, on a clean tree.
+$(GUI_OBJECTS): $(GUI_HEADERS)
+
 # GObject introspection (opt-in: pass GIR=1).  Defaults off so hosts that
 # lack gobject-introspection-devel can build without setting any flags.
 ifeq ($(GIR),1)
@@ -475,9 +606,18 @@ ifeq ($(GIR),1)
 .PHONY: gir
 gir: $(TYPELIB_FILE)
 
+# g-ir-scanner builds and runs a small program against the library to
+# dump its types. Against an ASAN=1 library that program has the runtime
+# loaded second, which ASan refuses unless told the order is fine -- and
+# leak checking there would report the scanner's leaks, not ours. The
+# warnings gate itself is unchanged.
+ifeq ($(ASAN),1)
+GIR_SCANNER_ENV = ASAN_OPTIONS=verify_asan_link_order=0:detect_leaks=0
+endif
+
 $(GIR_FILE): $(LIB_SHARED) $(PUBLIC_HEADERS) | $(OUTDIR)
 	@echo "Generating GObject introspection data..."
-	$(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
+	$(GIR_SCANNER_ENV) $(GIR_SCANNER) --namespace=$(GIR_NAMESPACE) \
 		--nsversion=$(GIR_VERSION) \
 		--identifier-prefix=Ai \
 		--symbol-prefix=ai \
@@ -534,10 +674,15 @@ pkgconfig:
 install: all install-gir pkgconfig
 	@echo "Installing to $(PREFIX)..."
 	install -d $(DESTDIR)$(PREFIX)/bin
-	@for b in $(BIN_BINARIES); do \
+	@for b in $(BIN_BINARIES) $(GUI_BINARY); do \
 		echo "  install $$b"; \
 		install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/; \
 	done
+ifeq ($(HAVE_GTK),1)
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	install -m 644 $(DATADIR)/org.copyleft.AiGlib.Gui.desktop \
+		$(DESTDIR)$(PREFIX)/share/applications/
+endif
 	install -d $(DESTDIR)$(LIBDIR)
 	install -d $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	install -d $(DESTDIR)$(PKGCONFIGDIR)
@@ -574,6 +719,8 @@ uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(LIB_NAME).a
 	rm -rf $(DESTDIR)$(INCLUDEDIR)/$(PROJECT_NAME)-1.0
 	rm -f $(DESTDIR)$(PKGCONFIGDIR)/$(PROJECT_NAME)-1.0.pc
+	rm -f $(DESTDIR)$(PREFIX)/bin/ai-gui
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/org.copyleft.AiGlib.Gui.desktop
 	rm -f $(DESTDIR)$(LIBDIR)/girepository-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).typelib
 	rm -f $(DESTDIR)$(PREFIX)/share/gir-1.0/$(GIR_NAMESPACE)-$(GIR_VERSION).gir
 	@echo "Uninstallation complete!"

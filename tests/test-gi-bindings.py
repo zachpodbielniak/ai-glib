@@ -15,6 +15,7 @@ Run via `make test-gi`, or directly:
 Requires python3-gobject (Fedora) / python3-gi (Debian).
 """
 import os
+import json
 import sys
 import tempfile
 
@@ -26,8 +27,37 @@ def main():
         print("SKIP: python3-gobject not installed", file=sys.stderr)
         return 0
 
+    # GLib caches HOME on first use. Redirect before importing the typelib so
+    # a scan cannot see the developer's real ~/.claude or agent skills.
+    gi_home = tempfile.TemporaryDirectory(prefix="ai-gi-")
+    os.environ["HOME"] = gi_home.name
+    os.environ["XDG_CONFIG_HOME"] = gi_home.name
+    os.environ["XDG_STATE_HOME"] = gi_home.name
+
     gi.require_version("AiGlib", "1.0")
-    from gi.repository import AiGlib, Gio  # noqa: E402
+    from gi.repository import AiGlib, Gio, GLib  # noqa: E402
+    gi_home  # keep the directory until process exit
+
+    # Decision types, array annotations and interface dispatch need no weights.
+    import json
+    laya = AiGlib.LayaClient.new()
+    laya.props.base_url = "http://127.0.0.1:8000"
+    laya.props.timeout_ms = 1000
+    assert isinstance(laya, AiGlib.Decider)
+    request = AiGlib.DecisionRequest.new("Refund please")
+    assert request.add_boolean("refund", "Is a refund requested?")
+    assert request.add_choice("route", "Which team?", ["billing", "other"], ["Invoices", "Other"])
+    assert request.add_score("urgency", "How urgent?", ["low", "high"])
+    mock = AiGlib.MockDecider.new(json.dumps({"model": "fixture", "answers": {
+        "refund": {"type": "noul", "noul": 0.93},
+        "route": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.8, "other": 0.2}},
+        "urgency": {"type": "score", "score": 0.6, "probabilities": {"0": 0.4, "1": 0.6}}
+    }}))
+    response = mock.decide(request, None)
+    assert response.get_probability("refund", None) == 0.93
+    assert response.get_choice("route") == "billing"
+    assert response.get_score("urgency") == 0.6
+    assert json.loads(response.dup_json())["model"] == "fixture"
 
     # OpenCode options remain usable through GIR, including exact file paths.
     opencode: AiGlib.OpenCodeClient = AiGlib.OpenCodeClient.new()
@@ -152,7 +182,14 @@ def main():
     grok = AiGlib.GrokBuildClient.new()
     assert isinstance(grok, AiGlib.GrokBuildClient)
     assert isinstance(grok, AiGlib.CliClient)  # inheritance visible
-    assert grok.props.model == "grok-4.6"
+    assert grok.props.model == "grok-4.7"
+
+    plan_conversation = AiGlib.Conversation.new(grok)
+    plan_conversation.props.plan_mode = True
+    assert plan_conversation.get_plan_mode()
+    assert grok.props.permission_mode == "plan"
+    assert plan_conversation.set_plan_mode(False)
+    assert grok.props.permission_mode is None
 
     grok.props.model = "grok-4.5"
     grok.props.effort_level = "xhigh"
@@ -177,7 +214,7 @@ def main():
     assert grok.get_provider_type() == AiGlib.ProviderType.GROK_BUILD
     assert grok.get_name() == "Grok Build"
     # ImageGenerator also defines get_default_model; select the chat interface.
-    assert AiGlib.Provider.get_default_model(grok) == "grok-4.6"
+    assert AiGlib.Provider.get_default_model(grok) == "grok-4.7"
 
     # Provider name round-trip, including the one that must not collide
     # with the HTTP "grok" provider
@@ -313,6 +350,39 @@ def main():
     assert conversation.get_busy() is False
     conversation.set_system_prompt("be brief")
     assert conversation.get_system_prompt() == "be brief"
+
+    queue = AiGlib.PromptQueue.new()
+    assert queue.props.max_length == 32
+    assert queue.props.coalesce is True
+    assert queue.get_length() == 0
+    assert queue.push("one", None, False)
+    assert queue.push("two", None, False)
+    assert queue.get_length() == 2
+    batch = queue.pop()
+    if isinstance(batch, tuple):
+        batch = batch[0]
+    assert batch == "one\n\ntwo"
+    peeked = queue.peek()
+    assert peeked[0] is None if isinstance(peeked, tuple) else peeked is None
+    queue.props.coalesce = False
+    queue.props.max_length = 1
+    assert queue.push("kept", None, False)
+    try:
+        queue.push("rejected", None, False)
+        raise AssertionError("a full queue must reject the extra submission")
+    except Exception:
+        pass
+
+    other = AiGlib.GrokBuildClient.new()
+    side = conversation.fork(other)
+    assert side is not None
+    assert side is not conversation
+    shared = None
+    try:
+        shared = conversation.fork(grok)
+    except Exception:
+        shared = None
+    assert shared is None
 
     # Idle: no activity, no elapsed. An Emacs frontend draws its own
     # spinner and takes the words from here.
@@ -501,6 +571,78 @@ def main():
     conversation.props.native_context_limit = 4096
     assert conversation.get_native_context_limit() == 4096
     conversation.clear_carried_context()
+
+    work = AiGlib.WorkSession()
+    work.add_link_full("https://github.com/team/repo/issues/9", "assigned")
+    conversation.props.work_session = work
+    manifest = json.loads(conversation.props.work_session.dup_link_manifest())
+    assert manifest[0]["repository"] == "team/repo"
+    assert manifest[0]["relationship"] == "assigned"
+    assert manifest[0]["id"] == "9"
+    conversation.props.work_session = None
+
+    # Loops and goals: the schedule, its vocabulary and the runner are
+    # what an Emacs frontend would drive, so they have to survive the
+    # scanner with their enums, out-parameters and signals intact.
+    now = 1000 * 1000000
+    schedule = AiGlib.LoopSchedule.new()
+    goal_id = schedule.add_goal("the tests pass", 5, 0, now)
+    assert len(goal_id) == 8
+    index = schedule.find(goal_id)
+    assert schedule.get_kind(index) == AiGlib.LoopKind.GOAL
+    assert schedule.get_state(index) == AiGlib.LoopState.ACTIVE
+    assert AiGlib.loop_state_to_string(AiGlib.LoopState.EXPIRED) == "expired"
+    assert "turn 0/5" in schedule.dup_line(index, now)
+    loop_id, notice = schedule.add_loop(5 * 60 * 1000000, "check the deploy", now)
+    assert "every 5m" in notice
+    assert schedule.pause(loop_id[:4])
+    assert schedule.dup_summary(now) == "1 loop, 1 goal, next now"
+    entries = json.loads(schedule.dup_json(now))
+    assert [e["kind"] for e in entries] == ["goal", "loop"]
+    assert entries[1]["state"] == "paused"
+    try:
+        schedule.resolve_id("zzz")
+        assert False, "a typo must be an error"
+    except GLib.Error as error:
+        assert "Valid ids" in error.message
+    assert AiGlib.loop_format_relative(4 * 60 * 1000000) == "in 4m"
+    assert "Loops and goals" in AiGlib.loop_help_text()
+
+    runner = AiGlib.LoopRunner.new()
+    fired = []
+    runner.connect("should-wait", lambda r: False)
+    runner.connect("fire", lambda r, i, text, expand: fired.append(text) or True)
+    assert runner.open(None, "gi-session", now)
+    runner.command("goal", "the build is green --turns 2", now)
+    assert runner.tick(now)
+    assert "the build is green" in fired[0]
+    runner.turn_finished("Done.\nGOAL_MET: green", None, now)
+    assert not runner.has_pending_goal()
+    assert AiGlib.loop_store_list_owners(None) == ["gi-session"]
+    # A met goal is history: nothing is scheduled, so no summary.
+    assert AiGlib.loop_store_dup_summary(None, "gi-session", now) is None
+    runner.close()
+    assert AiGlib.loop_store_remove(None, "gi-session")
+
+    # Build provenance: what ai --version prints, readable from bindings.
+    version = AiGlib.build_info_get_version()
+    assert all(part.isdigit() for part in version.split(".")) and version.count(".") == 2
+    summary = AiGlib.build_info_dup_summary()
+    assert summary.startswith(AiGlib.build_info_get_version() + " (")
+    assert AiGlib.build_info_get_date() in summary
+    assert isinstance(AiGlib.build_info_get_dirty(), bool)
+    commit = AiGlib.build_info_get_commit()
+    assert (commit is None) == (AiGlib.build_info_get_describe() is None)
+    if commit is not None:
+        assert len(commit) == 40
+    assert AiGlib.build_info_get_prefix()
+
+    # The updates: config section is plain properties.
+    cfg2 = AiGlib.Config()
+    assert cfg2.props.update_check is False
+    assert cfg2.props.update_interval == 4 * 60 * 60
+    cfg2.props.update_upstream = "origin/main"
+    assert cfg2.props.update_upstream == "origin/main"
 
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"

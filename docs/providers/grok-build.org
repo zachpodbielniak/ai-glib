@@ -6,7 +6,7 @@ The Grok Build provider (=AiGrokBuildClient=) wraps xAI's =grok= CLI (the "Grok 
 |---------------+---------------------------|
 | Type          | =AI_PROVIDER_GROK_BUILD=  |
 | Name          | "Grok Build"              |
-| Default Model | =grok-4.6=                |
+| Default Model | =grok-4.7=                |
 | Interface     | CLI (subprocess)          |
 
 ** Requirements
@@ -25,16 +25,18 @@ Run =grok models= for the authoritative list; the CLI resolves ids server-side a
 
 | Define                         | Model ID    | Description       |
 |--------------------------------+-------------+-------------------|
-| =AI_GROK_BUILD_MODEL_GROK_4_6= | ="grok-4.6"= | Default           |
-| =AI_GROK_BUILD_MODEL_GROK_4_5= | ="grok-4.5"= | Previous release  |
+| =AI_GROK_BUILD_MODEL_GROK_4_7=            | ="grok-4.7"=            | Default; the CLI's own default |
+| =AI_GROK_BUILD_MODEL_GROK_4_7_BUILD_FAST= | ="grok-4.7-build-fast"= | Same model, faster infrastructure; not an xAI HTTP API id |
+| =AI_GROK_BUILD_MODEL_GROK_4_6=            | ="grok-4.6"=            | Previous flagship              |
+| =AI_GROK_BUILD_MODEL_GROK_4_5=            | ="grok-4.5"=            | Previous release               |
 
 | Define                       | Points To                      | Description       |
 |------------------------------+--------------------------------+-------------------|
-| =AI_GROK_BUILD_MODEL_LATEST= | =AI_GROK_BUILD_MODEL_GROK_4_6= | Newest build model |
+| =AI_GROK_BUILD_MODEL_LATEST= | =AI_GROK_BUILD_MODEL_GROK_4_7= | Newest build model |
 
-As with the other providers' aliases, =g-ir-scanner= does not export a define whose value is another define, so bindings should use =AI_GROK_BUILD_MODEL_GROK_4_6=.
+As with the other providers' aliases, =g-ir-scanner= does not export a define whose value is another define, so bindings should use =AI_GROK_BUILD_MODEL_GROK_4_7=.
 
-Do not confuse these with the =AI_GROK_MODEL_*= defines in [[file:grok.org][ai-grok-client.h]] — those are raw xAI API model ids and are not valid =grok --model= arguments.
+=grok-4.7=, =grok-4.6= and =grok-4.5= are valid on both this CLI and the HTTP API. Older =AI_GROK_MODEL_*= ids such as =grok-4.3= and =grok-build-0.1= are API ids and are not valid =grok --model= arguments. =grok-4.7-build-fast= is the reverse: the CLI accepts it and the HTTP API does not.
 
 ** How the prompt is delivered
 The prompt is written to the subprocess's stdin and read back by grok through =--prompt-file /dev/stdin=. This is the C equivalent of the shell's =--prompt-file <(echo ...)=: no temporary file to create or clean up, no =ARG_MAX= ceiling on long conversations, and nothing sensitive visible in =ps= output.
@@ -76,7 +78,7 @@ Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 | Property              | Type    | Default   | Effect                                                    |
 |-----------------------+---------+-----------+-----------------------------------------------------------|
 | =config=              | object  | NULL      | An =AiConfig= to construct from                           |
-| =model=               | string  | =grok-4.6= | =--model=                                                |
+| =model=               | string  | =grok-4.7= | =--model=                                                |
 | =system-prompt=       | string  | NULL      | =--system-prompt-override= on a fresh session             |
 | =max-tokens=          | int     | 4096      | *Ignored* — grok has no such flag                         |
 | =executable-path=     | string  | NULL      | Explicit binary path; overrides =GROK_PATH= and =$PATH=   |
@@ -276,7 +278,7 @@ from gi.repository import AiGlib, GLib
 
 client = AiGlib.GrokBuildClient.new()
 client.props.skip_permissions = True
-client.props.model = "grok-4.6"
+client.props.model = "grok-4.7"
 client.props.effort_level = "low"
 
 loop = GLib.MainLoop()
@@ -296,7 +298,7 @@ Inspect the exact command with =ai -p grok-build --dry-run "hi"=.
 
 *** Non-Streaming
 #+begin_src sh
-grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+grok --prompt-file /dev/stdin --output-format json --model grok-4.7 \
      --verbatim --reasoning-effort medium
 #+end_src
 
@@ -304,7 +306,7 @@ grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
 #+begin_src sh
 grok --prompt-file /dev/stdin \
      --output-format streaming-messages-json --include-partial-messages \
-     --model grok-4.6 --verbatim --reasoning-effort medium
+     --model grok-4.7 --verbatim --reasoning-effort medium
 #+end_src
 
 =--include-partial-messages= is what turns whole messages into per-token deltas; without it nothing streams.
@@ -335,7 +337,7 @@ grok --prompt-file /dev/stdin \
 =--output-format streaming-messages-json= is NDJSON in the Anthropic Messages wire format — the same shape Claude Code's =stream-json= produces:
 
 #+begin_src json
-{"type":"system","subtype":"init","session_id":"...","model":"grok-4.6"}
+{"type":"system","subtype":"init","session_id":"...","model":"grok-4.7"}
 {"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"HELLO"}}}
 {"type":"assistant","message":{"type":"message","content":[{"type":"text","text":"HELLO"}]}}
 {"type":"result","subtype":"success","result":"HELLO","stop_reason":"end_turn","session_id":"...","usage":{...},"total_cost_usd":0.0068}
@@ -453,7 +455,7 @@ if (error != NULL)
 Reproduce the exact command outside the library with:
 
 #+begin_src sh
-ai -p grok-build -m grok-4.6 --effort low --dry-run "your prompt"
+ai -p grok-build -m grok-4.7 --effort low --dry-run "your prompt"
 #+end_src
 
 ** From the =ai= CLI
@@ -475,7 +477,7 @@ quickest way to confirm a setting landed:
 
 #+begin_example
 $ ai -p grok-build --set max-turns=20 --dry-run "hi"
-/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.6 \
+/path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.7 \
   --max-turns 20 --verbatim --reasoning-effort medium
 #+end_example
 

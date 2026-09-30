@@ -239,8 +239,8 @@ static void test_subprocess(gconstpointer data)
 
 static void models_done(GObject *source, GAsyncResult *result, gpointer data)
 {
-    const gchar *expected[] = { "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-        "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark" };
+    const gchar *expected[] = { "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+        "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark" };
     g_autoptr(GError) error = NULL;
     GList *models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error), *l;
     guint i = 0;

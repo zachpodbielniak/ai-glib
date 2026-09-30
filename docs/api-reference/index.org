@@ -36,6 +36,7 @@ Complete API documentation for ai-glib.
 | [[file:ai-mention.org][AiMention]]                         | =@path= references in a prompt                  |
 | [[file:ai-completion.org][AiCompletionContext]]            | Completing =/= and =@= at a cursor              |
 | [[file:ai-todo.org][AiTodo]]                               | One item on an agent's todo list                |
+| [[file:ai-loop.org][AiLoopSchedule / AiLoopRunner]]         | Loops and goals, and the scheduler that runs them |
 
 ** Agent Layer
 Running work that outlives the turn it was asked in. See
@@ -59,6 +60,7 @@ layer as a whole.
 | [[file:ai-view-block.org][AiViewBlock]]         | A renderable unit, and the render contract   |
 | [[file:ai-tool-call.org][AiToolCall]]           | One tool call, and how a tool name reads     |
 | [[file:ai-conversation.org][AiConversation]]    | Drives a provider, folds events into blocks  |
+| [[file:ai-prompt-queue.org][AiPromptQueue]]      | Bounded FIFO of follow-up submissions        |
 
 See [[file:../events.org][The event stream]] for per-provider coverage and
 ordering guarantees.
@@ -331,3 +333,5 @@ if (error != NULL)
 - Client objects should be used from a single thread
 - GMainLoop integration is required for async operations
 - Use =GTask= for thread-safe async patterns
+
+- [[file:ai-work-session.org][AiWorkSession — project/session metadata and linked work]]

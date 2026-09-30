@@ -26,7 +26,7 @@ The prompt comes from leftover arguments if present, otherwise from stdin when s
 
 ** Pasting images
 
-Copy an image or screenshot to the desktop clipboard, focus the composer, and press =C-v= (Ctrl+V). The upper composer border shows the number of attached images. Type your question and press =Enter= to send text and images together; an image-only turn is also valid. Repeat =C-v= to attach another image, up to four per draft. Each image is limited to 5 MiB of encoded image-file bytes before base64 conversion. The transcript records =[Images attached]= without printing binary data or base64.
+Copy an image or screenshot to the desktop clipboard, focus the composer, and press =C-v= (Ctrl+V). The upper composer border shows the number of attached images. Type your question and press =Enter= to send text and images together; an image-only turn is also valid. Repeat =C-v= to attach another image, up to four per draft. Images restored after a queued local command or resolution error are retained even if this exceeds four; further clipboard additions wait until you send or clear the draft. Each image is limited to 5 MiB of encoded image-file bytes before base64 conversion. The transcript records =[Images attached]= without printing binary data or base64.
 
 =C-v= reads image data directly from the desktop clipboard. The terminal's usual paste shortcut (often Ctrl+Shift+V) continues to paste text, including bracketed multiline text; pasting an image filename or URL that way does not attach the file. Inside cmacs/vterm or tmux, the host must pass =C-v= through to ai-tui. Over SSH, the clipboard must be accessible on the machine running ai-tui; the remote process cannot read an unforwarded local desktop clipboard.
 
@@ -117,7 +117,7 @@ The interface uses Catppuccin Mocha by default: a high-contrast identity badge, 
 
    Created 2 files  +5-0
 
- Grok Build / grok-4.6   your turn · type to reply
+ Grok Build / grok-4.7   your turn · type to reply
  ╭─ YOUR TURN ─────────────────────────────────────────────────────╮
  │ Your turn · type a reply, or / commands  @ files                │
  ╰───────────────────────────────────────────────────────── 1/1 ───╯
@@ -140,10 +140,10 @@ The frame also breathes for about 2.5 seconds as the turn is handed over: the bo
 
 The state is derived rather than remembered, so it always describes what is actually true: it ends the moment there is anything in the composer, and it returns if you clear the line again without sending. A search or approval overlay is its own, louder request for input and owns the frame while it is up. Terminals without color show the waiting frame in bold, since a state nobody can see is not a state.
 
-*** Permission modes
-The composer's lower border shows =read-only= in the theme's green or =skip-permissions= in its yellow, with =S-TAB= as the switching hint. =Shift-Tab= toggles the mode without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
+*** Permission and plan modes
+The composer's lower border shows =read-only=, =plan=, or =skip-permissions=, with =S-TAB= as the switching hint. =Shift-Tab= cycles through those three modes without changing the draft; completion navigation backward remains on =Up=. Narrow terminals retain the full mode name and omit the hint. Monochrome terminals show the same labels in bold.
 
-The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four switch in both directions, including sessions started with =--skip-permissions=.
+The binding accepts the standard backtab sequence (=ESC [ Z=), gst's explicit Shift-modifier form (=ESC [ 1 ; 2 Z=), CSI-u (=ESC [ 9 ; 2 u=), and xterm modifyOtherKeys (=ESC [ 27 ; 2 ; 9 ~=). All four cycle through all three states, including sessions started with =--skip-permissions=.
 
 These encodings must reach ai-tui. Older gst builds generate =ESC [ 1 ; 2 Z= for XKB's =ISO_Left_Tab= with Shift; herdr 0.8.2 discards that sequence, even though ai-tui accepts it directly. The correction belongs in gst's legacy encoder, which must emit canonical =ESC [ Z= and advertise it as terminfo =kcbt=. Rebuild and restart gst with that correction. A standalone tmux test that sends bytes directly to ai-tui bypasses herdr's parser and cannot verify this nested-terminal failure.
 
@@ -161,9 +161,41 @@ tmux unbind-key -n User100
 tmux set-option -su 'user-keys[100]'
 #+end_src
 
-Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. For wrapped CLIs, a change affects subsequent invocations, including resumed turns; already-running tools and background agents retain their existing permissions. Search, approval dialogs and bracketed paste retain their own input handling.
+Startup selects =read-only= unless =--skip-permissions= is passed; an explicit =--set skip-permissions= override is reflected in the label. The choice survives =/reset= and is inherited by subsequent provider switches. Mode changes require an idle turn. Entering plan mode also requires background agents to finish, because an existing process cannot be made read-only retroactively. Search, approval dialogs and bracketed paste retain their own input handling.
 
-=read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. CLIs without a =skip-permissions= property report that switching is unsupported.
+=read-only= names the existing non-bypass behavior, not an additional filesystem sandbox: the provider's own permission rules and explicit =--set= overrides still apply. =skip-permissions= sets the wrapped provider's corresponding flag, or automatically approves local HTTP-provider tool requests. Returning to =read-only= restores normal local approval handling; explicit =--yes= and remembered tool approvals still apply. Unrecognized CLI implementations report that plan mode is unsupported.
+
+=--plan= starts directly in plan mode, taking precedence over startup bypass
+settings. Plan mode asks the model to inspect the request, clarify unresolved
+requirements, and return an actionable plan in the conversation. It does not
+automatically start implementation. Review the plan, press =Shift-Tab= to leave
+plan mode, then send the instruction to implement it. History is preserved.
+
+| Provider | Plan-mode mechanism |
+|----------+---------------------|
+| Claude Code, Claude tmux, Grok Build | =--permission-mode plan= |
+| OpenCode | =--agent plan= with =--auto= disabled |
+| Antigravity, Cursor | =--mode plan= with bypass disabled |
+| Codex CLI | =--sandbox read-only= plus planning instructions |
+| HTTP providers with local tools | Planning instructions and a read-only tool allowlist |
+
+Native mode settings are temporary: leaving plan mode restores the provider's
+prior agent, mode, and sandbox; the selected TUI permission state controls bypass.
+Switching providers restores all outgoing settings, and the new provider inherits
+plan mode. Codex's exec transport has no native plan selector here; its read-only
+sandbox supplies the execution restriction.
+
+Local tools in plan mode allow =read=, =ls=, =glob=, =grep=, =web_fetch= and
+=web_search=. Writes, shell commands, skills, delegation and unknown tools are
+denied even with =--yes=. Local command shell substitutions are disabled.
+ai-tui's MCP host also rejects mutating calls during planning. Provider-native
+tools remain governed by the native harness's plan policy (including any native
+plan-file exception); this is not a new operating-system sandbox. The restrictions
+are removed on leaving plan mode. Side conversations inherit planning intent.
+
+Native mappings follow the [[https://code.claude.com/docs/en/cli-reference][Claude CLI reference]],
+[[https://opencode.ai/docs/agents][OpenCode agent documentation]], and
+[[https://cursor.com/docs/cli/reference/parameters][Cursor CLI parameters]], as well as the wrapped CLIs' accepted settings.
 
 *** Motion and feedback
 A brief startup sweep introduces the composer. While a turn runs, a small two-tone highlight travels along the composer's top border alongside the existing activity spinner. It never covers the prompt, shifts the layout, or delays text and keyboard input. Search and approval overlays suppress the border sweep. Once the turn finishes, the border briefly indicates success, failure, or cancellation, and the status strip names the outcome. Theme and panel changes also give short status feedback without adding messages to the transcript or model context.
@@ -171,6 +203,12 @@ A brief startup sweep introduces the composer. While a turn runs, a small two-to
 Motion is deliberately bounded: startup lasts 900 ms, feedback lasts about 1.6 seconds, the turn hand-off breathes for about 2.5 seconds, and an idle session has no ongoing animation timer. The activity and effect clock is shared, and cached transcript rows are reused rather than rebuilt for animation ticks. =--no-animation= disables the startup/border sweeps and spinner rotation; elapsed time still updates once per second and static feedback remains available. There are no blinking text effects, palette changes, or moving transcript contents.
 
 *** Themes
+The palettes live in =src/core/ai-theme.h= and are shared with
+[[file:gui.org][ai-gui]], which draws the same five under the same names and defaults to
+Catppuccin Mocha too. Which palette entry each style tag uses is decided
+there as well, so a tool target is the same colour in a terminal as in a
+window. Changing one changes both.
+
 Use =--theme NAME= to select =catppuccin-mocha=, =catppuccin-latte=, =nord=, =terminal=, or =monochrome=. =--list-themes= lists the available names without constructing a provider or requiring a terminal. =C-t= cycles themes in the running interface without interrupting the conversation or discarding a draft.
 
 #+begin_src bash
@@ -195,6 +233,7 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--max-tokens=        | Cap per response, default 4096                           |
 | =--no-stream=         | Wait for each whole turn instead of streaming it         |
 | =-c=, =--continue=    | Continue the provider's most recent session              |
+| =--plan= | Start in plan mode; review before implementing |
 | =--skip-permissions=  | Start in bypass mode; =Shift-Tab= switches it at runtime |
 | =--local-tools=       | Run tools in this process (HTTP providers only)          |
 | =-y=, =--yes=         | Approve every local tool call without asking             |
@@ -202,6 +241,8 @@ On 256-color terminals the RGB palettes are mapped to the nearest stable xterm c
 | =--theme NAME=        | Select a theme, overriding =AI_TUI_THEME= and =NO_COLOR= |
 | =--list-themes=       | List built-in themes without starting a provider        |
 | =--no-animation=      | Disable decorative motion; elapsed time still updates  |
+| =--no-coalesce=       | Send queued follow-ups as separate turns                 |
+| =--queue-limit N=     | Maximum queued follow-ups (1–4096, default 32)           |
 | =--no-agents=         | Do not let the model start background agents             |
 | =--no-herdr=          | Disable automatic herdr pane lifecycle reporting         |
 | =--dump PROMPT=       | Force one turn and print the transcript, even on a terminal |
@@ -235,7 +276,7 @@ one that refuses to start.
 | Mouse wheel               | Scroll three rows over the transcript |
 | Mouse drag                | Highlight transcript text and copy it |
 | =Tab=                      | Take a completion, or step to the next            |
-| =Shift-Tab=                | Toggle read-only / skip-permissions               |
+| =Shift-Tab=                | Cycle read-only / plan / skip-permissions               |
 | =Escape=                   | Dismiss the completion menu                       |
 | =C-n=                      | Select the next tool or reasoning block           |
 | =C-b=                      | Expand or collapse the selected block             |
@@ -285,7 +326,7 @@ Words are separated by Unicode whitespace, so filenames and punctuation stay tog
 
 Bracketed paste is enabled while ai-tui owns the terminal. A multiline paste is inserted into the composer without submitting any of its lines; press =Enter= explicitly when ready. Terminals without bracketed paste support cannot distinguish a pasted newline from a typed =Enter=, so use =C-g= for multiline text there. Pasted approval answers are ignored: approvals require a deliberate key. Control characters other than newlines and tabs are discarded in bracketed input; tabs are displayed as a single blank but retained in the prompt.
 
-Pressing =Enter= during a running turn queues the entire draft (text and images) instead of discarding it. The composer is labeled =QUEUED n / waiting for turn= and is then empty for the next follow-up. Queued prompts send in order when the current turn finishes, including after a failed turn. A cancelled turn leaves the queue in place: an empty =Enter= sends the next item, and =C-c= while idle drops it. The queue holds 32 prompts; a full queue keeps the draft and says so. Navigating back down past the newest history item also restores the draft you were editing.
+Pressing =Enter= during a running turn queues the entire draft (text and images) instead of discarding it. The composer is labeled =QUEUED n / waiting for turn= and is then empty for the next follow-up. Queued prompts send in order when the current turn finishes, including after a failed turn. Adjacent text-only follow-ups become one prompt by default; =--no-coalesce= sends them separately. Commands and images remain separate. A cancelled turn leaves the queue in place: an empty =Enter= sends the next batch, and =C-c= while idle drops pending entries. The queue holds 32 submissions by default (=--queue-limit= changes this); a full queue keeps the draft and says so. Navigating back down past the newest history item also restores the draft you were editing.
 
 *** =C-c= takes one thing at a time
 First close an active search or deny a pending approval; otherwise stop the turn, close the completion menu, throw away the
@@ -380,7 +421,7 @@ an =@= anywhere lists paths.
 | =Up= / =Down=      | Move the highlight, wrapping at both ends       |
 | =PgUp= / =PgDn=    | Move it a page at a time                        |
 | =Tab=              | Take what is on offer, or step to the next      |
-| =Shift-Tab=        | Toggle permission mode and dismiss the menu     |
+| =Shift-Tab=        | Cycle mode and dismiss the menu     |
 | =Enter=            | Submit an exact command, otherwise accept the candidate |
 | =Escape=           | Dismiss, until the line changes again           |
 
@@ -422,11 +463,12 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | Command             | Does                                              |
 |---------------------+---------------------------------------------------|
 | =/help=             | Every command, skill and agent, and the keys      |
+| =/btw QUESTION=     | Side question in an independent conversation      |
 | =/clear=            | Empty the transcript, the history and the todos   |
 | =/reset=            | Start a fresh session and return to the splash screen |
 | =/quit=             | Exit                                              |
 | =/exit=             | Exit, same as =/quit=                             |
-| =/model [NAME]=     | Show or switch the model without restarting       |
+| =/model [NAME]=     | Pick a model, or switch with =/model NAME=        |
 | =/provider [NAME]=  | Show or switch the provider, preserving context   |
 | =/effort [LEVEL]=   | Show or switch reasoning effort (CLI providers)   |
 | =/tools=            | The tools the model can call                      |
@@ -441,6 +483,9 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/expand LINE=      | What a line would send, without sending it        |
 | =/save PATH=        | Write the transcript to a file                    |
 | =/export FMT [PATH]= | Write it as =text=, =markdown= or =org=         |
+| =/loop=             | Repeat a prompt or =/command= on an interval, or at a pace the model picks |
+| =/goal=             | Keep taking turns until a condition holds, within a turn and time bound |
+| =/update [status]=  | Install the latest ai-glib, or check whether one is available |
 
 *** Command paths
 
@@ -463,6 +508,44 @@ The process directory is unchanged so background work is not redirected. The con
 Anything else is a command file: =/deploy staging= runs
 =~/.claude/commands/deploy.md= with =staging= as =$1=. See
 [[file:commands.org][authoring them]].
+
+*** Loops and goals (=/loop=, =/goal=)
+
+The full reference is [[file:loops-and-goals.org][Loops and goals]]; this is what is particular to the terminal.
+
+=/loop= repeats a prompt or a =/command=: =/loop 5m check the deploy= on an interval (one-minute floor, rounded to what cron can express), =/loop check whether CI passed= at a pace the model picks, =/loop= alone with the maintenance prompt. =/goal the tests pass --turns 10= keeps taking turns until the model reports the condition holds, and always stops at its turn or time bound (default 20 turns, 2 hours). Both take the same verbs: =list=, =show=, =pause=, =resume=, =run=, =delete=, =edit=, and =stop= for goals. An id can be shortened to any unambiguous prefix; a typo lists the ids that exist.
+
+The scheduler is the library's =AiLoopRunner=, shared with ai-gui. It checks once a second and sends at most one due turn, and only while nothing else is in flight -- a running turn, a queued draft, an approval, a decision, the dashboard, or search. A slot that comes due during a turn fires once when the session is idle, not once for every missed interval. Set =AI_LOOP_DISABLE= to =1= (anything other than =0=, =false=, =no=, or =off=) and nothing is scheduled.
+
+| You type | What happens |
+|----------+--------------|
+| =/loop 5m check the deploy= | Fixed schedule. =5m= is =*/5 * * * *=. Seconds round up to a minute. =7m= or =90m= round to the nearest step cron can express, and the confirmation says what was picked. =every 2 hours= at the end is the same kind of interval. |
+| =/loop check the deploy= | Self-paced. The model ends with =LOOP_NEXT: 5m why= or =LOOP_STOP: why=; the delay is clamped to 1–60 minutes. With no such line, the loop waits 20 minutes once, then stops if the next reply also omits it. |
+| =/loop 1h /todos= | A =/command=. Skills and command files expand as typed; a built-in runs only if it cannot change the session (=/clear= is refused when scheduled, with the list of the ones that can). |
+| =/loop= or =/loop 15m= | The maintenance prompt: finish work already started, then the current branch's pull request, then one small cleanup. It does not start a new initiative. |
+| =/goal CONDITION --turns N --time 4h= | A goal. Each reply ends with =GOAL_MET=, =GOAL_NOT_MET= or =GOAL_BLOCKED=; not met sends the next turn at once, carrying what remains. |
+| =/loop list=, =/goal list= | One line each: id, state, cadence and next run, or progress against the bound. |
+| =/loop pause ID=, =/goal resume all= | Also =show=, =run= (once, when idle), =delete= (=cancel= for loops), =stop= (goals), =edit ID --every 10m --prompt TEXT=, =edit ID --turns 30 --time 4h=. =/loop list the deploys= is a prompt, not the list. |
+| =/loop stop=, or Esc on an empty composer | Stop self-paced loops. A turn already running is allowed to finish and does not schedule another. Fixed intervals keep going. |
+
+The panel has a =LOOPS / GOALS= section: each live entry's text, then its state in the library's words -- =every 5m, next in 4m= or =turn 3/20, 1h 50m left=. The dashboard row of every session with a schedule ends in =2 loops, 1 goal, next in 4m=, read from that session's file whether it is running or not.
+
+A fixed loop's clock is local. Loops expire seven days after they were created. Up to 50 loops and 20 unfinished goals can be stored. The per-loop offset that keeps fixed fires from landing on the same wall-clock second is derived from the id: up to half the interval when the loop is more frequent than hourly, otherwise up to 30 minutes. Self-paced delays are exact.
+
+The maintenance prompt is replaced by the first of these files that exists, re-read on every fire so an edit applies to the next pass. Past 25000 bytes the file is cut on a UTF-8 boundary.
+
+| Path | Scope |
+|------+-------|
+| =.ai-glib/loop.md= | This project. Wins. |
+| =.claude/loop.md= | This project, the Claude Code file. |
+| =~/.config/ai-glib/loop.md= | Your user config. |
+| =~/.claude/loop.md= | Your home directory, the Claude Code file. |
+
+Loops of both kinds and goals are written under =$XDG_STATE_HOME/ai-glib/sessions/loops/=, one file per session, and restored when the session is resumed with =--workspace-session=, =-c= / =--continue=, or =--set session-id==. What was missed while it was closed fires once. A fresh launch starts its own empty schedule; the previous one stays on disk (=ai loop list= shows it) until that session is resumed. A second window resuming a session whose loops are already running elsewhere starts without them and says so. =/reset= clears the schedule. Edits made with =ai loop= from a shell are picked up within a second.
+
+Stopping a scheduled turn with =^C= pauses its goal rather than failing it; =/goal resume ID= continues.
+
+=ai-tui --dump "/goal ..."= runs the goal to its end -- met, failed or at its bound -- and prints the transcript. A =/loop= from =--dump= is confirmed and the run ends: a timer is no reason to keep a one-shot process alive.
 
 =/clear= empties the *local* view. A provider holding a session of its own
 --- the CLI wrappers do --- is not affected; clearing the transcript does
@@ -543,8 +626,10 @@ Dropping it is worth doing when the import is large and no longer relevant:
 it is sent with *every* turn, not just the first.
 
 *** Changing the model
-=/model= with no argument reports the current model; with one it changes it
-for the next turn and keeps everything else:
+=/model= with no argument reports the current model and opens a picker.
+Up and Down move through the provider's list, Enter switches, and Escape
+closes the picker without changing anything. =/model NAME= still changes
+the model directly and keeps everything else:
 
 #+begin_example
 > /model claude-opus-5
@@ -558,6 +643,22 @@ reason about afterwards.
 The name is not validated here, because no wrapped CLI offers a validating
 lookup. An id the provider will reject fails on the *next* turn, which is
 why the change is reported rather than applied silently.
+
+*** How an answer is drawn
+Assistant prose is rendered. Markdown and Org markers are not left on
+screen: a heading is a heading, =**bold**= is bold, inline code and fenced
+code are code, and a list marker becomes a bullet. The stored text is
+unchanged, so =/export markdown= and =/export org= still write the source.
+
+A fenced block is coloured by a small lexer immediately. Once the turn
+has finished, and =AI_LSP= is not =off=, ai-tui asks a language server on
+=PATH= (clangd, pylsp, rust-analyzer, gopls, typescript-language-server)
+for semantic tokens and recolors the fence when the answer arrives.
+=AI_LSP=auto= is the default in ai-tui. =AI_LSP=off= keeps the lexer.
+=AI_LSP=python=/path/to/server,c=/path/to/server= pins the executables.
+The library itself does not start a server: ai-gui renders the same
+blocks and stays on the lexer. A server that does not answer within
+three seconds is stopped and reaped, and the fence keeps the lexer colours.
 
 See [[file:provider-switching.org][Provider switching]] for the exact
 migration table and limits, and [[file:native-session.org][Native session
@@ -609,6 +710,25 @@ about this program's transcript.
 =--no-expand= turns the pipeline off entirely, for the case where the
 text must reach the model verbatim.
 
+*** Updating with =/update=
+
+When =updates.check= is true, ai-tui checks the checkout that built it for
+upstream commits in the background --- at start, then every ten minutes,
+fetching at most once per =updates.interval= --- and puts =update available (N)=
+on the status line when there is one. Nothing is shown otherwise. The check
+is off until that key is set, including with =ai --setup= scope =4=.
+
+=/update status= prints the version and the answer. =/update= refuses while a
+turn is running, then hands the terminal over the way =^G= does for
+=$EDITOR=: the build scrolls past in the open, =sudo= can prompt for the
+install, and Enter brings ai-tui back. =^C= stops it; nothing is installed
+unless the build succeeded. Restart ai-tui to use the new build. Under
+=--dump= there is no terminal to hand over, so =/update= builds and prints the
+command for a privileged install instead of running sudo.
+
+The background check stays off unless =updates.check= is true. =AI_GLIB_NO_UPDATE_CHECK=1=
+forces it off even then. See [[file:updating.org][Versions and self-update]].
+
 ** Mentions
 =@path= pulls a file in. The prompt keeps its shape and the files follow
 it, so a one-line question is not buried under the file it named.
@@ -627,7 +747,7 @@ The status bar shows what the turn is doing, with a spinner and the time
 so far:
 
 #+begin_example
-  Grok Build / grok-4.6   ⠹ Running make test… (5s · ^C to stop)
+  Grok Build / grok-4.7   ⠹ Running make test… (5s · ^C to stop)
 #+end_example
 
 The phrase tracks the turn --- =Waiting for the model=, =Thinking=,
@@ -737,3 +857,80 @@ installed =ai-tui= has no runtime dependency on =libai-glib=.
 ** MCP control and model-visible panels
 
 =ai-tui --mcp-tools todo_write,agent_spawn,agent_status,agent_result= starts a private MCP socket and injects it into supported CLI providers. The selected host tools update the actual TODOS and AGENTS panels; system-prompt guidance tells the model to use them instead of its native harness equivalents. =--mcp-no-inject= retains external control alone. =--mcp-server= runs headlessly over stdio, and =--mcp-all-tools= explicitly grants the complete catalog, including conversation control. See [[file:mcp.org][MCP hosting and provider integration]] for external-controller examples, opt-in policy, limits, and provider support.
+
+** Queued follow-ups and side questions
+
+=ai-tui= accepts follow-ups during an active turn and coalesces adjacent text
+submissions into the next prompt. Use =--no-coalesce= for separate turns and
+=--queue-limit N= to bound pending submissions. =/btw <question>= starts an
+independent side conversation without interrupting the main request.
+See [[file:message-queue.org][Queued follow-ups and side questions]] for
+command barriers, cancellation, context isolation and the library APIs.
+
+* Project dashboard and linked work
+
+=Ctrl+\= toggles the dashboard; =--dashboard= opens it at startup.
+See [[file:dashboard.org][Projects, dashboard and linked work]] for the startup
+preference, tmux status names, issue/PR side-panel links and task recovery.
+
+** Account quota in the session panel
+
+The side panel (=C-p=; visible at 110 columns and 20 rows or larger)
+shows =ACCOUNT REMAINING= beneath the current provider and model. Each
+bar is the percentage of an allowance still available: a full bar means
+100% remaining and an empty bar means 0% remaining. This convention is
+identical across providers, including Codex. Explicit remaining percentages
+are used directly; used percentages are subtracted from 100. A known
+remaining/limit or used/limit pair can also supply the percentage. An
+unlabeled percentage, missing denominator, or invalid value is unavailable,
+never an invented zero.
+
+The direction rule, the display rounding and the refresh policy live in
+=src/core/ai-quota.h= and are shared with [[file:gui.org][ai-gui]], which shows the same
+allowances in its header bar. A terminal saying 75% remaining while a
+window says 25% for one account would be worse than either saying
+nothing, so neither front-end decides this for itself.
+
+This uses the same native account report as =ai --usage -p PROVIDER=.
+Allowances are account-wide or named model pools, not this conversation's
+token count. Source labels and reset information are retained; reports
+without a model association are not guessed to belong only to the current
+model. The existing latest-turn token usage remains a separate section.
+See [[file:cli-reporting.org][CLI reporting]] for provider support and authentication limits.
+
+Queries run in the background on an independent client with the active
+provider's executable, working directory and environment. Opening the panel
+fetches a snapshot; while visible, it refreshes at most once per minute.
+Hidden panels and =--dump= do not start queries. Changing provider, model or
+working directory invalidates the snapshot and discards an old in-flight
+result. Shutdown cancels and drains pending reporting work.
+
+The panel names loading, refreshing, unavailable, partial and stale results.
+It shows up to three allowance entries, subject to terminal height; use
+=ai --usage -p PROVIDER= for the complete report. A failed
+refresh keeps the previous snapshot explicitly marked stale. Providers
+without native reporting show =Unavailable=, and only quota entries with
+known direction receive a bar. Long or control-bearing labels are sanitized
+and clipped to the panel; the terminal footer remains reserved.
+
+*** Quota regression tests
+
+=tests/test-quota.c= checks percentage direction (including Codex),
+unknown/invalid values, independent client snapshots, caching, failed
+refreshes, provider/model/directory changes and cancellation.
+=tests/test-ai-tui-panel.c= inspects real curses cells for bars, partial/stale
+states, hostile labels, Unicode clipping and footer preservation.
+The =/ai-glib/ai-tui/keys/usage-sidebar= case in =tests/test-ai-tui.c= uses
+a tmux PTY and a local Python reporting fixture to verify the complete
+sidebar wiring, hidden/dump behavior, cache reuse, and responsive typing
+and shutdown during a stalled query. That case skips when tmux or Python 3
+is unavailable; it never contacts an external provider.
+
+Run =make test= for the complete suite and GIR warning gate. For focused
+leak and lifetime coverage, build the two first test binaries with
+=DEBUG=1 ASAN=1= and run them from =build/debug/tests/= with
+=ASAN_OPTIONS=detect_leaks=1=.
+
+** Typed decisions
+See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
+including question syntax, request files, cancellation and server configuration.

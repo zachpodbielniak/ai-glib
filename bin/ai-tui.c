@@ -26,11 +26,14 @@
 #include <glib-unix.h>
 
 #include <ai-glib.h>
+#include "ai-decide-options.h"
 #include "ai-launch.h"
 #include "ai-mcp-options.h"
 #include "ai-tui-theme.h"
 #include "ai-tui-history.h"
 #include "ai-tui-herdr.h"
+#include "core/ai-quota.h"
+#include "core/ai-updater.h"
 #include "ai-tui-panel.h"
 #include "ai-tui-images.h"
 
@@ -49,12 +52,17 @@ static gint      opt_width = 0;
 static gboolean  opt_no_stream = FALSE;
 static gboolean  opt_continue = FALSE;
 static gboolean  opt_skip_permissions = FALSE;
+static gboolean  opt_plan = FALSE;
 static gboolean  opt_local_tools = FALSE;
 static gboolean  opt_yes = FALSE;
 static gboolean  opt_dry_run = FALSE;
 static gboolean  opt_no_expand = FALSE;
 static gboolean  opt_no_agents = FALSE;
 static gboolean  opt_no_herdr = FALSE;
+static gboolean opt_dashboard = FALSE;
+static gboolean opt_no_dashboard = FALSE;
+static gboolean opt_no_tmux_titles = FALSE;
+static gchar *opt_workspace_session = NULL;
 static gboolean  opt_version = FALSE;
 static gboolean  opt_license = FALSE;
 static gboolean  opt_launch = FALSE;
@@ -63,9 +71,19 @@ static gboolean  opt_launch_cmd_print = FALSE;
 static gchar *opt_theme = NULL;
 static gboolean opt_list_themes = FALSE;
 static gboolean opt_no_animation = FALSE;
+static gboolean opt_no_coalesce = FALSE;
+static gint opt_queue_limit = 32;
 static gboolean theme_explicit = FALSE;
 
 static const GOptionEntry option_entries[] = {
+    { "dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_dashboard, "Open the project dashboard", NULL },
+    { "no-dashboard", 0, 0, G_OPTION_ARG_NONE, &opt_no_dashboard, "Open a conversation instead of the configured dashboard", NULL },
+    { "no-tmux-titles", 0, 0, G_OPTION_ARG_NONE, &opt_no_tmux_titles, "Leave tmux titles unchanged", NULL },
+    { "workspace-session", 0, 0, G_OPTION_ARG_STRING, &opt_workspace_session, "Resume a disconnected dashboard session", "UUID" },
+	{ "no-coalesce", 0, 0, G_OPTION_ARG_NONE, &opt_no_coalesce,
+	  "Send queued follow-ups as separate turns", NULL },
+	{ "queue-limit", 0, 0, G_OPTION_ARG_INT, &opt_queue_limit,
+	  "Maximum queued follow-ups (1–4096, default 32)", "N" },
 	{ "no-herdr", 0, 0, G_OPTION_ARG_NONE, &opt_no_herdr,
 	  "Disable automatic herdr pane lifecycle reporting", NULL },
 	{ "theme", 0, 0, G_OPTION_ARG_STRING, &opt_theme, "Terminal theme (overrides AI_TUI_THEME and NO_COLOR)", "NAME" },
@@ -87,6 +105,8 @@ static const GOptionEntry option_entries[] = {
       "Wait for each whole turn instead of streaming it", NULL },
     { "continue", 'c', 0, G_OPTION_ARG_NONE, &opt_continue,
       "Continue the provider's most recent session", NULL },
+    { "plan", 0, 0, G_OPTION_ARG_NONE, &opt_plan,
+      "Start in plan mode: research without implementing", NULL },
     { "skip-permissions", 0, 0, G_OPTION_ARG_NONE, &opt_skip_permissions,
       "Let a wrapped CLI run its tools without asking", NULL },
     { "local-tools", 0, 0, G_OPTION_ARG_NONE, &opt_local_tools,
@@ -149,38 +169,34 @@ pair_for_tag(AiStyleTag tag)
  * build until somebody picks a colour, which is the loud failure the
  * silent one deserved.
  */
-static const short TAG_COLOURS[] = {
-    -1,             /* default       */
-    COLOR_WHITE,    /* user-prompt   */
-    COLOR_WHITE,    /* heading       */
-    COLOR_BLUE,     /* dim           */
-    COLOR_MAGENTA,  /* tool-name     */
-    COLOR_CYAN,     /* tool-target   */
-    COLOR_YELLOW,   /* tool-pending  */
-    COLOR_GREEN,    /* tool-ok       */
-    COLOR_RED,      /* tool-failed   */
-    COLOR_GREEN,    /* added         */
-    COLOR_RED,      /* removed       */
-    COLOR_CYAN,     /* code          */
-    COLOR_BLUE,     /* thinking      */
-    COLOR_RED,      /* error         */
-    COLOR_YELLOW,   /* status        */
-    COLOR_BLUE,     /* link          */
-    COLOR_BLUE,     /* marker        */
-    COLOR_CYAN,     /* mention       */
-    COLOR_MAGENTA,  /* command       */
-    -1,             /* todo-pending  */
-    COLOR_YELLOW,   /* todo-active   */
-    COLOR_GREEN,    /* todo-done     */
-	COLOR_MAGENTA,  /* syntax-keyword */
-	COLOR_GREEN,    /* syntax-string */
-	COLOR_BLUE,     /* syntax-comment */
-	COLOR_YELLOW,   /* syntax-number */
-	COLOR_YELLOW,   /* syntax-type */
-	COLOR_CYAN      /* syntax-function */
-};
+/*
+ * What a role looks like when the theme names no colours of its own.
+ *
+ * `terminal`, and any terminal that cannot do 256, draw from the
+ * sixteen the user has already configured rather than from a palette
+ * this program picked. Muted has no entry among those sixteen, so it
+ * falls back to the ordinary foreground -- except for a link, which has
+ * to stand out from the prose around it.
+ */
+static short
+native_colour_for_role(AiThemeRole role, AiStyleTag tag, short fg)
+{
+	switch (role)
+	{
+		case AI_THEME_ROLE_TEXT:     return COLOR_WHITE;
+		case AI_THEME_ROLE_MUTED:    return tag == AI_STYLE_LINK ? COLOR_CYAN : fg;
+		case AI_THEME_ROLE_ACCENT:   return COLOR_MAGENTA;
+		case AI_THEME_ROLE_CYAN:
+		case AI_THEME_ROLE_FUNCTION: return COLOR_CYAN;
+		case AI_THEME_ROLE_GREEN:    return COLOR_GREEN;
+		case AI_THEME_ROLE_YELLOW:
+		case AI_THEME_ROLE_NUMBER:   return COLOR_YELLOW;
+		case AI_THEME_ROLE_RED:      return COLOR_RED;
+		case AI_THEME_ROLE_DEFAULT:
+		default:                     return fg;
+	}
+}
 
-G_STATIC_ASSERT(G_N_ELEMENTS(TAG_COLOURS) == AI_STYLE_N_TAGS);
 
 static void
 init_colours(void)
@@ -209,26 +225,13 @@ init_colours(void)
 
     for (i = 0; i < AI_STYLE_N_TAGS; i++)
     {
-		short colour = TAG_COLOURS[i];
-		if (!native)
-		{
-			guint rgb = theme->text;
-			switch (colour) {
-			case COLOR_BLUE: rgb = theme->muted; break;
-			case COLOR_MAGENTA: rgb = theme->accent; break;
-			case COLOR_CYAN: rgb = theme->cyan; break;
-			case COLOR_GREEN: rgb = theme->green; break;
-			case COLOR_YELLOW: rgb = theme->yellow; break;
-			case COLOR_RED: rgb = theme->red; break;
-			default: break;
-			}
-			if (i == AI_STYLE_SYNTAX_NUMBER) rgb = theme->number;
-			if (i == AI_STYLE_SYNTAX_FUNCTION) rgb = theme->function;
-			colour = theme_nearest(rgb);
-		}
-		else if (colour == COLOR_BLUE)
-			colour = i == AI_STYLE_LINK ? COLOR_CYAN : fg;
-		else if (colour == -1) colour = fg;
+		/* Which palette entry a tag uses is decided once, in
+		 * src/core/ai-theme.h, so the window agrees with this. */
+		AiThemeRole role = ai_theme_role_for_tag((AiStyleTag)i);
+		short colour = native
+			? native_colour_for_role(role, (AiStyleTag)i, fg)
+			: theme_nearest(ai_theme_colour(theme, role));
+
 		if (init_pair(pair_for_tag((AiStyleTag)i), colour, bg) == ERR)
 		{
 			theme_colour = FALSE;
@@ -246,31 +249,19 @@ static attr_t
 attr_for_tag(AiStyleTag tag)
 {
     attr_t attr = theme_colour ? COLOR_PAIR(pair_for_tag(tag)) : 0;
+    AiThemeEmphasis emphasis = ai_theme_emphasis_for_tag(tag);
 
-    switch (tag)
-    {
-        case AI_STYLE_USER_PROMPT:
-        case AI_STYLE_HEADING:
-        case AI_STYLE_TOOL_NAME:
-        case AI_STYLE_COMMAND:
-        case AI_STYLE_TODO_ACTIVE:
-            attr |= A_BOLD;
-            break;
-        case AI_STYLE_DIM:
-        case AI_STYLE_THINKING:
-        case AI_STYLE_MARKER:
-        case AI_STYLE_TODO_DONE:
-            if (!theme_colour) attr |= A_DIM;
-            break;
-        case AI_STYLE_MENTION:
-            attr |= A_UNDERLINE;
-            break;
-        case AI_STYLE_ERROR:
-            attr |= A_BOLD;
-            break;
-        default:
-            break;
-    }
+    if (emphasis & AI_THEME_EMPHASIS_BOLD)
+        attr |= A_BOLD;
+
+    if (emphasis & AI_THEME_EMPHASIS_UNDERLINE)
+        attr |= A_UNDERLINE;
+
+    /* Dim only where there is no colour: a palette already says "muted"
+     * with its muted entry, and doing both would quiet the same tag
+     * twice in one front-end and once in the other. */
+    if ((emphasis & AI_THEME_EMPHASIS_FAINT) && !theme_colour)
+        attr |= A_DIM;
 
     return attr;
 }
@@ -325,10 +316,6 @@ attr_for_tag(AiStyleTag tag)
  */
 #define AGENT_MAX_CONCURRENT (4)
 
-/* Follow-ups typed during a turn. Enter queues rather than discarding
- * the draft; the next item is sent when the current turn finishes. */
-#define SEND_QUEUE_LIMIT (32)
-
 /*
  * A keycode of our own, for a key ncurses has no name for.
  *
@@ -367,12 +354,6 @@ static const gchar *SPINNER_FRAMES[] = {
 
 typedef struct
 {
-	gchar *text;
-	GList *images; /* (element-type AiImageContent) */
-} QueuedPrompt;
-
-typedef struct
-{
     AiConversation *conversation;
 	AiMcpHost *mcp_host;
 	AiTuiHerdr *herdr;
@@ -383,6 +364,7 @@ typedef struct
     WINDOW         *status_win;
     WINDOW         *input_win;
 	gboolean details;
+	AiQuota usage;
 	gboolean tiny;
 	gint content_width;
 	gint input_first;
@@ -400,7 +382,9 @@ typedef struct
 	gboolean sending;
 	gboolean pasting;
 	GList *images;                 /* AiImageContent references in the draft */
-	GQueue send_queue;             /* QueuedPrompt, FIFO follow-ups */
+	AiPromptQueue *send_queue;     /* Pending submissions, coalesced at turn boundaries */
+	gboolean queue_blocked;       /* Oldest image requires a compatible provider */
+	GPtrArray *side_questions;     /* AiConversation; async completion owns callbacks */
 	GCancellable *clipboard_cancel;
 	gboolean clipboard_pending;
 	gboolean skip_permissions;
@@ -444,6 +428,17 @@ typedef struct
      * reappear on the very next keystroke and Escape would do nothing. */
     gboolean             completion_dismissed;
 
+	GCancellable *decision_cancel;
+	gboolean decision_pending;
+	guint decision_generation;
+
+    /* /model with no argument. NULL while the picker is closed. */
+    gchar              **picker_models;
+    guint                picker_count;
+    guint                picker_index;
+    guint                picker_first;
+    guint                model_generation;
+
     /* One-shot re-read, so a lone Escape is not stuck behind the next
      * keystroke. See on_key_settle(). */
     guint                settle_id;
@@ -472,13 +467,59 @@ typedef struct
      * is not enough: a line that resolves to a built-in never sets it. */
     GMainLoop           *dump_loop;
 	gboolean             dump_waiting_models;
+    AiWorkSession *work;
+    gchar *work_directory;
+    gchar *work_notice;
+    gchar *original_pane_title;
+    const gchar *work_outcome;
+    GPtrArray *work_rows;
+    guint work_selected;
+    guint work_link;
+    guint work_timer;
+    GCancellable *link_cancel;
+    guint link_pending;
+    guint launch_pending;
+    guint link_generation;
+    guint link_refresh_cursor;
+    gint64 link_refreshed;
+    gint work_lock_fd;
+    gboolean work_registered;
+    gboolean dashboard;
+    gboolean title_pending;
+    gint link_first_row;
+    gint link_last_row;
+    gint link_pressed;
+
+    /* /loop and /goal: the shared runner, which owns the timer. */
+    AiLoopRunner   *loops;
+    gboolean        loop_builtin;
+
+    /* Self-update: the background check, and /update status in flight. */
+    AiUpdater      *updater;
+    GCancellable   *update_cancel;
+    guint           update_pending;
 } App;
+
+static void app_schedule_redraw(App *app);
+static gchar *tui_update_badge(App *app);
+static void
+on_usage_changed(gpointer data)
+{
+	app_schedule_redraw(data);
+}
+
+static gboolean app_flush_send_queue(App *app);
+static void chrome_text(gint y, gint x, gint width, const gchar *text, attr_t attr);
+#include <termios.h>
+#include "ai-tui-workspace.h"
+
 
 /* Publish expansion, provider I/O and approvals through one state mapping.
  * This callback also runs in dump mode, where there are no curses windows. */
 static void
 app_sync_herdr(App *app)
 {
+	work_publish(app);
 	ai_tui_herdr_update(app->herdr,
 		app->sending || ai_conversation_get_busy(app->conversation),
 		app->approval_prompt != NULL);
@@ -487,12 +528,13 @@ app_sync_herdr(App *app)
 /* Dispatch termination on the main loop so normal cleanup can release the
  * herdr identity and restore the terminal, including during an approval. */
 static gboolean
-on_herdr_shutdown(gpointer data)
+on_shutdown(gpointer data)
 {
 	App *app = data;
 
 	app->approval_answer = AI_TOOL_APPROVAL_DENY_ALL;
 	app->running = FALSE;
+	if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
 	ai_conversation_cancel(app->conversation);
 	if (app->loop != NULL) g_main_loop_quit(app->loop);
 	return G_SOURCE_CONTINUE;
@@ -510,10 +552,12 @@ typedef struct
 } Row;
 
 static void app_schedule_redraw(App *app);
+static gboolean app_flush_send_queue(App *app);
 static void selection_clear(App *app);
 static void tui_mouse_enable(void);
 static GPtrArray *build_rows(App *app, gint width);
 static void draw_completion(App *app);
+static void draw_model_picker(App *app);
 static void completion_advance(App *app);
 static void completion_refresh(App *app);
 static gboolean completion_select(App *app, gint delta);
@@ -523,6 +567,10 @@ static void completion_close(App *app);
 static void on_input_sent(GObject *source, GAsyncResult *result,
                           gpointer user_data);
 static void say(App *app, const gchar *format, ...) G_GNUC_PRINTF(2, 3);
+static void on_sent(GObject *source, GAsyncResult *result, gpointer user_data);
+static void on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data);
+static void loop_after_turn(App *app, const GError *error);
+static void loop_save(App *app);
 static gchar *fit_to_width(const gchar *text, gint columns);
 static gboolean on_resize(gpointer user_data);
 static GObject *build_provider_named(const gchar *name,
@@ -986,7 +1034,7 @@ app_awaiting_user(App *app)
 {
 	return app->awaiting_since != 0 && app->input->len == 0 &&
 		app->approval_prompt == NULL && !app->searching &&
-		g_queue_is_empty(&app->send_queue) &&
+		(ai_prompt_queue_get_length(app->send_queue) == 0) &&
 		!ai_conversation_get_busy(app->conversation);
 }
 
@@ -1088,6 +1136,10 @@ ui_turn_finished(App *app, const GError *error)
 	/* However a turn ended --- answered, stopped, or failed --- nothing
 	 * further happens until the user says so, so all three hand over. */
 	app->awaiting_since = g_get_monotonic_time();
+    app->work_outcome = error == NULL ? "DONE" :
+        (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+         g_error_matches(error, AI_ERROR, AI_ERROR_CANCELLED)) ? "STOPPED" : "ERROR";
+    work_publish(app);
 
 	if (error == NULL)
 		ui_feedback(app, "Turn complete", AI_STYLE_TOOL_OK);
@@ -1155,7 +1207,7 @@ draw_status(App *app)
             ai_conversation_get_activity(app->conversation);
         g_autofree gchar *elapsed = format_elapsed(
             ai_conversation_get_activity_elapsed(app->conversation));
-		guint queued = g_queue_get_length(&app->send_queue);
+		guint queued = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *queued_note = queued > 0
 			? g_strdup_printf(" · %u queued", queued)
 			: g_strdup("");
@@ -1191,12 +1243,25 @@ draw_status(App *app)
                                model != NULL ? model : "",
                                app->interrupt_id != 0
                                    ? "^C again to quit"
-                                   : g_queue_get_length(&app->send_queue) > 0
+                                   : ai_prompt_queue_get_length(app->send_queue) > 0
                                        ? "queued prompts · Enter to send"
                                    : app_awaiting_user(app)
                                        ? "your turn · type to reply"
                                        : "ready",
                                 app->follow ? "" : "   [scrolled]");
+
+		/* Only an update that exists earns space here. */
+		{
+			g_autofree gchar *badge = tui_update_badge(app);
+
+			if (badge != NULL)
+			{
+				gchar *with_badge = g_strdup_printf("%s   · %s", line, badge);
+
+				g_free(line);
+				line = with_badge;
+			}
+		}
     }
 	if (app->feedback != NULL && app->interrupt_id == 0 &&
 		!ai_conversation_get_busy(app->conversation) &&
@@ -1477,7 +1542,7 @@ draw_input(App *app)
 	wattrset(app->input_win, border);
 	draw_frame(app->input_win);
 	{
-		guint queued = g_queue_get_length(&app->send_queue);
+		guint queued = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *label = NULL;
 		g_autofree gchar *title = NULL;
 		gint title_cols;
@@ -1521,7 +1586,8 @@ draw_input(App *app)
 	 * activity sweep and row counter. Narrow panes retain the full mode. */
 	{
 		g_autofree gchar *mode = g_strdup_printf(" %s%s ",
-			app->skip_permissions ? "skip-permissions" : "read-only",
+			ai_conversation_get_plan_mode(app->conversation) ? "plan" :
+			(app->skip_permissions ? "skip-permissions" : "read-only"),
 			width >= 54 ? " | S-TAB" : "");
 		wattrset(app->input_win, attr_for_tag(app->skip_permissions
 			? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK) | A_BOLD);
@@ -1622,9 +1688,9 @@ draw_chrome(App *app)
 	chrome_text(LINES - 1, 1, COLS - 2,
 		app->searching ? "RET next | <up> / S-RET previous | C-u clear | ESC close" :
 		app->candidates != NULL ? "TAB / arrows choose | RET accept | ESC dismiss | C-o help" :
-		COLS < 65 ? "RET send  C-o help  C-c stop" :
-		COLS < 100 ? "RET send | C-f find | C-o help | C-t theme | C-p panel" :
-		"RET send  M-RET newline  C-g editor  C-f search  C-o help  C-t theme  C-p panel  C-l latest",
+		COLS < 65 ? "RET send  ^\\ dashboard  C-c stop" :
+		COLS < 100 ? "RET send | ^\\ dashboard | C-f find | C-o help | C-p panel" :
+		"RET send  ^\\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
 	attrset(theme_attr(PAIR_SURFACE));
@@ -1633,6 +1699,33 @@ draw_chrome(App *app)
 	y = panel_text(y, x, 28, "SESSION", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, ai_provider_get_name(AI_PROVIDER(provider)), theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, model != NULL ? model : "Provider default model", theme_attr(PAIR_SURFACE) | A_BOLD, FALSE);
+	ai_quota_refresh(&app->usage, provider, app->running && !app->dashboard);
+	y = panel_usage(y + 1, x, 28, &app->usage,
+		theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, theme_attr(PAIR_SURFACE));
+    app->link_first_row = app->link_last_row = -1;
+    if (app->work != NULL)
+    {
+        g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+        guint link_index;
+        y = panel_text(y + 1, x, 28, "LINKED WORK / ^] open", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+        app->link_first_row = y;
+        for (link_index = 0; links[link_index] != NULL && y < LINES - 5; link_index++)
+        {
+            /* One clickable row per link; /links shows full URLs. */
+            const gchar *title = ai_work_session_get_link_title(app->work, links[link_index]);
+            const gchar *state = ai_work_session_get_link_state(app->work, links[link_index]);
+            g_autofree gchar *display_url = g_strdup(links[link_index]);
+			const gchar *number;
+			if (g_str_has_suffix(display_url, "/")) display_url[strlen(display_url) - 1] = '\0';
+			number = strrchr(display_url, '/');
+            g_autofree gchar *label = g_strdup_printf("%s #%s %s %s", strstr(links[link_index], "/issues/") != NULL ? "ISSUE" : "PR", number != NULL ? number + 1 : "?",
+                state != NULL ? state : "unfetched", title != NULL ? title : links[link_index]);
+            chrome_text(y++, x, 28, label, theme_attr(PAIR_ACCENT) | A_UNDERLINE);
+        }
+        app->link_last_row = y;
+        if (app->work_notice != NULL) y = panel_text(y, x, 28, app->work_notice, attr_for_tag(AI_STYLE_ERROR), FALSE);
+        if (links[0] == NULL) y = panel_text(y, x, 28, "/issue link URL or /pr link URL", theme_attr(PAIR_SURFACE), FALSE);
+    }
 	y = panel_text(y + 1, x, 28, "APPEARANCE", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 	y = panel_text(y, x, 28, THEMES[theme_index].name, theme_attr(PAIR_SURFACE), FALSE);
 	y = panel_text(y, x, 28, theme_colour ? "^T cycle / ^P hide" : "No color / ^P hide", theme_attr(PAIR_SURFACE), FALSE);
@@ -1660,6 +1753,36 @@ draw_chrome(App *app)
 		g_autofree gchar *todo_heading = g_strdup_printf("TODOS / %u", n);
 		g_autofree gchar *agent_heading = g_strdup_printf("AGENTS / %u", g_list_length(agents));
 		GList *iter;
+		{
+			/* Words from the library, the same ones ai-gui and `ai loop
+			 * list` print. Text first, state under it: 28 columns do not
+			 * fit both on one line. */
+			AiLoopSchedule *schedule = app->loops != NULL ? ai_loop_runner_get_schedule(app->loops) : NULL;
+			guint loops = schedule != NULL ? ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_LOOP) : 0;
+			guint goals = schedule != NULL ? ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_GOAL) : 0;
+			g_autofree gchar *heading = g_strdup_printf("LOOPS %u / GOALS %u", loops, goals);
+			gint64 now = g_get_real_time();
+			guint shown = 0;
+
+			y = panel_text(y + 1, x, 28, heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
+			if (loops + goals == 0) y = panel_text(y, x, 28, "None /loop /goal", theme_attr(PAIR_SURFACE), FALSE);
+			for (i = 0; schedule != NULL && i < ai_loop_schedule_get_n_tasks(schedule) && shown < 3 && y < LINES - 6; i++)
+			{
+				g_autofree gchar *excerpt = NULL;
+				g_autofree gchar *status = NULL;
+				if (ai_loop_state_is_final(ai_loop_schedule_get_state(schedule, i))) continue;
+				excerpt = ai_loop_schedule_dup_excerpt(schedule, i);
+				status = ai_loop_schedule_dup_status(schedule, i, now);
+				y = panel_text(y, x, 28, excerpt, theme_attr(PAIR_SURFACE), TRUE);
+				y = panel_text(y, x + 2, 26, status, theme_attr(PAIR_SURFACE) | A_DIM, FALSE);
+				shown++;
+			}
+			if (loops + goals > shown && y < LINES - 5)
+			{
+				g_autofree gchar *more = g_strdup_printf("+%u more /loop list /goal list", loops + goals - shown);
+				y = panel_text(y, x, 28, more, theme_attr(PAIR_SURFACE), FALSE);
+			}
+		}
 		y = panel_text(y + 1, x, 28, todo_heading, theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 		if (n == 0) y = panel_text(y, x, 28, "No todos yet /todos", theme_attr(PAIR_SURFACE), FALSE);
 		for (i = 0; i < n && i < 3 && y < LINES - 5; i++)
@@ -1687,7 +1810,7 @@ draw_chrome(App *app)
 			y = panel_text(y + 1, x, 28, "TOOLS", theme_attr(PAIR_PANEL_ACCENT) | A_BOLD, FALSE);
 			y = panel_text(y, x, 28, tools, theme_attr(PAIR_SURFACE), FALSE);
 			if (local)
-				y = panel_text(y, x, 28, app->approve_all || app->skip_permissions ? "Approval: automatic" : "Approval: ask before running", theme_attr(PAIR_SURFACE), FALSE);
+				y = panel_text(y, x, 28, ai_conversation_get_plan_mode(app->conversation) ? "Plan: inspection only" : (app->approve_all || app->skip_permissions ? "Approval: automatic" : "Approval: ask before running"), theme_attr(PAIR_SURFACE), FALSE);
 		}
 	}
 }
@@ -1704,6 +1827,8 @@ app_redraw(App *app)
     /* The input decides how much room is left, so its height is settled
      * before anything is measured against the transcript window. */
     app_layout(app);
+    if (app->dashboard && !app->tiny) { work_draw(app); return; }
+    curs_set(1);
 	bkgd(' ' | attr_for_tag(AI_STYLE_DEFAULT));
 	erase();
 	if (app->tiny)
@@ -1798,6 +1923,7 @@ app_redraw(App *app)
 
     wnoutrefresh(app->transcript_win);
     draw_completion(app);
+    draw_model_picker(app);
     draw_status(app);
     draw_input(app);
 	/* Modal layers are always painted last, including timer-driven redraws. */
@@ -2176,7 +2302,113 @@ typedef struct
 	AiTranscript *transcript;
 	GMainLoop *dump_loop;
 	gchar *provider_name;
+	App *app;
+	guint generation;
 } ModelListing;
+
+static void picker_close(App *app);
+static void picker_open(App *app, GList *models);
+
+static const gchar *
+current_model_id(GObject *provider)
+{
+	if (AI_IS_CLIENT(provider))
+		return ai_client_get_model(AI_CLIENT(provider));
+	return ai_cli_client_get_model(AI_CLI_CLIENT(provider));
+}
+
+static void
+apply_model(App *app, const gchar *requested)
+{
+	GObject *provider = ai_conversation_get_provider(app->conversation);
+	const gchar *current = current_model_id(provider);
+	g_autofree gchar *previous = g_strdup(current);
+
+	if (requested == NULL || requested[0] == '\0')
+		return;
+	if (ai_conversation_get_busy(app->conversation))
+	{
+		say(app, "Model unchanged: a turn is in flight.");
+		return;
+	}
+	if (g_strcmp0(previous, requested) == 0)
+	{
+		say(app, "Model: %s", requested);
+		return;
+	}
+	if (AI_IS_CLIENT(provider))
+		ai_client_set_model(AI_CLIENT(provider), requested);
+	else
+		ai_cli_client_set_model(AI_CLI_CLIENT(provider), requested);
+	/*
+	 * A model id the provider will reject is not detectable here. The
+	 * report is what makes the next turn's failure explicable.
+	 */
+	say(app, "Model switched from %s to %s. Context preserved.",
+	    previous != NULL ? previous : "the default", requested);
+}
+
+static void
+picker_close(App *app)
+{
+	g_clear_pointer(&app->picker_models, g_strfreev);
+	app->picker_count = 0;
+	app->picker_index = 0;
+	app->picker_first = 0;
+}
+
+static void
+picker_move(App *app, gint delta)
+{
+	gint next;
+
+	if (app->picker_count == 0)
+		return;
+	next = (gint)app->picker_index + delta;
+	if (next < 0)
+		next = 0;
+	if (next >= (gint)app->picker_count)
+		next = (gint)app->picker_count - 1;
+	app->picker_index = (guint)next;
+}
+
+static void
+picker_open(App *app, GList *models)
+{
+	GPtrArray *ids = g_ptr_array_new();
+	GList *item;
+	GObject *provider = ai_conversation_get_provider(app->conversation);
+	const gchar *current = current_model_id(provider);
+	guint i;
+
+	picker_close(app);
+	completion_close(app);
+	app->searching = FALSE;
+	for (item = models; item != NULL; item = item->next)
+	{
+		if (item->data != NULL)
+			g_ptr_array_add(ids, g_strdup((gchar *)item->data));
+	}
+	app->picker_count = ids->len;
+	if (app->picker_count == 0)
+	{
+		g_ptr_array_unref(ids);
+		say(app, "No models reported by this provider.");
+		return;
+	}
+	g_ptr_array_add(ids, NULL);
+	app->picker_models = (gchar **)g_ptr_array_free(ids, FALSE);
+	app->picker_index = 0;
+	for (i = 0; i < app->picker_count; i++)
+	{
+		if (current != NULL && g_strcmp0(app->picker_models[i], current) == 0)
+		{
+			app->picker_index = i;
+			break;
+		}
+	}
+	app_schedule_redraw(app);
+}
 
 /* Publish discovery failures and empty catalogs without hiding manual entry. */
 static void
@@ -2190,16 +2422,24 @@ models_listed(GObject *source, GAsyncResult *result, gpointer user_data)
 	GList *item;
 
 	models = ai_provider_list_models_finish(AI_PROVIDER(source), result, &error);
-	g_string_append_printf(out, "Available models for %s:\n", listing->provider_name);
-	if (error != NULL)
-		g_string_append_printf(out, "  Could not list models: %s\n", error->message);
-	else if (models == NULL)
-		g_string_append(out, "  No models reported by this provider.\n");
-	for (item = models; item != NULL; item = item->next)
-		g_string_append_printf(out, "  %s\n", (const gchar *)item->data);
-	g_string_append(out, "To switch, type /model MODEL_ID (manual IDs are accepted).");
-	block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, out->str);
-	ai_transcript_append(listing->transcript, block);
+	if (listing->app != NULL && listing->generation == listing->app->model_generation &&
+	    error == NULL && models != NULL)
+	{
+		picker_open(listing->app, models);
+	}
+	else if (listing->app == NULL || listing->generation == listing->app->model_generation)
+	{
+		g_string_append_printf(out, "Available models for %s:\n", listing->provider_name);
+		if (error != NULL)
+			g_string_append_printf(out, "  Could not list models: %s\n", error->message);
+		else if (models == NULL)
+			g_string_append(out, "  No models reported by this provider.\n");
+		for (item = models; item != NULL; item = item->next)
+			g_string_append_printf(out, "  %s\n", (const gchar *)item->data);
+		g_string_append(out, "To switch, type /model MODEL_ID (manual IDs are accepted).");
+		block = ai_view_status_block_new(AI_VIEW_STATUS_INFO, out->str);
+		ai_transcript_append(listing->transcript, block);
+	}
 	g_list_free_full(models, g_free);
 	if (listing->dump_loop != NULL)
 	{
@@ -2219,6 +2459,10 @@ show_models(App *app, GObject *provider)
 
 	listing->transcript = g_object_ref(ai_conversation_get_transcript(app->conversation));
 	listing->provider_name = g_strdup(ai_provider_get_name(AI_PROVIDER(provider)));
+	app->model_generation++;
+	listing->generation = app->model_generation;
+	if (app->dump_loop == NULL)
+		listing->app = app;
 	if (app->dump_loop != NULL)
 	{
 		listing->dump_loop = g_main_loop_ref(app->dump_loop);
@@ -2383,10 +2627,11 @@ show_help(App *app)
 
     g_list_free_full(commands, g_object_unref);
 
+    g_string_append_printf(out, "\n%s\n", ai_loop_help_text());
     g_string_append(out,
                     "\nKeys\n"
 					"  ^O help / ^T cycle theme / ^P panel / ^L latest\n"
-					"  Shift-Tab    toggle read-only / skip-permissions\n"
+					"  Shift-Tab    cycle read-only / plan / skip-permissions\n"
 					"  ^F search transcript (case-sensitive matching rows)\n"
 					"     Enter next, Up or Shift-Enter previous, Esc close\n"
 					"  PgUp/PgDn    scroll transcript incrementally\n"
@@ -2399,10 +2644,12 @@ show_help(App *app)
 					"  ^V           attach clipboard image (up to 4, 5 MiB each)\n"
 					"  Delete       delete the next Unicode character\n"
 					"  ^W / ^K      kill previous word / to line end\n"
+					"  Esc          on an empty line, stop self-paced /loops\n"
 					"  ^Y           yank the last killed text\n"
                     "  ^C           stop the turn, then clear the line,\n"
                     "               then drop queued prompts, then quit\n"
                     "  ^D           quit, on an empty line\n"
+                    "  /model       Up/Down, Enter switches, Esc closes\n"
                     "  Tab          complete /command or @path\n"
                     "  ^N           cycle tool and thinking blocks\n"
                     "  ^B           expand or collapse the selected block\n"
@@ -2726,6 +2973,15 @@ change_directory(App *app, const gchar *path)
     }
 
     ai_conversation_set_working_directory(app->conversation, resolved);
+    if (app->loops != NULL)
+        ai_loop_runner_set_working_directory(app->loops, resolved);
+    if (app->work != NULL)
+    {
+        g_autoptr(AiWorkSession) location = ai_work_session_new(resolved);
+        g_object_set(app->work, "directory", work_field(location, "directory"),
+            "project", work_field(location, "project"), "branch", work_field(location, "branch"), NULL);
+        work_publish(app);
+    }
 
     if (app->completion != NULL)
     {
@@ -2780,13 +3036,383 @@ show_expansion(App *app, const gchar *line)
 }
 
 /*
+ * /loop and /goal. The schedule and the scheduler live in the library
+ * (AiLoopRunner, shared with ai-gui). This file answers "is the session
+ * idle", sends what it is handed, and reports how the turn ended.
+ */
+
+static gchar *
+loop_resume_key(App *app)
+{
+	const gchar *provider;
+	const gchar *cwd;
+
+	provider = ai_provider_type_to_string(ai_provider_get_provider_type(
+		AI_PROVIDER(ai_conversation_get_provider(app->conversation))));
+	cwd = ai_conversation_get_working_directory(app->conversation);
+	return g_strdup_printf("%s\n%s", provider != NULL ? provider : "unknown", cwd != NULL ? cwd : "");
+}
+
+static void
+loop_save(App *app)
+{
+	g_autoptr(GError) error = NULL;
+
+	if (app->loops != NULL && !ai_loop_runner_save(app->loops, &error))
+	{
+		say(app, "Could not save loops and goals: %s", error->message);
+	}
+}
+
+static gboolean
+loop_should_restore(void)
+{
+	guint i;
+
+	if (opt_continue || opt_workspace_session != NULL)
+	{
+		return TRUE;
+	}
+
+	for (i = 0; opt_set != NULL && opt_set[i] != NULL; i++)
+	{
+		if (g_strcmp0(opt_set[i], "continue-session") == 0)
+		{
+			return TRUE;
+		}
+
+		if (g_str_has_prefix(opt_set[i], "continue-session="))
+		{
+			const gchar *value = opt_set[i] + strlen("continue-session=");
+
+			if (g_ascii_strcasecmp(value, "false") != 0 && g_strcmp0(value, "0") != 0)
+			{
+				return TRUE;
+			}
+		}
+
+		if (g_str_has_prefix(opt_set[i], "session-id=") && opt_set[i][11] != '\0')
+		{
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+/*
+ * Which schedule this process runs. A fresh launch starts its own, keyed
+ * by the new session's id. A resumed one takes over the schedule the
+ * previous process ran: --workspace-session names it, and -c finds it
+ * through the pointer the last run in this directory left. The file is
+ * claimed with a lock, so a second window resuming the same session
+ * starts without it rather than firing every prompt twice.
+ */
+static void
+loop_open(App *app)
+{
+	g_autofree gchar  *store = ai_loop_store_default_directory();
+	g_autofree gchar  *key = loop_resume_key(app);
+	g_autofree gchar  *owner = NULL;
+	g_autofree gchar  *legacy = NULL;
+	g_autoptr(GError)  error = NULL;
+	const gchar       *work_id = ai_work_session_get_id(app->work);
+	gint64             now = g_get_real_time();
+	AiLoopSchedule    *schedule = ai_loop_runner_get_schedule(app->loops);
+	guint              restored;
+
+	if (loop_should_restore())
+	{
+		if (opt_workspace_session != NULL)
+		{
+			const gchar *recorded = ai_work_session_get_field(app->work, "loop-owner");
+
+			owner = g_strdup(recorded != NULL && recorded[0] != '\0' ? recorded : work_id);
+		}
+		else if ((owner = ai_loop_store_dup_resume(store, key)) == NULL)
+		{
+			/* Before the pointer, the resume file was a copy of the
+			 * schedule itself. Adopt one of those into this session. */
+			g_autofree gchar *sum = g_compute_checksum_for_string(G_CHECKSUM_SHA256, key, -1);
+
+			legacy = g_build_filename(store, "resume", sum, NULL);
+		}
+	}
+
+	if (owner != NULL && !ai_loop_runner_open(app->loops, store, owner, now, &error))
+	{
+		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_BUSY))
+			say(app, "That session's loops and goals are running in another window; this one starts without them.");
+		else
+			say(app, "Could not restore loops and goals: %s", error->message);
+
+		g_clear_error(&error);
+	}
+
+	if (ai_loop_runner_get_path(app->loops) == NULL &&
+	    !ai_loop_runner_open(app->loops, store, work_id, now, &error))
+	{
+		say(app, "Loops and goals will not be saved: %s", error->message);
+		return;
+	}
+
+	if (legacy != NULL && g_file_test(legacy, G_FILE_TEST_IS_REGULAR) &&
+	    ai_loop_schedule_get_n_tasks(schedule) == 0)
+	{
+		if (ai_loop_schedule_load(schedule, legacy, now, &error) < 0)
+		{
+			say(app, "Could not restore loops: %s", error->message);
+			ai_loop_schedule_clear(schedule);
+			g_clear_error(&error);
+		}
+
+		loop_save(app);
+	}
+
+	g_object_set(app->work, "loop-owner", ai_loop_runner_get_owner(app->loops), NULL);
+	restored = ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_LOOP) +
+	           ai_loop_schedule_count_live(schedule, AI_LOOP_KIND_GOAL);
+
+	if (restored > 0)
+	{
+		g_autofree gchar *summary = ai_loop_schedule_dup_summary(schedule, now);
+
+		/* This session carries the schedule on; the next -c here finds it. */
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
+		say(app, "Restored %s.", summary);
+	}
+}
+
+/*
+ * The runner asks before every fire. A one-shot --dump has nothing else
+ * to wait for, so there only a turn in flight holds it back -- that is
+ * what lets `ai-tui --dump "/goal ..."` run a goal to its end.
+ */
+static gboolean
+loop_should_wait(AiLoopRunner *runner, gpointer user_data)
+{
+	App *app = user_data;
+
+	if (app->dump_loop != NULL)
+	{
+		return app->sending || ai_conversation_get_busy(app->conversation);
+	}
+
+	return !app->running ||
+	       app->sending ||
+	       ai_conversation_get_busy(app->conversation) ||
+	       (app->send_queue != NULL && ai_prompt_queue_get_length(app->send_queue) > 0) ||
+	       app->approval_prompt != NULL ||
+	       app->decision_pending ||
+	       app->clipboard_pending ||
+	       app->dashboard ||
+	       app->searching ||
+	       app->picker_models != NULL ||
+	       app->launch_pending > 0;
+}
+
+static void on_loop_input_sent(GObject *source, GAsyncResult *result, gpointer user_data);
+
+/*
+ * A scheduled /command the library judged safe goes through the input
+ * pipeline, so a skill expands and a schedulable built-in such as /todos
+ * runs. One that is not safe -- a file written before the rule existed,
+ * scheduling /clear -- is sent to the model as text instead.
+ */
+static gboolean
+loop_fire(AiLoopRunner *runner, const gchar *id, const gchar *text, gboolean expand, gpointer user_data)
+{
+	App *app = user_data;
+
+	app->sending = TRUE;
+	app->follow = TRUE;
+	g_clear_object(&app->cancellable);
+	app->cancellable = g_cancellable_new();
+	app_sync_herdr(app);
+
+	ai_loop_runner_set_working_directory(runner,
+		ai_conversation_get_working_directory(app->conversation));
+
+	if (opt_no_expand || !expand)
+	{
+		ai_conversation_send_async(app->conversation, text, app->cancellable,
+		                           on_sent, app);
+	}
+	else
+	{
+		ai_conversation_send_input_async(app->conversation, text, app->cancellable,
+		                                 on_loop_input_sent, app);
+	}
+
+	return app->sending || ai_conversation_get_busy(app->conversation);
+}
+
+static void
+loop_notice(AiLoopRunner *runner, const gchar *text, gpointer user_data)
+{
+	say((App *)user_data, "%s", text);
+}
+
+static void
+loop_changed(AiLoopRunner *runner, gpointer user_data)
+{
+	App *app = user_data;
+
+	if (app->running)
+	{
+		app_schedule_redraw(app);
+	}
+}
+
+static gchar *
+loop_assistant_text(App *app)
+{
+	GList *messages = ai_conversation_get_messages(app->conversation);
+	GList *last = g_list_last(messages);
+
+	if (last == NULL || !AI_IS_MESSAGE(last->data) ||
+	    ai_message_get_role(AI_MESSAGE(last->data)) != AI_ROLE_ASSISTANT)
+	{
+		return NULL;
+	}
+
+	return ai_message_get_text(AI_MESSAGE(last->data));
+}
+
+static gboolean send_error_is_cancelled(const GError *error);
+
+static void
+loop_after_turn(App *app, const GError *error)
+{
+	g_autofree gchar *text = NULL;
+
+	if (app->loops == NULL || ai_loop_runner_get_active_id(app->loops) == NULL)
+	{
+		return;
+	}
+
+	if (send_error_is_cancelled(error))
+	{
+		ai_loop_runner_turn_cancelled(app->loops, g_get_real_time());
+		return;
+	}
+
+	if (error == NULL)
+	{
+		text = loop_assistant_text(app);
+	}
+
+	ai_loop_runner_turn_finished(app->loops, text, error != NULL ? error->message : NULL,
+	                             g_get_real_time());
+}
+
+/* A one-shot run stays up while a goal it started still wants turns. */
+static gboolean
+loop_dump_continues(App *app)
+{
+	return app->dump_loop != NULL && app->loops != NULL &&
+	       ai_loop_runner_has_pending_goal(app->loops);
+}
+
+static void
+loop_command(App *app, const gchar *name, const gchar *arguments)
+{
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *notice = NULL;
+
+	ai_loop_runner_set_working_directory(app->loops,
+		ai_conversation_get_working_directory(app->conversation));
+	notice = ai_loop_runner_command(app->loops, name, arguments, g_get_real_time(), &error);
+
+	if (notice == NULL)
+	{
+		say(app, "%s", error != NULL ? error->message : "Could not change the schedule.");
+		return;
+	}
+
+	say(app, "%s", notice);
+
+	/* Written only by a session that schedules something: the next -c in
+	 * this directory resumes the schedule this one is using. */
+	if (ai_loop_runner_get_owner(app->loops) != NULL && app->dump_loop == NULL)
+	{
+		g_autofree gchar *store = ai_loop_store_default_directory();
+		g_autofree gchar *key = loop_resume_key(app);
+
+		ai_loop_store_set_resume(store, key, ai_loop_runner_get_owner(app->loops), NULL);
+	}
+}
+
+/*
  * Act on a built-in.
  *
  * The dispatch is on the name because AiCommandSet decided what a name
  * means; this file only knows what to do about it. Growing the set is a
  * struct literal there plus a case here, and nothing in between.
  */
+
+/* App owns cancellation and drains completion before teardown. The generation
+ * check keeps a result from being appended to a replacement session. */
+typedef struct { App *app; guint generation; gboolean json; } DecisionJob;
+static void
+on_decision_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	g_autofree DecisionJob *job = user_data;
+	App *app = job->app;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiDecisionResponse) response = ai_decider_decide_finish(AI_DECIDER(source), result, &error);
+	g_autofree gchar *text = NULL;
+	app->decision_pending = FALSE;
+	g_clear_object(&app->decision_cancel);
+	if (job->generation == app->decision_generation)
+	{
+		if (response != NULL)
+		{
+			text = job->json ? ai_decision_response_dup_json(response) : ai_decision_response_format(response);
+			say(app, "Decision result:\n%s", text);
+		}
+		else say(app, "Decision failed: %s", error->message);
+	}
+	app_schedule_redraw(app);
+	if (app->dump_loop != NULL && !app->sending && !app->dump_waiting_models && !app->decision_pending)
+		g_main_loop_quit(app->dump_loop);
+}
+static void
+start_decision(App *app, const gchar *arguments)
+{
+	DecideOptions options = { NULL, NULL, NULL, FALSE };
+	g_auto(GStrv) argv = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *line = g_strconcat("decide ", arguments != NULL ? arguments : "", NULL);
+	DecisionJob *job;
+	gint argc;
+	if (app->decision_pending) { say(app, "A decision is running; Ctrl+C cancels it."); return; }
+	if (!g_shell_parse_argv(line, &argc, &argv, &error) ||
+		!decide_options_parse(&options, argv, FALSE, ai_conversation_get_working_directory(app->conversation), &error))
+	{
+		say(app, "Decision: %s", error->message);
+		decide_options_clear(&options);
+		return;
+	}
+	if (options.help != NULL)
+	{
+		say(app, "%s", options.help);
+		decide_options_clear(&options);
+		return;
+	}
+	job = g_new0(DecisionJob, 1);
+	job->app = app; job->generation = ++app->decision_generation; job->json = options.json;
+	app->decision_cancel = g_cancellable_new();
+	app->decision_pending = TRUE;
+	say(app, "Requesting decision from Laya...");
+	ai_decider_decide_async(AI_DECIDER(options.client), options.request,
+		app->decision_cancel, on_decision_done, job);
+	decide_options_clear(&options);
+}
+
 static void app_reset(App *app);
+
+#include "ai-tui-update.h"
 
 static void
 handle_builtin(App *app, AiCommandResult *result)
@@ -2808,8 +3434,18 @@ handle_builtin(App *app, AiCommandResult *result)
         return;
     }
 
-    if (g_strcmp0(name, "clear") == 0)
+    if (g_strcmp0(name, "decide") == 0)
     {
+        start_decision(app, arguments);
+    }
+    else if (g_strcmp0(name, "btw") == 0)
+	{
+		say(app, "/btw is available in the interactive composer");
+	}
+    else if (g_strcmp0(name, "clear") == 0)
+    {
+        app->decision_generation++;
+        if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
         ai_conversation_clear(app->conversation);
         app->selected = -1;
         app->follow = TRUE;
@@ -2860,6 +3496,64 @@ handle_builtin(App *app, AiCommandResult *result)
     {
         kill_agent(app, arguments);
     }
+    else if (g_strcmp0(name, "work") == 0)
+    {
+        g_autoptr(GError) link_error = NULL;
+        if (app->work == NULL) say(app, "Assignments require an interactive session.");
+        else if (ai_work_session_add_link(app->work, arguments, &link_error))
+        {
+            work_fetch_link(app, arguments, TRUE);
+            say(app, "Loading assignment; your draft is preserved.");
+        }
+        else say(app, "%s", link_error->message);
+    }
+    else if (g_strcmp0(name, "project") == 0)
+    {
+        if (app->work == NULL) say(app, "Projects require an interactive session.");
+        else if (arguments == NULL || !*arguments) work_toggle(app);
+        else
+        {
+            g_autofree gchar *path = resolve_command_path(app, arguments);
+            if (g_file_test(path, G_FILE_TEST_IS_DIR))
+            {
+                g_autoptr(AiWorkSession) project = ai_work_session_new(path);
+                work_launch(app, project, FALSE);
+            }
+            else say(app, "Project directory does not exist.");
+        }
+    }
+    else if (g_strcmp0(name, "dashboard") == 0)
+    {
+        work_toggle(app);
+    }
+    else if (g_strcmp0(name, "links") == 0 || g_strcmp0(name, "issue") == 0 || g_strcmp0(name, "pr") == 0)
+    {
+        g_auto(GStrv) parts = g_strsplit(arguments != NULL ? arguments : "", " ", 2);
+        g_autoptr(GError) link_error = NULL;
+        if (app->work == NULL) say(app, "Links require an interactive session.");
+        else if (g_strcmp0(parts[0], "link") == 0 && parts[1] != NULL)
+        {
+            if (ai_work_session_add_link(app->work, g_strstrip(parts[1]), &link_error))
+            {
+                say(app, "Linked %s", parts[1]);
+                work_fetch_link(app, parts[1], FALSE);
+            }
+            else say(app, "%s", link_error->message);
+            work_publish(app);
+        }
+        else if (g_strcmp0(parts[0], "unlink") == 0 && parts[1] != NULL)
+        {
+            say(app, ai_work_session_remove_link(app->work, g_strstrip(parts[1])) ? "Link removed." : "Link not found.");
+            work_publish(app);
+        }
+        else
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            guint index;
+            for (index = 0; links[index] != NULL; index++) say(app, "%u: %s", index + 1, links[index]);
+            if (index == 0) say(app, "No links. /issue link URL or /pr link URL");
+        }
+    }
     else if (g_strcmp0(name, "cwd") == 0)
     {
         change_directory(app, arguments);
@@ -2884,7 +3578,6 @@ handle_builtin(App *app, AiCommandResult *result)
             ? ai_client_get_model(AI_CLIENT(provider))
             : ai_cli_client_get_model(AI_CLI_CLIENT(provider));
         g_autofree gchar *requested = NULL;
-        g_autofree gchar *previous = g_strdup(current);
 
         if (arguments != NULL)
         {
@@ -2897,40 +3590,8 @@ handle_builtin(App *app, AiCommandResult *result)
             say(app, "Model: %s", current != NULL ? current : "(default)");
 			show_models(app, provider);
         }
-        else if (ai_conversation_get_busy(app->conversation))
-        {
-            /*
-             * Same rule as /provider, and for the same reason: half a
-             * turn answered by one model and half by another is not a
-             * transcript anybody can reason about afterwards.
-             */
-            say(app, "Model unchanged: a turn is in flight.");
-        }
-        else if (g_strcmp0(previous, requested) == 0)
-        {
-            say(app, "Model: %s", requested);
-        }
         else
-        {
-            if (AI_IS_CLIENT(provider))
-            {
-                ai_client_set_model(AI_CLIENT(provider), requested);
-            }
-            else
-            {
-                ai_cli_client_set_model(AI_CLI_CLIENT(provider), requested);
-            }
-
-            /*
-             * Say it out loud.  A model id that the provider will reject
-             * is not detectable here --- no wrapped CLI offers a
-             * validating lookup --- so the error arrives on the next
-             * turn, and by then the only thing that makes it explicable
-             * is having seen the change reported.
-             */
-            say(app, "Model switched from %s to %s. Context preserved.",
-                previous != NULL ? previous : "the default", requested);
-        }
+            apply_model(app, requested);
     }
     else if (g_strcmp0(name, "effort") == 0)
     {
@@ -3095,6 +3756,14 @@ handle_builtin(App *app, AiCommandResult *result)
                 }
             }
         }
+    }
+    else if (g_strcmp0(name, "loop") == 0 || g_strcmp0(name, "goal") == 0)
+    {
+        loop_command(app, name, arguments);
+    }
+    else if (g_strcmp0(name, "update") == 0)
+    {
+        tui_update_command(app, arguments);
     }
     else
     {
@@ -3338,6 +4007,11 @@ interrupt_arm(App *app)
 static gboolean
 handle_interrupt(App *app)
 {
+	if (app->decision_pending)
+	{
+		g_cancellable_cancel(app->decision_cancel);
+		return FALSE;
+	}
 	app->pasting = FALSE;
 	if (app->clipboard_pending)
 	{
@@ -3381,9 +4055,9 @@ handle_interrupt(App *app)
         return FALSE;
     }
 
-	if (!g_queue_is_empty(&app->send_queue))
+	if (ai_prompt_queue_get_length(app->send_queue) != 0)
 	{
-		guint n = g_queue_get_length(&app->send_queue);
+		guint n = ai_prompt_queue_get_length(app->send_queue);
 		g_autofree gchar *notice = g_strdup_printf(
 			"Dropped %u queued prompt%s", n, n == 1 ? "" : "s");
 
@@ -3577,6 +4251,23 @@ handle_mouse(
 	gint col = 0;
 	gboolean over;
 
+    if (app->dashboard) return;
+    if (!app->pasting && app->work != NULL && event->x >= app->content_width + 2 &&
+        event->y >= app->link_first_row && event->y < app->link_last_row)
+    {
+        gint index = event->y - app->link_first_row;
+        if (event->bstate & BUTTON1_PRESSED) app->link_pressed = index;
+        if ((event->bstate & BUTTON1_CLICKED) ||
+            ((event->bstate & BUTTON1_RELEASED) && app->link_pressed == index))
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            if ((guint)index < g_strv_length(links)) work_open_url(app, links[index]);
+        }
+        if (event->bstate & BUTTON1_RELEASED) app->link_pressed = -1;
+        return;
+    }
+    if (event->bstate & (BUTTON1_PRESSED | BUTTON1_RELEASED)) app->link_pressed = -1;
+
 	if (app->tiny || app->pasting || app->transcript_win == NULL)
 		return;
 	if ((event->bstate & BUTTON4_PRESSED) &&
@@ -3672,12 +4363,20 @@ drain_keys(App *app)
 			{
 				g_unichar_to_utf8(ch == '\r' ? '\n' : (gunichar)value, utf8);
 				/* Ignore pasted approval answers; require a deliberate key. */
-				if (app->approval_prompt == NULL && !app->searching && !app->tiny)
+				if (!app->dashboard && app->approval_prompt == NULL && !app->searching && !app->tiny)
 					input_insert(app, utf8);
 			}
 			app_schedule_redraw(app);
 			continue;
 		}
+        if (kind == OK && ch == 28) { work_toggle(app); continue; }
+        if (app->dashboard) { work_key(app, ch); continue; }
+        if (kind == OK && ch == 29 && app->work != NULL)
+        {
+            g_auto(GStrv) links = ai_work_session_dup_links(app->work);
+            if (links[0] != NULL) work_open_url(app, links[app->work_link++ % g_strv_length(links)]);
+            continue;
+        }
 		/* gst/tmux may deliver Ctrl-C as CSI-u rather than SIGINT. Treat
 		 * both encodings as one interrupt, before approval or search steal
 		 * Escape from an unmapped sequence. */
@@ -3707,6 +4406,49 @@ drain_keys(App *app)
 		/* Do not submit or edit a draft while it cannot be seen. */
 		if (app->tiny && !((kind == OK && ch == 4) ||
 			(kind == KEY_CODE_YES && ch == KEY_RESIZE))) continue;
+		if (app->picker_models != NULL && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
+			(kind == OK && (ch == 3 || ch == 4 || ch == 12 || ch == 15 || ch == 16 || ch == 20))))
+		{
+			if (kind == KEY_CODE_YES && ch == KEY_UP)
+				picker_move(app, -1);
+			else if (kind == KEY_CODE_YES && ch == KEY_DOWN)
+				picker_move(app, 1);
+			else if (kind == KEY_CODE_YES && ch == KEY_PPAGE)
+				picker_move(app, -MENU_MAX_ROWS);
+			else if (kind == KEY_CODE_YES && ch == KEY_NPAGE)
+				picker_move(app, MENU_MAX_ROWS);
+			else if ((kind == OK && (ch == '\n' || ch == '\r')) ||
+			         (kind == KEY_CODE_YES && ch == KEY_ENTER))
+			{
+				g_autofree gchar *chosen = NULL;
+
+				if (app->picker_index < app->picker_count)
+					chosen = g_strdup(app->picker_models[app->picker_index]);
+				picker_close(app);
+				if (chosen != NULL)
+					apply_model(app, chosen);
+			}
+			else if (kind == OK && ch == 27)
+			{
+				wint_t next = 0;
+				gint next_kind;
+
+				wtimeout(app->input_win, ESCAPE_SETTLE_MS);
+				next_kind = wget_wch(app->input_win, &next);
+				nodelay(app->input_win, TRUE);
+				if (!((next_kind == OK && (next == '\r' || next == '\n')) ||
+				      (next_kind == KEY_CODE_YES && next == KEY_ENTER)))
+				{
+					if (next_kind == KEY_CODE_YES)
+						ungetch((gint)next);
+					else if (next_kind != ERR)
+						unget_wch(next);
+					picker_close(app);
+				}
+			}
+			app_schedule_redraw(app);
+			continue;
+		}
 		if (app->searching && !((kind == KEY_CODE_YES && ch == KEY_RESIZE) ||
 			(kind == OK && (ch == 12 || ch == 15 || ch == 16 || ch == 20))))
 		{
@@ -3905,31 +4647,30 @@ drain_keys(App *app)
             case KEY_BTAB:  /* Shift-Tab */
             {
 				GObject *provider = ai_conversation_get_provider(app->conversation);
-				GParamSpec *property = g_object_class_find_property(
-					G_OBJECT_GET_CLASS(provider), "skip-permissions");
-				gboolean busy = app->sending || ai_conversation_get_busy(app->conversation);
+				gboolean was_plan = ai_conversation_get_plan_mode(app->conversation);
+				gboolean next_plan = !was_plan && !app->skip_permissions;
+				g_autoptr(GError) error = NULL;
 				g_autofree gchar *notice = NULL;
 
-				/* Wrapped tools belong to the child. Changing its property
-				 * affects the next invocation, never an existing process. */
-				if (AI_IS_CLI_CLIENT(provider) && property == NULL)
+				if (app->sending || ai_conversation_get_busy(app->conversation))
 				{
-					ui_feedback(app, "This provider does not support permission switching", AI_STYLE_ERROR);
+					ui_feedback(app, "Wait for the current turn to finish before changing mode", AI_STYLE_ERROR);
 					break;
 				}
-				app->skip_permissions = !app->skip_permissions;
-				if (property != NULL)
+				if (!ai_conversation_set_plan_mode(app->conversation, next_plan, &error))
+				{
+					ui_feedback(app, error->message, AI_STYLE_ERROR);
+					break;
+				}
+				app->skip_permissions = was_plan;
+				if (!next_plan && g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "skip-permissions") != NULL)
 					g_object_set(provider, "skip-permissions", app->skip_permissions, NULL);
-				/* Provider replacement inherits the live choice, not argv's
-				 * original value. Session reset reuses the same provider. */
 				opt_skip_permissions = app->skip_permissions;
 				completion_close(app);
 				app->completion_dismissed = TRUE;
-				notice = g_strdup_printf("Mode: %s%s",
-					app->skip_permissions ? "skip-permissions" : "read-only",
-					busy && AI_IS_CLI_CLIENT(provider) ? " (next turn; running tools unchanged)" : "");
-				ui_feedback(app, notice, app->skip_permissions
-					? AI_STYLE_TOOL_PENDING : AI_STYLE_TOOL_OK);
+				notice = g_strdup_printf("Mode: %s", next_plan ? "plan" :
+					(app->skip_permissions ? "skip-permissions" : "read-only"));
+				ui_feedback(app, notice, AI_STYLE_TOOL_OK);
                 break;
             }
 
@@ -3969,9 +4710,27 @@ drain_keys(App *app)
 					else unget_wch(next);
                 }
 
-                /* A real Escape: dismiss the menu until the line changes. */
-                app->completion_dismissed = TRUE;
-                completion_close(app);
+                /* A real Escape: dismiss the menu until the line changes.
+                 * On an empty composer, with no menu to dismiss, it also
+                 * stops a self-paced /loop that is waiting. */
+                {
+					gboolean menu_open = app->candidates != NULL;
+
+					app->completion_dismissed = TRUE;
+					completion_close(app);
+
+					if (!menu_open && app->input->len == 0 && app->loops != NULL)
+					{
+						g_autofree gchar *notice = ai_loop_schedule_stop_waiting(
+							ai_loop_runner_get_schedule(app->loops));
+
+						if (notice != NULL)
+						{
+							say(app, "%s", notice);
+							loop_save(app);
+						}
+					}
+                }
                 break;
             }
 
@@ -3982,7 +4741,7 @@ drain_keys(App *app)
 
             case 4:   /* ^D: quit, on an empty line */
                 if (app->input->len == 0 && app->images == NULL && !app->clipboard_pending &&
-					g_queue_is_empty(&app->send_queue))
+					(ai_prompt_queue_get_length(app->send_queue) == 0))
                 {
                     app->running = FALSE;
                     g_main_loop_quit(app->loop);
@@ -4096,21 +4855,10 @@ on_resize(gpointer user_data)
  * ================================================================ */
 
 static void
-queued_prompt_free(gpointer data)
-{
-	QueuedPrompt *item = data;
-
-	if (item == NULL)
-		return;
-	g_free(item->text);
-	g_list_free_full(item->images, g_object_unref);
-	g_free(item);
-}
-
-static void
 app_clear_send_queue(App *app)
 {
-	g_queue_clear_full(&app->send_queue, queued_prompt_free);
+	if (app->send_queue != NULL) ai_prompt_queue_clear(app->send_queue);
+	app->queue_blocked = FALSE;
 }
 
 static gboolean
@@ -4129,6 +4877,7 @@ app_finish_send(
 ){
 	app->sending = FALSE;
 	app_sync_herdr(app);
+	loop_after_turn(app, error);
 
 	/* Dump tests never set running; interactive shutdown has no dump loop
 	 * and must not start another turn. */
@@ -4145,7 +4894,8 @@ app_finish_send(
 
 	app_schedule_redraw(app);
 
-	if (app->dump_loop != NULL && !app->dump_waiting_models)
+	if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending &&
+	    !loop_dump_continues(app))
 		g_main_loop_quit(app->dump_loop);
 }
 
@@ -4185,17 +4935,35 @@ on_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
     {
 		app->sending = FALSE;
 		app_sync_herdr(app);
+
         handle_builtin(app, command);
+
+		/* A schedulable built-in a loop ran has no reply to judge; its
+		 * turn is over when it returns. */
+		if (app->loop_builtin && app->loops != NULL)
+			ai_loop_runner_turn_finished(app->loops, NULL, NULL, g_get_real_time());
+
 		/* /quit clears running; dump mode never sets it. Flush only when
 		 * the interactive session is still alive. */
 		if (app->running && app_flush_send_queue(app))
 			return;
 		app_schedule_redraw(app);
-		if (app->dump_loop != NULL && !app->dump_waiting_models)
+		if (app->dump_loop != NULL && !app->dump_waiting_models && !app->decision_pending &&
+		    !loop_dump_continues(app))
 			g_main_loop_quit(app->dump_loop);
     }
 	else
 		app_finish_send(app, NULL, TRUE);
+}
+
+static void
+on_loop_input_sent(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	App *app = user_data;
+
+	app->loop_builtin = TRUE;
+	on_input_sent(source, result, user_data);
+	app->loop_builtin = FALSE;
 }
 
 /* ================================================================
@@ -4494,7 +5262,7 @@ draw_completion(App *app)
     gint  origin_width;
     gint  i;
 
-    if (app->candidates == NULL)
+    if (app->picker_models != NULL || app->candidates == NULL)
     {
         return;
     }
@@ -4639,6 +5407,71 @@ draw_completion(App *app)
     wnoutrefresh(app->transcript_win);
 }
 
+static void
+draw_model_picker(App *app)
+{
+	gint height;
+	gint width;
+	gint rows;
+	gint first;
+	gint i;
+	guint n;
+	GObject *provider;
+	const gchar *current;
+
+	if (app->picker_models == NULL || app->transcript_win == NULL)
+		return;
+	n = app->picker_count;
+	if (n == 0)
+		return;
+	getmaxyx(app->transcript_win, height, width);
+	rows = MIN((gint)n, MIN(MENU_MAX_ROWS, height - 1));
+	if (rows < 1 || width < 8)
+		return;
+	first = (gint)app->picker_first;
+	if ((gint)app->picker_index < first)
+		first = (gint)app->picker_index;
+	else if ((gint)app->picker_index >= first + rows)
+		first = (gint)app->picker_index - rows + 1;
+	first = CLAMP(first, 0, MAX(0, (gint)n - rows));
+	app->picker_first = (guint)first;
+	provider = ai_conversation_get_provider(app->conversation);
+	current = current_model_id(provider);
+	{
+		gint y = height - rows - 1;
+		gint x;
+		g_autofree gchar *count = g_strdup_printf(" %u/%u ", app->picker_index + 1, n);
+		gint at = MAX(0, width - (gint)strlen(count) - 2);
+
+		wattrset(app->transcript_win, theme_attr(PAIR_ACCENT));
+		for (x = 0; x < width; x++)
+			mvwaddstr(app->transcript_win, y, x, g_get_charset(NULL) ? "─" : "-");
+		if (at > 18)
+			mvwaddstr(app->transcript_win, y, 2, " MODELS  Enter Esc ");
+		mvwaddstr(app->transcript_win, y, at, count);
+	}
+	for (i = 0; i < rows; i++)
+	{
+		guint index = (guint)(first + i);
+		gboolean selected = index == app->picker_index;
+		gboolean active = current != NULL && g_strcmp0(app->picker_models[index], current) == 0;
+		gint y = height - rows + i;
+		g_autofree gchar *label = g_strdup_printf("%s%s", app->picker_models[index],
+		                                          active ? "  current" : "");
+		g_autofree gchar *fitted = fit_to_width(label, width - 4);
+
+		wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE));
+		mvwhline(app->transcript_win, y, 0, ' ', width);
+		if (selected)
+			mvwaddstr(app->transcript_win, y, 0, g_get_charset(NULL) ? "›" : ">");
+		wattrset(app->transcript_win, theme_attr(selected ? PAIR_SELECTION : PAIR_SURFACE) |
+		         (active ? A_BOLD : A_NORMAL));
+		mvwaddstr(app->transcript_win, y, 2, fitted);
+	}
+	wattrset(app->transcript_win, A_NORMAL);
+	wnoutrefresh(app->transcript_win);
+}
+
 /* Local commands must remain usable with an unsupported provider and images
  * queued, especially /provider and /quit. Lookup is metadata-only: never run
  * prompt expansion twice just to decide whether an attachment can be sent. */
@@ -4673,22 +5506,132 @@ image_draft_is_rejected(App *app)
 	return FALSE;
 }
 
+/* A side question owns its client and transcript. Its completion is discarded
+ * after reset, and drained before App leaves scope. */
+typedef struct {
+	App *app;
+	AiConversation *origin;
+	gchar *question;
+} SideQuestion;
+
+static void
+on_side_question(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	SideQuestion *side = user_data;
+	App *app = side->app;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *answer = NULL;
+	GList *messages;
+
+	ai_conversation_send_finish(AI_CONVERSATION(source), result, &error);
+	if (app->running && app->conversation == side->origin) {
+		messages = ai_conversation_get_messages(AI_CONVERSATION(source));
+		if (error == NULL && messages != NULL)
+			answer = ai_message_get_text(g_list_last(messages)->data);
+		say(app, "BTW — %s\n%s", side->question,
+		    error != NULL ? error->message : (answer != NULL ? answer : "No answer"));
+	}
+	g_ptr_array_remove(app->side_questions, source);
+	g_object_unref(side->origin);
+	g_free(side->question);
+	g_free(side);
+}
+
+/* Client properties are the configuration contract. Never share request state
+ * or resume a native session, nor hand a child the parent's live MCP endpoint. */
+static GObject *
+side_provider_new(GObject *parent, GError **error)
+{
+	GParamSpec **specs;
+	const gchar **names;
+	GValue *values;
+	guint n, i, used = 0;
+	GObject *provider;
+
+	if (!AI_IS_CLIENT(parent) && !AI_IS_CLI_CLIENT(parent)) {
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+			"This provider needs an application-supplied independent client for /btw");
+		return NULL;
+	}
+	specs = g_object_class_list_properties(G_OBJECT_GET_CLASS(parent), &n);
+	names = g_new0(const gchar *, n);
+	values = g_new0(GValue, n);
+	for (i = 0; i < n; i++) {
+		GParamSpec *spec = specs[i];
+		GType type = G_PARAM_SPEC_VALUE_TYPE(spec);
+		if (!(spec->flags & G_PARAM_READABLE) || !(spec->flags & G_PARAM_WRITABLE) ||
+		    g_str_equal(spec->name, "session-id") ||
+		    g_str_equal(spec->name, "continue-session") ||
+		    g_str_equal(spec->name, "fork-session") ||
+		    strstr(spec->name, "mcp") != NULL ||
+		    (g_type_is_a(type, G_TYPE_OBJECT) && type != AI_TYPE_CONFIG))
+			continue;
+		names[used] = spec->name;
+		g_value_init(&values[used], type);
+		g_object_get_property(parent, spec->name, &values[used]);
+		used++;
+	}
+	provider = g_object_new_with_properties(G_OBJECT_TYPE(parent), used, names, values);
+	for (i = 0; i < used; i++) g_value_unset(&values[i]);
+	g_free(values);
+	g_free(names);
+	g_free(specs);
+	return provider;
+}
+
+static gboolean
+app_side_question(App *app, const gchar *question)
+{
+	g_autoptr(GObject) provider = NULL;
+	g_autoptr(AiConversation) branch = NULL;
+	g_autoptr(GError) error = NULL;
+	SideQuestion *side;
+
+	if (*question == '\0') {
+		say(app, "Usage: /btw <question> or /btw --cancel");
+		return TRUE;
+	}
+	if (g_str_equal(question, "--cancel")) {
+		guint i;
+		for (i = 0; i < app->side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app->side_questions, i));
+		say(app, "Cancelling side questions; main turn unchanged");
+		return TRUE;
+	}
+	if (app->images != NULL) {
+		ui_feedback(app, "/btw accepts text; attachments remain in your draft", AI_STYLE_ERROR);
+		return FALSE;
+	}
+	if (app->side_questions->len >= 4) {
+		ui_feedback(app, "Four side questions are already running", AI_STYLE_ERROR);
+		return FALSE;
+	}
+	provider = side_provider_new(ai_conversation_get_provider(app->conversation), &error);
+	if (provider != NULL) branch = ai_conversation_fork(app->conversation, provider, &error);
+	if (branch == NULL) {
+		ui_feedback(app, error->message, AI_STYLE_ERROR);
+		return FALSE;
+	}
+	side = g_new0(SideQuestion, 1);
+	side->app = app;
+	side->origin = g_object_ref(app->conversation);
+	side->question = g_strdup(question);
+	g_ptr_array_add(app->side_questions, g_object_ref(branch));
+	say(app, "BTW started: %s", question);
+	ai_conversation_send_async(branch, question, NULL, on_side_question, side);
+	return TRUE;
+}
+
 static void
 app_enqueue_draft(App *app, const gchar *line)
 {
-	QueuedPrompt *item;
-
-	if (g_queue_get_length(&app->send_queue) >= SEND_QUEUE_LIMIT)
-	{
-		ui_feedback(app, "Send queue is full", AI_STYLE_ERROR);
+	g_autoptr(GError) error = NULL;
+	if (!ai_prompt_queue_push(app->send_queue, line, app->images,
+	                         line[0] == '/', &error)) {
+		ui_feedback(app, error->message, AI_STYLE_ERROR);
 		return;
 	}
-
-	item = g_new0(QueuedPrompt, 1);
-	item->text = g_strdup(line);
-	item->images = app->images;
-	app->images = NULL;
-	g_queue_push_tail(&app->send_queue, item);
+	g_clear_list(&app->images, g_object_unref);
 	g_ptr_array_add(app->history, g_strdup(line));
 	g_string_truncate(app->input, 0);
 	app->cursor = 0;
@@ -4703,8 +5646,10 @@ app_send_from_composer(
 	gboolean  record_history
 ){
     g_autofree gchar *line = NULL;
+	gboolean recovery_command;
 
-	if (app->clipboard_pending)
+	/* A pending clipboard read belongs to the unsent draft, not this batch. */
+	if (record_history && app->clipboard_pending)
 		return;
 	if (image_draft_is_rejected(app))
 		return;
@@ -4726,9 +5671,37 @@ app_send_from_composer(
         return;
     }
 
-	if (app->sending || ai_conversation_get_busy(app->conversation))
+	if (!opt_no_expand && g_str_has_prefix(line, "/btw") &&
+	    (line[4] == '\0' || g_ascii_isspace(line[4]))) {
+		const gchar *question = line + 4;
+		while (g_ascii_isspace(*question)) question++;
+		if (app_side_question(app, question)) {
+			if (record_history) g_ptr_array_add(app->history, g_strdup(line));
+			g_string_truncate(app->input, 0);
+			app->cursor = 0;
+			app->history_pos = -1;
+		}
+		return;
+	}
+
+    if (app->work != NULL && !*work_field(app->work, "title") && line[0] != '/')
+    {
+        g_autofree gchar *title = g_utf8_substring(line, 0, MIN(80, g_utf8_strlen(line, -1)));
+        g_object_set(app->work, "title", title, NULL);
+    }
+	/* An idle, image-blocked queue must not trap the command that repairs it.
+	 * Other submissions retain FIFO order, and active turns are never bypassed. */
+	recovery_command = app->queue_blocked &&
+		g_str_has_prefix(line, "/provider") &&
+		(line[9] == '\0' || g_ascii_isspace(line[9])) &&
+		image_draft_is_local_command(app);
+	if (app->sending || ai_conversation_get_busy(app->conversation) ||
+	    (record_history && ai_prompt_queue_get_length(app->send_queue) > 0 &&
+	     !recovery_command))
 	{
 		app_enqueue_draft(app, line);
+		if (!app->sending && !ai_conversation_get_busy(app->conversation))
+			app_flush_send_queue(app);
 		return;
 	}
 
@@ -4768,20 +5741,45 @@ app_send_from_composer(
 static gboolean
 app_flush_send_queue(App *app)
 {
-	QueuedPrompt *item;
+	g_autofree gchar *text = NULL;
+	g_autofree gchar *draft = NULL;
+	GList *draft_images;
+	g_autoptr(GString) pending_input = NULL;
+	GString *draft_input;
+	gboolean rejected;
+	guint cursor;
+	gint history_pos;
 
 	if (app->sending || ai_conversation_get_busy(app->conversation) ||
-		g_queue_is_empty(&app->send_queue))
+		ai_prompt_queue_get_length(app->send_queue) == 0)
 		return FALSE;
 
-	item = g_queue_pop_head(&app->send_queue);
-	g_string_assign(app->input, item->text != NULL ? item->text : "");
+	/* A queued turn never consumes the unsent composer or its attachments. */
+	draft = g_strdup(app->input->str);
+	draft_images = app->images;
+	cursor = app->cursor;
+	history_pos = app->history_pos;
+	/* Validate without consuming an entry rejected after a provider switch. */
+	pending_input = g_string_new(ai_prompt_queue_peek(app->send_queue, &app->images));
+	draft_input = app->input;
+	app->input = pending_input;
+	rejected = image_draft_is_rejected(app);
+	app->input = draft_input;
+	app->images = draft_images;
+	app->queue_blocked = rejected;
+	if (rejected) return FALSE;
+	app->images = NULL;
+	text = ai_prompt_queue_pop(app->send_queue, &app->images);
+	g_string_assign(app->input, text);
 	app->cursor = (guint)app->input->len;
-	g_clear_list(&app->images, g_object_unref);
-	app->images = item->images;
-	item->images = NULL;
-	queued_prompt_free(item);
 	app_send_from_composer(app, FALSE);
+	/* A local command or input-resolution failure has not transferred these
+	 * images into a turn. Return them to the composer alongside its own images;
+	 * never attach them to the next queued prompt or discard them on restore. */
+	app->images = g_list_concat(draft_images, app->images);
+	g_string_assign(app->input, draft);
+	app->cursor = cursor;
+	app->history_pos = history_pos;
 	return app->sending || ai_conversation_get_busy(app->conversation);
 }
 
@@ -4885,6 +5883,7 @@ app_reset(App *app)
 	/* Prepare and bind before discarding any live application state. A
 	 * failed config write must leave /new and its MCP clients unchanged. */
 	replacement = ai_conversation_new(provider);
+	g_object_set(replacement, "work-session", app->work, NULL);
 	ai_conversation_set_system_prompt(replacement, ai_conversation_get_system_prompt(previous));
 	ai_conversation_set_working_directory(replacement, ai_conversation_get_working_directory(previous));
 	ai_conversation_set_max_tokens(replacement, ai_conversation_get_max_tokens(previous));
@@ -4919,6 +5918,15 @@ app_reset(App *app)
 			g_object_set(provider, "continue-session", FALSE, NULL);
 	}
 
+    if (app->decision_cancel != NULL) g_cancellable_cancel(app->decision_cancel);
+    app->decision_generation++;
+    app->link_generation++;
+    app->work_outcome = NULL;
+	if (ai_conversation_get_plan_mode(previous))
+	{
+		ai_conversation_set_plan_mode(previous, FALSE, NULL);
+		ai_conversation_set_plan_mode(replacement, TRUE, NULL);
+	}
 	/* A new executor also forgets tool approvals, todos and agent results. */
 	g_set_object(&app->conversation, replacement);
 	if (!opt_no_agents)
@@ -4937,7 +5945,14 @@ app_reset(App *app)
 		g_signal_connect_swapped(app->conversation, "notify::activity", G_CALLBACK(app_schedule_redraw), app);
 	}
 
+	{
+		guint i;
+		for (i = 0; i < app->side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app->side_questions, i));
+	}
 	/* Forget drafts and navigation as well as the visible conversation. */
+	if (app->loops != NULL)
+		ai_loop_runner_clear(app->loops);
 	g_ptr_array_set_size(app->history, 0);
 	g_string_truncate(app->input, 0);
 	app_clear_send_queue(app);
@@ -5350,9 +6365,15 @@ main(int argc, char *argv[])
 		if (mcp_status >= 0) { if (error != NULL) g_printerr("ai-tui: %s\n", error->message); return mcp_status; }
 	}
 
+    if (opt_dashboard && opt_no_dashboard)
+    {
+        g_printerr("ai-tui: choose --dashboard or --no-dashboard\n"); return 2;
+    }
     if (opt_version)
     {
-        g_print("ai-tui %s\n", AI_GLIB_VERSION_STRING);
+        g_autofree gchar *summary = ai_build_info_dup_summary();
+
+        g_print("ai-tui %s\n", summary);
         return 0;
     }
 
@@ -5363,6 +6384,10 @@ main(int argc, char *argv[])
                 "SPDX-License-Identifier: AGPL-3.0-or-later\n");
         return 0;
     }
+    if (opt_queue_limit < 1 || opt_queue_limit > 4096) {
+		g_printerr("--queue-limit must be between 1 and 4096\n");
+		return 1;
+	}
 	if (opt_list_themes)
 	{
 		guint i;
@@ -5387,6 +6412,11 @@ main(int argc, char *argv[])
 		}
 	}
 
+	if (opt_plan && (opt_launch || opt_launch_cmd || opt_launch_cmd_print || opt_mcp_server))
+	{
+		g_printerr("--plan requires an ai-tui conversation; it cannot be combined with native launch or --mcp-server\n");
+		return 1;
+	}
 	if (opt_launch + opt_launch_cmd + opt_launch_cmd_print > 1 ||
 	    ((opt_launch || opt_launch_cmd || opt_launch_cmd_print) &&
 	     (opt_dump != NULL || opt_dry_run || opt_local_tools || opt_yes)))
@@ -5394,6 +6424,30 @@ main(int argc, char *argv[])
 		g_printerr("ai-tui: choose one launch mode; it cannot be combined with dump, dry-run, or local-tool modes\n");
 		return 2;
 	}
+    if (opt_workspace_session != NULL)
+    {
+        g_autofree gchar *directory = ai_work_session_default_directory();
+        g_autoptr(GPtrArray) saved = work_list(directory, &error);
+        guint index;
+        AiWorkSession *selected = NULL;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
+                selected = g_ptr_array_index(saved, index);
+        if (selected == NULL || !g_str_equal(work_field(selected, "status"), "DISCONNECTED") ||
+            !*work_field(selected, "provider-session"))
+        {
+            g_printerr("ai-tui: session is missing, active, or has no native resume ID\n");
+            return 2;
+        }
+        g_free(opt_provider);
+        opt_provider = g_strdup(work_field(selected, "provider"));
+        g_free(opt_model);
+        opt_model = g_strdup(work_field(selected, "model"));
+        if (g_chdir(work_field(selected, "directory")) != 0)
+        {
+            g_printerr("ai-tui: session working directory is unavailable\n"); return 2;
+        }
+    }
     provider = build_provider(&error);
 
     if (provider == NULL)
@@ -5402,6 +6456,18 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    if (opt_workspace_session != NULL && AI_IS_CLI_CLIENT(provider))
+    {
+        g_autofree gchar *directory = ai_work_session_default_directory();
+        g_autoptr(GPtrArray) saved = work_list(directory, NULL);
+        guint index;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+        {
+            AiWorkSession *row = g_ptr_array_index(saved, index);
+            if (g_str_equal(ai_work_session_get_id(row), opt_workspace_session))
+                g_object_set(provider, "session-id", work_field(row, "provider-session"), NULL);
+        }
+    }
 	if (opt_launch || opt_launch_cmd || opt_launch_cmd_print)
 	{
 		g_autofree gchar *launch_prompt = remaining_args_prompt(argc, argv);
@@ -5424,6 +6490,11 @@ main(int argc, char *argv[])
 
     memset(&app, 0, sizeof app);
     app.conversation = ai_conversation_new(provider);
+	if (opt_plan && !ai_conversation_set_plan_mode(app.conversation, TRUE, &error))
+	{
+		g_printerr("Cannot enable plan mode: %s\n", error->message);
+		return 1;
+	}
 	/* --set remains authoritative at startup; show the effective flag. */
 	app.skip_permissions = opt_skip_permissions;
 	if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "skip-permissions") != NULL)
@@ -5431,6 +6502,9 @@ main(int argc, char *argv[])
 	opt_skip_permissions = app.skip_permissions;
 	g_signal_connect(ai_conversation_get_transcript(app.conversation), "items-changed",
 		G_CALLBACK(on_transcript_items_changed), &app);
+    app.send_queue = g_object_new(AI_TYPE_PROMPT_QUEUE,
+		"coalesce", !opt_no_coalesce, "max-length", (guint)opt_queue_limit, NULL);
+	app.side_questions = g_ptr_array_new_with_free_func(g_object_unref);
     app.input = g_string_new(prompt);
     app.cursor = (guint)app.input->len;
     app.history = g_ptr_array_new_with_free_func(g_free);
@@ -5577,6 +6651,8 @@ main(int argc, char *argv[])
         g_clear_object(&app.registry);
         g_object_unref(app.conversation);
         g_object_unref(provider);
+        g_clear_object(&app.send_queue);
+        g_ptr_array_unref(app.side_questions);
         g_string_free(app.input, TRUE);
         g_ptr_array_unref(app.history);
 
@@ -5588,13 +6664,32 @@ main(int argc, char *argv[])
 		herdr = ai_tui_herdr_new(g_getenv("HERDR_ENV"),
 			g_getenv("HERDR_SOCKET_PATH"), g_getenv("HERDR_PANE_ID"));
 	app.herdr = herdr;
-	if (herdr != NULL || mcp_host != NULL)
 	{
-		g_unix_signal_add(SIGTERM, on_herdr_shutdown, &app);
-		g_unix_signal_add(SIGHUP, on_herdr_shutdown, &app);
+		g_unix_signal_add(SIGTERM, on_shutdown, &app);
+		g_unix_signal_add(SIGHUP, on_shutdown, &app);
 	}
 	g_signal_connect_swapped(app.conversation, "notify::busy",
 		G_CALLBACK(app_sync_herdr), &app);
+
+    app.loops = ai_loop_runner_new();
+    ai_loop_schedule_set_commands(ai_loop_runner_get_schedule(app.loops), app.commands);
+    ai_loop_runner_set_working_directory(app.loops, ai_conversation_get_working_directory(app.conversation));
+    g_signal_connect(app.loops, "should-wait", G_CALLBACK(loop_should_wait), &app);
+    g_signal_connect(app.loops, "fire", G_CALLBACK(loop_fire), &app);
+    g_signal_connect(app.loops, "notice", G_CALLBACK(loop_notice), &app);
+    g_signal_connect(app.loops, "changed", G_CALLBACK(loop_changed), &app);
+
+    app.work_directory = ai_work_session_default_directory();
+    if (opt_workspace_session != NULL)
+    {
+        g_autoptr(GPtrArray) saved = work_list(app.work_directory, NULL);
+        guint index;
+        for (index = 0; saved != NULL && index < saved->len; index++)
+            if (g_str_equal(ai_work_session_get_id(g_ptr_array_index(saved, index)), opt_workspace_session))
+                app.work = g_object_ref(g_ptr_array_index(saved, index));
+    }
+    if (app.work == NULL) app.work = ai_work_session_new(ai_conversation_get_working_directory(app.conversation));
+    g_object_set(app.conversation, "work-session", app.work, NULL);
 
     /*
      * One-shot: --dump, or a prompt given without a terminal.
@@ -5618,6 +6713,8 @@ main(int argc, char *argv[])
 
             app.loop = loop;
             app.dump_loop = loop;
+            /* No file: a one-shot run's goal ends with the run. */
+            ai_loop_runner_start(app.loops);
 			app.sending = TRUE;
 			app_sync_herdr(&app);
 
@@ -5633,6 +6730,9 @@ main(int argc, char *argv[])
             }
 
             g_main_loop_run(loop);
+            tui_update_stop(&app);
+            if (app.decision_cancel != NULL) g_cancellable_cancel(app.decision_cancel);
+            while (app.decision_pending) g_main_context_iteration(NULL, TRUE);
             app.dump_loop = NULL;
 			/* Cancellation callbacks still reference App and its conversation. */
 			if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
@@ -5643,11 +6743,16 @@ main(int argc, char *argv[])
 
             g_print("%s", text);
 
+            g_clear_object(&app.loops);
+            g_clear_object(&app.work);
+            g_clear_pointer(&app.work_directory, g_free);
             g_clear_object(&app.completion);
             g_clear_object(&app.commands);
             g_clear_object(&app.registry);
             g_object_unref(app.conversation);
             g_object_unref(provider);
+            g_clear_object(&app.send_queue);
+            g_ptr_array_unref(app.side_questions);
             g_string_free(app.input, TRUE);
             g_ptr_array_unref(app.history);
 
@@ -5659,15 +6764,65 @@ main(int argc, char *argv[])
     {
         g_printerr("ai-tui: stdin is not a terminal; pass a prompt as an "
                    "argument, pipe it on stdin, or use --dump PROMPT\n");
+        g_clear_object(&app.loops);
+        g_clear_object(&app.work);
+        g_clear_pointer(&app.work_directory, g_free);
         g_clear_object(&app.completion);
         g_clear_object(&app.commands);
         g_clear_object(&app.registry);
         g_object_unref(app.conversation);
         g_object_unref(provider);
+        g_clear_object(&app.send_queue);
+        g_ptr_array_unref(app.side_questions);
         g_string_free(app.input, TRUE);
         g_ptr_array_unref(app.history);
         return 1;
     }
+
+    /* A recovered record must never retain a previous terminal's target. */
+    g_object_set(app.work, "socket", "", "pane", "", NULL);
+    {
+        g_autoptr(AiConfig) config = ai_config_new();
+        gboolean configured = FALSE;
+        g_auto(GStrv) tmux = g_strsplit(g_getenv("TMUX") != NULL ? g_getenv("TMUX") : "", ",", 3);
+        g_object_get(config, "open-dashboard-on-load", &configured, NULL);
+        gboolean explicit_session = FALSE;
+        guint set_index;
+        for (set_index = 0; opt_set != NULL && opt_set[set_index] != NULL; set_index++)
+            if (g_str_has_prefix(opt_set[set_index], "session-id=") ||
+                g_str_has_prefix(opt_set[set_index], "continue-session")) explicit_session = TRUE;
+        app.dashboard = opt_dashboard || (configured && !opt_no_dashboard &&
+            !opt_continue && !explicit_session && opt_workspace_session == NULL && (prompt == NULL || !*prompt));
+        app.work_registered = !app.dashboard;
+        if (g_path_is_absolute(tmux[0]) && work_pane_valid(g_getenv("TMUX_PANE")))
+        {
+            const gchar *query[] = {"display-message", "-p", "-t", g_getenv("TMUX_PANE"), "#{pane_tty}", NULL};
+            g_autofree gchar *pane_tty = work_tmux(tmux[0], query);
+            /* Nested PTYs (including herdr) inherit TMUX but do not own that pane. */
+            if (pane_tty != NULL && g_strcmp0(pane_tty, ttyname(STDIN_FILENO)) == 0)
+            {
+                const gchar *title_query[] = {"display-message", "-p", "-t", g_getenv("TMUX_PANE"), "#{pane_title}", NULL};
+                g_object_set(app.work, "socket", tmux[0], "pane", g_getenv("TMUX_PANE"), NULL);
+                app.original_pane_title = work_tmux(tmux[0], title_query);
+            }
+        }
+    }
+    {
+        g_autofree gchar *lock_name = g_strconcat(ai_work_session_get_id(app.work), ".lock", NULL);
+        g_autofree gchar *lock_path = g_build_filename(app.work_directory, lock_name, NULL);
+        g_mkdir_with_parents(app.work_directory, 0700);
+        app.work_lock_fd = g_open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (app.work_lock_fd < 0 || flock(app.work_lock_fd, LOCK_EX | LOCK_NB) != 0)
+        {
+            g_printerr("ai-tui: cannot claim workspace session\n");
+            g_clear_object(&app.loops);
+            return 2;
+        }
+    }
+    app.link_pressed = -1;
+    app.link_cancel = g_cancellable_new();
+    work_publish(&app);
+    work_refresh(&app);
 
     /* ---- Terminal ---- */
 	app.search = g_string_new(NULL);
@@ -5789,18 +6944,57 @@ main(int argc, char *argv[])
      */
     g_unix_signal_add(SIGINT, on_sigint, &app);
 
+    app.usage.changed = on_usage_changed;
+    app.usage.user_data = &app;
+    app.work_timer = g_timeout_add_seconds(3, work_tick, &app);
+    {
+        struct termios keys;
+        if (tcgetattr(STDIN_FILENO, &keys) == 0)
+        {
+            keys.c_cc[VQUIT] = _POSIX_VDISABLE;
+            tcsetattr(STDIN_FILENO, TCSANOW, &keys);
+        }
+    }
+    if (g_getenv("AI_LSP") == NULL)
+        g_setenv("AI_LSP", "auto", FALSE);
+    /* The library stays off unless this frontend asks. ai-gui renders
+     * the same blocks and must not spawn a language server per fence. */
+    ai_view_text_block_set_semantic_highlight(TRUE);
     app_redraw(&app);
+	loop_open(&app);
+	ai_loop_runner_start(app.loops);
     if (prompt != NULL && prompt[0] != '\0')
         g_idle_add(on_startup_send, &app);
+    tui_update_start(&app);
     g_main_loop_run(app.loop);
+    tui_update_stop(&app);
+	app.model_generation++;
+	picker_close(&app);
 	/* MCP stop drains callbacks, including UI and input sources. Do that
 	 * while the terminal and App-owned fields are still valid. */
 	app.running = FALSE;
+	/* Before anything else can spin the loop: nothing scheduled may start
+	 * while the session is closing, and the turn being cancelled below is
+	 * not judged -- closing the window is not an answer. */
+	ai_loop_runner_close(app.loops);
+	ai_quota_stop(&app.usage);
+	ai_quota_drain(&app.usage);
+	ai_quota_clear(&app.usage);
+	ai_conversation_cancel(app.conversation);
+	while (app.sending || ai_conversation_get_busy(app.conversation)) g_main_context_iteration(NULL, TRUE);
+	{
+		guint i;
+		for (i = 0; i < app.side_questions->len; i++)
+			ai_conversation_cancel(g_ptr_array_index(app.side_questions, i));
+		while (app.side_questions->len != 0) g_main_context_iteration(NULL, TRUE);
+	}
 	if (app.clipboard_pending)
 	{
 		g_cancellable_cancel(app.clipboard_cancel);
 		while (app.clipboard_pending) g_main_context_iteration(NULL, TRUE);
 	}
+	if (app.decision_cancel != NULL) g_cancellable_cancel(app.decision_cancel);
+	while (app.decision_pending) g_main_context_iteration(NULL, TRUE);
 	g_clear_list(&app.images, g_object_unref);
 	app_clear_send_queue(&app);
 	if (mcp_host != NULL) ai_mcp_host_stop(mcp_host);
@@ -5809,6 +7003,7 @@ main(int argc, char *argv[])
 		g_source_remove(app.redraw_id);
 		app.redraw_id = 0;
 	}
+	g_clear_object(&app.loops);
 
 	fputs("\033[?2004l", stdout);
 	fflush(stdout);
@@ -5827,6 +7022,19 @@ main(int argc, char *argv[])
         app.spinner_id = 0;
     }
 
+    if (app.work_timer != 0) g_source_remove(app.work_timer);
+
+    if (app.link_cancel != NULL) g_cancellable_cancel(app.link_cancel);
+    while (app.link_pending != 0 || app.launch_pending != 0) g_main_context_iteration(NULL, TRUE);
+    g_clear_object(&app.link_cancel);
+    while (app.title_pending) g_main_context_iteration(NULL, TRUE);
+    if (app.work_registered) work_title_update(&app, TRUE);
+    while (app.title_pending) g_main_context_iteration(NULL, TRUE);
+    if (app.work_registered) ai_work_session_save(app.work, app.work_directory, FALSE, NULL);
+    if (app.work_lock_fd >= 0) close(app.work_lock_fd);
+    g_clear_object(&app.work);
+    g_clear_pointer(&app.work_rows, g_ptr_array_unref);
+    g_free(app.work_directory); g_free(app.work_notice); g_free(app.original_pane_title);
     completion_close(&app);
     g_clear_object(&app.completion);
     g_clear_object(&app.commands);
@@ -5834,6 +7042,8 @@ main(int argc, char *argv[])
     g_clear_object(&app.cancellable);
     g_object_unref(app.conversation);
     g_object_unref(provider);
+    g_clear_object(&app.send_queue);
+	g_ptr_array_unref(app.side_questions);
     g_string_free(app.input, TRUE);
     g_ptr_array_unref(app.history);
     g_main_loop_unref(app.loop);

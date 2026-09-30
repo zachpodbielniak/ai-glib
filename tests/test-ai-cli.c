@@ -226,7 +226,7 @@ test_cli_dry_run_basic(void)
 	g_assert_cmpint(run.exit_status, ==, 0);
 	assert_dry_run_contains(run.stdout_data, "--prompt-file /dev/stdin");
 	assert_dry_run_contains(run.stdout_data, "--output-format json");
-	assert_dry_run_contains(run.stdout_data, "--model grok-4.6");
+	assert_dry_run_contains(run.stdout_data, "--model grok-4.7");
 	assert_dry_run_contains(run.stdout_data, "--verbatim");
 	assert_dry_run_contains(run.stdout_data, "--reasoning-effort medium");
 	/* The prompt is piped, never an argument. */

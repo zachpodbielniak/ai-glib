@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ai-gui
+GenericName=AI Chat
+Comment=Talk to Claude, OpenAI, Gemini, Grok, Ollama and the coding CLIs
+Exec=ai-gui
+Icon=chat-message-new-symbolic
+Terminal=false
+Categories=Development;Utility;Chat;
+Keywords=ai;llm;claude;openai;gemini;grok;ollama;agent;
+StartupNotify=true
+StartupWMClass=ai-gui

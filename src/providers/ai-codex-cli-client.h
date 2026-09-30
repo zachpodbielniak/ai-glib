@@ -8,6 +8,8 @@ G_BEGIN_DECLS
 #define AI_TYPE_CODEX_CLI_CLIENT (ai_codex_cli_client_get_type())
 G_DECLARE_FINAL_TYPE(AiCodexCliClient, ai_codex_cli_client, AI, CODEX_CLI_CLIENT, AiCliClient)
 #define AI_CODEX_CLI_MODEL_GPT_6_ASTRA "gpt-6-astra"
+#define AI_CODEX_CLI_MODEL_GPT_6_SOL "gpt-6-sol"
+#define AI_CODEX_CLI_MODEL_GPT_6_LUNA "gpt-6-luna"
 #define AI_CODEX_CLI_MODEL_GPT_5_6_SOL "gpt-5.6-sol"
 #define AI_CODEX_CLI_MODEL_GPT_5_6_TERRA "gpt-5.6-terra"
 #define AI_CODEX_CLI_MODEL_GPT_5_6_LUNA "gpt-5.6-luna"

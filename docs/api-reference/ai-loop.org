@@ -1,0 +1,126 @@
+#+TITLE: AiLoopSchedule, AiLoopRunner and the loop store
+
+=src/harness/ai-loop.h=, =src/harness/ai-loop-runner.h=. What the
+features are, as a person sees them, is in
+[[file:../loops-and-goals.org][Loops and goals]]; this page is the API.
+
+* AiLoopSchedule
+
+The entries of one session: loops and goals, their state, and every
+rule about when each is due. It owns no timer and never reads the clock:
+every call that depends on the time takes =now_us=.
+
+** Kinds and states
+
+| Enum | Values |
+|------+--------|
+| =AiLoopKind= | =AI_LOOP_KIND_LOOP=, =AI_LOOP_KIND_GOAL= |
+| =AiLoopState= | =ACTIVE=, =PAUSED=, =MET=, =FAILED=, =STOPPED=, =EXPIRED= |
+
+=ai_loop_state_to_string()= and =ai_loop_kind_to_string()= are the only
+spellings. =ai_loop_state_is_final()= is true for the last four.
+
+** Adding
+
+| Function | Notes |
+|----------+-------|
+| =ai_loop_schedule_command(self, args, cwd, config_dir, home, now, &error)= | One =/loop= line: schedule, or a verb |
+| =ai_loop_schedule_goal_command(self, args, now, &error)= | One =/goal= line |
+| =ai_loop_schedule_add_loop(self, interval_us, prompt, now, &notice, &error)= | =interval_us= 0 is self-paced; =prompt= %NULL is the maintenance prompt. Returns the id |
+| =ai_loop_schedule_add_goal(self, condition, max_turns, max_duration_us, now, &error)= | 0 takes the default bound (20 turns, 2 hours). Returns the id |
+
+** Editing
+
+Each takes an id or an unambiguous prefix; an unknown id is an error
+listing the valid ones. =ai_loop_schedule_resolve_id()= does only that.
+
+=ai_loop_schedule_pause()=, =_resume()=, =_remove()=, =_run_now()=,
+=_stop_goal()=, =_set_interval()=, =_set_prompt()=, =_set_condition()=,
+=_set_bounds()=.
+
+=ai_loop_schedule_set_commands()= attaches the =AiCommandSet= a scheduled
+=/name= resolves in, so a built-in that is not schedulable is refused when
+scheduled. =ai_loop_schedule_is_unattended_safe()= is the same check for
+a line about to be sent.
+
+** Running
+
+A frontend that does not use =AiLoopRunner= calls these in order:
+=ai_loop_schedule_reap()= (ends what ran out of time),
+=ai_loop_schedule_due()=, =ai_loop_schedule_dup_prompt()=,
+=ai_loop_schedule_note_fired()=, then after the turn
+=ai_loop_schedule_complete()= (self-paced loop) or
+=ai_loop_schedule_goal_complete()= (goal).
+
+** Reading
+
+Index getters: =get_n_tasks=, =get_id=, =get_kind=, =get_state=,
+=get_cron=, =get_cadence=, =get_prompt=, =get_condition=, =get_reason=,
+=get_turns=, =get_max_turns=, =get_max_duration_us=, =get_deadline_us=,
+=get_fire_us=, =get_interval_us=, =get_expires_us=, =get_inflight=.
+=ai_loop_schedule_find()= turns an exact id into an index.
+
+The shared vocabulary, which every frontend uses rather than formatting
+its own:
+
+| Function | Example |
+|----------+---------|
+| =ai_loop_schedule_dup_line()= | =1a2b3c4d  loop  active  every 5m, next in 4m  check the deploy= |
+| =ai_loop_schedule_dup_status()= | =turn 3/20, 1h 50m left= |
+| =ai_loop_schedule_dup_excerpt()= | =check the deploy= |
+| =ai_loop_schedule_dup_details()= | The multi-line =show= |
+| =ai_loop_schedule_dup_summary()= | =2 loops, 1 goal, next in 4m= |
+| =ai_loop_schedule_dup_json()= | A JSON array, one object per entry |
+| =ai_loop_format_duration()=, =ai_loop_format_relative()= | =2h 5m=, =in 4m= |
+| =ai_loop_help_text()= | The /help examples |
+
+** Files
+
+=ai_loop_schedule_save()= writes version 2 atomically, mode 0600, and
+refuses a symlink. =ai_loop_schedule_load()= reads version 1 or 2; a bad
+record is skipped with =g_debug=. =ai_loop_schedule_sync()= reloads only
+when the file is no longer the one this object last wrote (it compares a
+random revision token, and does not parse an unchanged file), carrying a
+turn in flight across the reload.
+
+* AiLoopRunner
+
+One session's scheduler: a =GSource= on the thread-default context, held
+by pointer. ai-tui and ai-gui both use it.
+
+| Function | Notes |
+|----------+-------|
+| =ai_loop_runner_new()= | Empty, no file |
+| =ai_loop_runner_open(self, dir, owner, now, &error)= | Claims =owner='s file with a lock (=G_IO_ERROR_BUSY= if another process has it) and loads it |
+| =ai_loop_runner_close()= | Releases the file; nothing fires after |
+| =ai_loop_runner_start()=, =_stop()= | The one-second timer |
+| =ai_loop_runner_tick(self, now)= | What the timer calls. Tests call it with a fake clock |
+| =ai_loop_runner_turn_finished(self, reply, error, now)= | After every turn; a no-op for turns it did not start |
+| =ai_loop_runner_turn_cancelled(self, now)= | The person stopped a scheduled turn |
+| =ai_loop_runner_command(self, "loop"\vert"goal", args, now, &error)= | A slash line, applied and saved |
+| =ai_loop_runner_has_pending_goal()= | What a one-shot run waits for |
+| =ai_loop_runner_clear()= | Drop everything and save |
+
+| Signal | |
+|--------+---|
+| =::should-wait= → =gboolean= | Return %TRUE while anything is in flight |
+| =::fire (id, text, expand)= → =gboolean= | Start the turn; %FALSE if it could not |
+| =::notice (text)= | A line to show |
+| =::changed= | Redraw |
+
+Property: =working-directory=, where the maintenance prompt looks for
+=loop.md=.
+
+* The store
+
+| Function | Notes |
+|----------+-------|
+| =ai_loop_store_default_directory()= | =$XDG_STATE_HOME/ai-glib/sessions/loops= |
+| =ai_loop_store_path(dir, owner)= | %NULL unless =owner= is a plain identifier |
+| =ai_loop_store_list_owners(dir)= | Every schedule file, sorted |
+| =ai_loop_store_claim(dir, owner, &error)= | The advisory lock; close the descriptor to release |
+| =ai_loop_store_remove(dir, owner, &error)= | For a session closed for good |
+| =ai_loop_store_set_resume()=, =_dup_resume()= | Which schedule =--continue= from a place picks up |
+| =ai_loop_store_dup_summary(dir, owner, now)= | A dashboard row's line, from the file |
+
+Every =dir= may be %NULL for the default.

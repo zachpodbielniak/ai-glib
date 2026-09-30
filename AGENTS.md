@@ -212,7 +212,9 @@ ai-glib/
 │   │   ├── ai-resource-registry.h/.c
 │   │   ├── ai-mention.h/.c    # @path references
 │   │   ├── ai-command.h/.c    # /commands, built-in and from disk
-│   │   └── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-completion.h/.c # The range + candidates an editor wants
+│   │   ├── ai-loop.h/.c       # /loop and /goal: schedule, rules, vocabulary, store
+│   │   └── ai-loop-runner.h/.c # The one scheduler every frontend drives
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
@@ -256,6 +258,7 @@ ai-glib/
 | Antigravity | `AGY_PATH` (override `agy` path) |
 | Cursor | `CURSOR_AGENT_PATH` then `CURSOR_PATH` (override `cursor-agent` path), `CURSOR_API_KEY` (optional) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
+| Self-update | `AI_GLIB_SOURCE_DIR` (checkout), `AI_GLIB_NO_UPDATE_CHECK` (no background check), `AI_GLIB_UPDATE_MAKE` (make program) |
 
 ## CLI provider options
 
@@ -448,7 +451,7 @@ ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_DEEPSEEK_R1_14B);
 
 /* Grok Build (CLI) — note the AI_GROK_BUILD_ prefix; the AI_GROK_MODEL_*
    defines above are xAI API ids and are NOT valid `grok --model` values */
-ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_6);
+ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_GROK_BUILD_MODEL_GROK_4_7);
 
 /* Antigravity (CLI) — `agy --model` ids, not Gemini HTTP ids */
 ai_cli_client_set_model(AI_CLI_CLIENT(client), AI_ANTIGRAVITY_MODEL_GEMINI_3_7_FLASH_HIGH);
@@ -1159,6 +1162,45 @@ Never fires for the CLI wrappers: they run their own tools in their own
 process. `AiConversation` refuses `local-tools` for them for the same
 reason.
 
+## Loops and goals (`src/harness/ai-loop*.{h,c}`)
+
+`/loop` repeats a prompt or `/command`; `/goal` takes turns until a
+condition holds. `AiLoopSchedule` is the state and every rule;
+`AiLoopRunner` is the one scheduler, and ai-tui and ai-gui both drive it.
+`ai loop` / `ai goal` edit the same files. See `docs/loops-and-goals.org`.
+
+Five rules are load-bearing, each with a test that fails by name:
+
+- **One scheduler, one vocabulary.** A frontend answers `::should-wait`,
+  sends what `::fire` hands it, and calls `ai_loop_runner_turn_finished()`.
+  It never computes what is due and never formats a state, a "next in"
+  or a progress line itself — those come from `ai_loop_schedule_dup_*()`,
+  the same arrangement as `ai-quota.h`. A second scheduler in a frontend
+  is how the TUI and the window start disagreeing about one schedule.
+- **Never mid-turn, and once.** Something due waits for anything in
+  flight and then fires once, however many slots went by — including
+  across a restart. `test-ai-loop-runner` `queue-behind-turn` and
+  `restart-coalesces`.
+- **A goal always ends.** Every goal has a turn bound and a time bound,
+  checked whatever the model's verdict says, and one that reaches either
+  is *expired*, never *met*. The judge is the working model's own
+  `GOAL_MET` / `GOAL_NOT_MET` / `GOAL_BLOCKED` line; the bound is what
+  makes that safe. Do not add an unbounded goal.
+- **The file is the truth, and it is claimed.** One file per session
+  under `$XDG_STATE_HOME/ai-glib/sessions/loops/`, written atomically
+  after every change, re-read when another process changed it (a random
+  revision token, not a counter — two writers from revision N would both
+  write N+1), and locked by the process running it so two never fire one
+  schedule. A bad record is skipped with `g_debug` and costs nothing else.
+- **A schedule cannot change its own session.** A built-in runs from a
+  loop only if `BUILTIN_COMMANDS` marks it `schedulable`; `/clear` and
+  friends are refused when scheduled. Adding a built-in means deciding
+  that column.
+
+Every function takes `now_us`. Tests pass a fake clock to
+`ai_loop_runner_tick()`; none sleeps for real minutes, and the one that
+proves the real `GSource` fires runs it on a private context.
+
 ## TUI binary (`ai-tui`)
 
 `bin/ai-tui.c` is a thin ncurses frontend over `AiConversation`. It maps
@@ -1170,6 +1212,348 @@ build with a notice and its tests skip themselves.
 `ai_transcript_to_text()`. That is what makes it testable:
 `tests/test-ai-tui.c` drives the whole path against a stub `grok` and
 asserts the grouped summary line appears. See `docs/tui.org`.
+
+## GUI binary (`ai-gui`)
+
+`gui/` builds a GTK4 + libadwaita desktop client over `AiConversation` and
+the view layer — the same model `ai-tui` draws in a terminal. gtk4 and
+libadwaita are optional: the binary is dropped with a notice when they are
+missing, exactly as `ai-tui` is without ncursesw.
+
+**Nothing in `LIB_SOURCES` may link a toolkit.** `$(GTK_CFLAGS)` is added by
+one rule in `rules.mk` and nowhere else. A daemon, an Emacs module or a
+server has to be able to embed ai-glib without dragging in GTK, and that is
+only true for as long as no library object has ever seen a GTK header.
+
+Four things are load-bearing:
+
+- **Three files in `gui/` are deliberately GTK-free** — `ai-gui-session.c`,
+  `ai-gui-session-store.c`, `ai-gui-util.c` — and `tests/test-ai-gui-session.c`
+  links them directly. That is the whole reason they include no toolkit
+  header: a suite that needed a display would pass or fail by whose machine
+  ran it. Those tests sandbox `HOME` and the working directory for the same
+  reason the harness tests do.
+- **A saved session names its provider canonically**, never
+  `ai_provider_get_name()`. Same trap the `AiNativeSession` reader table
+  documents: the display name is "Claude Code" and the factory wants
+  `claude-code`, so a display name works for the providers whose two names
+  coincide and silently stops matching for the rest. The symptom is a
+  reopened session that quietly comes back on the default provider.
+- **A block persists its own text where it has one**, its rendering where it
+  does not (`block_source_text`). A turn renders as `> what you typed`, so
+  round-tripping the *rendering* through `ai_view_turn_block_new()` gains one
+  `> ` per save-and-restore cycle — a transcript that decays a little every
+  time the application closes. Tool groups have no source text, so those go
+  through the renderer.
+- **`:busy` is notified from both halves.** `AiGuiSession:busy` is the
+  disjunction of the session's own in-flight flag and the conversation's, and
+  the conversation clears its half *first* — so a frontend watching only
+  `AiConversation::notify::busy` sees "still working" and never hears
+  otherwise. The symptom is a stop button that stays red after the answer
+  arrives.
+
+The approval dialog spins its nested `GMainLoop` on
+`g_main_context_get_thread_default()`, and the chat view's elapsed-time timer
+is held as a `GSource *` and torn down with `g_source_destroy()` — both for
+the reasons the main-context section above gives.
+
+### Attachments, previews and tool calls
+
+**An attachment is an `AiImageContent`, never a bare `AiImage`.** The
+whole library pipeline — `ai_prompt_queue_push()`, `ai_message_add_content_block()`,
+`ai_conversation_send_images_async()`'s `AI_IS_IMAGE_CONTENT` check — takes
+the *content block* and reference-counts it. `gui/` built the boxed payload
+instead, so every one of those paths type-punned a `GObject`: attaching
+anything at all did not work, and queueing one behind a running turn called
+`g_object_ref` on a struct that has no type instance.
+`tests/test-ai-gui-content.c` pushes one through the real prompt queue for
+exactly that reason.
+
+Four rules on top of that:
+
+- **An image is recognised by its signature**, in `ai_gui_content_sniff_image()`
+  — never by extension and never by what a clipboard owner advertises. A
+  `.png` that is really HTML otherwise fails inside a provider, in a message
+  about base64.
+- **The bytes are not in the transcript.** A view block is text and spans;
+  `AiConversation` records `[Images attached]` deliberately. The window keeps
+  the blocks beside the block with `ai_gui_content_attach_images()`, and then
+  calls `ai_view_block_changed()` — `ai_transcript_append()` has already bound
+  and rendered the row by the time the images exist, so without that the
+  thumbnails appear only if something else happens to redraw it.
+- **Which runs are clickable is the view layer's answer**, not a guess:
+  `AI_STYLE_TOOL_TARGET`, `AI_STYLE_MENTION`, `AI_STYLE_LINK`. Re-deriving
+  "this looks like a path" from prose would invent an answer the library
+  already has. `ai_gui_content_span_at()` is GTK-free and tested; the only
+  part that needs a display is `pango_layout_xy_to_index()`.
+- **A preview never opens by itself.** It is an explicit click, and the
+  document reader is bounded to a megabyte and never splits a UTF-8
+  character at the cut.
+
+Tool blocks render the library's summary line exactly as ai-tui does, and
+add a row per call from `AiViewToolBlock`'s own accessors when expanded.
+State colours come from CSS classes resolving to `@success_color` and
+friends, which a palette has already redefined — so this file never learns
+what red is, and a failed call matches the summary above it.
+
+Fenced code is parsed *only* to decide what the copy button puts on the
+clipboard. Rendering stays entirely in the view layer, so a fence
+`ai_gui_content_code_blocks()` misreads costs a button and never the
+transcript.
+
+### Themes
+
+**The palettes are one table**, `AI_THEMES` in `src/core/ai-theme.h`, read
+by `bin/ai-tui-theme.h` and `gui/ai-gui-style.c` alike. It is a private
+header of `static` data and `static inline` functions — the `ai-json-util.h`
+pattern — so nothing new is exported and nothing new is introspected.
+
+That file settles one question and no more: *given* that a frontend has
+chosen one of these named palettes, which entry does each style tag use.
+The library still has no opinion about what a tag looks like; a frontend
+with a palette of its own ignores the header entirely. There were two
+answers before, written at different times from the same intent, and they
+had drifted — the terminal drew a link muted and the window drew it
+accented, so one person running both saw two programs disagreeing about
+their own theme.
+
+Four rules:
+
+- **`ai_theme_role_for_tag()` and `ai_theme_emphasis_for_tag()` are the
+  mapping.** Changing one changes both front-ends, which is the point.
+  `tests/test-ai-gui-theme.c` asserts the whole table by name and counts it
+  against `AI_STYLE_N_TAGS`, so a tag added to the library cannot be
+  forgotten here silently.
+- **Colour and weight are shared; font family and slant are not.** A
+  terminal can be bold and underlined and cannot be monospace or italic, so
+  those stay in `gui/`'s own small `TYPEFACES` table. Putting them in the
+  shared header would have been stating something one frontend cannot honour.
+- **`terminal` and `monochrome` name no colours** — every field is zero.
+  `ai_theme_is_native()` is the guard before reading one; ai-tui falls back
+  to the sixteen the user configured and ai-gui to GNOME's palette.
+- **A named palette is applied by redefining libadwaita's own colours**
+  (`window_bg_color`, `accent_color`, …), not by styling widgets. Styling
+  the transcript alone produces catppuccin text inside Adwaita-blue chrome.
+  A palette also forces the matching light/dark: a near-black page with
+  light-theme widget internals reads as a bug, not a choice.
+
+**A theme change must restyle the transcript.** A span's colour is a
+`PangoAttribute` baked into a label when the block was last rendered, and
+nothing invalidates it — so recolouring the chrome alone leaves
+light-lavender prose on a latte page. `ai_gui_style_add_changed()` is the
+hook and `ai_gui_chat_view_restyle()` the response; it also covers the
+change nobody initiates, the desktop going dark at sunset while `terminal`
+is active.
+
+Appearance is remembered in `$XDG_DATA_HOME/ai-glib/gui/settings.json`
+(`gui/ai-gui-settings.c`, GTK-free) rather than in `config.yaml`: that file
+is validated by the library and read by `ai` and `ai-tui` too, so a key
+there would have to mean something to all three. A `--theme` on the command
+line is deliberately *not* written back.
+
+### Account quota
+
+**One cache, two front-ends**, `src/core/ai-quota.h` — the same pattern as
+`AI_THEMES` and for the same reason. `AiCliReport` gives each allowance in
+whatever direction its provider stated (Codex says `used_percent`, a Claude
+panel says remaining, some give a count against a limit), and turning that
+into a number a person acts on is a *decision*. A terminal saying 75%
+remaining while a window says 25% for one account is worse than either
+saying nothing.
+
+It is a private header of `static inline` functions — nothing exported,
+nothing introspected — holding the direction rule, the display rounding,
+the "worst allowance" pick, the heading vocabulary *and* the refresh
+policy. `bin/ai-tui-usage.h` was the first copy and was folded into it when
+ai-gui needed the second.
+
+Five rules:
+
+- **Never infer a direction.** An unlabeled `percent`, a missing
+  denominator or an out-of-range value is unavailable. A number that might
+  mean either direction is worth less than no number.
+- **Rounding must not invent an exhausted allowance.** `%.0f` prints 0.4%
+  as `0%`, which reads as "you are out" when you are not — the same
+  invented zero the report layer refuses to produce from missing data.
+  `ai_quota_format_percent()` answers `<1%` and `>99%` at the two ends, and
+  `tests/test-quota.c` names every boundary.
+- **Identity is provider *and* model *and* working directory.** A report is
+  scoped to all three; relabelling the previous snapshot would attribute
+  somebody else's quota to this session. The generation counter is what
+  discards an in-flight answer that no longer applies.
+- **Visibility is the whole throttle.** A query is a CLI subprocess. ai-tui
+  asks only while the panel is drawn; ai-gui only while the window is
+  active. Failures back off at the same one minute as successes, or a
+  broken CLI becomes a subprocess per redraw.
+- **Teardown is stop, drain, clear, in that order.** `ai_quota_ready()`
+  clears `pending` *before* it checks `stopped`, so the drain always
+  terminates — including when the cancel it just fired is what completed
+  the query. `ai_quota_clear()` asserts `!pending` because skipping the
+  drain leaves a callback pointing at freed memory.
+
+The query runs against a *separate* client built from the active one
+(executable, model, cwd, environment, timeout). Reporting is read-only work
+and has no business sharing the lifetime of the object a turn is using.
+
+### Projects and the grouped sidebar
+
+The sidebar is sectioned by project, which is the library's identity for
+one — `AiWorkSession`'s canonicalised **Git common directory**, or the
+path itself outside a repository. That is what makes a linked worktree
+and a subdirectory both group with their repository instead of reading
+as three unrelated things.
+
+Four rules:
+
+- **One function names a project**, `ai_gui_work_project_label()`. The
+  dashboard's group headings and the sidebar's both call it. The common
+  directory's own basename is `.git`, so a literal `g_path_get_basename()`
+  makes every heading in the list read "git" — there were two copies of
+  the undo for that, and the second one is how a project ends up under two
+  names in one window.
+- **The project is asynchronous and the working directory is the
+  fallback.** `ai_work_session_new()` shells out to `git rev-parse` twice
+  and its own documentation says to keep that off a UI thread, so the
+  sidebar cannot compute the group it is drawing. Until the answer lands,
+  `ai_gui_session_get_project()` returns the working directory — which
+  groups correctly on its own, so the fallback is an answer rather than a
+  blank. It is also persisted with the session, or every restored row
+  would sit under its own directory until one pair of subprocesses per row
+  had finished.
+- **A directory change moves the record, never forks it.** `on_work_ready`
+  runs again after a `/cwd`; when a record already exists it rewrites that
+  record's `directory`, `project` and `branch` rather than installing a
+  second identity. The id, the links and the title somebody attached are
+  all in the record being kept.
+- **Never invalidate a sorter or a filter from inside the underlying
+  model's `::items-changed`.** `GtkSortListModel` and `GtkFilterListModel`
+  place an inserted item themselves; calling `gtk_sorter_changed()` mid
+  update re-enters them and `GtkListView` draws the result — one session
+  rendered as two rows, which reads exactly like the store having
+  duplicated it. `sidebar_regroup()` is for property changes on a session
+  (`project`, `pinned`, `updated-at`, `title`); an insert or a removal only
+  needs the heading's own count told. Those four names are also why the
+  per-session `notify` handler filters on the pspec: `busy` and `activity`
+  fire many times a second while a turn streams.
+
+`Ctrl+N` inherits the current session's directory and `Ctrl+Shift+O`
+opens a folder as a project. Both are the same `window_open_session()`
+the dashboard's "Open project…" already used.
+
+### The dashboard and the pickers
+
+`ai-gui` registers an `AiWorkSession` like `ai-tui` does, into the same
+`$XDG_STATE_HOME/ai-glib/sessions` registry — so each front-end's
+dashboard lists the other's work. Four things follow:
+
+- **The ordering is copied, not approximated.** `ai_gui_work_priority()`
+  and `ai_gui_work_compare()` reproduce ai-tui's three keys exactly.
+  Two dashboards reading one registry that sorted it differently would
+  be two answers to "what needs me next". If one changes, change both.
+- **`AiGuiSession:busy` and the record are published from one place.**
+  `ai_gui_session_publish_work()` derives every field from the
+  conversation, the executor and the brigade rather than caching them as
+  they change: a second copy kept in step by hand is a second copy that
+  eventually is not. It runs on every state change *and* on a
+  three-second heartbeat, against the registry's fifteen-second expiry.
+- **A built-in does not set an outcome.** `/help` reporting DONE would
+  tell the dashboard a model had just finished work. The outcome is only
+  written when a real turn ends.
+- **Focusing a foreign row checks `@ai_session` first.** A tmux pane id
+  is reused when a pane closes, so switching without that check opens
+  whatever unrelated work took the number. Resume takes the same
+  advisory lock ai-tui takes, so the exclusion spans both front-ends.
+
+The per-question provider and model menus apply their selection
+immediately before a send, never when the menu changes: a switch
+mid-turn moves the conversation out from under a reply still arriving.
+`ai_provider_list_models_async()` fills the model menu — **check
+`AI_PROVIDER_GET_IFACE(...)->list_models_async` first**, because
+`claude-tmux` implements neither half and the public wrapper answers a
+missing vfunc with a critical, which is fatal under fatal-warnings.
+
+**`Ctrl+backslash` is forwarded by the composer**, not bound on the
+window alone: `GtkTextView` binds it to `delete-from-cursor(WHITESPACE)`
+and consumes it, so a class binding never sees the key while the
+composer has focus — which is every time somebody would press it.
+
+`tests/test-ai-gui-work.c` links `gui/ai-gui-work.c` directly, without a
+display, and sandboxes `XDG_STATE_HOME`: a suite that read the
+developer's real registry would pass or fail by whose machine ran it.
+
+The preferences dialog's provider page is generated by walking the
+provider's writable `GParamSpec` list. A new provider knob is reachable there
+the day it exists, with no edit here — the same property-is-the-interface
+rule `ai --set` follows. Do not add a per-provider branch.
+
+`ai-gui` is a third app-defaults scope (`apps.ai-gui` in the config), beside
+`ai` and `ai-tui`. The names live in one table, `AI_CONFIG_APPS` in
+`src/core/ai-config.c`: six places needed that comparison and adding the
+third app found five of them by grep, missing the YAML validator's own list —
+which rejected a config naming the new app on load.
+
+`open-dashboard-on-load` is per app for the same reason and is read with
+`ai_config_get_app_dashboard()`. The loader used to read it only at
+ai-tui's index, so `apps.ai-gui.open-dashboard-on-load` validated — the
+validator checks the key under *any* app — and was then silently
+discarded, which reads exactly like the preference not working rather
+than like a bug. The `AiConfig:open-dashboard-on-load` property remains
+an alias for ai-tui's slot: it predates the second dashboard and is
+documented as ai-tui's, so a host reading it back still sees what it
+set.
+
+See `docs/gui.org`.
+
+## Versions and self-update
+
+`config.mk` holds the release number; `build-aux/gen-build-stamp.sh`
+writes the provenance (commit, dirty, date, source dir, install paths)
+into `build/<type>/ai-build-stamp.h`, read only by
+`src/core/ai-build-info.c`. `AiUpdater` (`src/core/ai-updater.{h,c}`,
+private) checks and updates from that checkout; `ai`, `ai-tui` and
+`ai-gui` all drive it. See `docs/updating.org` and `CHANGELOG.org`.
+
+**Every PR that changes behaviour bumps the version** in `config.mk` and
+adds a matching top heading to `CHANGELOG.org`, in the same PR: micro for
+a fix, minor for a feature (and, below 1.0.0, for a break). `make test`
+runs `test-version`, which fails when the two disagree. See
+`docs/contributing.org`, Versioning.
+
+Rules that are load-bearing, each with a test:
+
+- **Background checks are opt-in.** `AiConfig:update-check` defaults to
+  false. ai-tui and ai-gui fetch only when `updates.check` is true, which
+  `ai --setup` scope 4 writes. `AI_GLIB_NO_UPDATE_CHECK` still forces them
+  off. An explicit `--check-update`, `--update` or `/update` ignores the
+  switch. An immutable image should leave the key unset.
+- **The stamp is rewritten only when its content changes** (the date is
+  excluded from the comparison), or every `make` relinks everything. When
+  git fails and a stamp exists it is kept: `sudo make install` runs git as
+  root, which is why it also passes `safe.directory` and
+  `--no-optional-locks`.
+- **Never guess the checkout.** It must exist, be the top of a repository,
+  contain the build commit, and be on a branch tracking the upstream.
+  Anything else is `unavailable` with a sentence saying which.
+- **Git never prompts and never leaves the file protocol in tests.**
+  Children get their own session, stdin closed, askpass disabled; tests
+  set `GIT_ALLOW_PROTOCOL=file` and pin submodule URLs to local paths. A
+  test that spawns an interactive ai-tui sets `AI_GLIB_NO_UPDATE_CHECK=1`
+  and a nonexistent `AI_GLIB_SOURCE_DIR`, so nothing can fetch or build
+  the real tree.
+- **Argv, never a shell string; first failure stops.** Nothing is
+  installed after a failed build or test. Only an interactive caller
+  (`ai --update` on a tty, ai-tui) may run `sudo`. ai-gui passes
+  `AI_UPDATE_RUN_POLKIT`: the install step alone under `pkexec`, detached
+  with stdin closed so it can never wait on an invisible prompt; exit 126
+  or 127 (dismissed, no agent) falls back to returning the exact command.
+  Tests always set `pkexec-program` to a stub — never the machine's.
+- **One vocabulary.** States, sentences, badge, refusals and the fetch
+  policy live in `src/core/ai-update-status.h`, and every front-end prints
+  those strings. `tests/test-ai-update-status.c` asserts them literally.
+- **No fire after teardown.** `ai_updater_stop()` silences every later
+  completion; front-ends then drain (`ai_updater_is_checking()`, the GUI's
+  `ai_gui_update_drain()`) before exiting so a cancelled make or git is
+  actually killed. The monitor's timer is a held `GSource *`.
 
 ## Log levels
 

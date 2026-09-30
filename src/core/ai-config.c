@@ -11,6 +11,7 @@
 
 #include "core/ai-config.h"
 #include "core/ai-error.h"
+#include "core/ai-update-status.h"
 
 #include <yaml-glib.h>
 #include <glib/gstdio.h>
@@ -159,11 +160,97 @@ config_yaml_acyclic(yaml_document_t *document, gint id, guint8 *state, guint dep
 	return TRUE;
 }
 
+/*
+ * The applications that get a defaults scope of their own.
+ *
+ * One table rather than a comparison written out at each of the six
+ * places that needed one. When `ai-gui` was added, five of those six
+ * were found by grep and the sixth -- the YAML validator's own list --
+ * was not, so a config naming the new app validated as an unknown key
+ * and was rejected on load. The index into this table is the index into
+ * app_providers and app_models, which is what keeps them in step.
+ */
+static const gchar *const AI_CONFIG_APPS[] = { "ai", "ai-tui", "ai-gui", "ai-call" };
+
+static gint
+config_app_index(const gchar *app)
+{
+	gsize i;
+
+	if (app == NULL)
+		return -1;
+
+	for (i = 0; i < G_N_ELEMENTS(AI_CONFIG_APPS); i++)
+	{
+		if (g_str_equal(app, AI_CONFIG_APPS[i]))
+			return (gint)i;
+	}
+
+	return -1;
+}
+
+/* A scalar that is exactly `true` or `false`. */
+static gboolean
+config_yaml_is_boolean(yaml_document_t *document, gint id)
+{
+	yaml_node_t *node = yaml_document_get_node(document, id);
+
+	return node->type == YAML_SCALAR_NODE &&
+	       (g_str_equal((const gchar *)node->data.scalar.value, "true") ||
+	        g_str_equal((const gchar *)node->data.scalar.value, "false"));
+}
+
+/*
+ * updates: {check, interval, upstream, source-dir, run-tests}.
+ *
+ * Checked here, with the rest of the file, so a typo rejects the whole
+ * config on load rather than being read as "no preference" -- the same
+ * rule as every other key. An interval is plain seconds.
+ */
+static gboolean
+config_yaml_validate_updates(yaml_document_t *document)
+{
+	gint updates_id = config_yaml_member(document, 1, "updates");
+	gint value_id;
+	yaml_node_t *node;
+	const gchar *text;
+
+	if (updates_id == 0)
+		return TRUE;
+	if (yaml_document_get_node(document, updates_id)->type != YAML_MAPPING_NODE)
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "check");
+	if (value_id != 0 && !config_yaml_is_boolean(document, value_id))
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "run-tests");
+	if (value_id != 0 && !config_yaml_is_boolean(document, value_id))
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "interval");
+	if (value_id != 0)
+	{
+		guint64 seconds;
+
+		node = yaml_document_get_node(document, value_id);
+		if (node->type != YAML_SCALAR_NODE)
+			return FALSE;
+		text = (const gchar *)node->data.scalar.value;
+		if (!g_ascii_string_to_unsigned(text, 10, 0, G_MAXUINT, &seconds, NULL))
+			return FALSE;
+	}
+	value_id = config_yaml_member(document, updates_id, "upstream");
+	if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
+		return FALSE;
+	value_id = config_yaml_member(document, updates_id, "source-dir");
+	if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
+		return FALSE;
+	return TRUE;
+}
+
 /* Validate all scopes before either loading or rewriting any of their values. */
 static gboolean
 config_yaml_validate(yaml_document_t *document)
 {
-	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-call"};
+	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-gui", "ai-call"};
 	yaml_node_t *node;
 	gint apps_id;
 	guint i;
@@ -204,6 +291,8 @@ config_yaml_validate(yaml_document_t *document)
 	apps_id = config_yaml_member(document, 1, "apps");
 	if (apps_id != 0 && yaml_document_get_node(document, apps_id)->type != YAML_MAPPING_NODE)
 		return FALSE;
+	if (!config_yaml_validate_updates(document))
+		return FALSE;
 	for (i = 0; i < G_N_ELEMENTS(apps); i++)
 	{
 		gint app_id = apps[i] == NULL ? 1 : config_yaml_member(document, apps_id, apps[i]);
@@ -220,6 +309,14 @@ config_yaml_validate(yaml_document_t *document)
 			if (node->type != YAML_SCALAR_NODE ||
 			    config_parse_provider((const gchar *)node->data.scalar.value) == (AiProviderType)-1)
 				return FALSE;
+		}
+		value_id = config_yaml_member(document, app_id, "open-dashboard-on-load");
+		if (value_id != 0)
+		{
+			node = yaml_document_get_node(document, value_id);
+			if (node->type != YAML_SCALAR_NODE ||
+			    (g_strcmp0((const gchar *)node->data.scalar.value, "true") != 0 &&
+			     g_strcmp0((const gchar *)node->data.scalar.value, "false") != 0)) return FALSE;
 		}
 		value_id = config_yaml_member(document, app_id, "default_model");
 		if (value_id != 0 && yaml_document_get_node(document, value_id)->type != YAML_SCALAR_NODE)
@@ -302,8 +399,17 @@ struct _AiConfig
     gboolean       default_provider_programmatic; /* TRUE if set via set_default_provider() */
     gchar         *default_model;
     gboolean       default_model_programmatic;  /* TRUE if set via set_default_model() */
-	AiProviderType app_providers[3];
-	gchar *app_models[3];
+	AiProviderType app_providers[G_N_ELEMENTS(AI_CONFIG_APPS)];
+	gchar *app_models[G_N_ELEMENTS(AI_CONFIG_APPS)];
+	gboolean app_dashboards[G_N_ELEMENTS(AI_CONFIG_APPS)];
+
+	/* updates: -- read by the self-updater in ai, ai-tui and ai-gui. */
+	gboolean update_check;
+	guint    update_interval;
+	gchar   *update_upstream;
+	gchar   *update_source_dir;
+	gboolean update_run_tests;
+
 	gchar *voice_values[4];
 	gboolean voice_explicit[4];
 };
@@ -318,6 +424,12 @@ enum
     PROP_0,
     PROP_TIMEOUT,
     PROP_MAX_RETRIES,
+    PROP_OPEN_DASHBOARD_ON_LOAD,
+    PROP_UPDATE_CHECK,
+    PROP_UPDATE_INTERVAL,
+    PROP_UPDATE_UPSTREAM,
+    PROP_UPDATE_SOURCE_DIR,
+    PROP_UPDATE_RUN_TESTS,
     PROP_VOICE_STT_URL,
     PROP_VOICE_TTS_URL,
     PROP_VOICE_LIVEKIT_URL,
@@ -357,11 +469,16 @@ ai_config_finalize(GObject *object)
     g_clear_pointer(&self->grok_base_url, g_free);
     g_clear_pointer(&self->ollama_base_url, g_free);
     g_clear_pointer(&self->default_model, g_free);
-	g_clear_pointer(&self->app_models[0], g_free);
-	g_clear_pointer(&self->app_models[1], g_free);
+	g_clear_pointer(&self->update_upstream, g_free);
+	g_clear_pointer(&self->update_source_dir, g_free);
+	{ guint v; for (v = 0; v < G_N_ELEMENTS(self->voice_values); v++) g_free(self->voice_values[v]); }
+	{
+		gsize i;
 
-	g_free(self->app_models[2]);
-	{ guint i; for (i = 0; i < 4; i++) g_free(self->voice_values[i]); }
+		for (i = 0; i < G_N_ELEMENTS(self->app_models); i++)
+			g_clear_pointer(&self->app_models[i], g_free);
+	}
+
     G_OBJECT_CLASS(ai_config_parent_class)->finalize(object);
 }
 
@@ -384,8 +501,36 @@ ai_config_get_property(
     }
     switch (prop_id)
     {
+        case PROP_OPEN_DASHBOARD_ON_LOAD:
+            /*
+             * The property is ai-tui's slot, not a fourth answer.
+             *
+             * The preference is per application -- ai-tui and ai-gui each
+             * have a dashboard and each may want a different default -- but
+             * this property predates the second one and is documented as
+             * ai-tui's. Keeping it as an alias for that slot means a host
+             * reading it back still sees what it set.
+             */
+            g_value_set_boolean(value,
+                self->app_dashboards[config_app_index("ai-tui")]);
+            break;
         case PROP_TIMEOUT:
             g_value_set_uint(value, self->timeout_seconds);
+            break;
+        case PROP_UPDATE_CHECK:
+            g_value_set_boolean(value, self->update_check);
+            break;
+        case PROP_UPDATE_INTERVAL:
+            g_value_set_uint(value, self->update_interval);
+            break;
+        case PROP_UPDATE_UPSTREAM:
+            g_value_set_string(value, self->update_upstream);
+            break;
+        case PROP_UPDATE_SOURCE_DIR:
+            g_value_set_string(value, self->update_source_dir);
+            break;
+        case PROP_UPDATE_RUN_TESTS:
+            g_value_set_boolean(value, self->update_run_tests);
             break;
         case PROP_MAX_RETRIES:
             g_value_set_uint(value, self->max_retries);
@@ -414,8 +559,29 @@ ai_config_set_property(
     }
     switch (prop_id)
     {
+        case PROP_OPEN_DASHBOARD_ON_LOAD:
+            self->app_dashboards[config_app_index("ai-tui")] =
+                g_value_get_boolean(value);
+            break;
         case PROP_TIMEOUT:
             self->timeout_seconds = g_value_get_uint(value);
+            break;
+        case PROP_UPDATE_CHECK:
+            self->update_check = g_value_get_boolean(value);
+            break;
+        case PROP_UPDATE_INTERVAL:
+            self->update_interval = g_value_get_uint(value);
+            break;
+        case PROP_UPDATE_UPSTREAM:
+            g_free(self->update_upstream);
+            self->update_upstream = g_value_dup_string(value);
+            break;
+        case PROP_UPDATE_SOURCE_DIR:
+            g_free(self->update_source_dir);
+            self->update_source_dir = g_value_dup_string(value);
+            break;
+        case PROP_UPDATE_RUN_TESTS:
+            self->update_run_tests = g_value_get_boolean(value);
             break;
         case PROP_MAX_RETRIES:
             self->max_retries = g_value_get_uint(value);
@@ -459,6 +625,69 @@ ai_config_class_init(AiConfigClass *klass)
                           0, G_MAXUINT, AI_CONFIG_DEFAULT_MAX_RETRIES,
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiConfig:open-dashboard-on-load:
+     *
+     * Open the ai-tui project dashboard on an otherwise bare interactive launch.
+     * Explicit prompts, continuation and native launch modes take precedence.
+     */
+    properties[PROP_OPEN_DASHBOARD_ON_LOAD] = g_param_spec_boolean(
+        "open-dashboard-on-load", "Open dashboard on load", "Start ai-tui on its dashboard",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-check:
+     *
+     * Whether ai-tui and ai-gui check for a newer ai-glib in the background
+     * (`updates.check`). Off unless the config says true: an immutable
+     * install must not fetch or announce updates on its own. `ai --setup`
+     * writes the key. `AI_GLIB_NO_UPDATE_CHECK` forces it off even then.
+     * An explicit `ai --check-update` or `/update` still runs.
+     */
+    properties[PROP_UPDATE_CHECK] = g_param_spec_boolean(
+        "update-check", "Update check", "Check for updates in the background",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-interval:
+     *
+     * Seconds between fetches of the upstream branch (`updates.interval`).
+     * Values under five minutes are treated as five minutes.
+     */
+    properties[PROP_UPDATE_INTERVAL] = g_param_spec_uint(
+        "update-interval", "Update interval", "Seconds between update fetches",
+        0, G_MAXUINT, AI_UPDATE_DEFAULT_INTERVAL_S,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-upstream:
+     *
+     * `REMOTE/BRANCH` to update from (`updates.upstream`). %NULL means the
+     * checkout's own upstream, else `origin/master`.
+     */
+    properties[PROP_UPDATE_UPSTREAM] = g_param_spec_string(
+        "update-upstream", "Update upstream", "REMOTE/BRANCH to update from",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-source-dir:
+     *
+     * The checkout to update from (`updates.source-dir`), overriding the
+     * directory the binary was built in. `AI_GLIB_SOURCE_DIR` wins over it.
+     */
+    properties[PROP_UPDATE_SOURCE_DIR] = g_param_spec_string(
+        "update-source-dir", "Update source directory", "Checkout to update from",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiConfig:update-run-tests:
+     *
+     * Run `make test` before installing an update (`updates.run-tests`).
+     * A failure installs nothing.
+     */
+    properties[PROP_UPDATE_RUN_TESTS] = g_param_spec_boolean(
+        "update-run-tests", "Run tests on update", "Run make test before installing",
+        FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
     {
         guint i;
         for (i = 0; i < 4; i++)
@@ -473,9 +702,14 @@ ai_config_init(AiConfig *self)
 {
     self->timeout_seconds = AI_CONFIG_DEFAULT_TIMEOUT;
     self->max_retries = AI_CONFIG_DEFAULT_MAX_RETRIES;
-	self->app_providers[0] = AI_PROVIDER_CLAUDE;
-	self->app_providers[1] = AI_PROVIDER_CLAUDE;
-	self->app_providers[2] = AI_PROVIDER_CLAUDE;
+	self->update_check = FALSE;
+	self->update_interval = AI_UPDATE_DEFAULT_INTERVAL_S;
+	{
+		gsize i;
+
+		for (i = 0; i < G_N_ELEMENTS(self->app_providers); i++)
+			self->app_providers[i] = AI_PROVIDER_CLAUDE;
+	}
 }
 
 /* Forward declaration for use in ai_config_new */
@@ -1097,7 +1331,7 @@ ai_config_load_from_file(
 	for (i = 0; i < G_N_ELEMENTS(self->app_providers); i++)
 	{
 		gint apps_id = config_yaml_member(document, 1, "apps");
-		gint app_id = config_yaml_member(document, apps_id, i == 0 ? "ai" : i == 1 ? "ai-tui" : "ai-call");
+		gint app_id = config_yaml_member(document, apps_id, AI_CONFIG_APPS[i]);
 		gint value_id = config_yaml_member(document, app_id, "default_provider");
 		yaml_node_t *value;
 
@@ -1105,6 +1339,20 @@ ai_config_load_from_file(
 		{
 			value = yaml_document_get_node(document, value_id);
 			self->app_providers[i] = config_parse_provider((const gchar *)value->data.scalar.value);
+		}
+		{
+			/*
+			 * Read for every app rather than only ai-tui's index.
+			 *
+			 * Hardcoding the index meant apps.ai-gui.open-dashboard-on-load
+			 * validated -- the validator checks the key under any app -- and
+			 * was then silently discarded, which reads exactly like the
+			 * preference not working rather than like a bug.
+			 */
+			gint dashboard_id = config_yaml_member(document, app_id, "open-dashboard-on-load");
+			if (dashboard_id != 0)
+				self->app_dashboards[i] = g_str_equal(
+					(const gchar *)yaml_document_get_node(document, dashboard_id)->data.scalar.value, "true");
 		}
 		value_id = config_yaml_member(document, app_id, "default_model");
 		if (value_id != 0)
@@ -1114,6 +1362,39 @@ ai_config_load_from_file(
 			g_clear_pointer(&self->app_models[i], g_free);
 			if (str_val[0] != '\0')
 				self->app_models[i] = g_strdup(str_val);
+		}
+	}
+
+	/* updates: already validated, so each value is the right shape. */
+	{
+		gint updates_id = config_yaml_member(document, 1, "updates");
+		gint value_id;
+
+		value_id = config_yaml_member(document, updates_id, "check");
+		if (value_id != 0)
+			self->update_check = g_str_equal(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, "true");
+		value_id = config_yaml_member(document, updates_id, "run-tests");
+		if (value_id != 0)
+			self->update_run_tests = g_str_equal(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, "true");
+		value_id = config_yaml_member(document, updates_id, "interval");
+		if (value_id != 0)
+			self->update_interval = (guint)g_ascii_strtoull(
+				(const gchar *)yaml_document_get_node(document, value_id)->data.scalar.value, NULL, 10);
+		value_id = config_yaml_member(document, updates_id, "upstream");
+		if (value_id != 0)
+		{
+			str_val = config_yaml_model(yaml_document_get_node(document, value_id));
+			g_free(self->update_upstream);
+			self->update_upstream = str_val[0] != '\0' ? g_strdup(str_val) : NULL;
+		}
+		value_id = config_yaml_member(document, updates_id, "source-dir");
+		if (value_id != 0)
+		{
+			str_val = config_yaml_model(yaml_document_get_node(document, value_id));
+			g_free(self->update_source_dir);
+			self->update_source_dir = str_val[0] != '\0' ? g_strdup(str_val) : NULL;
 		}
 	}
 
@@ -1362,7 +1643,7 @@ ai_config_set_default_model(
 /**
  * ai_config_get_app_provider:
  * @self: an #AiConfig
- * @app: application name, `ai`, `ai-tui` or `ai-call`
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
  *
  * Reads only apps.@app.default_provider, never library or environment defaults.
  *
@@ -1371,15 +1652,18 @@ ai_config_set_default_model(
 AiProviderType
 ai_config_get_app_provider(AiConfig *self, const gchar *app)
 {
+	gint index;
+
 	g_return_val_if_fail(AI_IS_CONFIG(self), AI_PROVIDER_CLAUDE);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0 || g_strcmp0(app, "ai-call") == 0, AI_PROVIDER_CLAUDE);
-	return self->app_providers[g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2];
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, AI_PROVIDER_CLAUDE);
+	return self->app_providers[index];
 }
 
 /**
  * ai_config_get_app_model:
  * @self: an #AiConfig
- * @app: application name, `ai`, `ai-tui` or `ai-call`
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
  *
  * Reads only apps.@app.default_model, never library or environment defaults.
  *
@@ -1388,9 +1672,32 @@ ai_config_get_app_provider(AiConfig *self, const gchar *app)
 const gchar *
 ai_config_get_app_model(AiConfig *self, const gchar *app)
 {
+	gint index;
+
 	g_return_val_if_fail(AI_IS_CONFIG(self), NULL);
-	g_return_val_if_fail(g_strcmp0(app, "ai") == 0 || g_strcmp0(app, "ai-tui") == 0 || g_strcmp0(app, "ai-call") == 0, NULL);
-	return self->app_models[g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2];
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, NULL);
+	return self->app_models[index];
+}
+
+/**
+ * ai_config_get_app_dashboard:
+ * @self: an #AiConfig
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
+ *
+ * Reads only apps.@app.open-dashboard-on-load.
+ *
+ * Returns: whether @app should open on its dashboard, %FALSE when absent
+ */
+gboolean
+ai_config_get_app_dashboard(AiConfig *self, const gchar *app)
+{
+	gint index;
+
+	g_return_val_if_fail(AI_IS_CONFIG(self), FALSE);
+	index = config_app_index(app);
+	g_return_val_if_fail(index >= 0, FALSE);
+	return self->app_dashboards[index];
 }
 
 /* Copy each mapping on the edited path so YAML aliases outside it stay unchanged. */
@@ -1425,10 +1732,100 @@ config_yaml_copy_mapping(yaml_document_t *document, gint parent, const gchar *na
 	return new_id;
 }
 
+/* Replace or append one plain scalar. The old node stays in the document. */
+static void
+config_yaml_set_plain(
+	yaml_document_t *document,
+	gint             mapping_id,
+	const gchar     *key,
+	const gchar     *value
+){
+	gint value_id = yaml_document_add_scalar(document, (const yaml_char_t *)YAML_STR_TAG,
+		(const yaml_char_t *)value, -1, YAML_PLAIN_SCALAR_STYLE);
+	yaml_node_t *root = yaml_document_get_node(document, mapping_id);
+	yaml_node_pair_t *pair;
+	gboolean found = FALSE;
+
+	for (pair = root->data.mapping.pairs.start; pair < root->data.mapping.pairs.top; pair++)
+	{
+		yaml_node_t *existing = yaml_document_get_node(document, pair->key);
+
+		if (existing->type == YAML_SCALAR_NODE &&
+		    g_str_equal((const gchar *)existing->data.scalar.value, key))
+		{
+			pair->value = value_id;
+			found = TRUE;
+		}
+	}
+	if (!found)
+	{
+		gint key_id = yaml_document_add_scalar(document, (const yaml_char_t *)YAML_STR_TAG,
+			(const yaml_char_t *)key, -1, YAML_PLAIN_SCALAR_STYLE);
+
+		yaml_document_append_mapping_pair(document, mapping_id, key_id, value_id);
+	}
+}
+
+/*
+ * Replace the user config with @document. dump consumes the document
+ * contents; once dump has been attempted the struct is freed and
+ * *@document is NULL, so the caller's g_autoptr does not delete it again.
+ */
+static gboolean
+config_yaml_store_user(yaml_document_t **document, GError **error)
+{
+	g_autoptr(GString) output = g_string_new(NULL);
+	g_autoptr(GFile) file = NULL;
+	g_autofree gchar *directory = NULL;
+	g_autofree gchar *path = NULL;
+	yaml_emitter_t emitter;
+	gboolean emitted;
+
+	g_return_val_if_fail(document != NULL && *document != NULL, FALSE);
+
+	if (!yaml_emitter_initialize(&emitter))
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		                    "Cannot initialize YAML emitter");
+		return FALSE;
+	}
+	yaml_emitter_set_output(&emitter, config_yaml_output, output);
+	/* dump consumes the document contents even on failure, not its allocation. */
+	emitted = yaml_emitter_open(&emitter);
+	if (emitted)
+	{
+		emitted = yaml_emitter_dump(&emitter, *document);
+		g_free(*document);
+		*document = NULL;
+	}
+	if (emitted)
+		emitted = yaml_emitter_close(&emitter);
+	if (!emitted)
+		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+		            "Cannot emit config YAML: %s",
+		            emitter.problem != NULL ? emitter.problem : "emitter failure");
+	yaml_emitter_delete(&emitter);
+	if (!emitted)
+		return FALSE;
+	directory = g_build_filename(g_get_user_config_dir(), "ai-glib", NULL);
+	path = g_build_filename(directory, AI_CONFIG_FILENAME, NULL);
+	if (g_mkdir_with_parents(directory, 0700) != 0)
+	{
+		g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+		            "Cannot create config directory %s: %s", directory, g_strerror(errno));
+		return FALSE;
+	}
+	/* Replace the inode, not its contents: old permissive modes must not survive. */
+	file = g_file_new_for_path(path);
+	return g_file_replace_contents(file, output->str, output->len, NULL, FALSE,
+	                               G_FILE_CREATE_PRIVATE | G_FILE_CREATE_REPLACE_DESTINATION,
+	                               NULL, NULL, error);
+}
+
 /**
  * ai_config_save_defaults:
  * @self: an #AiConfig
- * @app: (nullable): `ai`, `ai-tui` or `ai-call`, or %NULL for library defaults
+ * @app: (nullable): `ai`, `ai-tui`, `ai-gui` or `ai-call`, or %NULL for library defaults
  * @provider: the provider to save
  * @model: (nullable): model name, or %NULL for the provider's native default
  * @error: (out) (optional): return location for a #GError
@@ -1458,20 +1855,16 @@ ai_config_save_defaults(
 	GError        **error
 ){
 	g_autoptr(yaml_document_t) document = NULL;
-	g_autoptr(GString) output = g_string_new(NULL);
-	g_autoptr(GFile) file = NULL;
 	g_autoptr(GError) read_error = NULL;
 	g_autofree gchar *directory = NULL;
 	g_autofree gchar *path = NULL;
 	g_autofree gchar *contents = NULL;
 	g_autofree gchar *saved_model = g_strdup(model != NULL ? model : "");
-	yaml_emitter_t emitter;
 	yaml_node_pair_t *pair;
 	yaml_node_t *root;
 	const gchar *keys[] = {"default_provider", "default_model"};
 	const gchar *values[2];
 	guint i;
-	gboolean emitted;
 	const gchar *name;
 	gsize length;
 	gint mapping_id = 1;
@@ -1483,7 +1876,7 @@ ai_config_save_defaults(
 		                    "Model must be valid UTF-8");
 		return FALSE;
 	}
-	if (app != NULL && !g_str_equal(app, "ai") && !g_str_equal(app, "ai-tui") && !g_str_equal(app, "ai-call"))
+	if (app != NULL && config_app_index(app) < 0)
 	{
 		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Unknown app '%s'", app);
 		return FALSE;
@@ -1543,38 +1936,7 @@ ai_config_save_defaults(
 			yaml_document_append_mapping_pair(document, mapping_id, key_id, value_id);
 		}
 	}
-	if (!yaml_emitter_initialize(&emitter))
-	{
-		g_set_error_literal(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Cannot initialize YAML emitter");
-		return FALSE;
-	}
-	yaml_emitter_set_output(&emitter, config_yaml_output, output);
-	/* dump consumes the document contents even on failure, not its allocation. */
-	emitted = yaml_emitter_open(&emitter);
-	if (emitted)
-	{
-		emitted = yaml_emitter_dump(&emitter, document);
-		g_free(g_steal_pointer(&document));
-	}
-	if (emitted)
-		emitted = yaml_emitter_close(&emitter);
-	if (!emitted)
-		g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR, "Cannot emit config YAML: %s",
-		            emitter.problem != NULL ? emitter.problem : "emitter failure");
-	yaml_emitter_delete(&emitter);
-	if (!emitted)
-		return FALSE;
-	if (g_mkdir_with_parents(directory, 0700) != 0)
-	{
-		g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
-		            "Cannot create config directory %s: %s", directory, g_strerror(errno));
-		return FALSE;
-	}
-	/* Replace the inode, not its contents: old permissive modes must not survive. */
-	file = g_file_new_for_path(path);
-	if (!g_file_replace_contents(file, output->str, output->len, NULL, FALSE,
-	                             G_FILE_CREATE_PRIVATE | G_FILE_CREATE_REPLACE_DESTINATION,
-	                             NULL, NULL, error))
+	if (!config_yaml_store_user(&document, error))
 		return FALSE;
 	if (app == NULL)
 	{
@@ -1583,10 +1945,65 @@ ai_config_save_defaults(
 	}
 	else
 	{
-		i = g_str_equal(app, "ai") ? 0 : g_str_equal(app, "ai-tui") ? 1 : 2;
+		i = (guint)config_app_index(app);
 		self->app_providers[i] = provider;
 		g_free(self->app_models[i]);
 		self->app_models[i] = saved_model[0] != '\0' ? g_strdup(saved_model) : NULL;
 	}
+	return TRUE;
+}
+
+/**
+ * ai_config_save_update_check:
+ * @self: an #AiConfig
+ * @enabled: whether ai-tui and ai-gui should check for updates in the background
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Writes only `updates.check` in `$XDG_CONFIG_HOME/ai-glib/config.yaml`.
+ * Background checks stay off until this is true. Other keys, including the
+ * rest of `updates:`, are kept. A missing file is created. A malformed file
+ * is rejected and left untouched. The file is replaced atomically with mode
+ * 0600, and the parent directory is created with mode 0700 when missing.
+ * On success, #AiConfig:update-check on @self matches @enabled. On failure,
+ * @self is unchanged.
+ *
+ * Returns: %TRUE on success, %FALSE on validation or I/O failure
+ */
+gboolean
+ai_config_save_update_check(
+	AiConfig  *self,
+	gboolean   enabled,
+	GError   **error
+){
+	g_autoptr(yaml_document_t) document = NULL;
+	g_autoptr(GError) read_error = NULL;
+	g_autofree gchar *directory = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *contents = NULL;
+	gsize length;
+	gint mapping_id;
+
+	g_return_val_if_fail(AI_IS_CONFIG(self), FALSE);
+
+	directory = g_build_filename(g_get_user_config_dir(), "ai-glib", NULL);
+	path = g_build_filename(directory, AI_CONFIG_FILENAME, NULL);
+	if (!g_file_get_contents(path, &contents, &length, &read_error))
+	{
+		if (!g_error_matches(read_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+		{
+			g_propagate_error(error, (GError *)g_steal_pointer(&read_error));
+			return FALSE;
+		}
+		contents = g_strdup("{}\n");
+		length = 3;
+	}
+	document = config_yaml_parse(contents, length, error);
+	if (document == NULL)
+		return FALSE;
+	mapping_id = config_yaml_copy_mapping(document, 1, "updates");
+	config_yaml_set_plain(document, mapping_id, "check", enabled ? "true" : "false");
+	if (!config_yaml_store_user(&document, error))
+		return FALSE;
+	self->update_check = enabled;
 	return TRUE;
 }

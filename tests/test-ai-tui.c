@@ -106,6 +106,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	g_autoptr(GError) error = NULL;
 	g_auto(GStrv) envp = NULL;
 	g_autofree gchar *config = g_build_filename(dir, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(dir, ".local", "state", NULL);
 	gsize i;
 
 	g_ptr_array_add(argv, g_strdup(tui_binary));
@@ -120,6 +121,7 @@ run_tui_in(const gchar *dir, const gchar * const *args)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", dir, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_unsetenv(envp, "ANTHROPIC_API_KEY");
 	envp = g_environ_unsetenv(envp, "OPENAI_API_KEY");
 
@@ -513,9 +515,9 @@ tmux_start_tui_with_options(const gchar *session, const gchar *stub_dir,
 	tmux_kill(session);
 
 	command = g_strdup_printf(
-		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
-		"XDG_CONFIG_HOME='%s/.config' EDITOR='%s' %s '%s' -p grok-build %s",
-		libs, grok, stub_dir, stub_dir,
+		"exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME -u AI_LOOP_DISABLE TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' HOME='%s' "
+		"XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' EDITOR='%s' %s '%s' -p grok-build %s",
+		libs, grok, stub_dir, stub_dir, stub_dir,
 		editor != NULL ? editor : "true", environment != NULL ? environment : "",
 		tui_binary, options != NULL ? options : "");
 
@@ -566,8 +568,9 @@ tmux_start_tui_piped(const gchar *session, const gchar *stub_dir,
 	command = g_strdup_printf(
 		"printf '%%s\\n' %s | exec env -u VISUAL -u NO_COLOR -u AI_TUI_THEME "
 		"TERM=xterm-256color LC_ALL=C.UTF-8 LD_LIBRARY_PATH='%s' GROK_PATH='%s' "
-		"HOME='%s' XDG_CONFIG_HOME='%s/.config' EDITOR=true '%s' -p grok-build",
-		quoted, libs, grok, stub_dir, stub_dir, tui_binary);
+		"HOME='%s' XDG_CONFIG_HOME='%s/.config' XDG_STATE_HOME='%s/.local/state' "
+		"EDITOR=true '%s' -p grok-build",
+		quoted, libs, grok, stub_dir, stub_dir, stub_dir, tui_binary);
 
 	args[14] = command;
 	out = tmux_run(args);
@@ -680,6 +683,19 @@ test_dry_run_cli_provider(void)
 	g_assert_true(strstr(run->stdout_data, "--prompt-file /dev/stdin") != NULL);
 	g_assert_true(strstr(run->stdout_data, stub->stub) != NULL);
 
+	run_free(run);
+	stub_free(stub);
+}
+
+static void
+test_plan_startup(void)
+{
+	const gchar *args[] = { "-p", "grok-build", "--plan", "--skip-permissions", "--dry-run", NULL };
+	Stub *stub = stub_new("");
+	Run *run = run_tui(args, "GROK_PATH", stub->stub);
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "--permission-mode plan"));
+	g_assert_null(strstr(run->stdout_data, "bypassPermissions"));
 	run_free(run);
 	stub_free(stub);
 }
@@ -1207,6 +1223,11 @@ test_help_lists_commands_from_disk(void)
 	g_assert_nonnull(strstr(run->stdout_data, "/reset"));
 	g_assert_nonnull(strstr(run->stdout_data, "/effort"));
 
+	/* /loop and /goal come with worked examples, from the library. */
+	g_assert_nonnull(strstr(run->stdout_data, "Loops and goals"));
+	g_assert_nonnull(strstr(run->stdout_data, "/loop 5m check the deploy"));
+	g_assert_nonnull(strstr(run->stdout_data, "/goal the tests pass --turns 10"));
+
 	run_free(run);
 	sandbox_free(box);
 }
@@ -1463,6 +1484,8 @@ test_model_command_reports(void)
 	g_assert_nonnull(strstr(run->stdout_data, "Model:"));
 	g_assert_cmpint(run->status, ==, 0);
 	g_assert_nonnull(strstr(run->stdout_data, "Available models for Grok Build:"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4.7"));
+	g_assert_nonnull(strstr(run->stdout_data, "grok-4.7-build-fast"));
 	g_assert_nonnull(strstr(run->stdout_data, "grok-4.6"));
 	g_assert_nonnull(strstr(run->stdout_data, "/model MODEL_ID"));
 	run_free(run);
@@ -1629,6 +1652,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	g_auto(GStrv) envp = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *config = g_build_filename(box, ".config", NULL);
+	g_autofree gchar *state = g_build_filename(box, ".local", "state", NULL);
 	gsize i;
 
 	sandbox_write(box, "hello.c", "SHOULD_NOT_BE_INLINED\n");
@@ -1648,6 +1672,7 @@ test_unknown_builtin_free_line_reaches_the_child(void)
 	envp = g_get_environ();
 	envp = g_environ_setenv(envp, "HOME", box, TRUE);
 	envp = g_environ_setenv(envp, "XDG_CONFIG_HOME", config, TRUE);
+	envp = g_environ_setenv(envp, "XDG_STATE_HOME", state, TRUE);
 	envp = g_environ_setenv(envp, "GROK_PATH", stub->stub, TRUE);
 
 	g_spawn_sync(box, (gchar **)argv->pdata, envp, G_SPAWN_DEFAULT, NULL,
@@ -1709,6 +1734,48 @@ test_no_expand_leaves_a_command_alone(void)
 	"\"delta\":{\"type\":\"text_delta\",\"text\":\"the reply\"}}}\n" \
 	"{\"type\":\"result\",\"result\":\"the reply\",\"session_id\":\"s1\"}\n"
 
+/* /model with no argument opens a picker. Arrows move, Enter switches,
+ * Escape dismisses without changing the model. */
+static void
+test_model_picker_selects(void)
+{
+	Stub *stub;
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL,
+	                            "-m grok-4.6 --no-animation");
+	tmux_send(TUI_SESSION, "/model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "grok-4.7"));
+	tmux_send(TUI_SESSION, "Escape");
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+
+		while (g_get_monotonic_time() < deadline)
+		{
+			g_clear_pointer(&pane, g_free);
+			pane = tmux_capture(TUI_SESSION);
+			if (pane != NULL && strstr(pane, "grok-4.7") == NULL)
+				break;
+			g_usleep(100 * 1000);
+		}
+	}
+	g_assert_nonnull(pane);
+	g_assert_null(strstr(pane, "grok-4.7"));
+	g_assert_null(strstr(pane, "Model switched"));
+	tmux_send(TUI_SESSION, "/model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "grok-4.7"));
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "Up");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Model switched from grok-4.6 to grok-4.7"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 /**
  * test_switch_command_enter:
  * @data: the complete command to submit
@@ -1730,7 +1797,8 @@ test_switch_command_enter(gconstpointer data)
 		notice = "Provider:";
 	Stub *stub;
 	g_autofree gchar *stdin_path = NULL;
-	g_autofree gchar *partial = g_strndup(command, 4);
+	/* /pro now also completes /project; use an unambiguous prefix. */
+	g_autofree gchar *partial = g_strndup(command, g_str_equal(command, "/provider") ? 5 : 4);
 	g_autofree gchar *pane = NULL;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
@@ -2234,7 +2302,19 @@ test_transcript_drag_select(void)
 		tmux_send_literal(TUI_SESSION, drag);
 		tmux_send_literal(TUI_SESSION, release);
 		tmux_send(TUI_SESSION, "C-y");
-		g_assert_true(tmux_wait_for(TUI_SESSION, token));
+		/* The transcript already contains the token: wait for the paste. */
+		{
+			gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+			do
+			{
+				g_clear_pointer(&pane, g_free);
+				pane = tmux_capture(TUI_SESSION);
+				if (pane != NULL && count_needle(pane, token) >= 2)
+					break;
+				g_usleep(100 * 1000);
+			} while (g_get_monotonic_time() < deadline);
+		}
 		g_clear_pointer(&pane, g_free);
 		pane = tmux_capture(TUI_SESSION);
 		g_assert_cmpuint(count_needle(pane, token), >=, 2);
@@ -2300,6 +2380,7 @@ test_permission_modes(gconstpointer data)
 		"    then\n"
 		"        mode=child-bypass\n"
 		"    fi\n"
+		"    if [[ ${arg} == plan ]]; then mode=child-plan; fi\n"
 		"done\n"
 		"cat >/dev/null\n"
 		"printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
@@ -2318,17 +2399,18 @@ test_permission_modes(gconstpointer data)
 	g_assert_true(tmux_wait_for(TUI_SESSION, initial_skip
 		? "skip-permissions | S-TAB" : "read-only | S-TAB"));
 
-	for (i = 0; i < 2; i++)
+	for (i = 0; i < 3; i++)
 	{
-		gboolean skip = i == 0 ? !initial_skip : initial_skip;
+		guint mode = ((initial_skip ? 2 : 0) + i + 1) % 3;
+		const gchar *label = mode == 1 ? "plan | S-TAB" :
+			(mode == 2 ? "skip-permissions | S-TAB" : "read-only | S-TAB");
 
 		/* A completion menu must not consume the new global composer key. */
 		tmux_send(TUI_SESSION, "/pro");
 		/* Raw bytes exercise terminal-specific encodings without letting
 		 * tmux translate them back into its canonical BTab sequence. */
 		tmux_send(TUI_SESSION, keys[variant >> 1]);
-		g_assert_true(tmux_wait_for(TUI_SESSION, skip
-			? "skip-permissions | S-TAB" : "read-only | S-TAB"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, label));
 		g_assert_true(tmux_wait_for(TUI_SESSION, "/pro"));
 		tmux_send(TUI_SESSION, "C-u");
 		tmux_send(TUI_SESSION, "/reset");
@@ -2343,7 +2425,8 @@ test_permission_modes(gconstpointer data)
 		g_assert_true(tmux_wait_for(TUI_SESSION, "Provider switched"));
 		tmux_send(TUI_SESSION, "verify mode");
 		tmux_send(TUI_SESSION, "Enter");
-		g_assert_true(tmux_wait_for(TUI_SESSION, skip ? "child-bypass" : "child-guarded"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, mode == 1 ? "child-plan" :
+			(mode == 2 ? "child-bypass" : "child-guarded")));
 	}
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
@@ -2750,6 +2833,92 @@ test_theme_options(void)
 	run_free(run);
 }
 
+/* Real PTY coverage: opening, hiding, model changes, and typing/quitting
+ * during a blocked native report. The fixture accepts no model-turn method. */
+static void
+test_usage_sidebar(void)
+{
+	Stub *stub;
+	g_autofree gchar *queries = NULL;
+	g_autofree gchar *stall = NULL;
+	g_autofree gchar *log = NULL;
+	g_autofree gchar *python = g_find_program_in_path("python3");
+	gint64 started;
+	Run *dump;
+	const gchar *dump_args[] = { "-p", "grok-build", "--dump", "/help", NULL };
+	const gchar *script =
+		"#!/usr/bin/env python3\n"
+		"import json, pathlib, sys, time\n"
+		"root = pathlib.Path(__file__).parent\n"
+		"assert sys.argv[1:] == ['agent', '--no-leader', 'stdio']\n"
+		"for line in sys.stdin:\n"
+		"    req = json.loads(line)\n"
+		"    method = req['method']\n"
+		"    assert method in ('initialize', '_x.ai/billing')\n"
+		"    if method == 'initialize':\n"
+		"        result = {}\n"
+		"    else:\n"
+		"        with (root / 'queries').open('a') as f: f.write('query\\n')\n"
+		"        if (root / 'stall').exists(): time.sleep(10)\n"
+		"        result = {'config': {'creditUsagePercent': 25}}\n"
+		"    print(json.dumps({'id': req['id'], 'result': result}), flush=True)\n";
+
+	if (!tmux_available() || python == NULL)
+	{
+		g_test_skip("tmux and python3 are required for the usage PTY fixture");
+		return;
+	}
+	stub = stub_new("");
+	queries = g_build_filename(stub->dir, "queries", NULL);
+	stall = g_build_filename(stub->dir, "stall", NULL);
+	g_assert_true(g_file_set_contents(stub->stub, script, -1, NULL));
+	dump = run_tui(dump_args, "GROK_PATH", stub->stub);
+	g_assert_cmpint(dump->status, ==, 0);
+	g_assert_false(g_file_test(queries, G_FILE_TEST_EXISTS));
+	run_free(dump);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation --no-agents");
+	/* The harness starts at 100 columns: the hidden panel must not query. */
+	g_assert_false(g_file_test(queries, G_FILE_TEST_EXISTS));
+	tmux_resize("120", "32");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "75% remaining"));
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\n");
+	tmux_send(TUI_SESSION, "C-p");
+	tmux_send(TUI_SESSION, "C-p");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "75% remaining"));
+	g_clear_pointer(&log, g_free);
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\n");
+	g_assert_true(g_file_set_contents(stall, "", -1, NULL));
+	tmux_send(TUI_SESSION, "/model usage-fixture-model");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Loading..."));
+	/* Wait for the blocked RPC itself, not merely its loading placeholder. */
+	started = g_get_monotonic_time();
+	do
+	{
+		g_clear_pointer(&log, g_free);
+		g_file_get_contents(queries, &log, NULL, NULL);
+		if (g_strcmp0(log, "query\nquery\n") == 0) break;
+		g_usleep(10000);
+	} while (g_get_monotonic_time() - started < 5 * G_USEC_PER_SEC);
+	g_assert_cmpstr(log, ==, "query\nquery\n");
+	tmux_send(TUI_SESSION, "typing-during-usage-fetch");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "typing-during-usage-fetch"));
+	tmux_send(TUI_SESSION, "C-u");
+	started = g_get_monotonic_time();
+	tmux_send(TUI_SESSION, "/quit");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for_exit(TUI_SESSION));
+	g_assert_cmpint(g_get_monotonic_time() - started, <, 5 * G_USEC_PER_SEC);
+	g_clear_pointer(&log, g_free);
+	g_assert_true(g_file_get_contents(queries, &log, NULL, NULL));
+	g_assert_cmpstr(log, ==, "query\nquery\n");
+	g_remove(queries);
+	g_remove(stall);
+	stub_free(stub);
+}
+
 static void
 test_themes_and_resizing(void)
 {
@@ -2955,6 +3124,14 @@ typedef struct
 } CommandCase;
 
 static const CommandCase COMMAND_CASES[] = {
+	{ "decide", "Never downloads weights" },
+	{ "dashboard", NULL },
+	{ "project", NULL },
+	{ "links", "No links." },
+	{ "issue", "No links." },
+	{ "pr", "No links." },
+	{ "work", "Use a full issue or PR URL" },
+	{ "btw", "Usage: /btw" },
 	{ "help", "clear the line" },
 	{ "clear", NULL },
 	{ "reset", NULL },
@@ -2975,7 +3152,10 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "kill", "/kill needs an agent id" },
 	{ "expand", "/expand needs something to expand." },
 	{ "save", "/save needs a path." },
-	{ "export", "/export needs a format" }
+	{ "export", "/export needs a format" },
+	{ "loop", "No scheduled loops." },
+	{ "goal", "No goals." },
+	{ "update", "Checking for updates" }
 };
 
 /**
@@ -2996,17 +3176,32 @@ test_builtin_enter(gconstpointer data)
 	g_autofree gchar *stdin_path = NULL;
 	g_autofree gchar *saved = NULL;
 	gboolean clears;
+	gboolean view_command;
 
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
 	saved_path = g_build_filename(stub->dir, "command-audit.txt", NULL);
 	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
-	command = g_strconcat("/", test_case->name, NULL);
+	/* The no-argument model command opens a picker (covered separately).
+	 * Audit the text command without leaving a modal over the next /save. */
+	command = g_str_equal(test_case->name, "model")
+		? g_strdup("/model grok-4.7")
+		: g_str_equal(test_case->name, "loop")
+			? g_strdup("/loop list")
+		: g_str_equal(test_case->name, "update")
+			? g_strdup("/update status")
+			: g_strconcat("/", test_case->name, NULL);
+	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 	tmux_command("/expand command-audit-sentinel", "Would send:");
 	tmux_send(TUI_SESSION, command);
 	tmux_send(TUI_SESSION, "Enter");
+	if (view_command)
+	{
+		g_assert_true(tmux_wait_for(TUI_SESSION, "PROJECT DASHBOARD"));
+		tmux_send(TUI_SESSION, "C-\\");
+	}
 	if (g_str_equal(test_case->name, "quit") ||
 	    g_str_equal(test_case->name, "exit"))
 		g_assert_true(tmux_wait_for_exit(TUI_SESSION));
@@ -3022,11 +3217,241 @@ test_builtin_enter(gconstpointer data)
 		else
 		{
 			g_assert_nonnull(strstr(saved, "command-audit-sentinel"));
-			g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
+			if (!view_command) g_assert_nonnull(strstr(saved, g_str_equal(test_case->name, "cwd") ?
 				stub->dir : test_case->notice));
 		}
 	}
 	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/**
+ * test_loop_schedule:
+ *
+ * A fixed interval must be confirmed in the transcript and must not ask
+ * the provider. An hour-long slot cannot come due during this test.
+ */
+static void
+test_loop_schedule(void)
+{
+	Stub             *stub;
+	g_autofree gchar *saved_path = NULL;
+	g_autofree gchar *stdin_path = NULL;
+	g_autofree gchar *saved = NULL;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	saved_path = g_build_filename(stub->dir, "loop-audit.txt", NULL);
+	stdin_path = g_build_filename(stub->dir, "stdin.log", NULL);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_command("/loop 60m ping the build", "every hour");
+	tmux_command("/loop list", "ping the build");
+	tmux_command("/loop cancel all", "Cancelled 1 scheduled loop");
+	tmux_command("/loop list", "No scheduled loops.");
+	tmux_command("/save loop-audit.txt", "Wrote");
+	g_assert_true(g_file_get_contents(saved_path, &saved, NULL, NULL));
+	g_assert_nonnull(strstr(saved, "every hour"));
+	g_assert_nonnull(strstr(saved, "0 * * * *"));
+	g_assert_false(g_file_test(stdin_path, G_FILE_TEST_EXISTS));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+/*
+ * A stub grok that answers the Nth call with `reply.N` (or `reply` when
+ * there is none) and counts its calls, so a goal's turns can be scripted
+ * one reply at a time.
+ */
+static gchar *
+goal_stub_new(const gchar *const *replies, const gchar *fallback)
+{
+	g_autoptr(GError) error = NULL;
+	gchar            *dir = g_dir_make_tmp("ai-glib-tui-goal-XXXXXX", &error);
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *path = NULL;
+	guint             i;
+
+	g_assert_no_error(error);
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"cat > /dev/null\n"
+		"n=$(cat '%s/calls' 2>/dev/null || echo 0)\n"
+		"n=$((n + 1))\n"
+		"echo $n > '%s/calls'\n"
+		"if [ -f '%s/reply.'$n ]; then cat '%s/reply.'$n; else cat '%s/reply'; fi\n",
+		dir, dir, dir, dir, dir);
+	path = g_build_filename(dir, "grok", NULL);
+	g_assert_true(g_file_set_contents(path, script, -1, NULL));
+	g_assert_cmpint(g_chmod(path, 0700), ==, 0);
+
+	for (i = 0; replies != NULL && replies[i] != NULL; i++)
+	{
+		g_autofree gchar *name = g_strdup_printf("reply.%u", i + 1);
+		sandbox_write(dir, name, replies[i]);
+	}
+
+	sandbox_write(dir, "reply", fallback);
+	return dir;
+}
+
+static gchar *
+goal_reply(const gchar *text)
+{
+	g_autofree gchar *escaped = g_strescape(text, NULL);
+
+	return g_strdup_printf("{\"type\":\"result\",\"result\":\"%s\",\"session_id\":\"s1\"}\n", escaped);
+}
+
+static guint
+goal_stub_calls(const gchar *dir)
+{
+	g_autofree gchar *path = g_build_filename(dir, "calls", NULL);
+	g_autofree gchar *text = NULL;
+
+	if (!g_file_get_contents(path, &text, NULL, NULL))
+	{
+		return 0;
+	}
+
+	return (guint)g_ascii_strtoull(text, NULL, 10);
+}
+
+static Run *
+goal_run(const gchar *dir, const gchar *line)
+{
+	g_autofree gchar *grok = g_build_filename(dir, "grok", NULL);
+	g_autofree gchar *state = g_build_filename(dir, "state", NULL);
+	const gchar      *args[] = { "-p", "grok-build", "--dump", line, NULL };
+	Run              *run = g_new0(Run, 1);
+	g_autoptr(GSubprocessLauncher) launcher = NULL;
+	g_autoptr(GSubprocess) proc = NULL;
+	g_autoptr(GPtrArray) argv = g_ptr_array_new();
+	g_autoptr(GError) error = NULL;
+	guint i;
+
+	g_ptr_array_add(argv, tui_binary);
+	for (i = 0; args[i] != NULL; i++)
+		g_ptr_array_add(argv, (gpointer)args[i]);
+	g_ptr_array_add(argv, NULL);
+
+	launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+	                                     G_SUBPROCESS_FLAGS_STDERR_PIPE);
+	g_subprocess_launcher_set_cwd(launcher, dir);
+	g_subprocess_launcher_setenv(launcher, "GROK_PATH", grok, TRUE);
+	g_subprocess_launcher_setenv(launcher, "HOME", dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_STATE_HOME", state, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_CONFIG_HOME", dir, TRUE);
+	g_subprocess_launcher_setenv(launcher, "XDG_DATA_HOME", dir, TRUE);
+	g_subprocess_launcher_unsetenv(launcher, "AI_LOOP_DISABLE");
+	proc = g_subprocess_launcher_spawnv(launcher, (const gchar * const *)argv->pdata, &error);
+	g_assert_no_error(error);
+	g_subprocess_communicate_utf8(proc, NULL, NULL, &run->stdout_data, &run->stderr_data, &error);
+	g_assert_no_error(error);
+	run->status = g_subprocess_get_exit_status(proc);
+	return run;
+}
+
+/**
+ * test_dump_goal_met:
+ *
+ * `--dump "/goal ..."` runs the goal to its end: a turn, a verdict of
+ * not met, the next turn carrying that verdict, and a met verdict that
+ * ends the run. The stub is called exactly twice.
+ */
+static void
+test_dump_goal_met(void)
+{
+	g_autofree gchar *first = goal_reply("Fixed one.\nGOAL_NOT_MET: one test still fails");
+	g_autofree gchar *second = goal_reply("All green.\nGOAL_MET: make test passes");
+	const gchar      *replies[] = { first, second, NULL };
+	g_autofree gchar *dir = goal_stub_new(replies, second);
+	g_autofree gchar *stdin_path = g_build_filename(dir, "stdin.log", NULL);
+	Run              *run = goal_run(dir, "/goal the tests pass --turns 5");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "Goal"));
+	g_assert_nonnull(strstr(run->stdout_data, "not met yet (turn 1/5): one test still fails"));
+	g_assert_nonnull(strstr(run->stdout_data, "met after 2 turns: make test passes"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 2);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_dump_goal_bound:
+ *
+ * A goal the model never meets ends at its turn bound and says so, as
+ * expired and not met -- never as met, and never by running forever.
+ */
+static void
+test_dump_goal_bound(void)
+{
+	g_autofree gchar *reply = goal_reply("Tried again.\nGOAL_NOT_MET: still red");
+	g_autofree gchar *dir = goal_stub_new(NULL, reply);
+	Run              *run = goal_run(dir, "/goal it can never pass --turns 2");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "expired: not met after 2 turns"));
+	/* "not met after 2 turns, its bound" -- never "met after 2 turns: ...". */
+	g_assert_null(strstr(run->stdout_data, "met after 2 turns:"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 2);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_dump_loop_does_not_hold:
+ *
+ * A loop scheduled from --dump is confirmed and the run ends: a timer
+ * is not a reason to keep a one-shot process alive, and nothing is sent.
+ */
+static void
+test_dump_loop_does_not_hold(void)
+{
+	g_autofree gchar *reply = goal_reply("unused");
+	g_autofree gchar *dir = goal_stub_new(NULL, reply);
+	Run              *run = goal_run(dir, "/loop 5m check the deploy");
+
+	g_assert_cmpint(run->status, ==, 0);
+	g_assert_nonnull(strstr(run->stdout_data, "every 5m"));
+	g_assert_cmpuint(goal_stub_calls(dir), ==, 0);
+	run_free(run);
+	sandbox_free(g_steal_pointer(&dir));
+}
+
+/**
+ * test_goal_schedule_panel:
+ *
+ * In the real terminal: /goal is confirmed, /goal list shows the entry
+ * in the shared vocabulary, and the panel lists it with its progress.
+ */
+static void
+test_goal_schedule_panel(void)
+{
+	Stub *stub;
+
+	if (!tmux_available())
+	{
+		g_test_skip("tmux is not installed");
+		return;
+	}
+
+	stub = stub_new(STUB_REPLY);
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_command("/loop 60m ping the build", "every hour");
+	tmux_command("/goal list", "No goals.");
+	tmux_command("/loop pause all", "Paused 1 scheduled loop");
+	tmux_command("/loop list", "paused, every hour");
+	tmux_command("/loop resume all", "Resumed 1 scheduled loop");
+	tmux_command("/loop pause nosuchid", "Valid ids:");
+	tmux_command("/loop 10m /clear", "cannot run on a schedule");
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }
@@ -3200,12 +3625,15 @@ test_theme_fallbacks(void)
 }
 
 static void
-test_busy_queues_follow_up(void)
+test_busy_queues_follow_up(gconstpointer data)
 {
+	gboolean separate = GPOINTER_TO_INT(data);
 	Stub *stub;
 	g_autofree gchar *script = NULL;
 	g_autofree gchar *second = NULL;
 	g_autofree gchar *pane = NULL;
+	g_autofree gchar *recorded = NULL;
+	g_autofree gchar *path = NULL;
 	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
 	stub = stub_new(STUB_REPLY);
 	second = g_strdup(
@@ -3229,19 +3657,95 @@ test_busy_queues_follow_up(void)
 		stub->dir, stub->dir, stub->dir);
 	sandbox_write(stub->dir, "grok", script);
 	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
-	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, separate ? "--no-animation --no-coalesce" : "--no-animation");
 	tmux_send(TUI_SESSION, "first request");
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
 	tmux_send(TUI_SESSION, "second-draft");
 	tmux_send(TUI_SESSION, "Enter");
 	g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED 1"));
+	tmux_send(TUI_SESSION, "third-draft");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED 2"));
+	tmux_send(TUI_SESSION, "unfinished-composer");
 	pane = tmux_capture(TUI_SESSION);
 	g_assert_null(strstr(pane, "the reply"));
 	sandbox_write(stub->dir, "release", "ready\n");
-	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
-	g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	/* Separate replies may already have scrolled the first turn off screen.
+	 * Assert delivery using recorded requests below, not old viewport rows. */
+	if (!separate) {
+		g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "second-draft"));
+	}
 	g_assert_true(tmux_wait_for(TUI_SESSION, "the follow-up"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "unfinished-composer"));
+	path = g_build_filename(stub->dir, "stdin.2.log", NULL);
+	g_assert_true(g_file_get_contents(path, &recorded, NULL, NULL));
+	g_assert_nonnull(strstr(recorded, "second-draft"));
+	if (separate) {
+		g_assert_null(strstr(recorded, "third-draft"));
+		g_assert_true(tmux_wait_for(TUI_SESSION, "third-draft"));
+	} else
+		g_assert_nonnull(strstr(recorded, "third-draft"));
+	g_assert_null(strstr(recorded, "unfinished-composer"));
+	g_clear_pointer(&recorded, g_free);
+	g_clear_pointer(&path, g_free);
+	path = g_build_filename(stub->dir, "call", NULL);
+	{
+		gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+		const gchar *expected = separate ? "3\n" : "2\n";
+		do {
+			g_clear_pointer(&recorded, g_free);
+			g_file_get_contents(path, &recorded, NULL, NULL);
+			if (g_strcmp0(recorded, expected) == 0) break;
+			g_usleep(1000);
+		} while (g_get_monotonic_time() < deadline);
+		g_assert_cmpstr(recorded, ==, expected);
+	}
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
+static void
+test_btw_during_turn(gconstpointer data)
+{
+	gboolean cancel = GPOINTER_TO_INT(data);
+	Stub *stub;
+	g_autofree gchar *script = NULL;
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	script = g_strdup_printf(
+		"#!/bin/sh\n"
+		"cat > '%s/request.'$$\n"
+		"if mkdir '%s/first' 2>/dev/null; then\n"
+		" while [ ! -f '%s/release' ]; do sleep 0.05; done\n"
+		" cat '%s/stdout'\n"
+		"else\n"
+		" %s\n"
+		" printf '%%s\\n' '{\"type\":\"result\",\"result\":\"side-answer-token\",\"session_id\":\"side-id\"}'\n"
+		"fi\n", stub->dir, stub->dir, stub->dir, stub->dir, cancel ? "sleep 30" : ":");
+	sandbox_write(stub->dir, "grok", script);
+	g_assert_cmpint(g_chmod(stub->stub, 0700), ==, 0);
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, NULL, "--no-animation");
+	tmux_send(TUI_SESSION, "main-work-token");
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "DRAFT / waiting"));
+	tmux_send(TUI_SESSION, "/btw explain-this-token");
+	tmux_send(TUI_SESSION, "Enter");
+	if (cancel) {
+		g_assert_true(tmux_wait_for(TUI_SESSION, "BTW started: explain-this-token"));
+		tmux_send(TUI_SESSION, "/btw --cancel");
+		tmux_send(TUI_SESSION, "Enter");
+		g_assert_true(tmux_wait_for(TUI_SESSION, "main turn unchanged"));
+	} else
+		g_assert_true(tmux_wait_for(TUI_SESSION, "side-answer-token"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "the reply"));
+	g_assert_nonnull(strstr(pane, "waiting"));
+	sandbox_write(stub->dir, "release", "ready\n");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "the reply"));
 	tmux_kill(TUI_SESSION);
 	stub_free(stub);
 }
@@ -3509,6 +4013,43 @@ test_inline_tool_previews(void)
 	stub_free(stub);
 }
 
+#include "test-server.h"
+
+static void
+test_decision_interactive(void)
+{
+	TServer *server;
+	Stub *stub;
+	g_autofree gchar *environment = NULL;
+	g_autofree gchar *saved = NULL;
+	g_autofree gchar *path = NULL;
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	server = tserver_new();
+	stub = stub_new(STUB_REPLY);
+	environment = g_strdup_printf("LAYA_BASE_URL=%s LAYA_API_KEY=", server->base_url);
+	tserver_set_response(server, 200, "{\"model\":\"fixture\",\"answers\":{\"answer\":{\"type\":\"noul\",\"noul\":0.93}}}");
+	tmux_start_tui_with_options(TUI_SESSION, stub->dir, NULL, environment, NULL);
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "answer: 0.9300");
+	tserver_set_delay(server, 1000);
+	tmux_command("/clear", "Ask, build, investigate...");
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "Requesting decision");
+	tmux_send(TUI_SESSION, "C-c");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "Decision failed:"));
+	/* Reset must not receive a result belonging to its predecessor. */
+	tmux_command("/clear", "Ask, build, investigate...");
+	tmux_command("/decide -q 'Spam?' 'Free prize'", "Requesting decision");
+	tmux_send(TUI_SESSION, "/reset"); tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "MAKE SOMETHING WORTH SHIPPING."));
+	tmux_command("/save decision-reset.txt", "Wrote");
+	path = g_build_filename(stub->dir, "decision-reset.txt", NULL);
+	g_assert_true(g_file_get_contents(path, &saved, NULL, NULL));
+	g_assert_null(strstr(saved, "Decision result"));
+	g_assert_null(strstr(saved, "Decision failed"));
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+	tserver_free(server);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -3519,7 +4060,12 @@ main(int argc, char *argv[])
 
 	/* Spawned fixtures must never register in the developer's real herdr pane. */
 	g_unsetenv("HERDR_ENV");
+	/* Never check for, let alone install, a real update from a test: no
+	 * background fetch, and a checkout that does not exist. */
+	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
+	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/ai-glib/ai-tui/decision/interactive", test_decision_interactive);
 	/* Never inherit the developer's tmux options or touch their sessions. */
 	tmux_socket = g_strdup_printf("ai-tui-test-%u", (guint)getpid());
 	g_test_add_func("/ai-glib/tui/reset-session", test_reset_session);
@@ -3562,6 +4108,11 @@ main(int argc, char *argv[])
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-home-end", cursor_keys, test_command_cursor_completion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/command-control-a-e", control_keys, test_command_cursor_completion);
 	g_test_add_func("/ai-glib/ai-tui/builtins/catalog", test_builtin_catalog);
+	g_test_add_func("/ai-glib/ai-tui/builtins/loop-schedule", test_loop_schedule);
+	g_test_add_func("/ai-glib/ai-tui/builtins/goal-schedule", test_goal_schedule_panel);
+	g_test_add_func("/ai-glib/ai-tui/dump/goal-met", test_dump_goal_met);
+	g_test_add_func("/ai-glib/ai-tui/dump/goal-bound", test_dump_goal_bound);
+	g_test_add_func("/ai-glib/ai-tui/dump/loop-does-not-hold", test_dump_loop_does_not_hold);
 	for (i = 0; i < G_N_ELEMENTS(COMMAND_CASES); i++)
 	{
 		g_autofree gchar *path = g_strconcat("/ai-glib/ai-tui/builtins/", COMMAND_CASES[i].name, NULL);
@@ -3572,12 +4123,16 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/themes", test_theme_options);
 	g_test_add_func("/ai-glib/ai-tui/inline-tool-previews", test_inline_tool_previews);
 	g_test_add_func("/ai-glib/ai-tui/keys/themes-resize", test_themes_and_resizing);
+	g_test_add_func("/ai-glib/ai-tui/keys/usage-sidebar", test_usage_sidebar);
 	g_test_add_func("/ai-glib/ai-tui/keys/unicode-search", test_unicode_and_search);
 	g_test_add_func("/ai-glib/ai-tui/keys/long-paste", test_long_bracketed_paste);
 	g_test_add_func("/ai-glib/ai-tui/keys/composer-editing", test_composer_editing);
 	g_test_add_func("/ai-glib/ai-tui/keys/command-paths", test_command_paths);
 	g_test_add_func("/ai-glib/ai-tui/keys/theme-fallbacks", test_theme_fallbacks);
-	g_test_add_func("/ai-glib/ai-tui/keys/busy-queue", test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/busy-queue", GINT_TO_POINTER(0), test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/busy-queue-separate", GINT_TO_POINTER(1), test_busy_queues_follow_up);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/btw", GINT_TO_POINTER(0), test_btw_during_turn);
+	g_test_add_data_func("/ai-glib/ai-tui/keys/btw-cancel", GINT_TO_POINTER(1), test_btw_during_turn);
 	g_test_add_func("/ai-glib/ai-tui/keys/control-shortcuts", test_control_shortcuts);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/activity-motion", GINT_TO_POINTER(FALSE), test_activity_motion);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/reduced-motion", GINT_TO_POINTER(TRUE), test_activity_motion);
@@ -3657,6 +4212,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/transcript-drag-select", test_transcript_drag_select);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/model-enter", "/model",
 	                     test_switch_command_enter);
+	g_test_add_func("/ai-glib/ai-tui/keys/model-picker", test_model_picker_selects);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/provider-enter", "/provider",
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/effort-enter", "/effort",
@@ -3688,6 +4244,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/ai-glib/ai-tui/keys/editor-abort",
 	                test_an_aborted_edit_keeps_the_prompt);
 
+	g_test_add_func("/ai-glib/ai-tui/plan-startup", test_plan_startup);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-default",
 		GINT_TO_POINTER(0), test_permission_modes);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/permission-modes-skip",

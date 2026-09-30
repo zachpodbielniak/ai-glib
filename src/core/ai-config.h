@@ -133,11 +133,21 @@ ai_config_save_defaults(
 	GError        **error
 );
 
+gboolean
+ai_config_save_update_check(
+	AiConfig  *self,
+	gboolean   enabled,
+	GError   **error
+);
+
 AiProviderType
 ai_config_get_app_provider(AiConfig *self, const gchar *app);
 
 const gchar *
 ai_config_get_app_model(AiConfig *self, const gchar *app);
+
+gboolean
+ai_config_get_app_dashboard(AiConfig *self, const gchar *app);
 
 AiProviderType
 ai_config_get_default_provider(AiConfig *self);

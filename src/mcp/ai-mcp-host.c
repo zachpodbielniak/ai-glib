@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "ai-mcp-host.h"
+#include "core/ai-plan-policy.h"
 #include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <gio/gunixsocketaddress.h>
@@ -239,6 +240,14 @@ invoke_tool(McpServer *server, const gchar *name, JsonObject *arguments, gpointe
 	if (self == NULL) return text_result("Host session has closed", TRUE);
 	conversation = self->conversation;
 	executor = ai_conversation_get_executor(conversation);
+	if (ai_conversation_get_plan_mode(conversation) &&
+		!ai_plan_tool_is_read_only(name) &&
+		!g_str_equal(name, "conversation_status") &&
+		!g_str_equal(name, "conversation_transcript") &&
+		!g_str_equal(name, "conversation_send") &&
+		!g_str_equal(name, "conversation_cancel") &&
+		!g_str_equal(name, "todo_read") && !g_str_equal(name, "agent_list"))
+		return text_result("Tool is unavailable in plan mode; leave plan mode before implementing", TRUE);
 	if (self->stopping || !g_hash_table_contains(self->allowed, name))
 		return text_result("Tool is not enabled", TRUE);
 	tool = create_tool(self, name);
