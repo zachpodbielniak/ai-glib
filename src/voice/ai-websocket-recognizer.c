@@ -13,6 +13,7 @@ typedef struct {
 	SoupWebsocketConnection *ws;
 	GQueue queued;
 	gsize queued_bytes;
+	GString *committed; /* finals the server sent before EOS */
 	gboolean ready, ended, active;
 } Recognition;
 
@@ -38,6 +39,8 @@ recognition_unref(Recognition *r)
 	g_clear_object(&r->cancel);
 	g_clear_object(&r->ws);
 	g_queue_clear_full(&r->queued, (GDestroyNotify)g_bytes_unref);
+	if (r->committed != NULL)
+		g_string_free(r->committed, TRUE);
 	g_free(r->speaker);
 	g_free(r);
 }
@@ -94,12 +97,35 @@ arm_deadline(Recognition *r, guint milliseconds)
 						  (GDestroyNotify)recognition_unref);
 	g_source_attach(r->deadline, g_main_context_get_thread_default());
 }
+/* The one final for this utterance: everything committed early, then TEXT. */
+static void
+recognition_finish(Recognition *r, AiWebsocketRecognizer *self, const gchar *text)
+{
+	g_autofree gchar *speaker = g_strdup(r->speaker);
+	g_autoptr(GString) full = g_string_new(r->committed != NULL ? r->committed->str : "");
+	g_autofree gchar *tail = g_strstrip(g_strdup(text != NULL ? text : ""));
+	if (full->len != 0 && *tail != '\0')
+		g_string_append_c(full, ' ');
+	g_string_append(full, tail);
+	g_hash_table_remove(self->streams, speaker);
+	g_signal_emit_by_name(self, "transcript", speaker, full->str, TRUE);
+}
 static void
 on_closed(SoupWebsocketConnection *ws, gpointer data)
 {
-	g_autoptr(GError) error = g_error_new_literal(
-		G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED, "STT closed before a final transcript");
-	recognition_error(data, error);
+	Recognition *r = data;
+	g_autoptr(AiWebsocketRecognizer) self = g_weak_ref_get(&r->owner);
+	g_autoptr(GError) error = NULL;
+	/* After EOS, a server that found no speech may send nothing and close.
+	 * That is silence -- a sniff, a footstep -- not a failure to report to
+	 * the caller as "could not transcribe". Before EOS it is a failure. */
+	if (self != NULL && r->active && r->ended) {
+		recognition_finish(r, self, "");
+		return;
+	}
+	error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
+								"STT closed before a final transcript");
+	recognition_error(r, error);
 }
 
 static void
@@ -159,9 +185,22 @@ on_message(SoupWebsocketConnection *ws, gint kind, GBytes *bytes, gpointer data)
 		return;
 	}
 	if (g_strcmp0(type, "final") == 0 && r->ended) {
-		g_autofree gchar *speaker = g_strdup(r->speaker);
-		g_hash_table_remove(self->streams, speaker);
-		g_signal_emit_by_name(self, "transcript", speaker, text, TRUE);
+		recognition_finish(r, self, text);
+		return;
+	}
+	/* A server with its own endpointing may close an utterance while audio
+	 * is still arriving. Those words belong to this turn: keep them, and
+	 * report them as a partial so a barge-in can still be confirmed. */
+	if (g_strcmp0(type, "final") == 0) {
+		g_autofree gchar *piece = g_strstrip(g_strdup(text));
+		if (*piece != '\0') {
+			if (r->committed == NULL)
+				r->committed = g_string_new(NULL);
+			if (r->committed->len != 0)
+				g_string_append_c(r->committed, ' ');
+			g_string_append(r->committed, piece);
+			g_signal_emit_by_name(self, "transcript", r->speaker, r->committed->str, FALSE);
+		}
 		return;
 	}
 malformed:

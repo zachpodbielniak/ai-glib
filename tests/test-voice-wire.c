@@ -208,6 +208,105 @@ test_stt_response(gconstpointer data)
 	teardown(&w);
 }
 
+/* How the live server behaves, which the canned one above does not.
+ *   "closes": after EOS it found no speech, sends nothing and closes.
+ *   "early":  its own VAD ends an utterance while audio is still arriving and
+ *             sends a final then; the rest of the speech gets a final at EOS.
+ */
+typedef struct {
+	GMainLoop *loop;
+	const gchar *mode;
+	GString *finals;
+	guint final_count;
+	GError *error;
+} Live;
+static void
+live_message(SoupWebsocketConnection *ws, gint type, GBytes *bytes, gpointer data)
+{
+	Live *l = data;
+	if (type == SOUP_WEBSOCKET_DATA_BINARY) {
+		if (g_str_equal(l->mode, "early"))
+			soup_websocket_connection_send_text(
+				ws, "{\"type\":\"final\",\"text\":\"First part.\"}");
+		return;
+	}
+	if (g_str_equal(l->mode, "closes"))
+		soup_websocket_connection_close(ws, SOUP_WEBSOCKET_CLOSE_NORMAL, NULL);
+	else
+		soup_websocket_connection_send_text(ws,
+											"{\"type\":\"final\",\"text\":\"second part\"}");
+}
+static void
+live_connected(SoupServer *server, SoupServerMessage *msg, const gchar *path,
+			   SoupWebsocketConnection *ws, gpointer data)
+{
+	g_object_set_data_full(G_OBJECT(server), "ws", g_object_ref(ws), g_object_unref);
+	g_signal_connect(ws, "message", G_CALLBACK(live_message), data);
+	soup_websocket_connection_send_text(ws, "{\"type\":\"ready\",\"sample_rate\":16000}");
+}
+static void
+live_transcript(AiSpeechRecognizer *stt, const gchar *id, const gchar *text,
+				gboolean final, gpointer data)
+{
+	Live *l = data;
+	if (!final)
+		return;
+	l->final_count++;
+	g_string_assign(l->finals, text);
+	g_main_loop_quit(l->loop);
+}
+static void
+live_failed(AiSpeechRecognizer *stt, const gchar *speaker, GError *error, gpointer data)
+{
+	Live *l = data;
+	l->error = g_error_copy(error);
+	g_main_loop_quit(l->loop);
+}
+static void
+test_stt_live_server(gconstpointer data)
+{
+	Wire w = {0};
+	Live l = {0};
+	g_autoptr(AiWebsocketRecognizer) stt = NULL;
+	g_autofree gchar *url = NULL;
+	g_autoptr(GBytes) pcm = NULL;
+	guint8 silence[320] = {0};
+	guint timeout;
+	setup(&w);
+	l.loop = w.loop;
+	l.mode = data;
+	l.finals = g_string_new(NULL);
+	soup_server_add_websocket_handler(w.server, "/stt/stream", NULL, NULL, live_connected,
+									  &l, NULL);
+	url = g_strconcat("ws", w.url + 4, "stt/stream", NULL);
+	stt = ai_websocket_recognizer_new(url);
+	g_signal_connect(stt, "error", G_CALLBACK(live_failed), &l);
+	g_signal_connect(stt, "transcript", G_CALLBACK(live_transcript), &l);
+	g_assert_true(ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", NULL));
+	pcm = g_bytes_new(silence, sizeof(silence));
+	g_assert_true(
+		ai_speech_recognizer_feed(AI_SPEECH_RECOGNIZER(stt), "caller", pcm, NULL));
+	/* Let the early final arrive before the caller stops talking. */
+	timeout = g_timeout_add_seconds(3, expired, NULL);
+	{
+		gint64 until = g_get_monotonic_time() + 200000;
+		while (g_get_monotonic_time() < until)
+			g_main_context_iteration(NULL, FALSE);
+	}
+	ai_speech_recognizer_end(AI_SPEECH_RECOGNIZER(stt), "caller");
+	g_main_loop_run(w.loop);
+	g_source_remove(timeout);
+	/* A sniff is silence, not a failure; an early final is part of the turn. */
+	g_assert_no_error(l.error);
+	g_assert_cmpuint(l.final_count, ==, 1);
+	g_assert_cmpstr(l.finals->str, ==,
+					g_str_equal(l.mode, "closes") ? "" : "First part. second part");
+	g_assert_true(ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", NULL));
+	ai_speech_recognizer_cancel(AI_SPEECH_RECOGNIZER(stt), "caller");
+	g_clear_object(&stt);
+	g_string_free(l.finals, TRUE);
+	teardown(&w);
+}
 static void
 test_stt_timeout(void)
 {
@@ -394,6 +493,9 @@ main(int argc, char **argv)
 						 "\"transcribe_ms\":1}",
 						 test_stt_response);
 	g_test_add_func("/voice/wire/stt-ready-timeout", test_stt_timeout);
+	g_test_add_data_func("/voice/wire/stt-closes-after-silence", "closes",
+						 test_stt_live_server);
+	g_test_add_data_func("/voice/wire/stt-early-final", "early", test_stt_live_server);
 	g_test_add_func("/voice/wire/tts-framing", test_tts);
 	g_test_add_data_func("/voice/wire/tts-invalid-rate", "SR=nope\n", test_tts_bad);
 	g_test_add_data_func("/voice/wire/tts-missing-sentinel", "SR=16000\n", test_tts_bad);
