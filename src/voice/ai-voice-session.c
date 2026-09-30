@@ -113,6 +113,7 @@ struct _AiVoiceSession {
 	guint chime_threshold, chime_cooldown_ms;
 	GCancellable *scoring;
 	gint64 last_turn_us;
+	gchar *logged_tool; /* id of the last tool whose start was logged */
 	/* speaker-identifier: finals wait here, in order, until each is named */
 	GObject *identifier;
 	gchar *unknown_speaker_name;
@@ -970,8 +971,19 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 		}
 	} else if (generation == self->generation) {
 		AiEventKind k = ai_event_get_kind(event);
-		if (k == AI_EVENT_TOOL_STARTED)
+		if (k == AI_EVENT_TOOL_STARTED) {
+			/* A tool that never finishes never reaches the transcript: log its
+			 * start, once per call, so a stuck turn names what it is stuck in. */
+			AiToolUse *use = ai_event_get_tool_use(event);
+			const gchar *id = use != NULL ? ai_tool_use_get_id(use) : NULL;
+			if (use != NULL && g_strcmp0(id, self->logged_tool) != 0) {
+				g_free(self->logged_tool);
+				self->logged_tool = g_strdup(id);
+				g_log("ai-glib", G_LOG_LEVEL_INFO, "Tool started: %s",
+					  ai_tool_use_get_name(use) != NULL ? ai_tool_use_get_name(use) : "?");
+			}
 			tool_started(self);
+		}
 		else if (k == AI_EVENT_TEXT_DELTA) {
 			if (self->runaway)
 				;
@@ -1269,7 +1281,9 @@ static const gchar relevance_prompt[] =
 	"You are listening to a live conversation between people in a room. An AI "
 	"assistant named %s is present and hears everything, but nobody addressed it. "
 	"Decide how much the assistant should speak up right now, from 0 (stay quiet) "
-	"to 10 (clearly should speak).\n"
+	"to 10 (clearly should speak). Lines marked [Assistant] are what the "
+	"assistant itself said last; talk that follows up on them -- a next question, "
+	"a correction, another sum -- is usually meant for it.\n"
 	"Score high when: a question was asked that nobody answered; someone states "
 	"something that is wrong; the group is stuck or looking for information the "
 	"assistant is likely to have; someone seems to be waiting for the assistant.\n"
@@ -1441,6 +1455,13 @@ maybe_score(AiVoiceSession *self)
 		 g_get_monotonic_time() - self->last_turn_us < (gint64)self->chime_cooldown_ms * 1000)) {
 		g_string_free(talk, TRUE);
 		return;
+	}
+	/* What the assistant said last, so a follow-up to it reads as one. */
+	for (l = self->said.head; l != NULL; l = l->next) {
+		const Said *said = l->data;
+		if (said->at >= self->last_turn_us &&
+			g_get_monotonic_time() - said->at < 180 * G_USEC_PER_SEC)
+			g_string_append_printf(talk, "[Assistant]: %s\n", said->text);
 	}
 	for (l = self->room.head; l != NULL; l = l->next) {
 		g_string_append(talk, l->data);
@@ -1767,6 +1788,7 @@ finalize(GObject *object)
 	g_strfreev(self->soundalikes);
 	g_queue_clear_full(&self->room, g_free);
 	g_free(self->unknown_speaker_name);
+	g_free(self->logged_tool);
 	g_free(self->mute_message);
 	g_free(self->unmute_message);
 	g_free(self->repeat_message);

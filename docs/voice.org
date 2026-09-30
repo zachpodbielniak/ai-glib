@@ -606,7 +606,10 @@ the assistant speak up unasked. After each unaddressed line, what has been
 said since the assistant last spoke is scored from 0 to 10 by a separate
 model: high when a question went unanswered, something said is wrong, or the
 group is stuck on something the assistant is likely to know; low for chat,
-jokes, personal talk, or a point already settled. At or above the threshold,
+jokes, personal talk, or a point already settled. The judge also sees what
+the assistant itself said last, marked =[Assistant]=, so a follow-up to it --
+"and thirty-five times twelve?" after it answered one sum -- reads as meant
+for it rather than as a remark out of nowhere. At or above the threshold,
 and only when nobody is speaking and no turn is under way, the talk becomes a
 turn with a note saying why the assistant is joining in. A score for talk
 that has since moved on is dropped: only the latest counts, and an answer
@@ -620,6 +623,10 @@ unset, it is the call's own provider and model, built as a separate client
 because the conversation's is in use on the session's worker thread. A judge
 that cannot be built turns chiming in off for the call and is logged; it
 never fails the call.
+
+Each tool call's start is logged at INFO ("Tool started: NAME"): a tool that
+never finishes never reaches the transcript, and the log then says what a
+stuck turn was waiting on.
 
 Every score is logged at INFO, emitted as =AiVoiceSession::relevance=, and
 written to the call transcript as a =relevance= record with =score=,

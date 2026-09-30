@@ -381,6 +381,33 @@ room_chime_in(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(r.count, ==, 1);
 	g_free(r.reason);
 }
+/* The judge knows what the assistant just said, so a follow-up to it -- "and
+ * times twelve?" -- is not a stranger's remark out of nowhere. */
+static void
+room_judge_sees_reply(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	Relevance r = {0};
+	GList *l;
+	g_autofree gchar *judged = NULL;
+	g_object_set(f->session, "chime-in-cooldown-ms", 0, NULL);
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 8\nREASON: a sum was asked");
+	ai_mock_provider_push_text(f->provider, "That's sixty.");
+	said_by(f, "second", "Five times twelve.");
+	wait_replies(f, 1);
+	ai_mock_provider_push_text(judge, "SCORE: 2\nREASON: fine");
+	said_by(f, "second", "Thirty-five times twelve.");
+	wait_relevance(&r, 2);
+	for (l = ai_mock_provider_get_last_messages(judge); l != NULL; l = l->next)
+		if (ai_message_get_role(l->data) == AI_ROLE_USER)
+			judged = ai_message_get_text(l->data);
+	g_assert_nonnull(judged);
+	g_assert_nonnull(strstr(judged, "[Assistant]: That's sixty."));
+	g_assert_nonnull(strstr(judged, "Thirty-five times twelve."));
+	g_assert_true(strstr(judged, "That's sixty.") < strstr(judged, "Thirty-five"));
+	g_free(r.reason);
+}
 /* Below the threshold nothing is said, but the score is still reported. */
 static void
 room_chime_below(Fixture *f, gconstpointer data)
@@ -656,14 +683,24 @@ on_tool(AiVoiceSession *s, const gchar *name, const gchar *arguments, const gcha
 	seen->is_error = is_error;
 }
 static void
+capture_info(const gchar *domain, GLogLevelFlags level, const gchar *message, gpointer data)
+{
+	g_ptr_array_add(data, g_strdup(message));
+}
+static void
 tool_reported(Fixture *f, gconstpointer data)
 {
 	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-tool-XXXXXX", NULL);
 	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
 	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
 	ToolSeen seen = {0};
+	g_autoptr(GPtrArray) logged = g_ptr_array_new_with_free_func(g_free);
+	guint handler, i, started = 0;
 	g_assert_true(g_file_set_contents(path, "voice fixture content", -1, NULL));
 	g_signal_connect(f->session, "tool", G_CALLBACK(on_tool), &seen);
+	/* A tool that never finishes never reaches the transcript; its start is
+	 * logged, so the log says which one a stuck turn was in. */
+	handler = g_log_set_handler("ai-glib", G_LOG_LEVEL_INFO, capture_info, logged);
 	if (data == NULL)
 		ai_mock_provider_push_tool_use(f->provider, "read", input);
 	else
@@ -672,6 +709,11 @@ tool_reported(Fixture *f, gconstpointer data)
 	ai_mock_provider_push_text(f->provider, "Done.");
 	utterance(f, "caller");
 	wait_replies(f, 1);
+	g_log_remove_handler("ai-glib", handler);
+	for (i = 0; i < logged->len; i++)
+		if (g_str_has_prefix(g_ptr_array_index(logged, i), "Tool started: read"))
+			started++;
+	g_assert_cmpuint(started, ==, 1);
 	g_signal_handlers_disconnect_by_data(f->session, &seen);
 	g_assert_cmpuint(seen.count, ==, 1);
 	g_assert_cmpstr(seen.name, ==, "read");
@@ -1712,6 +1754,8 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);
 	g_test_add("/voice/session/room-soundalike-addressed", Fixture, NULL, setup,
 			   room_soundalike_addressed, teardown);
+	g_test_add("/voice/session/room-judge-sees-reply", Fixture, NULL, setup,
+			   room_judge_sees_reply, teardown);
 	g_test_add("/voice/session/room-chime-below", Fixture, NULL, setup, room_chime_below,
 			   teardown);
 	g_test_add("/voice/session/room-chime-superseded", Fixture, NULL, setup,
