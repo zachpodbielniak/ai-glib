@@ -129,6 +129,10 @@ Matches filenames recursively. =*.c=, =test-*=.
 A regular expression over file contents, returning matching lines with
 file and line number.
 
+=grep= reads regular files only, of at most 16 MiB: a FIFO, a device or
+=/proc/kmsg= met on a walk blocks the read itself, where no cancel reaches,
+so a search of =/= would otherwise never return.
+
 Both walk the whole tree under =path=, which for a home directory on a slow
 disk can take minutes. They stop at the next entry once the turn is
 cancelled and return =G_IO_ERROR_CANCELLED=, so a stop button or a voice

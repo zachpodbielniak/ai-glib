@@ -318,6 +318,34 @@ test_executor_search_cancelled (gconstpointer data)
     g_rmdir (dir);
 }
 
+/* grep reads only regular files. A FIFO, a device or /proc/kmsg met on a
+ * walk blocks the read itself, where no cancel can reach it: a search of "/"
+ * then never ends, and a voice call waiting on the turn stays deaf. */
+static void
+test_executor_grep_skips_special_files (void)
+{
+    g_autoptr(AiToolExecutor) exec   = ai_tool_executor_new ();
+    g_autofree gchar         *dir    = g_dir_make_tmp ("ai-glib-grep-fifo-XXXXXX", NULL);
+    g_autofree gchar         *fifo   = g_build_filename (dir, "pipe", NULL);
+    g_autofree gchar         *file   = g_build_filename (dir, "note.txt", NULL);
+    g_autofree gchar         *json   = NULL;
+    g_autoptr(AiToolUse)      use    = NULL;
+    g_autofree gchar         *result = NULL;
+    g_autoptr(GError)         err    = NULL;
+
+    g_assert_cmpint (mkfifo (fifo, 0600), ==, 0);
+    g_assert_true (g_file_set_contents (file, "needle\n", -1, NULL));
+    json = g_strdup_printf ("{\"pattern\": \"needle\", \"path\": \"%s\"}", dir);
+    use = make_tool_use ("grep", json);
+    result = ai_tool_executor_execute (exec, use, NULL, &err);
+
+    g_assert_no_error (err);
+    g_assert_nonnull (strstr (result, "note.txt:1: needle"));
+    g_unlink (fifo);
+    g_unlink (file);
+    g_rmdir (dir);
+}
+
 /* ================================================================
  * grep
  * ================================================================ */
@@ -1080,6 +1108,8 @@ main (
                      test_executor_edit);
     g_test_add_func ("/ai-glib/tool-executor/glob",
                      test_executor_glob);
+    g_test_add_func ("/ai-glib/tool-executor/grep-skips-special-files",
+                     test_executor_grep_skips_special_files);
     g_test_add_data_func ("/ai-glib/tool-executor/glob-cancelled", "glob",
                           test_executor_search_cancelled);
     g_test_add_data_func ("/ai-glib/tool-executor/grep-cancelled", "grep",

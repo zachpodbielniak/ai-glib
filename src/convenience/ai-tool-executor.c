@@ -20,6 +20,7 @@
 #include <libxml/uri.h>
 
 #include "convenience/ai-tool-executor.h"
+#include <glib/gstdio.h>
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-streamable.h"
@@ -1147,6 +1148,9 @@ tool_glob (
 
 /* ---- grep helpers ---- */
 
+/* Largest file grep reads; past this it is data, not text to search. */
+#define GREP_MAX_FILE_BYTES (16 * 1024 * 1024)
+
 static void
 grep_one_file (
     const gchar *filepath,
@@ -1158,7 +1162,17 @@ grep_one_file (
     gchar            **lines;
     gint               i;
     gint               line_num;
+    GStatBuf           st;
 
+    /*
+     * Regular files only. A FIFO, a device or /proc/kmsg blocks inside the
+     * read itself, where the turn's cancellable cannot reach: a grep of "/"
+     * met one and never returned, and a voice call waiting on the turn
+     * heard nothing more until it hung up.
+     */
+    if (g_stat (filepath, &st) != 0 || !S_ISREG (st.st_mode) ||
+        st.st_size > GREP_MAX_FILE_BYTES)
+        return;
     if (!g_file_get_contents (filepath, &contents, &length, NULL))
         return;
 
