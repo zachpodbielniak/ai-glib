@@ -19,6 +19,11 @@
  * like an error -- so a voiceprint from another model is never compared.
  */
 #define MIN_BYTES (16000 * 2 / 2) /* half a second */
+/* A stranger's first utterance must be this long to start a guest: a short
+ * clip's voiceprint is too noisy to tell a new voice from a known one said
+ * briefly, and every false guest splits someone in two. */
+#define MIN_NEW_GUEST_BYTES (16000 * 2 * 3 / 2)
+#define MAX_GUESTS 32
 #define MAX_NAME 64
 
 typedef struct {
@@ -35,9 +40,22 @@ struct _AiVoiceprintIdentifier {
 	guint timeout_ms;
 	SoupSession *http;
 	GPtrArray *voices;
+	/* track-guests: voices matching nobody enrolled, numbered as first heard;
+	 * kept in memory only, for this identifier's lifetime */
+	gboolean track_guests;
+	gdouble guest_threshold;
+	GPtrArray *guests;
 };
 
-enum { PROP_0, PROP_URL, PROP_DIRECTORY, PROP_THRESHOLD, PROP_TIMEOUT };
+enum {
+	PROP_0,
+	PROP_URL,
+	PROP_DIRECTORY,
+	PROP_THRESHOLD,
+	PROP_TIMEOUT,
+	PROP_TRACK_GUESTS,
+	PROP_GUEST_THRESHOLD
+};
 
 static void identifier_iface_init(AiSpeakerIdentifierInterface *iface);
 G_DEFINE_TYPE_WITH_CODE(AiVoiceprintIdentifier, ai_voiceprint_identifier, G_TYPE_OBJECT,
@@ -137,6 +155,7 @@ typedef struct {
 	gfloat *vector;
 	gsize dims;
 	gchar *name; /* enrolling: whose */
+	gsize bytes; /* how much audio it came from */
 } Print;
 static void
 print_free(gpointer data)
@@ -207,12 +226,67 @@ embed(AiVoiceprintIdentifier *self, GBytes *pcm, GTask *task)
 		g_object_unref(task);
 		return;
 	}
+	((Print *)g_task_get_task_data(task))->bytes = g_bytes_get_size(pcm);
 	soup_message_set_request_body_from_bytes(message, "application/octet-stream", pcm);
 	soup_session_send_and_read_async(self->http, message, G_PRIORITY_DEFAULT,
 									 g_task_get_cancellable(task), embedded, task);
 }
 
 /* ---- identify ---- */
+
+/* The closest voice in LIST made by the same model, and how close. */
+static Voice *
+closest(GPtrArray *list, const Print *print, gdouble *score)
+{
+	Voice *best = NULL;
+	guint i;
+	*score = 0;
+	for (i = 0; i < list->len; i++) {
+		Voice *v = g_ptr_array_index(list, i);
+		gdouble similarity;
+		if (v->dims != print->dims || g_strcmp0(v->model, print->model) != 0)
+			continue;
+		similarity = ai_embedding_cosine(v->vector, print->vector, v->dims);
+		if (best == NULL || similarity > *score) {
+			best = v;
+			*score = similarity;
+		}
+	}
+	return best;
+}
+/* A guest's voiceprint is the running mean of everything heard from them. */
+static void
+absorb(Voice *v, const Print *print)
+{
+	gsize k;
+	for (k = 0; k < v->dims; k++)
+		v->vector[k] = (v->vector[k] * v->count + print->vector[k]) / (v->count + 1);
+	ai_embedding_normalize(v->vector, v->dims);
+	if (v->count < 50) /* keep adapting as the room changes */
+		v->count++;
+}
+/* Who a voice that matches nobody enrolled is: a guest already heard, a new
+ * one, or -- too short to start a guest on -- nobody yet (NULL). */
+static const gchar *
+guest(AiVoiceprintIdentifier *self, const Print *print, gdouble *score)
+{
+	Voice *v = closest(self->guests, print, score);
+	if (v != NULL && (*score >= self->guest_threshold || self->guests->len >= MAX_GUESTS)) {
+		absorb(v, print);
+		return v->name;
+	}
+	if (print->bytes < MIN_NEW_GUEST_BYTES)
+		return NULL;
+	v = g_new0(Voice, 1);
+	v->name = g_strdup_printf("Guest %u", self->guests->len + 1);
+	v->model = g_strdup(print->model);
+	v->dims = print->dims;
+	v->vector = g_memdup2(print->vector, print->dims * sizeof(gfloat));
+	v->count = 1;
+	g_ptr_array_add(self->guests, v);
+	*score = 1.0;
+	return v->name;
+}
 
 static void
 identify_embedded(GObject *source, GAsyncResult *result, gpointer data)
@@ -221,30 +295,28 @@ identify_embedded(GObject *source, GAsyncResult *result, gpointer data)
 	g_autoptr(GError) error = NULL;
 	AiVoiceprintIdentifier *self = g_task_get_source_object(outer);
 	Print *print = g_task_get_task_data(G_TASK(result));
-	const Voice *best = NULL;
+	const Voice *best;
+	const gchar *name = NULL;
 	gdouble best_score = 0;
-	guint i;
 	if (!g_task_propagate_boolean(G_TASK(result), &error)) {
 		g_task_return_error(outer, g_steal_pointer(&error));
 		g_object_unref(outer);
 		return;
 	}
-	for (i = 0; i < self->voices->len; i++) {
-		const Voice *v = g_ptr_array_index(self->voices, i);
-		gdouble score;
-		if (v->dims != print->dims || g_strcmp0(v->model, print->model) != 0)
-			continue;
-		score = ai_embedding_cosine(v->vector, print->vector, v->dims);
-		if (best == NULL || score > best_score) {
-			best = v;
-			best_score = score;
+	best = closest(self->voices, print, &best_score);
+	if (best != NULL && best_score >= self->threshold)
+		name = best->name;
+	else if (self->track_guests) {
+		name = guest(self, print, &best_score);
+		if (name == NULL) {
+			g_task_return_new_error(outer, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+									"Too little audio to tell a new voice");
+			g_object_unref(outer);
+			return;
 		}
 	}
 	g_task_set_task_data(outer, g_memdup2(&best_score, sizeof(best_score)), g_free);
-	g_task_return_pointer(outer,
-						  best != NULL && best_score >= self->threshold ? g_strdup(best->name)
-																		 : NULL,
-						  g_free);
+	g_task_return_pointer(outer, g_strdup(name), g_free);
 	g_object_unref(outer);
 }
 static void
@@ -456,6 +528,10 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_double(value, self->threshold);
 	else if (id == PROP_TIMEOUT)
 		g_value_set_uint(value, self->timeout_ms);
+	else if (id == PROP_TRACK_GUESTS)
+		g_value_set_boolean(value, self->track_guests);
+	else if (id == PROP_GUEST_THRESHOLD)
+		g_value_set_double(value, self->guest_threshold);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -475,7 +551,11 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	else if (id == PROP_TIMEOUT) {
 		self->timeout_ms = g_value_get_uint(value);
 		g_object_set(self->http, "timeout", MAX(1u, (self->timeout_ms + 999) / 1000), NULL);
-	} else
+	} else if (id == PROP_TRACK_GUESTS)
+		self->track_guests = g_value_get_boolean(value);
+	else if (id == PROP_GUEST_THRESHOLD)
+		self->guest_threshold = g_value_get_double(value);
+	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
 static void
@@ -485,6 +565,7 @@ finalize(GObject *object)
 	g_free(self->url);
 	g_free(self->directory);
 	g_ptr_array_unref(self->voices);
+	g_ptr_array_unref(self->guests);
 	g_object_unref(self->http);
 	G_OBJECT_CLASS(ai_voiceprint_identifier_parent_class)->finalize(object);
 }
@@ -514,6 +595,32 @@ ai_voiceprint_identifier_class_init(AiVoiceprintIdentifierClass *klass)
 		g_param_spec_double("threshold", "Threshold", "Similarity needed to name a speaker",
 							0.0, 1.0, 0.55,
 							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceprintIdentifier:track-guests:
+	 *
+	 * Name every voice, not only enrolled ones. A voice that matches nobody
+	 * enrolled becomes "Guest 1", "Guest 2", ... in the order first heard, and
+	 * later utterances in that voice are the same guest. Guests live in memory
+	 * for this identifier's lifetime and are never saved. A new guest needs
+	 * at least a second and a half of audio; a shorter unknown voice is
+	 * %G_IO_ERROR_INVALID_DATA, too short to tell.
+	 */
+	g_object_class_install_property(
+		oc, PROP_TRACK_GUESTS,
+		g_param_spec_boolean("track-guests", "Track guests",
+							 "Number voices that match nobody enrolled", FALSE,
+							 G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceprintIdentifier:guest-threshold:
+	 *
+	 * The similarity a voice needs to be a guest already heard rather than a
+	 * new one.
+	 */
+	g_object_class_install_property(
+		oc, PROP_GUEST_THRESHOLD,
+		g_param_spec_double("guest-threshold", "Guest threshold",
+							"Similarity needed to be a guest already heard", 0.0, 1.0, 0.35,
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TIMEOUT,
 		g_param_spec_uint("timeout-ms", "Timeout", "Voiceprint service request timeout", 1,
@@ -524,5 +631,6 @@ static void
 ai_voiceprint_identifier_init(AiVoiceprintIdentifier *self)
 {
 	self->voices = g_ptr_array_new_with_free_func(voice_free);
+	self->guests = g_ptr_array_new_with_free_func(voice_free);
 	self->http = soup_session_new();
 }

@@ -35,7 +35,8 @@ struct _App {
 	guint chime_threshold, chime_cooldown_ms;
 	gchar *relevance_provider, *relevance_model;
 	gchar *speaker_url, *voiceprint_dir, *unknown_speaker_name;
-	guint speaker_threshold;
+	guint speaker_threshold, guest_threshold;
+	gboolean track_guests;
 	/* --local: one session on this machine's audio devices, no Matrix. */
 	gboolean local, local_echo_cancel;
 	/* NULL: no state file. What a display beside the speaker reads. */
@@ -724,7 +725,8 @@ voiceprints(App *app)
 {
 	AiVoiceprintIdentifier *identifier =
 		ai_voiceprint_identifier_new(app->speaker_url, app->voiceprint_dir);
-	g_object_set(identifier, "threshold", app->speaker_threshold / 100.0, NULL);
+	g_object_set(identifier, "threshold", app->speaker_threshold / 100.0, "track-guests",
+				 app->track_guests, "guest-threshold", app->guest_threshold / 100.0, NULL);
 	return identifier;
 }
 static void
@@ -2001,7 +2003,21 @@ devices:
 			g_clear_pointer(&app.relevance_model, g_free);
 		g_object_get(call_config, "speaker-url", &app.speaker_url, "voiceprint-dir",
 					 &app.voiceprint_dir, "speaker-threshold", &app.speaker_threshold,
-					 "unknown-speaker-name", &app.unknown_speaker_name, NULL);
+					 "unknown-speaker-name", &app.unknown_speaker_name, "guest-threshold",
+					 &app.guest_threshold, NULL);
+		{
+			g_autofree gchar *guests = NULL;
+			g_object_get(call_config, "track-guests", &guests, NULL);
+			if (guests == NULL || *guests == '\0' || g_str_equal(guests, "no"))
+				app.track_guests = FALSE;
+			else if (g_str_equal(guests, "yes"))
+				app.track_guests = TRUE;
+			else {
+				g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+							"track-guests must be yes or no, not \"%s\"", guests);
+				goto fail;
+			}
+		}
 		if (app.speaker_url != NULL && *app.speaker_url == '\0')
 			g_clear_pointer(&app.speaker_url, g_free);
 		if (app.voiceprint_dir == NULL || *app.voiceprint_dir == '\0') {

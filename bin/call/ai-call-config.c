@@ -71,6 +71,11 @@ static const Setting settings[] = {
 	/* Similarity, in percent, a voice needs to be named. */
 	{"speaker-threshold", "AI_VOICE_SPEAKER_THRESHOLD", NULL, 55, 1, 100},
 	{"unknown-speaker-name", "AI_VOICE_UNKNOWN_SPEAKER_NAME", "Guest", 0, 0, 0},
+	/* yes: every voice is named -- one matching nobody enrolled becomes
+	 * "Guest 1", "Guest 2", ... for the call. Unset or no: unknown-speaker-name. */
+	{"track-guests", "AI_VOICE_TRACK_GUESTS", NULL, 0, 0, 0},
+	/* Similarity, in percent, to be a guest already heard rather than a new one. */
+	{"guest-threshold", "AI_VOICE_GUEST_THRESHOLD", NULL, 35, 1, 100},
 	/* Comma-separated; a command may start with one, as in "Name, mute". */
 	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
 	/* Comma-separated words STT hears for a name ("say" for a short one); room

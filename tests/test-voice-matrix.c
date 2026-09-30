@@ -351,6 +351,8 @@ enroll_and_name(MatrixFixture *f, gconstpointer data)
 	a->voiceprint_dir = dir;
 	a->unknown_speaker_name = "Guest";
 	a->speaker_threshold = 55;
+	a->track_guests = TRUE;
+	a->guest_threshold = 40;
 	g_assert_true(enroll_voice(a, "Sam", raw, 0, &error));
 	g_assert_no_error(error);
 	g_assert_true(enroll_voice(a, "Ada", wav, 0, &error));
@@ -376,6 +378,13 @@ enroll_and_name(MatrixFixture *f, gconstpointer data)
 	g_assert_cmpuint(
 		ai_voiceprint_identifier_get_n_voices(AI_VOICEPRINT_IDENTIFIER(identifier)), ==, 2);
 	g_assert_cmpstr(unknown, ==, "Guest");
+	{
+		gboolean guests = FALSE;
+		gdouble threshold = 0;
+		g_object_get(identifier, "track-guests", &guests, "guest-threshold", &threshold, NULL);
+		g_assert_true(guests);
+		g_assert_cmpfloat_with_epsilon(threshold, 0.40, 1e-9);
+	}
 	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
 	shutdown_app(a);
 	g_main_loop_run(a->loop);

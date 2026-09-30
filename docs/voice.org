@@ -395,6 +395,8 @@ ai_call:
   voiceprint-dir: ""       # unset: $XDG_DATA_HOME/ai-glib/voiceprints
   speaker-threshold: 55    # similarity, in percent, a voice needs to be named
   unknown-speaker-name: Guest
+  track-guests: no         # yes: every voice is named; strangers are Guest 1, Guest 2, ...
+  guest-threshold: 35      # similarity, in percent, to be a guest already heard
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -637,7 +639,15 @@ naming finishes in.
 
 - *Too short to tell* (under half a second: "yes", "stop") is whoever that
   microphone was last named, for two minutes.
-- *Nobody enrolled matches*: =unknown-speaker-name= (default =Guest=).
+- *Nobody enrolled matches*: with =track-guests= (=AI_VOICE_TRACK_GUESTS=,
+  =yes= or =no=), the voice is numbered -- "Guest 1", "Guest 2", in the order
+  first heard -- and later utterances in it are the same guest, so a room of
+  strangers is still a room of distinct people. A guest's voiceprint is the
+  running mean of what they said; guests live in memory for the call and are
+  never saved. An utterance joins a guest at =guest-threshold= (percent,
+  default 35); a new guest needs a second and a half of audio, and a shorter
+  unknown voice is treated as too short to tell. Without =track-guests=:
+  =unknown-speaker-name= (default =Guest=).
 - *The service is down or refuses*: the participant's own name. Naming never
   delays a call by more than its request timeout, and never fails it.
 - Voice commands are recognised before naming and do not wait for it.
@@ -645,7 +655,14 @@ naming finishes in.
 The library side is =AiSpeakerIdentifier= (an interface: PCM in, name out)
 and =AiVoiceprintIdentifier=, which asks a service for a voiceprint and
 matches it against enrolled ones by cosine similarity, at
-=speaker-threshold= (percent, default 55). The service is one HTTP endpoint:
+=speaker-threshold= (percent, default 55). The right thresholds belong to the
+model. Measured on a far-field device microphone, with echo cancellation, a
+person against a podcast playing in the same room: a model that mostly
+recognises the room (wespeaker ResNet34) scored the podcast /above/ the
+enrolled person and cannot be thresholded at all, while NeMo TitaNet-large
+kept the podcast below 0.1 and the person above 0.35, with its hosts
+clustering apart from each other at 0.35. Measure with the device's own
+audio before trusting a model. The service is one HTTP endpoint:
 =POST= raw 16 kHz mono S16LE, answered with
 ={"model":"...","embedding":[...]}=; less than half a second may be refused
 with 422. It keeps nothing. Voiceprints live in =voiceprint-dir=
@@ -664,7 +681,9 @@ ai-call --config config.yaml --enroll Kim --enroll-file kim.wav   # 16 kHz mono 
 #+end_example
 
 Enrolling a name again averages the new audio into it, which makes it
-steadier. Delete the file to forget someone. A voice can be imitated or
+steadier. Enroll with audio that went through the same processing a call's
+does -- echo cancellation and noise suppression change a voiceprint -- which
+=--enroll-file= allows with a recording taken from the call path. Delete the file to forget someone. A voice can be imitated or
 replayed; a name from a voiceprint says who is probably talking, and is not a
 login. Nothing here gates what a speaker may ask for.
 

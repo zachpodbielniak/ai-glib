@@ -38,6 +38,8 @@ embed_handler(SoupServer *server, SoupServerMessage *msg, const gchar *path, GHa
 	vector = first == 1000	 ? "[1,0,0,0]"
 			 : first == 2000 ? "[0,1,0,0]"
 			 : first == 1100 ? "[0.9949,0.0995,0,0]"
+			 : first == 3000 ? "[0,0,1,0]"
+			 : first == 3100 ? "[0,0,0.9949,0.0995]"
 							 : "[0,0,0,1]";
 	reply = g_strdup_printf("{\"model\":\"%s\",\"dim\":4,\"embedding\":%s}", s->model, vector);
 	soup_server_message_set_status(msg, 200, NULL);
@@ -248,6 +250,51 @@ test_short_and_bad_names(void)
 	service_stop(&s);
 }
 
+/* Everyone is tracked, enrolled or not: a voice that matches nobody enrolled
+ * becomes a numbered guest for as long as this identifier lives, and later
+ * utterances in that voice are the same guest. An unknown voice too short to
+ * start a guest on is "too short to tell", not a new person. */
+static void
+test_guests_tracked(void)
+{
+	Service s = {0};
+	g_autoptr(AiVoiceprintIdentifier) id = NULL;
+	Result r;
+	service_start(&s);
+	id = ai_voiceprint_identifier_new(s.url, s.dir);
+	g_object_set(id, "track-guests", TRUE, NULL);
+	enroll(id, "Ada", 1000);
+
+	r = identify(id, 3000, 2.0);
+	g_assert_no_error(r.error);
+	g_assert_cmpstr(r.name, ==, "Guest 1");
+	g_free(r.name);
+	r = identify(id, 3100, 1.0);
+	g_assert_cmpstr(r.name, ==, "Guest 1");
+	g_free(r.name);
+	r = identify(id, 7, 2.0);
+	g_assert_cmpstr(r.name, ==, "Guest 2");
+	g_free(r.name);
+	r = identify(id, 1100, 1.0);
+	g_assert_cmpstr(r.name, ==, "Ada");
+	g_free(r.name);
+	r = identify(id, 3000, 1.0);
+	g_assert_cmpstr(r.name, ==, "Guest 1");
+	g_free(r.name);
+	/* A third stranger, but only a second of them: not enough to be sure. */
+	{
+		g_autoptr(AiVoiceprintIdentifier) fresh = ai_voiceprint_identifier_new(s.url, s.dir);
+		g_object_set(fresh, "track-guests", TRUE, NULL);
+		r = identify(fresh, 7, 1.0);
+		g_assert_error(r.error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+		g_assert_null(r.name);
+		g_clear_error(&r.error);
+	}
+	/* Guests are never written to disk. */
+	g_assert_cmpuint(ai_voiceprint_identifier_get_n_voices(id), ==, 1);
+	service_stop(&s);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -256,5 +303,6 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/speaker/persisted-and-filtered", test_persisted_and_filtered);
 	g_test_add_func("/voice/speaker/reenroll-averages", test_reenroll_averages);
 	g_test_add_func("/voice/speaker/short-and-bad-names", test_short_and_bad_names);
+	g_test_add_func("/voice/speaker/guests-tracked", test_guests_tracked);
 	return g_test_run();
 }

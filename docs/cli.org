@@ -704,7 +704,8 @@ the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =AI_VOICE_RELEVANCE_PROVIDER= and =AI_VOICE_RELEVANCE_MODEL=; see
 [[file:voice.org::*Room mode and chiming in][Room mode and chiming in]]. Naming speakers by
 voice uses =AI_VOICE_SPEAKER_URL=, =AI_VOICE_VOICEPRINT_DIR=,
-=AI_VOICE_SPEAKER_THRESHOLD= and =AI_VOICE_UNKNOWN_SPEAKER_NAME=; see
+=AI_VOICE_SPEAKER_THRESHOLD=, =AI_VOICE_UNKNOWN_SPEAKER_NAME=,
+=AI_VOICE_TRACK_GUESTS= and =AI_VOICE_GUEST_THRESHOLD=; see
 [[file:voice.org::*Naming speakers by voice][Naming speakers by voice]]. Speech/media endpoints use =AI_VOICE_STT_URL=,
 =AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
 
