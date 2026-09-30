@@ -577,14 +577,16 @@ maybe_connect(Call *call)
 	}
 	{
 		guint attempts = 3, delay = 500, bitrate = 64000;
+		g_autofree gchar *noise = NULL;
 		if (app->call_config != NULL)
 			g_object_get(app->call_config, "media-reconnect-attempts", &attempts,
 						 "media-reconnect-delay-ms", &delay, "opus-bitrate", &bitrate,
-						 NULL);
+						 "noise-suppression", &noise, NULL);
 		call->transport =
 			g_object_new(AI_TYPE_LIVEKIT_TRANSPORT, "url", app->livekit_url,
 						 "receive-token", call->rx_token, "reconnect-attempts", attempts,
-						 "reconnect-delay-ms", delay, "opus-bitrate", bitrate, NULL);
+						 "reconnect-delay-ms", delay, "opus-bitrate", bitrate,
+						 "noise-suppression", noise, NULL);
 	}
 	stt = ai_websocket_recognizer_new(app->stt_url);
 	tts = ai_http_synthesizer_new(app->tts_url);

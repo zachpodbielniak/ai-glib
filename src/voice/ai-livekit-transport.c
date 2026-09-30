@@ -3,6 +3,7 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
+#include "voice/ai-voice-input-private.h"
 #include <json-glib/json-glib.h>
 #include "core/ai-json-util.h"
 
@@ -35,6 +36,7 @@ struct _AiLivekitTransport {
 	GSource *bus_source, *clock, *retry_source;
 	GCancellable *retry_cancel;
 	gchar *room, *token;
+	gchar *noise_suppression; /* NULL: incoming audio is not processed */
 	guint retry_count, reconnect_attempts, reconnect_delay_ms, opus_bitrate;
 	gboolean recovering;
 	GQueue playback, recent;
@@ -258,11 +260,19 @@ pad_added(GstElement *input, GstPad *pad, gpointer data)
 		track_free(track);
 		return;
 	}
-	bin = gst_parse_bin_from_description(
-		"queue max-size-time=200000000 ! audioconvert ! audioresample ! "
-		"audio/x-raw,format=S16LE,rate=16000,channels=1,layout=interleaved ! appsink "
-		"name=pcm emit-signals=true sync=false max-buffers=20 drop=true",
-		TRUE, &error);
+	{
+		g_autofree gchar *chain = ai_voice_input_description(self->noise_suppression);
+		bin = gst_parse_bin_from_description(chain, TRUE, &error);
+	}
+	/* A missing webrtcdsp plugin costs the suppression, never the caller. */
+	if (bin == NULL && self->noise_suppression != NULL) {
+		g_autofree gchar *plain = ai_voice_input_description(NULL);
+		g_log("ai-glib", G_LOG_LEVEL_INFO,
+			  "LiveKit noise suppression unavailable, receiving unprocessed audio: %s",
+			  error != NULL ? error->message : "unknown");
+		g_clear_error(&error);
+		bin = gst_parse_bin_from_description(plain, TRUE, &error);
+	}
 	if (bin == NULL) {
 		track_free(track);
 		return;
@@ -910,6 +920,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint64(value, self->dropped_buffers);
 	else if (id == 8)
 		g_value_set_uint64(value, self->late_buffers);
+	else if (id == 9)
+		g_value_set_string(value, self->noise_suppression);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -927,7 +939,18 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->reconnect_delay_ms = g_value_get_uint(value);
 	else if (id == 5)
 		self->opus_bitrate = g_value_get_uint(value);
-	else
+	else if (id == 9) {
+		const gchar *level = g_value_get_string(value);
+		if (!ai_voice_input_level_valid(level)) {
+			g_message("noise-suppression: unknown level '%s'; expected off, low, "
+					  "moderate, high or very-high",
+					  level);
+			return;
+		}
+		g_free(self->noise_suppression);
+		self->noise_suppression =
+			level != NULL && !g_str_equal(level, "off") ? g_strdup(level) : NULL;
+	} else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
 static void
@@ -949,6 +972,7 @@ finalize(GObject *object)
 {
 	AiLivekitTransport *self = AI_LIVEKIT_TRANSPORT(object);
 	g_free(self->url);
+	g_free(self->noise_suppression);
 	g_free(self->receive_token);
 	g_free(self->room);
 	g_free(self->token);
@@ -999,6 +1023,14 @@ ai_livekit_transport_class_init(AiLivekitTransportClass *klass)
 						  "Fullband generic audio bitrate", 48000, 650000, 64000,
 						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
 							  G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, 9,
+		g_param_spec_string(
+			"noise-suppression", "Noise suppression",
+			"Suppress background noise in received audio before voice detection: "
+			"NULL or off, low, moderate, high, very-high. Applies to tracks "
+			"subscribed after it is set",
+			NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, 1,
 		g_param_spec_string("url", "URL", "LiveKit websocket endpoint", NULL,
