@@ -154,6 +154,80 @@ test_stt(void)
 	teardown(&w);
 }
 
+/* Record each binary message's size, so a test can see how audio was framed. */
+static void
+sizes_message(SoupWebsocketConnection *ws, gint type, GBytes *bytes, gpointer data)
+{
+	Wire *w = data;
+	gsize len;
+	const gchar *s = g_bytes_get_data(bytes, &len);
+	if (type == SOUP_WEBSOCKET_DATA_BINARY) {
+		guint32 size = (guint32)len;
+		g_byte_array_append(w->audio, (const guint8 *)&size, sizeof(size));
+		return;
+	}
+	g_assert_cmpmem(s, len, "EOS", 3);
+	soup_websocket_connection_send_text(ws, "{\"type\":\"final\",\"text\":\"hello world\"}");
+}
+static void
+sizes_connected(SoupServer *server, SoupServerMessage *msg, const gchar *path,
+				SoupWebsocketConnection *ws, gpointer data)
+{
+	((Wire *)data)->ws = g_object_ref(ws);
+	g_signal_connect(ws, "message", G_CALLBACK(sizes_message), data);
+	soup_websocket_connection_send_text(ws, "{\"type\":\"ready\",\"sample_rate\":16000}");
+}
+/* A streaming server that runs VAD per message falls behind on 10 ms messages:
+ * measured against faster-whisper, a 12 s utterance's final arrived 4.5 s after
+ * the speaker stopped, against 0.8 s with 20 ms or more. frame-ms coalesces. */
+static void
+test_stt_frames(gconstpointer data)
+{
+	guint frame_ms = GPOINTER_TO_UINT(data);
+	Wire w = {0};
+	g_autoptr(AiWebsocketRecognizer) stt = NULL;
+	g_autofree gchar *url = NULL;
+	guint8 silence[320] = {0};
+	const guint32 *sizes;
+	guint timeout, i, n, total = 0;
+	setup(&w);
+	soup_server_add_websocket_handler(w.server, "/stt/stream", NULL, NULL, sizes_connected,
+									  &w, NULL);
+	url = g_strconcat("ws", w.url + 4, "stt/stream", NULL);
+	stt = ai_websocket_recognizer_new(url);
+	if (frame_ms > 0)
+		g_object_set(stt, "frame-ms", frame_ms, NULL);
+	g_signal_connect(stt, "transcript", G_CALLBACK(transcript), &w);
+	g_assert_true(
+		ai_speech_recognizer_begin(AI_SPEECH_RECOGNIZER(stt), "caller", &w.error));
+	for (i = 0; i < 25; i++) {
+		g_autoptr(GBytes) pcm = g_bytes_new(silence, sizeof(silence));
+		g_assert_true(ai_speech_recognizer_feed(AI_SPEECH_RECOGNIZER(stt), "caller", pcm,
+												&w.error));
+	}
+	ai_speech_recognizer_end(AI_SPEECH_RECOGNIZER(stt), "caller");
+	timeout = g_timeout_add_seconds(3, expired, NULL);
+	g_main_loop_run(w.loop);
+	g_source_remove(timeout);
+	g_assert_no_error(w.error);
+	sizes = (const guint32 *)w.audio->data;
+	n = w.audio->len / sizeof(guint32);
+	for (i = 0; i < n; i++)
+		total += sizes[i];
+	/* Every sample arrives, including a short remainder flushed before EOS. */
+	g_assert_cmpuint(total, ==, 25 * 320);
+	if (frame_ms == 0) {
+		g_assert_cmpuint(n, ==, 25);
+		g_assert_cmpuint(sizes[0], ==, 320);
+	} else {
+		g_assert_cmpuint(n, ==, 3);
+		g_assert_cmpuint(sizes[0], ==, 3200);
+		g_assert_cmpuint(sizes[1], ==, 3200);
+		g_assert_cmpuint(sizes[2], ==, 1600);
+	}
+	g_clear_object(&stt);
+	teardown(&w);
+}
 static void
 silent_connected(SoupServer *server, SoupServerMessage *msg, const gchar *path,
 				 SoupWebsocketConnection *ws, gpointer data)
@@ -493,6 +567,10 @@ main(int argc, char **argv)
 						 "\"transcribe_ms\":1}",
 						 test_stt_response);
 	g_test_add_func("/voice/wire/stt-ready-timeout", test_stt_timeout);
+	g_test_add_data_func("/voice/wire/stt-frames-as-fed", GUINT_TO_POINTER(0),
+						 test_stt_frames);
+	g_test_add_data_func("/voice/wire/stt-frames-coalesced", GUINT_TO_POINTER(100),
+						 test_stt_frames);
 	g_test_add_data_func("/voice/wire/stt-closes-after-silence", "closes",
 						 test_stt_live_server);
 	g_test_add_data_func("/voice/wire/stt-early-final", "early", test_stt_live_server);

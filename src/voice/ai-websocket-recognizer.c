@@ -14,6 +14,8 @@ typedef struct {
 	GQueue queued;
 	gsize queued_bytes;
 	GString *committed; /* finals the server sent before EOS */
+	GByteArray *pending; /* audio short of one frame-ms message; NULL: as fed */
+	gsize frame_bytes;
 	gboolean ready, ended, active;
 } Recognition;
 
@@ -23,6 +25,7 @@ struct _AiWebsocketRecognizer {
 	SoupSession *http;
 	GHashTable *streams;
 	guint timeout_ms;
+	guint frame_ms;
 };
 static void
 recognizer_iface(AiSpeechRecognizerInterface *iface);
@@ -41,6 +44,8 @@ recognition_unref(Recognition *r)
 	g_queue_clear_full(&r->queued, (GDestroyNotify)g_bytes_unref);
 	if (r->committed != NULL)
 		g_string_free(r->committed, TRUE);
+	if (r->pending != NULL)
+		g_byte_array_unref(r->pending);
 	g_free(r->speaker);
 	g_free(r);
 }
@@ -251,12 +256,38 @@ begin(AiSpeechRecognizer *recognizer, const gchar *speaker, GError **error)
 	r->speaker = g_strdup(speaker);
 	r->cancel = g_cancellable_new();
 	r->active = TRUE;
+	if (self->frame_ms > 0) {
+		r->frame_bytes = (gsize)self->frame_ms * 32; /* 16 kHz, 16-bit mono */
+		r->pending = g_byte_array_sized_new(r->frame_bytes);
+	}
 	g_hash_table_insert(self->streams, g_strdup(speaker), r);
 	arm_deadline(r, self->timeout_ms);
 	g_ref_count_inc(&r->refs);
 	soup_session_websocket_connect_async(self->http, msg, NULL, NULL, G_PRIORITY_DEFAULT,
 										 r->cancel, on_connected, r);
 	return TRUE;
+}
+
+static void
+transmit(Recognition *r, GBytes *pcm)
+{
+	if (r->ready)
+		soup_websocket_connection_send_message(r->ws, SOUP_WEBSOCKET_DATA_BINARY, pcm);
+	else {
+		g_queue_push_tail(&r->queued, g_bytes_ref(pcm));
+		r->queued_bytes += g_bytes_get_size(pcm);
+	}
+}
+
+static void
+transmit_pending(Recognition *r, gsize at_least)
+{
+	while (r->pending != NULL && r->pending->len > 0 && r->pending->len >= at_least) {
+		gsize n = MIN(r->pending->len, r->frame_bytes);
+		g_autoptr(GBytes) chunk = g_bytes_new(r->pending->data, n);
+		g_byte_array_remove_range(r->pending, 0, n);
+		transmit(r, chunk);
+	}
 }
 
 static gboolean
@@ -271,11 +302,11 @@ feed(AiSpeechRecognizer *recognizer, const gchar *speaker, GBytes *pcm, GError *
 							"Invalid PCM, closed STT stream, or STT queue full");
 		return FALSE;
 	}
-	if (r->ready)
-		soup_websocket_connection_send_message(r->ws, SOUP_WEBSOCKET_DATA_BINARY, pcm);
+	if (r->pending == NULL)
+		transmit(r, pcm);
 	else {
-		g_queue_push_tail(&r->queued, g_bytes_ref(pcm));
-		r->queued_bytes += n;
+		g_byte_array_append(r->pending, g_bytes_get_data(pcm, NULL), n);
+		transmit_pending(r, r->frame_bytes);
 	}
 	return TRUE;
 }
@@ -287,6 +318,7 @@ end(AiSpeechRecognizer *recognizer, const gchar *speaker)
 		g_hash_table_lookup(AI_WEBSOCKET_RECOGNIZER(recognizer)->streams, speaker);
 	if (r == NULL || r->ended)
 		return;
+	transmit_pending(r, 1); /* the short remainder, ahead of EOS */
 	r->ended = TRUE;
 	arm_deadline(r, AI_WEBSOCKET_RECOGNIZER(recognizer)->timeout_ms);
 	if (r->ready)
@@ -315,6 +347,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_string(value, AI_WEBSOCKET_RECOGNIZER(object)->url);
 	else if (id == 2)
 		g_value_set_uint(value, AI_WEBSOCKET_RECOGNIZER(object)->timeout_ms);
+	else if (id == 3)
+		g_value_set_uint(value, AI_WEBSOCKET_RECOGNIZER(object)->frame_ms);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -326,6 +360,8 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		AI_WEBSOCKET_RECOGNIZER(object)->url = g_value_dup_string(value);
 	else if (id == 2)
 		AI_WEBSOCKET_RECOGNIZER(object)->timeout_ms = g_value_get_uint(value);
+	else if (id == 3)
+		AI_WEBSOCKET_RECOGNIZER(object)->frame_ms = g_value_get_uint(value);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -360,6 +396,19 @@ ai_websocket_recognizer_class_init(AiWebsocketRecognizerClass *klass)
 		oc, 2,
 		g_param_spec_uint("timeout-ms", "Timeout", "Ready/final response deadline", 1,
 						  300000, 30000, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiWebsocketRecognizer:frame-ms:
+	 *
+	 * Send audio in messages of this many milliseconds rather than as fed; 0
+	 * sends each fed buffer as its own message. A server that runs voice
+	 * activity detection per message can fall behind on 10 ms messages, which
+	 * the caller hears as a slow reply after a long sentence. Takes effect
+	 * from the next utterance.
+	 */
+	g_object_class_install_property(
+		oc, 3,
+		g_param_spec_uint("frame-ms", "Frame", "Milliseconds of audio per message; 0: as fed",
+						  0, 1000, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, 1,
 		g_param_spec_string("url", "URL", "STT websocket endpoint", NULL,

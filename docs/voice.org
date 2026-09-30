@@ -357,6 +357,7 @@ ai_call:
   opus-bitrate: 64000
   vad-mode: 2
   stt-timeout-ms: 30000
+  stt-frame-ms: 0       # 0 sends 10 ms messages; 100 keeps a VAD-per-message server real-time
   tts-timeout-ms: 10000
   max-agents: 4
   deadline-message: "Please try again shortly."
@@ -399,6 +400,15 @@ A quick tool, or a model that already said "let me look", hears nothing extra.
 It plays while the tool keeps running, and it can be interrupted like any other
 line. It is not a reply: a turn that then ends with nothing still speaks
 =empty-reply-message=. An empty value disables it.
+
+=stt-frame-ms= (=AI_VOICE_STT_FRAME_MS=, default 0: as fed) sends the
+recognizer audio in messages of that many milliseconds instead of one per 10 ms
+frame. A streaming server that runs voice activity detection over its buffer on
+every message can fall behind real time on 10 ms messages. Measured against a
+faster-whisper server of that kind, a 12-second sentence's final transcript
+arrived 4.5 s after the speaker stopped with 10 ms messages, and 0.8 s with
+20 ms or more. Short sentences were unaffected. 100 is a safe value; the short
+remainder is sent ahead of EOS, so no audio is lost.
 
 =trim-tool-results-after= (=AI_VOICE_TRIM_TOOL_RESULTS_AFTER=, default 0: off)
 keeps long calls small. Every turn resends every earlier tool result, so after a
@@ -629,6 +639,7 @@ as in the media-test example above.
 | Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
 | A tool runs for a while before anything is said | One =tool-progress-message= line, played while the tool keeps running | — |
 | Provider turn ends with no text and no tool error | The =empty-reply-message= line, never silence | "Provider turn ended with nothing to say" |
+| Long sentences get slow replies; short ones don't | Set =stt-frame-ms= (100): the recognizer server is falling behind on 10 ms messages | Compare "state=transcribing" and the transcript line against the sentence's length |
 | A long call with many tool results | With =trim-tool-results-after= set, old results shrink to a note and replies stay fast; unset, each turn resends them all | — |
 | Steady background noise (fan, traffic, footsteps' rumble) | With =noise-suppression= set, suppressed before VAD; unset, passed through | "LiveKit noise suppression unavailable" if the plugin is missing |
 | Recognizer marks a noise as =[throat clearing]=, =(coughs)=, =*sniff*= | Nothing: alone it is silence, inside a sentence it is removed | — |

@@ -33,6 +33,8 @@ static const Setting settings[] = {
 	{"vad-mode", "AI_VOICE_VAD_MODE", NULL, 2, 0, 3},
 	{"tts-timeout-ms", "AI_VOICE_TTS_TIMEOUT_MS", NULL, 10000, 1, 3600000},
 	{"stt-timeout-ms", "AI_VOICE_STT_TIMEOUT_MS", NULL, 30000, 1, 300000},
+	/* 0: each 10 ms frame is its own websocket message. */
+	{"stt-frame-ms", "AI_VOICE_STT_FRAME_MS", NULL, 0, 0, 1000},
 	{"max-agents", "AI_VOICE_MAX_AGENTS", NULL, 4, 1, 128},
 	{"deadline-message", "AI_VOICE_DEADLINE_MESSAGE",
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
