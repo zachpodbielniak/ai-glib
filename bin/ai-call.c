@@ -1126,7 +1126,7 @@ maybe_connect(Call *call)
 						 *synthesis_error = NULL, *empty_reply = NULL, *progress = NULL;
 		guint progress_delay, trim_after, stt_frame, repeat_limit;
 		g_autofree gchar *repeat_message = NULL, *names = NULL, *mute_message = NULL,
-						 *unmute_message = NULL;
+						 *unmute_message = NULL, *soundalikes = NULL;
 		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "stt-frame-ms", &stt_frame,
 					 "tts-timeout-ms",
 					 &tts_timeout, "trailing-silence-ms", &silence, "vad-mode", &mode,
@@ -1137,7 +1137,8 @@ maybe_connect(Call *call)
 					 "tool-progress-delay-ms", &progress_delay, "trim-tool-results-after",
 					 &trim_after, "repeat-limit", &repeat_limit, "repeat-message",
 					 &repeat_message, "assistant-names", &names, "mute-message",
-					 &mute_message, "unmute-message", &unmute_message, NULL);
+					 &mute_message, "unmute-message", &unmute_message, "assistant-soundalikes",
+					 &soundalikes, NULL);
 		g_object_set(stt, "timeout-ms", timeout, "frame-ms", stt_frame, NULL);
 		g_object_set(tts, "timeout-ms", tts_timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
@@ -1149,7 +1150,8 @@ maybe_connect(Call *call)
 					 trim_after, "repeat-limit", repeat_limit, "repeat-message",
 					 repeat_message, "speak-code", app->speak_code, "voice-commands",
 					 app->voice_commands, "assistant-names", names, "mute-message",
-					 mute_message, "unmute-message", unmute_message, NULL);
+					 mute_message, "unmute-message", unmute_message, "assistant-soundalikes",
+					 soundalikes, NULL);
 	}
 	if (app->speech_cache != NULL) {
 		fallback_ready(app->speech_cache, call->voice);

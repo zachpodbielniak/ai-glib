@@ -326,6 +326,33 @@ room_unaddressed_heard(Fixture *f, gconstpointer data)
 	g_assert_nonnull(strstr(sent, "[Sam]: Friday is tight."));
 	g_assert_nonnull(strstr(sent, "[Caller]: Ada, what do you think?"));
 }
+/* Speech recognition hears a short name as a common word ("Kay" as "say").
+ * A sound-alike counts only where a name would be -- after a greeting,
+ * before a comma at the start, after a comma at the end -- so the ordinary
+ * uses of the word are still just talk. */
+static void
+room_soundalike_addressed(Fixture *f, gconstpointer data)
+{
+	static const gchar *const addressed_lines[] = {
+		"What do you think, say?", "Hi, say.", "Say, could you tell the speakers apart?",
+		"Hey say", NULL};
+	static const gchar *const talk[] = {"Say that again.", "I say we ship it Friday.",
+										"Okay, say it again.", "Hi, I would say no.", NULL};
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	guint i, calls;
+	g_object_set(f->session, "assistant-soundalikes", "say", NULL);
+	for (i = 0; talk[i] != NULL; i++)
+		said_by(f, "caller", talk[i]);
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	for (i = 0; addressed_lines[i] != NULL; i++) {
+		calls = ai_mock_provider_get_call_count(f->provider);
+		ai_mock_provider_push_text(f->provider, "Yes?");
+		said_by(f, "caller", addressed_lines[i]);
+		wait_replies(f, i + 1);
+		g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, calls + 1);
+	}
+}
 /* Scored above the threshold, the assistant speaks up unasked, once, and
  * then waits out the cooldown before it is scored again. */
 static void
@@ -1683,6 +1710,8 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/room-unaddressed-heard", Fixture, NULL, setup,
 			   room_unaddressed_heard, teardown);
 	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);
+	g_test_add("/voice/session/room-soundalike-addressed", Fixture, NULL, setup,
+			   room_soundalike_addressed, teardown);
 	g_test_add("/voice/session/room-chime-below", Fixture, NULL, setup, room_chime_below,
 			   teardown);
 	g_test_add("/voice/session/room-chime-superseded", Fixture, NULL, setup,

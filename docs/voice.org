@@ -386,6 +386,7 @@ ai_call:
   transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
   live-text: off   # replies: the assistant's words in the room as spoken; both: the caller's too
   room-mode: no            # yes: answer only when named (assistant-names); hear the rest
+  assistant-soundalikes: ""  # words STT hears for the name, e.g. "say"; counted only in a name's place
   chime-in-threshold: 0    # 1-10: speak up unasked at this relevance; 0 never
   chime-in-cooldown-ms: 60000
   relevance-provider: ""   # unset: the call's own provider, as a separate client
@@ -588,6 +589,15 @@ as a transcript like any other line, kept (the last 40 lines), and given to
 the model at the start of the next turn, so the reply knows what was said
 before it was asked. Without =assistant-names=, every utterance names it.
 Voice commands work as before; each is a whole utterance.
+
+Speech recognition hears a short name as a common word: "Kay" at the end of
+a question comes out as "..., say?". =assistant-soundalikes=
+(=AI_VOICE_ASSISTANT_SOUNDALIKES=, comma-separated) lists such words, and
+one counts as naming the assistant only where a name would be -- after a
+greeting ("Hi, say."), before a comma that opens the utterance ("Say, could
+you..."), or after a comma that ends it ("What do you think, say?"). "Say
+that again" and "I say we ship it" stay talk. A server that takes hotwords
+should be given the name too; the sound-alikes catch what it still mishears.
 
 =chime-in-threshold= (=AI_VOICE_CHIME_IN_THRESHOLD=, 0-10, unset: 0) lets
 the assistant speak up unasked. After each unaddressed line, what has been

@@ -73,6 +73,9 @@ static const Setting settings[] = {
 	{"unknown-speaker-name", "AI_VOICE_UNKNOWN_SPEAKER_NAME", "Guest", 0, 0, 0},
 	/* Comma-separated; a command may start with one, as in "Name, mute". */
 	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
+	/* Comma-separated words STT hears for a name ("say" for a short one); room
+	 * mode counts one only where a name would be. */
+	{"assistant-soundalikes", "AI_VOICE_ASSISTANT_SOUNDALIKES", NULL, 0, 0, 0},
 	{"mute-message", "AI_VOICE_MUTE_MESSAGE",
 	 "Okay, I'm not listening. Say unmute when you need me.", 0, 0, 0},
 	{"unmute-message", "AI_VOICE_UNMUTE_MESSAGE", "I'm listening.", 0, 0, 0},

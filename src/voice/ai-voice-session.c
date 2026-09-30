@@ -83,6 +83,7 @@ struct _AiVoiceSession {
 	/* voice-commands: spoken controls, and whether the caller is being heard */
 	gboolean voice_commands, muted;
 	gchar **assistant_names;
+	gchar **soundalikes; /* heard for a name, counted only where a name would be */
 	gchar *mute_message, *unmute_message;
 	GHashTable *repeats;
 	gboolean runaway;
@@ -151,7 +152,8 @@ enum {
 	PROP_CHIME_IN_THRESHOLD,
 	PROP_CHIME_IN_COOLDOWN,
 	PROP_SPEAKER_IDENTIFIER,
-	PROP_UNKNOWN_SPEAKER_NAME
+	PROP_UNKNOWN_SPEAKER_NAME,
+	PROP_ASSISTANT_SOUNDALIKES
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 /* A word that starts softly -- "f", "h", "th" -- is not speech to the
@@ -1277,6 +1279,27 @@ static const gchar relevance_prompt[] =
 	"Answer with exactly two lines and nothing else:\n"
 	"SCORE: <0-10>\n"
 	"REASON: <one short sentence>";
+/* A sound-alike in a name's place: after a greeting ("Hi, say."), before a
+ * comma at the start ("Say, could you..."), after a comma at the end ("What
+ * do you think, say?"). Anywhere else it is the ordinary word. */
+static gboolean
+soundalike_addressed(AiVoiceSession *self, const gchar *text)
+{
+	guint i;
+	for (i = 0; self->soundalikes != NULL && self->soundalikes[i] != NULL; i++) {
+		g_autofree gchar *word = g_regex_escape_string(self->soundalikes[i], -1);
+		g_autofree gchar *pattern = NULL;
+		if (*word == '\0')
+			continue;
+		pattern = g_strdup_printf("^\\W*(?:hi|hey|hello|ok|okay|yo)\\W+%s\\s*(?:[,.!?]|$)"
+								  "|^\\W*%s\\s*,"
+								  "|,\\s*%s\\W*$",
+								  word, word, word);
+		if (g_regex_match_simple(pattern, text, G_REGEX_CASELESS, 0))
+			return TRUE;
+	}
+	return FALSE;
+}
 /* Named anywhere in the utterance, as whole words: "Ada, what do you think?"
  * and "what does Ada think?" both are. With no names, everything is. */
 static gboolean
@@ -1285,6 +1308,8 @@ addressed(AiVoiceSession *self, const gchar *text)
 	g_autofree gchar *words = NULL, *padded = NULL;
 	guint i;
 	if (self->assistant_names == NULL || self->assistant_names[0] == NULL)
+		return TRUE;
+	if (soundalike_addressed(self, text))
 		return TRUE;
 	words = command_words(text);
 	padded = g_strconcat(" ", words, " ", NULL);
@@ -1739,6 +1764,7 @@ finalize(GObject *object)
 	g_hash_table_unref(self->repeats);
 	g_string_free(self->span, TRUE);
 	g_strfreev(self->assistant_names);
+	g_strfreev(self->soundalikes);
 	g_queue_clear_full(&self->room, g_free);
 	g_free(self->unknown_speaker_name);
 	g_free(self->mute_message);
@@ -1817,6 +1843,11 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_object(value, self->identifier);
 	else if (id == PROP_UNKNOWN_SPEAKER_NAME)
 		g_value_set_string(value, self->unknown_speaker_name);
+	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
+		g_autofree gchar *joined =
+			self->soundalikes != NULL ? g_strjoinv(",", self->soundalikes) : NULL;
+		g_value_set_string(value, joined);
+	}
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1905,7 +1936,16 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->chime_cooldown_ms = g_value_get_uint(value);
 	else if (id == PROP_SPEAKER_IDENTIFIER)
 		g_set_object(&self->identifier, g_value_get_object(value));
-	else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
+	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
+		const gchar *words = g_value_get_string(value);
+		g_clear_pointer(&self->soundalikes, g_strfreev);
+		if (words != NULL && *words != '\0') {
+			guint i;
+			self->soundalikes = g_strsplit(words, ",", -1);
+			for (i = 0; self->soundalikes[i] != NULL; i++)
+				g_strstrip(self->soundalikes[i]);
+		}
+	} else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
 		const gchar *name = g_value_get_string(value);
 		g_free(self->unknown_speaker_name);
 		self->unknown_speaker_name = name != NULL && *name != '\0' ? g_strdup(name) : NULL;
@@ -2101,6 +2141,19 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							"Names who spoke each utterance from its audio",
 							AI_TYPE_SPEAKER_IDENTIFIER,
 							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:assistant-soundalikes:
+	 *
+	 * Comma-separated words speech recognition hears in place of an assistant
+	 * name ("say" for "Kay"). In room mode one counts as naming the assistant
+	 * only where a name would be: after a greeting, before a comma that opens
+	 * the utterance, or after a comma that ends it.
+	 */
+	g_object_class_install_property(
+		oc, PROP_ASSISTANT_SOUNDALIKES,
+		g_param_spec_string("assistant-soundalikes", "Assistant sound-alikes",
+							"Words heard for an assistant name, counted only in a name's place",
+							NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	/**
 	 * AiVoiceSession:unknown-speaker-name:
 	 *
