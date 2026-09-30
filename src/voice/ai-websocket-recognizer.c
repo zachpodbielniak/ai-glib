@@ -124,7 +124,9 @@ on_closed(SoupWebsocketConnection *ws, gpointer data)
 	/* After EOS, a server that found no speech may send nothing and close.
 	 * That is silence -- a sniff, a footstep -- not a failure to report to
 	 * the caller as "could not transcribe". Before EOS it is a failure. */
-	if (self != NULL && r->active && r->ended) {
+	/* EOS is only sent once the server said ready: a close before ready means
+	 * the words never reached it, even if the caller had finished. */
+	if (self != NULL && r->active && r->ended && r->ready) {
 		recognition_finish(r, self, "");
 		return;
 	}

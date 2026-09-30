@@ -286,6 +286,9 @@ test_stt_response(gconstpointer data)
  *   "closes": after EOS it found no speech, sends nothing and closes.
  *   "early":  its own VAD ends an utterance while audio is still arriving and
  *             sends a final then; the rest of the speech gets a final at EOS.
+ *   "refuses": still loading or at capacity -- it never says ready, and
+ *             closes after the caller has already stopped talking. The words
+ *             were never sent, so that is a failure, not silence.
  */
 typedef struct {
 	GMainLoop *loop;
@@ -310,12 +313,22 @@ live_message(SoupWebsocketConnection *ws, gint type, GBytes *bytes, gpointer dat
 		soup_websocket_connection_send_text(ws,
 											"{\"type\":\"final\",\"text\":\"second part\"}");
 }
+static gboolean
+live_refuse(gpointer data)
+{
+	soup_websocket_connection_close(data, SOUP_WEBSOCKET_CLOSE_NORMAL, NULL);
+	return G_SOURCE_REMOVE;
+}
 static void
 live_connected(SoupServer *server, SoupServerMessage *msg, const gchar *path,
 			   SoupWebsocketConnection *ws, gpointer data)
 {
 	g_object_set_data_full(G_OBJECT(server), "ws", g_object_ref(ws), g_object_unref);
 	g_signal_connect(ws, "message", G_CALLBACK(live_message), data);
+	if (g_str_equal(((Live *)data)->mode, "refuses")) {
+		g_timeout_add(400, live_refuse, ws);
+		return;
+	}
 	soup_websocket_connection_send_text(ws, "{\"type\":\"ready\",\"sample_rate\":16000}");
 }
 static void
@@ -370,6 +383,15 @@ test_stt_live_server(gconstpointer data)
 	ai_speech_recognizer_end(AI_SPEECH_RECOGNIZER(stt), "caller");
 	g_main_loop_run(w.loop);
 	g_source_remove(timeout);
+	if (g_str_equal(l.mode, "refuses")) {
+		g_assert_error(l.error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED);
+		g_assert_cmpuint(l.final_count, ==, 0);
+		g_clear_error(&l.error);
+		g_clear_object(&stt);
+		g_string_free(l.finals, TRUE);
+		teardown(&w);
+		return;
+	}
 	/* A sniff is silence, not a failure; an early final is part of the turn. */
 	g_assert_no_error(l.error);
 	g_assert_cmpuint(l.final_count, ==, 1);
@@ -574,6 +596,8 @@ main(int argc, char **argv)
 	g_test_add_data_func("/voice/wire/stt-closes-after-silence", "closes",
 						 test_stt_live_server);
 	g_test_add_data_func("/voice/wire/stt-early-final", "early", test_stt_live_server);
+	g_test_add_data_func("/voice/wire/stt-closes-before-ready", "refuses",
+						 test_stt_live_server);
 	g_test_add_func("/voice/wire/tts-framing", test_tts);
 	g_test_add_data_func("/voice/wire/tts-invalid-rate", "SR=nope\n", test_tts_bad);
 	g_test_add_data_func("/voice/wire/tts-missing-sentinel", "SR=16000\n", test_tts_bad);
