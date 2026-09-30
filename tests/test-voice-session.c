@@ -851,6 +851,52 @@ tool_progress_disabled(Fixture *f, gconstpointer data)
 							"One moment, let me check.");
 	}
 }
+/* Recognizers mark non-speech as [throat clearing], (coughs) or *sniff*.
+ * Those are not words: alone they are silence, inside a sentence they are
+ * dropped. */
+static void
+annotations_are_silence(Fixture *f, gconstpointer data)
+{
+	static const gchar *const noises[] = {"[throat clearing]", "(coughs)", "*sniff*",
+										  "[BLANK_AUDIO]", " [Music] (laughs) ", NULL};
+	guint i, heard = f->speakers->len;
+	for (i = 0; noises[i] != NULL; i++) {
+		frame(f, "caller", 1);
+		g_signal_emit_by_name(f->stt, "transcript", "caller", noises[i], TRUE);
+		drain();
+	}
+	g_assert_cmpuint(f->speakers->len, ==, heard);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+static void
+annotations_stripped(Fixture *f, gconstpointer data)
+{
+	GList *messages;
+	ai_mock_provider_push_text(f->provider, "Sure.");
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller",
+						  "[clears throat] Okay, (coughs) do it.", TRUE);
+	wait_replies(f, 1);
+	messages = ai_mock_provider_get_last_messages(f->provider);
+	g_assert_nonnull(messages);
+	{
+		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
+		g_assert_nonnull(strstr(text, "Okay, do it."));
+		g_assert_null(strstr(text, "clears"));
+		g_assert_null(strstr(text, "coughs"));
+	}
+}
+/* A noise mark must not confirm an interruption either. */
+static void
+annotation_is_not_a_barge_in(Fixture *f, gconstpointer data)
+{
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "[footsteps]", FALSE);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+}
 static void
 recovery_pauses_deadline(Fixture *f, gconstpointer data)
 {
@@ -937,6 +983,12 @@ main(int argc, char **argv)
 			   tool_progress_not_an_answer, teardown);
 	g_test_add("/voice/session/tool-progress-disabled", Fixture, NULL, setup,
 			   tool_progress_disabled, teardown);
+	g_test_add("/voice/session/annotations-are-silence", Fixture, NULL, setup,
+			   annotations_are_silence, teardown);
+	g_test_add("/voice/session/annotations-stripped", Fixture, NULL, setup,
+			   annotations_stripped, teardown);
+	g_test_add("/voice/session/annotation-is-not-a-barge-in", Fixture, NULL, setup,
+			   annotation_is_not_a_barge_in, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,

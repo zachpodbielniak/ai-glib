@@ -123,6 +123,14 @@ onset audio is buffered in memory and replayed to STT so initial words are
 preserved. Greetings and all =ai_voice_session_say()= notices use this same
 debounce, including while waiting for the first synthesized audio.
 
+Recognizers mark non-speech inline, as =[throat clearing]=, =(coughs)=,
+=*sniff*= or =[BLANK_AUDIO]=. The session removes every bracketed,
+parenthesized or starred span of up to 60 bytes from partial and final
+transcripts. A final with nothing left is silence and starts no turn, and a
+partial with nothing left cannot confirm a barge-in. The cost is that a
+parenthesized phrase the caller really said is dropped too, which recognizers
+almost never produce.
+
 While speaking, reaching the threshold is not yet an interruption. A caller
 on speakerphone sends our own voice back, and to VAD that is speech. The
 session opens recognition and logs a "possible barge-in", and playback
@@ -597,6 +605,7 @@ as in the media-test example above.
 | Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
 | A tool runs for a while before anything is said | One =tool-progress-message= line, played while the tool keeps running | — |
 | Provider turn ends with no text and no tool error | The =empty-reply-message= line, never silence | "Provider turn ended with nothing to say" |
+| Recognizer marks a noise as =[throat clearing]=, =(coughs)=, =*sniff*= | Nothing: alone it is silence, inside a sentence it is removed | — |
 | Own voice echoed back by the caller's speaker | Playback continues; the echo is not answered | "possible barge-in", then "ignoring transcript ... repeats our own recent speech" |
 | STT ready/final timeout or server error | One configured transcription-error line when speech output is available; next turn can proceed | Specific recognition error or server detail |
 | TTS unreachable, truncated response or inactivity timeout | One cached synthesis-error line; if no cache exists, one bounded synthesis attempt, then listening | Specific connection/protocol/timeout error; cache readiness or unavailability |

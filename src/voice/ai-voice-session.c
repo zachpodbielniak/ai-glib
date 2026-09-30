@@ -184,6 +184,38 @@ is_echo(AiVoiceSession *self, const gchar *text)
 	}
 	return total != 0 && matched * 5 >= total * 4;
 }
+/* Recognizers mark non-speech inline: [throat clearing], (coughs), *sniff*,
+ * [BLANK_AUDIO]. Those are not words said to us. Remove each bracketed,
+ * parenthesized or starred span of up to 60 bytes, then collapse whitespace.
+ * An unclosed opener is kept as text. */
+static gchar *
+strip_annotations(const gchar *text)
+{
+	GString *out = g_string_new(NULL);
+	const gchar *p = text != NULL ? text : "";
+	while (*p != '\0') {
+		gchar close = *p == '[' ? ']' : *p == '(' ? ')' : *p == '*' ? '*' : '\0';
+		const gchar *end = close != '\0' ? strchr(p + 1, close) : NULL;
+		if (end != NULL && end - p <= 60) {
+			if (out->len != 0 && out->str[out->len - 1] != ' ')
+				g_string_append_c(out, ' ');
+			p = end + 1;
+			continue;
+		}
+		if (g_ascii_isspace(*p)) {
+			if (out->len != 0 && out->str[out->len - 1] != ' ')
+				g_string_append_c(out, ' ');
+		} else {
+			/* No space before punctuation left behind by a removed span. */
+			if ((*p == ',' || *p == '.' || *p == '!' || *p == '?') && out->len != 0 &&
+				out->str[out->len - 1] == ' ')
+				g_string_truncate(out, out->len - 1);
+			g_string_append_c(out, *p);
+		}
+		p++;
+	}
+	return g_strstrip(g_string_free(out, FALSE));
+}
 static gboolean
 has_words(const gchar *text)
 {
@@ -927,12 +959,13 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	if (self->stopped || p == NULL)
 		return;
 	if (!final) {
-		if (p->pending_barge && has_words(text) && !is_echo(self, text))
+		g_autofree gchar *words = strip_annotations(text);
+		if (p->pending_barge && has_words(words) && !is_echo(self, words))
 			confirm_barge(self, p);
-		g_signal_emit_by_name(self, "transcript", p->name, text, FALSE);
+		g_signal_emit_by_name(self, "transcript", p->name, words, FALSE);
 		return;
 	}
-	trimmed = g_strdup(text != NULL ? text : "");
+	trimmed = strip_annotations(text);
 	text = g_strstrip(trimmed);
 	pending = p->pending_barge;
 	p->recognizing = FALSE;
