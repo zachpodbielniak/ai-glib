@@ -80,6 +80,9 @@ Signals, on the session's constructing thread-default context:
 =state= is also a read-only property. =turn-deadline-ms= defaults to 20000. At
 the deadline the provider and TTS cancellables are cancelled, pending playback
 is flushed, and the session says a fallback line instead of going silent.
+The next turn starts once the cancelled one has ended, so a tool that ignores
+cancellation keeps the caller waiting until it finishes. Every built-in tool
+that can run long stops at the cancel; a host registering its own should too.
 The deadline bounds provider work, not playback of a completed reply. Its
 remaining time is paused during media recovery. Speech-service errors are
 reported through =error= and logged with their specific cause.

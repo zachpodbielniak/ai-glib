@@ -285,6 +285,39 @@ test_executor_glob (void)
     g_unlink (tmp_path);
 }
 
+/* A search over a large tree has to stop when its turn is cancelled. A voice
+ * call's deadline cancels the turn and waits for it to end; a walk of a whole
+ * home directory on a slow disk that ignored the cancel kept the call deaf
+ * until it finished. */
+static void
+test_executor_search_cancelled (gconstpointer data)
+{
+    const gchar              *tool = data;
+    g_autoptr(AiToolExecutor) exec   = ai_tool_executor_new ();
+    g_autoptr(GCancellable)   cancel = g_cancellable_new ();
+    g_autofree gchar         *dir    = g_dir_make_tmp ("ai-glib-search-XXXXXX", NULL);
+    g_autofree gchar         *sub    = g_build_filename (dir, "sub", NULL);
+    g_autofree gchar         *file   = g_build_filename (sub, "match.txt", NULL);
+    g_autofree gchar         *json   = NULL;
+    g_autoptr(AiToolUse)      use    = NULL;
+    g_autofree gchar         *result = NULL;
+    g_autoptr(GError)         err    = NULL;
+
+    g_assert_cmpint (g_mkdir (sub, 0700), ==, 0);
+    g_assert_true (g_file_set_contents (file, "needle\n", -1, NULL));
+    json = g_strdup_printf ("{\"pattern\": \"%s\", \"path\": \"%s\"}",
+                            g_str_equal (tool, "glob") ? "*.txt" : "needle", dir);
+    use = make_tool_use (tool, json);
+    g_cancellable_cancel (cancel);
+    result = ai_tool_executor_execute (exec, use, cancel, &err);
+
+    g_assert_error (err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    g_assert_null (result);
+    g_unlink (file);
+    g_rmdir (sub);
+    g_rmdir (dir);
+}
+
 /* ================================================================
  * grep
  * ================================================================ */
@@ -1047,6 +1080,10 @@ main (
                      test_executor_edit);
     g_test_add_func ("/ai-glib/tool-executor/glob",
                      test_executor_glob);
+    g_test_add_data_func ("/ai-glib/tool-executor/glob-cancelled", "glob",
+                          test_executor_search_cancelled);
+    g_test_add_data_func ("/ai-glib/tool-executor/grep-cancelled", "grep",
+                          test_executor_search_cancelled);
     g_test_add_func ("/ai-glib/tool-executor/grep",
                      test_executor_grep);
     g_test_add_func ("/ai-glib/tool-executor/ls",

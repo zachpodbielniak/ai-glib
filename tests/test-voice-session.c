@@ -236,6 +236,41 @@ timeout_turn(Fixture *f, gconstpointer data)
 	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Custom deadline fallback");
 }
 static void
+settle(Fixture *f);
+/* A tool that runs until its turn is cancelled, as a search of a whole home
+ * directory on a slow disk does. */
+static gchar *
+slow_tool(AiToolUse *use, GCancellable *cancel, GError **error, gpointer data)
+{
+	gint64 limit = g_get_monotonic_time() + 10000000;
+	while (!g_cancellable_is_cancelled(cancel) && g_get_monotonic_time() < limit)
+		g_usleep(1000);
+	if (g_cancellable_set_error_if_cancelled(cancel, error))
+		return NULL;
+	return g_strdup("finished");
+}
+/* The deadline gives up on a turn stuck in a tool, and the caller is heard
+ * again: the next question is answered, not queued behind the stuck one. */
+static void
+deadline_in_tool(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiTool) tool = ai_tool_new("slow_search", "Search everything");
+	ai_tool_executor_register_callback(ai_conversation_get_executor(f->conversation), tool,
+									   slow_tool, NULL, NULL);
+	g_object_set(f->session, "turn-deadline-ms", 200, "tool-progress-message", "", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "slow_search", "{}");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Sorry, that is taking too long. Please try again.");
+	settle(f);
+	ai_mock_provider_push_text(f->provider, "Here I am.");
+	utterance(f, "caller");
+	wait_replies(f, f->tts->texts->len + 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Here I am.");
+}
+static void
 tools(Fixture *f, gconstpointer data)
 {
 	ai_mock_provider_push_tool_use(f->provider, "read",
@@ -1339,6 +1374,8 @@ main(int argc, char **argv)
 			   final_words_interrupt, teardown);
 	g_test_add("/voice/session/speakers", Fixture, NULL, setup, speakers, teardown);
 	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
+	g_test_add("/voice/session/deadline-in-tool", Fixture, NULL, setup, deadline_in_tool,
+			   teardown);
 	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);
 	g_test_add("/voice/session/read-fixture", Fixture, NULL, setup, read_fixture,
 			   teardown);

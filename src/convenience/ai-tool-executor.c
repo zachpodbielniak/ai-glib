@@ -1064,11 +1064,18 @@ tool_edit (
 
 /* ---- glob helpers ---- */
 
+/*
+ * The walks below check the turn's cancellable at every entry. They can cover
+ * a whole home directory, and on a slow disk that takes minutes; a caller that
+ * cancels -- a voice call's turn deadline, a user pressing stop -- waits for
+ * the turn to end, and would otherwise wait for the whole walk.
+ */
 static void
 glob_collect (
     const gchar  *base_dir,
     GPatternSpec *pattern,
-    GString      *output
+    GString      *output,
+    GCancellable *cancellable
 ){
     g_autoptr(GError) dir_err = NULL;
     GDir        *dir;
@@ -1078,7 +1085,8 @@ glob_collect (
     if (dir == NULL)
         return;
 
-    while ((name = g_dir_read_name (dir)) != NULL)
+    while (!g_cancellable_is_cancelled (cancellable)
+           && (name = g_dir_read_name (dir)) != NULL)
     {
         g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
 
@@ -1087,7 +1095,7 @@ glob_collect (
             /* Follow an explicitly requested root, but not directory links
              * encountered during traversal: they can lead back to an ancestor. */
             if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                glob_collect (full, pattern, output);
+                glob_collect (full, pattern, output, cancellable);
         }
         else if (g_pattern_spec_match_string (pattern, name))
         {
@@ -1112,9 +1120,6 @@ tool_glob (
     GString              *output;
     g_autofree gchar *resolved = NULL;
 
-    (void)cancellable;
-    (void)error;
-
     pattern_str = ai_tool_use_get_input_string (tool_use, "pattern");
     if (pattern_str == NULL)
     {
@@ -1130,8 +1135,13 @@ tool_glob (
     pattern = g_pattern_spec_new (pattern_str);
     output  = g_string_new (NULL);
 
-    glob_collect (path, pattern, output);
+    glob_collect (path, pattern, output, cancellable);
 
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+        g_string_free (output, TRUE);
+        return NULL;
+    }
     return g_string_free (output, FALSE);
 }
 
@@ -1171,7 +1181,8 @@ grep_dir_recurse (
     const gchar  *base_dir,
     GPatternSpec *file_pattern, /* nullable — match all files */
     GRegex       *regex,
-    GString      *output
+    GString      *output,
+    GCancellable *cancellable
 ){
     g_autoptr(GError) dir_err = NULL;
     GDir        *dir;
@@ -1181,14 +1192,15 @@ grep_dir_recurse (
     if (dir == NULL)
         return;
 
-    while ((name = g_dir_read_name (dir)) != NULL)
+    while (!g_cancellable_is_cancelled (cancellable)
+           && (name = g_dir_read_name (dir)) != NULL)
     {
         g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
 
         if (g_file_test (full, G_FILE_TEST_IS_DIR))
         {
             if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                grep_dir_recurse (full, file_pattern, regex, output);
+                grep_dir_recurse (full, file_pattern, regex, output, cancellable);
         }
         else if (file_pattern == NULL
                  || g_pattern_spec_match_string (file_pattern, name))
@@ -1215,8 +1227,6 @@ tool_grep (
     GString               *output;
     g_autofree gchar *resolved = NULL;
 
-    (void)cancellable;
-
     pattern_str = ai_tool_use_get_input_string (tool_use, "pattern");
     if (pattern_str == NULL)
     {
@@ -1241,10 +1251,15 @@ tool_grep (
     output = g_string_new (NULL);
 
     if (g_file_test (path, G_FILE_TEST_IS_DIR))
-        grep_dir_recurse (path, file_pattern, regex, output);
-    else
+        grep_dir_recurse (path, file_pattern, regex, output, cancellable);
+    else if (!g_cancellable_is_cancelled (cancellable))
         grep_one_file (path, regex, output);
 
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+        g_string_free (output, TRUE);
+        return NULL;
+    }
     return g_string_free (output, FALSE);
 }
 

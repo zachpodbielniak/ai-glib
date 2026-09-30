@@ -129,6 +129,11 @@ Matches filenames recursively. =*.c=, =test-*=.
 A regular expression over file contents, returning matching lines with
 file and line number.
 
+Both walk the whole tree under =path=, which for a home directory on a slow
+disk can take minutes. They stop at the next entry once the turn is
+cancelled and return =G_IO_ERROR_CANCELLED=, so a stop button or a voice
+call's turn deadline ends the turn instead of waiting for the walk.
+
 ** ls
 | Parameter | Type   | Required | Default           |
 |-----------+--------+----------+-------------------|
