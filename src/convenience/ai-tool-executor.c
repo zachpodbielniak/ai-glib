@@ -118,6 +118,7 @@ struct _AiToolExecutor
 
     /* Which optional tool groups this executor is willing to offer. */
     AiToolFeatures    features;
+    guint             max_tool_result_bytes;
 };
 
 static void
@@ -142,10 +143,13 @@ enum
     PROP_RESOURCE_REGISTRY,
     PROP_BRIGADE,
     PROP_FEATURES,
+    PROP_MAX_TOOL_RESULT_BYTES,
     N_PROPS
 };
 
 static GParamSpec *properties[N_PROPS];
+
+static gchar *cap_tool_result (gchar *text, guint max);
 
 enum
 {
@@ -600,6 +604,9 @@ on_run_response_common (
                 }
             }
 
+            tool_result = cap_tool_result (tool_result,
+                                           ctx->executor->max_tool_result_bytes);
+
             {
                 g_autoptr(AiToolResult) result_block =
                     ai_tool_result_new_with_name (tool_id, tool_name,
@@ -797,6 +804,34 @@ executor_resolve_path (
         return g_strdup (path);
 
     return g_build_filename (self->working_directory, path, NULL);
+}
+
+/*
+ * Keep the start and the end of an oversized tool result, cut on character
+ * boundaries: the start is usually the most relevant match and the end is
+ * where errors and summaries land. Takes ownership of TEXT.
+ */
+static gchar *
+cap_tool_result (gchar *text, guint max)
+{
+    gsize len, head, tail;
+    gchar *capped;
+
+    if (text == NULL || max == 0 || (len = strlen (text)) <= max)
+        return text;
+
+    head = max * 3 / 4;
+    while (head > 0 && (((guchar) text[head]) & 0xC0) == 0x80)
+        head--;
+    tail = len - (max - max * 3 / 4);
+    while (tail < len && (((guchar) text[tail]) & 0xC0) == 0x80)
+        tail++;
+
+    capped = g_strdup_printf ("%.*s\n\n[... %" G_GSIZE_FORMAT " bytes of output omitted. "
+                              "Narrow the command, or read a smaller range ...]\n\n%s",
+                              (int) head, text, tail - head, text + tail);
+    g_free (text);
+    return capped;
 }
 
 static gchar *
@@ -3721,6 +3756,22 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
                            AI_TOOL_FEATURE_ALL,
                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiToolExecutor:max-tool-result-bytes:
+     *
+     * The most of any one tool result that goes back to the model. Longer
+     * output keeps its start and its end with a note of how much was cut.
+     * Every later turn resends every earlier result, so one command that
+     * prints megabytes makes every turn after it fail for context length.
+     * 0 means no limit.
+     */
+    properties[PROP_MAX_TOOL_RESULT_BYTES] =
+        g_param_spec_uint ("max-tool-result-bytes",
+                           "Max tool result bytes",
+                           "Largest tool result passed back to the model; 0 for no limit",
+                           0, G_MAXUINT, 64 * 1024,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties (object_class, N_PROPS, properties);
 
     /**
@@ -3804,6 +3855,9 @@ ai_tool_executor_get_property (
         case PROP_FEATURES:
             g_value_set_uint (value, (guint) self->features);
             break;
+        case PROP_MAX_TOOL_RESULT_BYTES:
+            g_value_set_uint (value, self->max_tool_result_bytes);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
             break;
@@ -3841,6 +3895,9 @@ ai_tool_executor_set_property (
         case PROP_FEATURES:
             ai_tool_executor_set_features (
                 self, (AiToolFeatures) g_value_get_uint (value));
+            break;
+        case PROP_MAX_TOOL_RESULT_BYTES:
+            self->max_tool_result_bytes = g_value_get_uint (value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -3933,6 +3990,7 @@ ai_tool_executor_init (AiToolExecutor *self)
     self->registry        = NULL;
     self->brigade         = NULL;
     self->features        = AI_TOOL_FEATURE_ALL;
+    self->max_tool_result_bytes = 64 * 1024;
     self->task_depth      = 0;
     self->todos           = g_ptr_array_new_with_free_func (
                                 (GDestroyNotify)ai_todo_free);

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <string.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -550,6 +551,86 @@ test_executor_run_full_includes_tool_results (void)
     g_list_free (messages);
 }
 
+/* A command that prints megabytes must not put megabytes into the
+ * conversation: every later turn resends it. A voice call that grepped a
+ * notes tree, .git included, grew to 2.7 million tokens and every turn after
+ * failed. The start and the end are kept, with a note of what was cut. */
+static const gchar *
+tool_result_text (GList *messages)
+{
+    GList *l, *b;
+
+    for (l = messages; l != NULL; l = l->next)
+        for (b = ai_message_get_content_blocks (l->data); b != NULL; b = b->next)
+            if (AI_IS_TOOL_RESULT (b->data))
+                return ai_tool_result_get_content (b->data);
+    return NULL;
+}
+
+static void
+test_executor_caps_tool_output (gconstpointer data)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("search everything");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+    const gchar *text;
+    guint cap = GPOINTER_TO_UINT (data);
+
+    if (cap != G_MAXUINT)
+        g_object_set (exec, "max-tool-result-bytes", cap, NULL);
+    else
+        g_object_get (exec, "max-tool-result-bytes", &cap, NULL);
+    g_assert_cmpuint (cap, >, 0);
+    /* 400 KB: "START", 400 000 x's, "END". */
+    ai_mock_provider_push_tool_use (mock, "bash",
+        "{\"command\": \"printf START; head -c 400000 /dev/zero | tr '\\\\\\\\0' x; printf END\"}");
+    ai_mock_provider_push_text (mock, "done");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+
+    g_assert_no_error (error);
+    text = tool_result_text (produced);
+    g_assert_nonnull (text);
+    g_assert_cmpuint (strlen (text), <=, cap + 256);
+    g_assert_true (g_str_has_prefix (text, "START"));
+    g_assert_true (g_str_has_suffix (text, "END"));
+    g_assert_nonnull (strstr (text, "bytes of output omitted"));
+    g_assert_true (g_utf8_validate (text, -1, NULL));
+
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
+/* Output under the cap is untouched, byte for byte. */
+static void
+test_executor_small_output_untouched (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("run something");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+
+    ai_mock_provider_push_tool_use (mock, "bash",
+                                    "{\"command\": \"printf 'caf\\\\303\\\\251 ok'\"}");
+    ai_mock_provider_push_text (mock, "done");
+    messages = g_list_append (NULL, user);
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (tool_result_text (produced), ==, "caf\303\251 ok");
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
 /* Passing NULL must behave exactly like the old entry point, since that
  * is now literally what run() is. */
 static void
@@ -990,6 +1071,12 @@ main (
                      test_a_plain_executor_gains_nothing);
     g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
                      test_executor_run_full_returns_new_messages);
+    g_test_add_data_func ("/ai-glib/tool-executor/run-full/caps-tool-output-default",
+                          GUINT_TO_POINTER (G_MAXUINT), test_executor_caps_tool_output);
+    g_test_add_data_func ("/ai-glib/tool-executor/run-full/caps-tool-output-4k",
+                          GUINT_TO_POINTER (4096), test_executor_caps_tool_output);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/small-output-untouched",
+                     test_executor_small_output_untouched);
     g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
                      test_executor_run_full_includes_tool_results);
     g_test_add_func ("/ai-glib/tool-executor/run-full/null-out",
