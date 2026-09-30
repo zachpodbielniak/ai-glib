@@ -3,6 +3,7 @@
 #include "voice/ai-voice-worker-private.h"
 #include "model/ai-tool-result.h"
 #include "core/ai-provider.h"
+#include "voice/ai-speaker-identifier.h"
 #include <string.h>
 
 /**
@@ -31,6 +32,9 @@ typedef struct {
 	gchar *name;
 	GByteArray *frames, *onset;
 	GByteArray *preroll; /* the last PREROLL_BYTES of audio, speech or not */
+	GByteArray *utterance; /* audio sent to STT since recognition began, for naming */
+	gchar *last_named;	   /* who a speaker identifier last said this was */
+	gint64 last_named_us;
 	guint speech_ms;
 	gboolean recognizing, ended, pending_barge;
 } Participant;
@@ -108,6 +112,11 @@ struct _AiVoiceSession {
 	guint chime_threshold, chime_cooldown_ms;
 	GCancellable *scoring;
 	gint64 last_turn_us;
+	/* speaker-identifier: finals wait here, in order, until each is named */
+	GObject *identifier;
+	gchar *unknown_speaker_name;
+	GQueue naming;
+	GCancellable *naming_cancel;
 };
 enum {
 	PROP_0,
@@ -140,7 +149,9 @@ enum {
 	PROP_ROOM_MODE,
 	PROP_RELEVANCE_PROVIDER,
 	PROP_CHIME_IN_THRESHOLD,
-	PROP_CHIME_IN_COOLDOWN
+	PROP_CHIME_IN_COOLDOWN,
+	PROP_SPEAKER_IDENTIFIER,
+	PROP_UNKNOWN_SPEAKER_NAME
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 /* A word that starts softly -- "f", "h", "th" -- is not speech to the
@@ -148,6 +159,7 @@ G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
  * as "-ay", and transcribed "say" or "Bay". This much of what came just
  * before speech is sent too. */
 #define PREROLL_BYTES (300 * 16 * 2)
+#define UTTERANCE_BYTES (30 * 16000 * 2) /* the most of one utterance kept for naming */
 static void
 pump(AiVoiceSession *self);
 static void
@@ -275,6 +287,8 @@ participant_free(gpointer data)
 	g_byte_array_unref(p->frames);
 	g_byte_array_unref(p->onset);
 	g_byte_array_unref(p->preroll);
+	g_byte_array_unref(p->utterance);
+	g_free(p->last_named);
 	g_free(p);
 }
 static void
@@ -988,6 +1002,7 @@ joined(AiAudioTransport *transport, const gchar *speaker, const gchar *name,
 	p->frames = g_byte_array_new();
 	p->onset = g_byte_array_new();
 	p->preroll = g_byte_array_new();
+	p->utterance = g_byte_array_new();
 	g_hash_table_insert(self->participants, g_strdup(speaker), p);
 }
 static void
@@ -1064,6 +1079,8 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					gsize size;
 					const guint8 *samples = g_bytes_get_data(onset, &size);
 					g_byte_array_set_size(p->onset, 0);
+					g_byte_array_set_size(p->utterance, 0);
+					g_byte_array_append(p->utterance, samples, size);
 					recognizing =
 						ai_speech_recognizer_begin(self->recognizer, speaker, &error);
 					if (self->stopped ||
@@ -1096,8 +1113,11 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		g_byte_array_append(p->preroll, g_bytes_get_data(frame, NULL), 320);
 		if (p->preroll->len > PREROLL_BYTES)
 			g_byte_array_remove_range(p->preroll, 0, p->preroll->len - PREROLL_BYTES);
-		if (p->recognizing && !p->ended && error == NULL && !fed_onset)
+		if (p->recognizing && !p->ended && error == NULL && !fed_onset) {
+			if (p->utterance->len < UTTERANCE_BYTES)
+				g_byte_array_append(p->utterance, g_bytes_get_data(frame, NULL), 320);
 			ai_speech_recognizer_feed(self->recognizer, speaker, frame, &error);
+		}
 		if (self->stopped || g_hash_table_lookup(self->participants, speaker) != p)
 			return;
 		if (error != NULL) {
@@ -1433,13 +1453,121 @@ confirm_barge(AiVoiceSession *self, Participant *p)
 	interrupt_turn(self);
 	state(self, AI_VOICE_TRANSCRIBING);
 }
+/* A final transcript, attributed: a turn, or in room mode perhaps only heard. */
+static void
+deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
+{
+	if (self->room_mode && *text != '\0' && !addressed(self, text)) {
+		g_signal_emit_by_name(self, "transcript", name, text, TRUE);
+		hear_room(self, name, text);
+		pump(self);
+		return;
+	}
+	if (*text != '\0' && g_queue_get_length(&self->turns) < 32) {
+		g_autofree gchar *line = g_strdup_printf("[%s]: %s", name, text);
+		cancel_scoring(self);
+		self->room_revision++;
+		g_queue_push_tail(&self->turns, room_turn(self, line));
+	}
+	if (*text != '\0')
+		g_signal_emit_by_name(self, "transcript", name, text, TRUE);
+	pump(self);
+}
+
+/* ---- naming speakers who share a microphone ----
+ *
+ * With a speaker identifier, each final waits for its utterance's audio to be
+ * named before it is delivered. Namings finish in any order; finals are
+ * delivered in the order they were heard. A final too short to tell is
+ * whoever that participant was last named, for a while; a voice that matches
+ * nobody is unknown-speaker-name, or the participant's own name. */
+#define NAME_MEMORY_US (120 * G_USEC_PER_SEC)
+typedef struct {
+	AiVoiceSession *session;
+	gchar *speaker, *text, *name;
+	gboolean done, too_short, failed;
+	gdouble score;
+} Naming;
+static void
+naming_free(gpointer data)
+{
+	Naming *n = data;
+	g_object_unref(n->session);
+	g_free(n->speaker);
+	g_free(n->text);
+	g_free(n->name);
+	g_free(n);
+}
+/* Names are settled here, in the order things were said, so "too short to
+ * tell" means whoever spoke just before -- not whoever was named first. */
+static void
+deliver_named(AiVoiceSession *self)
+{
+	Naming *n;
+	while ((n = g_queue_peek_head(&self->naming)) != NULL && n->done) {
+		Participant *p = g_hash_table_lookup(self->participants, n->speaker);
+		gint64 now = g_get_monotonic_time();
+		const gchar *name;
+		g_queue_pop_head(&self->naming);
+		if (n->name != NULL) {
+			name = n->name;
+			if (p != NULL) {
+				g_free(p->last_named);
+				p->last_named = g_strdup(n->name);
+				p->last_named_us = now;
+			}
+		} else if (n->too_short && p != NULL && p->last_named != NULL &&
+				   now - p->last_named_us < NAME_MEMORY_US)
+			name = p->last_named;
+		else if (!n->failed && !n->too_short && self->unknown_speaker_name != NULL)
+			name = self->unknown_speaker_name;
+		else
+			name = p != NULL ? p->name : n->speaker;
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "Speaker: %s (%.2f)", name, n->score);
+		if (!self->stopped)
+			deliver(self, name, n->text);
+		naming_free(n);
+	}
+}
+static void
+named(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Naming *n = data;
+	AiVoiceSession *self = n->session;
+	g_autoptr(GError) error = NULL;
+	n->name = ai_speaker_identifier_identify_finish(AI_SPEAKER_IDENTIFIER(source), result,
+													&n->score, &error);
+	n->too_short = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+	/* The service down or refusing: the participant, not "a stranger". */
+	n->failed = error != NULL && !n->too_short;
+	if (n->failed)
+		g_debug("voice: speaker not identified: %s", error->message);
+	n->done = TRUE;
+	deliver_named(self);
+}
+static void
+name_then_deliver(AiVoiceSession *self, const gchar *speaker, Participant *p,
+				  const gchar *text)
+{
+	Naming *n = g_new0(Naming, 1);
+	g_autoptr(GBytes) pcm = g_bytes_new(p->utterance->data, p->utterance->len);
+	g_byte_array_set_size(p->utterance, 0);
+	n->session = g_object_ref(self);
+	n->speaker = g_strdup(speaker);
+	n->text = g_strdup(text);
+	g_queue_push_tail(&self->naming, n);
+	if (self->naming_cancel == NULL)
+		self->naming_cancel = g_cancellable_new();
+	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(self->identifier), pcm,
+										 self->naming_cancel, named, n);
+}
+
 static void
 transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *text,
 		   gboolean final, gpointer data)
 {
 	AiVoiceSession *self = data;
 	Participant *p = g_hash_table_lookup(self->participants, speaker);
-	g_autofree gchar *labelled = NULL;
 	g_autofree gchar *trimmed = NULL;
 	gboolean pending;
 	if (self->stopped || p == NULL)
@@ -1487,22 +1615,11 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 		pump(self);
 		return;
 	}
-	if (self->room_mode && *text != '\0' && !addressed(self, text)) {
-		g_signal_emit_by_name(self, "transcript", p->name, text, TRUE);
-		hear_room(self, p->name, text);
-		pump(self);
+	if (self->identifier != NULL && *text != '\0') {
+		name_then_deliver(self, speaker, p, text);
 		return;
 	}
-	if (text != NULL && *text != '\0' && g_queue_get_length(&self->turns) < 32) {
-		g_autofree gchar *line = g_strdup_printf("[%s]: %s", p->name, text);
-		cancel_scoring(self);
-		self->room_revision++;
-		labelled = room_turn(self, line);
-		g_queue_push_tail(&self->turns, g_steal_pointer(&labelled));
-	}
-	if (text != NULL && *text != '\0')
-		g_signal_emit_by_name(self, "transcript", p->name, text, TRUE);
-	pump(self);
+	deliver(self, p->name, text);
 }
 static void
 stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
@@ -1576,6 +1693,8 @@ ai_voice_session_stop(AiVoiceSession *self)
 	self->stopped = TRUE;
 	self->media_recovering = TRUE;
 	cancel_scoring(self);
+	if (self->naming_cancel != NULL)
+		g_cancellable_cancel(self->naming_cancel);
 	interrupt_turn(self);
 	g_hash_table_iter_init(&iter, self->participants);
 	while (g_hash_table_iter_next(&iter, &key, NULL)) {
@@ -1607,6 +1726,8 @@ dispose(GObject *object)
 	g_clear_object(&self->conversation);
 	g_clear_object(&self->turn_cancel);
 	g_clear_object(&self->relevance_provider);
+	g_clear_object(&self->identifier);
+	g_clear_object(&self->naming_cancel);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->dispose(object);
 }
 static void
@@ -1619,6 +1740,7 @@ finalize(GObject *object)
 	g_string_free(self->span, TRUE);
 	g_strfreev(self->assistant_names);
 	g_queue_clear_full(&self->room, g_free);
+	g_free(self->unknown_speaker_name);
 	g_free(self->mute_message);
 	g_free(self->unmute_message);
 	g_free(self->repeat_message);
@@ -1691,6 +1813,10 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->chime_threshold);
 	else if (id == PROP_CHIME_IN_COOLDOWN)
 		g_value_set_uint(value, self->chime_cooldown_ms);
+	else if (id == PROP_SPEAKER_IDENTIFIER)
+		g_value_set_object(value, self->identifier);
+	else if (id == PROP_UNKNOWN_SPEAKER_NAME)
+		g_value_set_string(value, self->unknown_speaker_name);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1776,7 +1902,14 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	} else if (id == PROP_CHIME_IN_THRESHOLD)
 		self->chime_threshold = g_value_get_uint(value);
 	else if (id == PROP_CHIME_IN_COOLDOWN)
-		self->chime_cooldown_ms = g_value_get_uint(value); else if (id == PROP_TRIM_AFTER) {
+		self->chime_cooldown_ms = g_value_get_uint(value);
+	else if (id == PROP_SPEAKER_IDENTIFIER)
+		g_set_object(&self->identifier, g_value_get_object(value));
+	else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
+		const gchar *name = g_value_get_string(value);
+		g_free(self->unknown_speaker_name);
+		self->unknown_speaker_name = name != NULL && *name != '\0' ? g_strdup(name) : NULL;
+	} else if (id == PROP_TRIM_AFTER) {
 		self->trim_after = g_value_get_uint(value);
 		if (self->worker != NULL)
 			ai_voice_worker_set_trim_after(self->worker, self->trim_after);
@@ -1954,6 +2087,31 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 						  "Time after a turn before room talk is scored again",
 						  0, 3600000, 60000,
 						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:speaker-identifier: (type AiSpeakerIdentifier)
+	 *
+	 * Names the speaker of each final transcript from its audio, for several
+	 * people sharing one participant's microphone. Finals are delivered in
+	 * the order they were heard, each once it is named. %NULL: every
+	 * utterance is its participant's.
+	 */
+	g_object_class_install_property(
+		oc, PROP_SPEAKER_IDENTIFIER,
+		g_param_spec_object("speaker-identifier", "Speaker identifier",
+							"Names who spoke each utterance from its audio",
+							AI_TYPE_SPEAKER_IDENTIFIER,
+							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:unknown-speaker-name:
+	 *
+	 * With a speaker identifier, the name for a voice that matches nobody.
+	 * %NULL or empty: the participant's own name.
+	 */
+	g_object_class_install_property(
+		oc, PROP_UNKNOWN_SPEAKER_NAME,
+		g_param_spec_string("unknown-speaker-name", "Unknown speaker name",
+							"Name for a voice the identifier does not know", NULL,
+							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TRIM_AFTER,
 		g_param_spec_uint("trim-tool-results-after", "Trim tool results after",

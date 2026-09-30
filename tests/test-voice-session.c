@@ -399,6 +399,128 @@ room_chime_superseded(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
 	g_free(r.reason);
 }
+/* ---- naming speakers who share one microphone ---- */
+typedef struct {
+	const gchar *name; /* NULL: nobody enrolled */
+	gint error;		   /* a GIOErrorEnum, or -1 for none */
+	guint delay_ms;
+} Naming;
+typedef struct {
+	GObject parent;
+	GQueue script; /* of Naming * */
+	guint calls;
+	gsize last_bytes;
+} TestIdentifier;
+typedef GObjectClass TestIdentifierClass;
+static void test_identifier_iface_init(AiSpeakerIdentifierInterface *iface);
+G_DEFINE_TYPE_WITH_CODE(TestIdentifier, test_identifier, G_TYPE_OBJECT,
+						G_IMPLEMENT_INTERFACE(AI_TYPE_SPEAKER_IDENTIFIER,
+											  test_identifier_iface_init))
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(TestIdentifier, g_object_unref)
+static void
+test_identifier_class_init(TestIdentifierClass *c)
+{
+}
+static void
+test_identifier_init(TestIdentifier *self)
+{
+}
+static gboolean
+naming_due(gpointer data)
+{
+	GTask *task = data;
+	const Naming *n = g_task_get_task_data(task);
+	if (n->error >= 0)
+		g_task_return_new_error(task, G_IO_ERROR, n->error, "scripted");
+	else
+		g_task_return_pointer(task, g_strdup(n->name), g_free);
+	g_object_unref(task);
+	return G_SOURCE_REMOVE;
+}
+static void
+identifier_identify(AiSpeakerIdentifier *id, GBytes *pcm, GCancellable *cancel,
+					GAsyncReadyCallback cb, gpointer data)
+{
+	TestIdentifier *self = (TestIdentifier *)id;
+	GTask *task = g_task_new(self, cancel, cb, data);
+	const Naming *n = g_queue_pop_head(&self->script);
+	static const Naming nobody = {NULL, -1, 0};
+	self->calls++;
+	self->last_bytes = g_bytes_get_size(pcm);
+	g_task_set_task_data(task, (gpointer)(n != NULL ? n : &nobody), NULL);
+	g_timeout_add(n != NULL ? n->delay_ms : 0, naming_due, task);
+}
+static gchar *
+identifier_finish(AiSpeakerIdentifier *id, GAsyncResult *result, gdouble *score, GError **error)
+{
+	if (score != NULL)
+		*score = 0.9;
+	return g_task_propagate_pointer(G_TASK(result), error);
+}
+static void
+test_identifier_iface_init(AiSpeakerIdentifierInterface *iface)
+{
+	iface->identify_async = identifier_identify;
+	iface->identify_finish = identifier_finish;
+}
+static TestIdentifier *
+naming(Fixture *f, const Naming *script, guint n)
+{
+	TestIdentifier *id = g_object_new(test_identifier_get_type(), NULL);
+	guint i;
+	for (i = 0; i < n; i++)
+		g_queue_push_tail(&id->script, (gpointer)&script[i]);
+	g_object_set(f->session, "speaker-identifier", id, NULL);
+	return id;
+}
+/* One microphone, told apart by voice: the model and the transcript see who
+ * spoke, from the utterance's own audio. */
+static void
+speakers_named(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 0}};
+	g_autoptr(TestIdentifier) id = naming(f, script, 1);
+	g_autofree gchar *sent = NULL;
+	ai_mock_provider_push_text(f->provider, "Hi Sam.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	sent = last_user_text(f);
+	g_assert_cmpstr(sent, ==, "[Sam]: hello");
+	g_assert_cmpuint(id->calls, ==, 1);
+	g_assert_cmpuint(id->last_bytes, >, 0);
+	g_assert_cmpstr(g_ptr_array_index(f->speakers, f->speakers->len - 1), ==, "Sam");
+}
+/* Naming takes time and finishes out of order; what was said keeps its order.
+ * Too short to tell is whoever that microphone last heard; a stranger has
+ * the unknown-speaker name. */
+static void
+speakers_in_order(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 80},
+									{NULL, G_IO_ERROR_INVALID_DATA, 0},
+									{NULL, -1, 0},
+									{"Kim", -1, 0}};
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	g_autoptr(TestIdentifier) id = naming(f, script, 4);
+	g_autofree gchar *sent = NULL;
+	const gchar *first, *second, *third;
+	g_object_set(f->session, "unknown-speaker-name", "Guest", NULL);
+	said_by(f, "caller", "The release slipped.");
+	said_by(f, "caller", "Again.");
+	said_by(f, "caller", "Who are you people?");
+	ai_mock_provider_push_text(f->provider, "Thursday now.");
+	said_by(f, "caller", "Ada, when is it?");
+	wait_replies(f, 1);
+	sent = last_user_text(f);
+	first = strstr(sent, "[Sam]: The release slipped.");
+	second = strstr(sent, "[Sam]: Again.");
+	third = strstr(sent, "[Guest]: Who are you people?");
+	g_assert_nonnull(first);
+	g_assert_nonnull(second);
+	g_assert_nonnull(third);
+	g_assert_true(first < second && second < third);
+	g_assert_nonnull(strstr(sent, "[Kim]: Ada, when is it?"));
+}
 /* The deadline gives up on a turn stuck in a tool, and the caller is heard
  * again: the next question is answered, not queued behind the stuck one. */
 static void
@@ -1554,6 +1676,10 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
 	g_test_add("/voice/session/onset-keeps-preroll", Fixture, NULL, setup,
 			   onset_keeps_preroll, teardown);
+	g_test_add("/voice/session/speakers-named", Fixture, NULL, setup, speakers_named,
+			   teardown);
+	g_test_add("/voice/session/speakers-in-order", Fixture, NULL, setup, speakers_in_order,
+			   teardown);
 	g_test_add("/voice/session/room-unaddressed-heard", Fixture, NULL, setup,
 			   room_unaddressed_heard, teardown);
 	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);

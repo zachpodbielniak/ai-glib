@@ -63,6 +63,14 @@ static const Setting settings[] = {
 	/* Unset: the call's own provider and model, as a separate client. */
 	{"relevance-provider", "AI_VOICE_RELEVANCE_PROVIDER", NULL, 0, 0, 0},
 	{"relevance-model", "AI_VOICE_RELEVANCE_MODEL", NULL, 0, 0, 0},
+	/* Unset: every utterance is its participant's. Set: the voiceprint
+	 * service's embedding URL, and utterances are named by voice. */
+	{"speaker-url", "AI_VOICE_SPEAKER_URL", NULL, 0, 0, 0},
+	/* Unset: $XDG_DATA_HOME/ai-glib/voiceprints. */
+	{"voiceprint-dir", "AI_VOICE_VOICEPRINT_DIR", NULL, 0, 0, 0},
+	/* Similarity, in percent, a voice needs to be named. */
+	{"speaker-threshold", "AI_VOICE_SPEAKER_THRESHOLD", NULL, 55, 1, 100},
+	{"unknown-speaker-name", "AI_VOICE_UNKNOWN_SPEAKER_NAME", "Guest", 0, 0, 0},
 	/* Comma-separated; a command may start with one, as in "Name, mute". */
 	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
 	{"mute-message", "AI_VOICE_MUTE_MESSAGE",

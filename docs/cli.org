@@ -685,6 +685,9 @@ ai-call --config /path/to/config.yaml --identity /path/to/identity.md --local
 | =--list-call-settings= | List call property names, types and defaults |
 | =--credentials PATH= | Matrix JSON containing =userId=, =accessToken=, =homeserver= |
 | =--local= | One session on this machine's microphone and speaker; no Matrix, no credentials |
+| =--enroll NAME= | Save NAME's voiceprint from 20 s of the microphone, then exit |
+| =--enroll-file PATH= | With =--enroll=: from a 16 kHz mono 16-bit WAV or raw PCM file |
+| =--enroll-seconds N= | With =--enroll=: record N seconds (3-60) |
 | =-p=, =--provider NAME= | Existing provider factory selection |
 | =-m=, =--model NAME= | Provider model |
 | =--version=, =--license= | Version or license information |
@@ -699,7 +702,10 @@ the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =AI_CALL_LOCAL_SPEAKER_NAME=. Room mode and chiming in use =AI_VOICE_ROOM_MODE=,
 =AI_VOICE_CHIME_IN_THRESHOLD=, =AI_VOICE_CHIME_IN_COOLDOWN_MS=,
 =AI_VOICE_RELEVANCE_PROVIDER= and =AI_VOICE_RELEVANCE_MODEL=; see
-[[file:voice.org::*Room mode and chiming in][Room mode and chiming in]]. Speech/media endpoints use =AI_VOICE_STT_URL=,
+[[file:voice.org::*Room mode and chiming in][Room mode and chiming in]]. Naming speakers by
+voice uses =AI_VOICE_SPEAKER_URL=, =AI_VOICE_VOICEPRINT_DIR=,
+=AI_VOICE_SPEAKER_THRESHOLD= and =AI_VOICE_UNKNOWN_SPEAKER_NAME=; see
+[[file:voice.org::*Naming speakers by voice][Naming speakers by voice]]. Speech/media endpoints use =AI_VOICE_STT_URL=,
 =AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
 
 =SIGUSR1= toggles mute on every live session, as the spoken commands do; a

@@ -75,7 +75,7 @@ typedef struct {
 	App app;
 	SoupServer *server;
 	gchar *url;
-	guint publications, clears, jwt_requests, summaries;
+	guint publications, clears, jwt_requests, summaries, embeds;
 	guint fail_clear; /* 1: one 503; 2: 403 every time */
 	GPtrArray *sent; /* m.room.message bodies; event id "$live<index>" */
 } MatrixFixture;
@@ -86,9 +86,12 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 	MatrixFixture *f = data;
 	const gchar *body = "{}";
 	guint status = 200;
-	g_assert_cmpstr(soup_message_headers_get_one(
-						soup_server_message_get_request_headers(message), "User-Agent"),
-					==, USER_AGENT);
+	/* Matrix and JWT requests carry ai-call's agent; the voiceprint service
+	 * is the library's own client. */
+	if (!g_str_has_suffix(path, "/embed"))
+		g_assert_cmpstr(soup_message_headers_get_one(
+							soup_server_message_get_request_headers(message), "User-Agent"),
+						==, USER_AGENT);
 	if (strstr(path, "/sfu/get") != NULL) {
 		g_autoptr(JsonParser) parser = json_parser_new();
 		SoupMessageBody *request_body = soup_server_message_get_request_body(message);
@@ -111,6 +114,12 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 		soup_server_message_set_response(message, "application/json", SOUP_MEMORY_COPY,
 										 reply, strlen(reply));
 		return;
+	} else if (g_str_has_suffix(path, "/embed")) {
+		SoupMessageBody *request_body = soup_server_message_get_request_body(message);
+		f->embeds++;
+		status = request_body->length >= 16000 ? 200 : 422;
+		body = status == 200 ? "{\"model\":\"test-voices\",\"embedding\":[0.6,0.8]}"
+							 : "{\"error\":\"too short\"}";
 	} else if (strstr(path, "/messages") != NULL)
 		body = "{\"chunk\":[]}";
 	else if (strstr(path, "/state/" MEMBER) != NULL) {
@@ -309,6 +318,74 @@ room_mode_call(MatrixFixture *f, gconstpointer data)
 	g_main_loop_run(a->loop);
 	g_source_remove(timeout);
 	a->transcript_dir = NULL;
+}
+/* Enrolling a voice from a recording: raw PCM or a 16 kHz mono WAV, saved as
+ * the named voiceprint; a call then names speakers with it. */
+static void
+enroll_and_name(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("voiceprints-XXXXXX", NULL);
+	g_autofree gchar *raw = g_build_filename(dir, "zach.pcm", NULL);
+	g_autofree gchar *wav = g_build_filename(dir, "ada.wav", NULL);
+	g_autofree gchar *print = g_build_filename(dir, "Sam.json", NULL);
+	g_autofree gchar *adas = g_build_filename(dir, "Ada.json", NULL);
+	g_autofree gchar *url = g_strconcat(f->url, "embed", NULL);
+	g_autofree gchar *pcm = g_malloc0(32000);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GObject) identifier = NULL;
+	g_autofree gchar *unknown = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint timeout;
+	Call *call;
+	static const guchar header[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E',
+									  'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 1, 0,
+									  0x80, 0x3e, 0, 0, 0, 0x7d, 0, 0, 2, 0, 16, 0,
+									  'd', 'a', 't', 'a', 0, 0x7d, 0, 0};
+	GString *wave = g_string_new_len((const gchar *)header, 44);
+	g_string_append_len(wave, pcm, 32000);
+	g_assert_true(g_file_set_contents(raw, pcm, 32000, NULL));
+	g_assert_true(g_file_set_contents(wav, wave->str, wave->len, NULL));
+	g_string_free(wave, TRUE);
+	a->speaker_url = url;
+	a->voiceprint_dir = dir;
+	a->unknown_speaker_name = "Guest";
+	a->speaker_threshold = 55;
+	g_assert_true(enroll_voice(a, "Sam", raw, 0, &error));
+	g_assert_no_error(error);
+	g_assert_true(enroll_voice(a, "Ada", wav, 0, &error));
+	g_assert_no_error(error);
+	g_assert_true(g_file_test(print, G_FILE_TEST_EXISTS));
+	g_assert_true(g_file_test(adas, G_FILE_TEST_EXISTS));
+	g_assert_cmpuint(f->embeds, ==, 2);
+	/* A recording too short to be anyone is an error, and saves nothing. */
+	g_assert_true(g_file_set_contents(raw, pcm, 3200, NULL));
+	g_assert_false(enroll_voice(a, "Short", raw, 0, &error));
+	g_assert_nonnull(error);
+	g_clear_error(&error);
+
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while (!call->greeted && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_object_get(call->voice, "speaker-identifier", &identifier, "unknown-speaker-name",
+				 &unknown, NULL);
+	g_assert_true(AI_IS_VOICEPRINT_IDENTIFIER(identifier));
+	g_assert_cmpuint(
+		ai_voiceprint_identifier_get_n_voices(AI_VOICEPRINT_IDENTIFIER(identifier)), ==, 2);
+	g_assert_cmpstr(unknown, ==, "Guest");
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	g_unlink(raw);
+	g_unlink(wav);
+	g_unlink(print);
+	g_unlink(adas);
+	g_rmdir(dir);
+	a->speaker_url = a->voiceprint_dir = a->unknown_speaker_name = NULL;
 }
 /* An outbound drop file too large to be a request is removed, not reread
  * every second for the life of the process, and starts no call. */
@@ -971,6 +1048,8 @@ main(int argc, char **argv)
 			   drop_oversized, matrix_teardown);
 	g_test_add("/voice/matrix/room-mode", MatrixFixture, NULL, matrix_setup, room_mode_call,
 			   matrix_teardown);
+	g_test_add("/voice/matrix/enroll-and-name", MatrixFixture, NULL, matrix_setup,
+			   enroll_and_name, matrix_teardown);
 	g_test_add("/voice/matrix/stale-membership", MatrixFixture, NULL, matrix_setup,
 			   stale_membership, matrix_teardown);
 	return g_test_run();

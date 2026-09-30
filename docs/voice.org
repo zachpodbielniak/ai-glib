@@ -390,6 +390,10 @@ ai_call:
   chime-in-cooldown-ms: 60000
   relevance-provider: ""   # unset: the call's own provider, as a separate client
   relevance-model: ""      # unset: the call's own model; a small fast one is enough
+  speaker-url: ""          # set: name speakers by voice with this voiceprint service
+  voiceprint-dir: ""       # unset: $XDG_DATA_HOME/ai-glib/voiceprints
+  speaker-threshold: 55    # similarity, in percent, a voice needs to be named
+  unknown-speaker-name: Guest
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -610,6 +614,49 @@ written to the call transcript as a =relevance= record with =score=,
 =reason= and =chimed=: the numbers to tune the threshold from. The library
 properties are =room-mode=, =relevance-provider=, =chime-in-threshold= and
 =chime-in-cooldown-ms=; a =NULL= provider or a zero threshold never chimes in.
+
+** Naming speakers by voice
+
+One microphone in a room hears everyone as one participant. With
+=speaker-url= (=AI_VOICE_SPEAKER_URL=) set, each final transcript waits for
+its own audio to be named before it is delivered, so the model sees
+"[Sam]: ..." and "[Kim]: ..." rather than one name for the whole room, and
+can answer people by name. Transcripts, live text and room mode all use the
+name. Finals are delivered in the order they were heard, whatever order the
+naming finishes in.
+
+- *Too short to tell* (under half a second: "yes", "stop") is whoever that
+  microphone was last named, for two minutes.
+- *Nobody enrolled matches*: =unknown-speaker-name= (default =Guest=).
+- *The service is down or refuses*: the participant's own name. Naming never
+  delays a call by more than its request timeout, and never fails it.
+- Voice commands are recognised before naming and do not wait for it.
+
+The library side is =AiSpeakerIdentifier= (an interface: PCM in, name out)
+and =AiVoiceprintIdentifier=, which asks a service for a voiceprint and
+matches it against enrolled ones by cosine similarity, at
+=speaker-threshold= (percent, default 55). The service is one HTTP endpoint:
+=POST= raw 16 kHz mono S16LE, answered with
+={"model":"...","embedding":[...]}=; less than half a second may be refused
+with 422. It keeps nothing. Voiceprints live in =voiceprint-dir=
+(=AI_VOICE_VOICEPRINT_DIR=, default =$XDG_DATA_HOME/ai-glib/voiceprints=),
+one =NAME.json= per person, mode =0600=: they are biometric data. Each
+records the model that made it, and one from another model is never
+compared, since the similarity between vectors from two models is noise that
+reads like a weak match. A file that is not a voiceprint is skipped.
+
+Enroll each person once, on the device that will hear them:
+
+#+begin_example
+ai-call --config config.yaml --enroll Sam                 # 20 s of the microphone
+ai-call --config config.yaml --enroll Sam --enroll-seconds 30
+ai-call --config config.yaml --enroll Kim --enroll-file kim.wav   # 16 kHz mono 16-bit
+#+end_example
+
+Enrolling a name again averages the new audio into it, which makes it
+steadier. Delete the file to forget someone. A voice can be imitated or
+replayed; a name from a voiceprint says who is probably talking, and is not a
+login. Nothing here gates what a speaker may ask for.
 
 ** Local audio: a device instead of a call
 

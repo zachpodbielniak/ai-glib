@@ -145,6 +145,7 @@
 #include "voice/ai-speech-recognizer.h"
 #include "voice/ai-speech-synthesizer.h"
 #include "voice/ai-voice-activity.h"
+#include "voice/ai-speaker-identifier.h"
 
 #include "voice/ai-websocket-recognizer.h"
 #include "voice/ai-http-synthesizer.h"
@@ -152,4 +153,5 @@
 #include "voice/ai-voice-session.h"
 #include "voice/ai-livekit-transport.h"
 #include "voice/ai-local-audio-transport.h"
+#include "voice/ai-voiceprint-identifier.h"
 #undef AI_GLIB_INSIDE

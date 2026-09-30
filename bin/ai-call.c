@@ -34,6 +34,8 @@ struct _App {
 	gboolean speak_code, voice_commands, room_mode;
 	guint chime_threshold, chime_cooldown_ms;
 	gchar *relevance_provider, *relevance_model;
+	gchar *speaker_url, *voiceprint_dir, *unknown_speaker_name;
+	guint speaker_threshold;
 	/* --local: one session on this machine's audio devices, no Matrix. */
 	gboolean local, local_echo_cancel;
 	/* NULL: no state file. What a display beside the speaker reads. */
@@ -716,6 +718,175 @@ room_settings(Call *call)
 		g_object_set(judge, "model", app->model, NULL);
 	g_object_set(call->voice, "relevance-provider", judge, NULL);
 }
+/* Speakers named by voice, when a voiceprint service is configured. */
+static AiVoiceprintIdentifier *
+voiceprints(App *app)
+{
+	AiVoiceprintIdentifier *identifier =
+		ai_voiceprint_identifier_new(app->speaker_url, app->voiceprint_dir);
+	g_object_set(identifier, "threshold", app->speaker_threshold / 100.0, NULL);
+	return identifier;
+}
+static void
+naming_settings(Call *call)
+{
+	g_autoptr(AiVoiceprintIdentifier) identifier = NULL;
+	if (call->app->speaker_url == NULL)
+		return;
+	identifier = voiceprints(call->app);
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Naming speakers by voice: %u enrolled",
+		  ai_voiceprint_identifier_get_n_voices(identifier));
+	g_object_set(call->voice, "speaker-identifier", identifier, "unknown-speaker-name",
+				 call->app->unknown_speaker_name, NULL);
+}
+
+/* ---- enrolling a voice ---- */
+
+/* Raw 16 kHz mono S16LE, or a WAV file holding exactly that. */
+static GBytes *
+read_recording(const gchar *path, GError **error)
+{
+	g_autofree gchar *data = NULL;
+	gsize size = 0, at = 12;
+	gboolean format_ok = FALSE;
+	if (!g_file_get_contents(path, &data, &size, error))
+		return NULL;
+	if (size < 12 || memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0) {
+		if (size % 2 != 0) {
+			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+						"%s is not 16-bit PCM", path);
+			return NULL;
+		}
+		return g_bytes_new_take(g_steal_pointer(&data), size);
+	}
+	while (at + 8 <= size) {
+		guint32 length = GUINT32_FROM_LE(*(guint32 *)(data + at + 4));
+		const gchar *chunk = data + at + 8;
+		if (length > size - at - 8)
+			break;
+		if (memcmp(data + at, "fmt ", 4) == 0 && length >= 16)
+			format_ok = GUINT16_FROM_LE(*(guint16 *)chunk) == 1 &&
+						GUINT16_FROM_LE(*(guint16 *)(chunk + 2)) == 1 &&
+						GUINT32_FROM_LE(*(guint32 *)(chunk + 4)) == 16000 &&
+						GUINT16_FROM_LE(*(guint16 *)(chunk + 14)) == 16;
+		else if (memcmp(data + at, "data", 4) == 0) {
+			if (!format_ok)
+				break;
+			return g_bytes_new(chunk, length - length % 2);
+		}
+		at += 8 + length + (length & 1);
+	}
+	g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+				"%s is not a 16 kHz mono 16-bit WAV file", path);
+	return NULL;
+}
+typedef struct {
+	GByteArray *audio;
+	gboolean done;
+	GError *error;
+} Recording;
+static void
+recorded_audio(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointer data)
+{
+	Recording *r = data;
+	gsize size;
+	const guint8 *raw = g_bytes_get_data(pcm, &size);
+	g_byte_array_append(r->audio, raw, size);
+}
+static void
+recording_step(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Recording *r = data;
+	if (!ai_audio_transport_join_finish(AI_AUDIO_TRANSPORT(source), result, &r->error))
+		r->done = TRUE;
+}
+static gboolean
+recording_over(gpointer data)
+{
+	((Recording *)data)->done = TRUE;
+	return G_SOURCE_REMOVE;
+}
+static void
+recording_left(GObject *source, GAsyncResult *result, gpointer data)
+{
+	ai_audio_transport_leave_finish(AI_AUDIO_TRANSPORT(source), result, NULL);
+	((Recording *)data)->done = TRUE;
+}
+/* SECONDS of this machine's microphone, through local-input. */
+static GBytes *
+record_microphone(App *app, guint seconds, GError **error)
+{
+	g_autofree gchar *input = NULL;
+	g_autoptr(AiLocalAudioTransport) transport = NULL;
+	Recording r = {0};
+	GMainContext *context = g_main_context_get_thread_default();
+	g_object_get(app->call_config, "local-input", &input, NULL);
+	transport = g_object_new(AI_TYPE_LOCAL_AUDIO_TRANSPORT, "input", input, "output",
+							 "fakesink", NULL);
+	r.audio = g_byte_array_new();
+	g_signal_connect(transport, "audio", G_CALLBACK(recorded_audio), &r);
+	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(transport), "enroll", NULL, NULL,
+								  recording_step, &r);
+	g_timeout_add_seconds(seconds, recording_over, &r);
+	while (!r.done)
+		g_main_context_iteration(context, TRUE);
+	if (r.error == NULL) {
+		r.done = FALSE;
+		ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(transport), NULL, recording_left, &r);
+		while (!r.done)
+			g_main_context_iteration(context, TRUE);
+	}
+	g_signal_handlers_disconnect_by_data(transport, &r);
+	if (r.error != NULL) {
+		g_propagate_error(error, r.error);
+		g_byte_array_unref(r.audio);
+		return NULL;
+	}
+	return g_byte_array_free_to_bytes(r.audio);
+}
+typedef struct {
+	gboolean done, ok;
+	GError *error;
+} Enrolling;
+static void
+enrolled_voice(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Enrolling *e = data;
+	e->ok = ai_voiceprint_identifier_enroll_finish(AI_VOICEPRINT_IDENTIFIER(source), result,
+												   &e->error);
+	e->done = TRUE;
+}
+/* NAME's voiceprint from the recording at PATH, or from SECONDS of the
+ * microphone when PATH is NULL. */
+static gboolean
+enroll_voice(App *app, const gchar *name, const gchar *path, guint seconds, GError **error)
+{
+	g_autoptr(AiVoiceprintIdentifier) identifier = NULL;
+	g_autoptr(GBytes) pcm = NULL;
+	Enrolling e = {0};
+	if (app->speaker_url == NULL) {
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+							"Configure ai_call.speaker-url to enroll voices");
+		return FALSE;
+	}
+	if (path != NULL)
+		pcm = read_recording(path, error);
+	else {
+		g_print("Recording %u seconds. Talk normally until it stops...\n", seconds);
+		pcm = record_microphone(app, seconds, error);
+	}
+	if (pcm == NULL)
+		return FALSE;
+	identifier = voiceprints(app);
+	ai_voiceprint_identifier_enroll_async(identifier, name, pcm, NULL, enrolled_voice, &e);
+	while (!e.done)
+		g_main_context_iteration(g_main_context_get_thread_default(), TRUE);
+	if (!e.ok) {
+		g_propagate_error(error, e.error);
+		return FALSE;
+	}
+	return TRUE;
+}
 static gboolean
 hangup_idle(gpointer data)
 {
@@ -995,6 +1166,7 @@ maybe_connect(Call *call)
 	g_signal_connect(call->voice, "notify::muted", G_CALLBACK(voice_muted), call);
 	g_signal_connect(call->voice, "relevance", G_CALLBACK(voice_relevance), call);
 	room_settings(call);
+	naming_settings(call);
 	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
@@ -1613,6 +1785,8 @@ main(int argc, char **argv)
 	g_autofree gchar *credentials = NULL, *config_path = NULL, *identity_file = NULL;
 	g_autofree gchar *provider_name = NULL, *model = NULL, *url = NULL;
 	gboolean version = FALSE, license = FALSE, list_settings = FALSE;
+	g_autofree gchar *enroll_name = NULL, *enroll_file = NULL;
+	gint enroll_seconds = 20;
 	g_auto(GStrv) call_overrides = NULL;
 	g_autoptr(AiCallConfig) call_config = ai_call_config_new();
 	guint setting_index;
@@ -1634,6 +1808,13 @@ main(int argc, char **argv)
 		{"local", 0, 0, G_OPTION_ARG_NONE, &app.local,
 		 "Talk through this machine's microphone and speaker instead of answering calls",
 		 NULL},
+		{"enroll", 0, 0, G_OPTION_ARG_STRING, &enroll_name,
+		 "Save NAME's voiceprint from the microphone (or --enroll-file), then exit",
+		 "NAME"},
+		{"enroll-file", 0, 0, G_OPTION_ARG_FILENAME, &enroll_file,
+		 "Enroll from a 16 kHz mono 16-bit WAV or raw PCM file", "PATH"},
+		{"enroll-seconds", 0, 0, G_OPTION_ARG_INT, &enroll_seconds,
+		 "How long to record for --enroll (default 20)", "N"},
 		{"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
 		{"license", 0, 0, G_OPTION_ARG_NONE, &license, "Show license", NULL},
 		{NULL}};
@@ -1707,12 +1888,23 @@ main(int argc, char **argv)
 				 "voice-livekit-url", &app.livekit_url, NULL);
 	if (identity_file == NULL)
 		g_object_get(app.config, "voice-identity-file", &identity_file, NULL);
+	/* Enrolling talks to nobody: no identity, no Matrix. */
+	if (enroll_name != NULL) {
+		if (enroll_seconds < 3 || enroll_seconds > 60) {
+			g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+								"--enroll-seconds must be 3 to 60");
+			goto fail;
+		}
+		app.local = TRUE;
+		app.identity = g_strdup("");
+		identity_file = g_strdup("");
+	}
 	if (identity_file == NULL) {
 		g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 							"Configure voice.identity_file or pass --identity");
 		goto fail;
 	}
-	if (!g_file_get_contents(identity_file, &app.identity, NULL, &error))
+	if (enroll_name == NULL && !g_file_get_contents(identity_file, &app.identity, NULL, &error))
 		goto fail;
 	if (!ai_provider_factory_resolve_defaults(app.config, "ai-call", provider_name, model,
 											  &app.provider, &app.model, &error))
@@ -1805,6 +1997,16 @@ devices:
 			g_clear_pointer(&app.relevance_provider, g_free);
 		if (app.relevance_model != NULL && *app.relevance_model == '\0')
 			g_clear_pointer(&app.relevance_model, g_free);
+		g_object_get(call_config, "speaker-url", &app.speaker_url, "voiceprint-dir",
+					 &app.voiceprint_dir, "speaker-threshold", &app.speaker_threshold,
+					 "unknown-speaker-name", &app.unknown_speaker_name, NULL);
+		if (app.speaker_url != NULL && *app.speaker_url == '\0')
+			g_clear_pointer(&app.speaker_url, g_free);
+		if (app.voiceprint_dir == NULL || *app.voiceprint_dir == '\0') {
+			g_free(app.voiceprint_dir);
+			app.voiceprint_dir =
+				g_build_filename(g_get_user_data_dir(), "ai-glib", "voiceprints", NULL);
+		}
 	}
 	{
 		g_autofree gchar *live = NULL;
@@ -1842,6 +2044,12 @@ devices:
 	/* There is no room to post into. */
 	if (app.local)
 		app.live_text = 0;
+	if (enroll_name != NULL) {
+		if (!enroll_voice(&app, enroll_name, enroll_file, (guint)enroll_seconds, &error))
+			goto fail;
+		g_print("Saved %s's voiceprint in %s\n", enroll_name, app.voiceprint_dir);
+		goto cleanup;
+	}
 	if (!app.local && (app.jwt_url == NULL || *app.jwt_url == '\0' || app.foci == NULL ||
 		*app.foci == '\0' || app.device == NULL || *app.device == '\0')) {
 		g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -1906,6 +2114,9 @@ cleanup:
 	g_free(app.state_file);
 	g_free(app.relevance_provider);
 	g_free(app.relevance_model);
+	g_free(app.speaker_url);
+	g_free(app.voiceprint_dir);
+	g_free(app.unknown_speaker_name);
 	return app.exit_status;
 fail:
 	g_printerr("ai-call: %s\n", error != NULL ? error->message : "startup failed");
