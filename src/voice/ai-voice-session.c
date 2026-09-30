@@ -915,8 +915,9 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 				report(self, error);
 				queue_line(self, line, FALSE);
 			} else {
-				if (text != NULL)
-					append_reply(self, text, TRUE);
+				/* Streamed replies arrive with no text here, but the end
+				 * still has to close a span or a backtick left open. */
+				append_reply(self, text != NULL ? text : "", TRUE);
 				segment(self, TRUE);
 				/* No text, no tool error, nothing pronounceable: a model that
 				 * returns an empty turn, or a tool call a provider failed to

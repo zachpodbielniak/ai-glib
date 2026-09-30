@@ -426,6 +426,19 @@ code_not_spoken(Fixture *f, gconstpointer data)
 	} else
 		g_assert_nonnull(strstr(all, "ssh host"));
 }
+/* The closing backtick is the last thing streamed: the span still closes, and
+ * the name in it is said. */
+static void
+code_span_ends_reply(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *all = NULL;
+	g_object_set(f->session, "speak-code", FALSE, NULL);
+	ai_mock_provider_push_text(f->provider, "The file is `notes.org`");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	all = spoken_all(f);
+	g_assert_nonnull(strstr(all, "notes.org"));
+}
 /* A reply that loops is stopped, not read out to the end: after repeat-limit
  * copies of one line, the rest of the reply is dropped and one line says so. */
 static void
@@ -1275,6 +1288,8 @@ main(int argc, char **argv)
 			   code_not_spoken, teardown);
 	g_test_add("/voice/session/code-not-spoken", Fixture, GINT_TO_POINTER(2), setup,
 			   code_not_spoken, teardown);
+	g_test_add("/voice/session/code-span-ends-reply", Fixture, NULL, setup,
+			   code_span_ends_reply, teardown);
 	g_test_add("/voice/session/runaway-reply-read-by-default", Fixture, GINT_TO_POINTER(3),
 			   setup, runaway_reply_stopped, teardown);
 	g_test_add("/voice/session/runaway-reply-stopped", Fixture, GINT_TO_POINTER(2), setup,
