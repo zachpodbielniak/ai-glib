@@ -592,6 +592,63 @@ background(Fixture *f, gconstpointer data)
 	g_assert_true(contains_tool_result(f, "The background fixture result"));
 	g_assert_null(ai_brigade_get(brigade, "agent-1"));
 }
+/* "Stop" during a background agent's notice ends it; it is not replayed the
+ * moment it is cut off, as it would be after an ordinary barge-in. */
+static void
+stop_during_notice(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiBrigade) brigade = ai_brigade_new();
+	g_autoptr(GObject) worker = g_object_new(test_agent_worker_get_type(), NULL);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint i, notices = 0;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	ai_brigade_set_worker(brigade, AI_AGENT_WORKER(worker));
+	ai_conversation_set_brigade(f->conversation, brigade);
+	ai_mock_provider_push_tool_use(f->provider, "agent_spawn",
+								   "{\"prompt\":\"read background fixture\"}");
+	ai_mock_provider_push_text(f->provider, "I started it.");
+	f->tts->hold_after = 2;
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	said(f, "Stop.");
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	settle(f);
+	for (i = 0; i < f->tts->texts->len; i++)
+		if (strstr(g_ptr_array_index(f->tts->texts, i),
+				   "Background agent agent-1 finished") != NULL)
+			notices++;
+	g_assert_cmpuint(notices, ==, 1);
+}
+/* Muted, the caller is not heard -- and so cannot interrupt either, whether
+ * words confirm the barge-in or sound alone would. */
+static void
+muted_speech_does_not_interrupt(Fixture *f, gconstpointer data)
+{
+	guint i, flushes;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	said(f, "Mute.");
+	settle(f);
+	flushes = f->transport->flushes;
+	f->tts->hold_after = 2;
+	ai_voice_session_say(f->session, "A notice.");
+	g_assert_nonnull(f->tts->held);
+	for (i = 0; i < 25; i++)
+		frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "talking to someone else", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, flushes);
+	g_object_set(f->session, "barge-in-confirm", FALSE, NULL);
+	for (i = 0; i < 25; i++)
+		frame(f, "caller", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, flushes);
+}
 static void
 stalled_turn(Fixture *f, gconstpointer data)
 {
@@ -1227,6 +1284,10 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/mute-and-unmute", Fixture, NULL, setup, mute_and_unmute,
 			   teardown);
 	g_test_add("/voice/session/stop-command", Fixture, NULL, setup, stop_command, teardown);
+	g_test_add("/voice/session/stop-during-notice", Fixture, NULL, setup,
+			   stop_during_notice, teardown);
+	g_test_add("/voice/session/muted-speech-does-not-interrupt", Fixture, NULL, setup,
+			   muted_speech_does_not_interrupt, teardown);
 	g_test_add("/voice/session/command-needs-whole-utterance", Fixture, NULL, setup,
 			   command_needs_whole_utterance, teardown);
 	g_test_add("/voice/session/empty-reply-spoken", Fixture, NULL, setup,

@@ -1010,7 +1010,10 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 				/* While we are talking, sound alone may be our own voice
 				 * returning through the caller's speaker. Listen, and let
 				 * words decide whether this is an interruption. */
-				if (self->state == AI_VOICE_SPEAKING && self->barge_in_confirm) {
+				/* Muted, the caller is not heard, so cannot interrupt: only
+				 * the words "unmute" or "hang up" reach us, as commands. */
+				if (self->muted) {
+				} else if (self->state == AI_VOICE_SPEAKING && self->barge_in_confirm) {
 					if (!p->pending_barge)
 						g_log("ai-glib", G_LOG_LEVEL_INFO,
 							  "possible barge-in by %s after %u ms of speech, waiting for words",
@@ -1187,6 +1190,11 @@ run_command(AiVoiceSession *self, const gchar *name)
 	if (self->stopped)
 		return;
 	if (g_str_equal(name, "stop") || g_str_equal(name, "mute")) {
+		/* A cut-off notice goes back in the queue after a barge-in, so the
+		 * caller's turn goes first. After "stop" there is no turn: it would
+		 * be replayed at once. */
+		if (self->speech != NULL)
+			self->speech->notice = FALSE;
 		interrupt_turn(self);
 		g_queue_clear_full(&self->turns, g_free);
 	}
@@ -1245,7 +1253,7 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 		pump(self);
 		return;
 	}
-	if (pending && has_words(text))
+	if (pending && has_words(text) && !self->muted)
 		confirm_barge(self, p);
 	if (self->voice_commands && has_words(text)) {
 		const gchar *command = match_command(self, text);
