@@ -556,6 +556,14 @@ command_needs_whole_utterance(Fixture *f, gconstpointer data)
 	settle(f);
 	g_assert_cmpuint(commands->len, ==, 1);
 	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "hangup");
+	/* A polite lead-in is still the command, as a caller said it on a real call. */
+	said(f, "Go ahead and hang up.");
+	settle(f);
+	said(f, "Can you stop talking, please?");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 3);
+	g_assert_cmpstr(g_ptr_array_index(commands, 1), ==, "hangup");
+	g_assert_cmpstr(g_ptr_array_index(commands, 2), ==, "stop");
 }
 static void
 background(Fixture *f, gconstpointer data)

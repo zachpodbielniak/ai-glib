@@ -531,8 +531,8 @@ also kills a hook that is still running.
 
 =voice-commands= (=AI_VOICE_COMMANDS=, =yes= or =no=, default =no=) lets the
 caller control the call by voice. A command is the whole utterance, optionally
-led by "hey" or one of =assistant-names= (=AI_VOICE_ASSISTANT_NAMES=,
-comma-separated) and followed by "please". "Assistant, stop listening, please"
+led by "hey", "go ahead and", "can you" or one of =assistant-names=
+(=AI_VOICE_ASSISTANT_NAMES=, comma-separated) and followed by "please". "Assistant, stop listening, please"
 is a command; "I want to stop listening to that podcast" is something to
 answer. Case and punctuation are ignored.
 

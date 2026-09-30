@@ -1105,8 +1105,11 @@ static const VoiceCommand voice_command_table[] = {{"stop", stop_phrases},
 												   {"mute", mute_phrases},
 												   {"unmute", unmute_phrases},
 												   {"hangup", hangup_phrases}};
-static const gchar *const lead_words[] = {"hey", "hi", "ok", "okay", "yo", NULL};
-static const gchar *const tail_words[] = {"please", "now", "thanks", NULL};
+/* Politeness around a command is still the command: "go ahead and hang up". */
+static const gchar *const lead_words[] = {"hey",	  "hi",		"ok",		  "okay",
+										  "yo",		  "please", "just",		  "go ahead and",
+										  "can you", "could you", "would you", NULL};
+static const gchar *const tail_words[] = {"please", "now", "thanks", "for me", NULL};
 /* Lower-case words separated by single spaces; a curly apostrophe is a straight
  * one, anything else that is not a letter or digit separates words. */
 static gchar *
