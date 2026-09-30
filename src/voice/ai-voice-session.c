@@ -2,6 +2,7 @@
 #include "voice/ai-voice-session.h"
 #include "voice/ai-voice-worker-private.h"
 #include "model/ai-tool-result.h"
+#include "core/ai-provider.h"
 #include <string.h>
 
 /**
@@ -99,6 +100,14 @@ struct _AiVoiceSession {
 	guint64 generation, provider_generation;
 	AiVoiceState state;
 	gboolean stopped, provider_pending, media_recovering, barge_in_confirm;
+	/* room-mode: talk that does not name the assistant is heard, not answered */
+	gboolean room_mode;
+	GQueue room;           /* "[Name]: text" heard since the assistant last took a turn */
+	guint64 room_revision; /* bumped by every line heard; a score for an older one is stale */
+	GObject *relevance_provider;
+	guint chime_threshold, chime_cooldown_ms;
+	GCancellable *scoring;
+	gint64 last_turn_us;
 };
 enum {
 	PROP_0,
@@ -127,7 +136,11 @@ enum {
 	PROP_ASSISTANT_NAMES,
 	PROP_MUTED,
 	PROP_MUTE_MESSAGE,
-	PROP_UNMUTE_MESSAGE
+	PROP_UNMUTE_MESSAGE,
+	PROP_ROOM_MODE,
+	PROP_RELEVANCE_PROVIDER,
+	PROP_CHIME_IN_THRESHOLD,
+	PROP_CHIME_IN_COOLDOWN
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 /* A word that starts softly -- "f", "h", "th" -- is not speech to the
@@ -766,6 +779,7 @@ deadline(gpointer data)
 static void
 start_turn(AiVoiceSession *self, const gchar *text)
 {
+	self->last_turn_us = g_get_monotonic_time();
 	self->generation++;
 	self->provider_generation = self->generation;
 	self->provider_pending = TRUE;
@@ -1222,6 +1236,194 @@ run_command(AiVoiceSession *self, const gchar *name)
 			queue_line(self, self->unmute_message, FALSE);
 	}
 }
+/* ---- room mode ----
+ *
+ * With several people in a room, most of what is said is not for the
+ * assistant. It is kept, and handed to the model with the next turn so a
+ * reply knows what was said; a turn happens when someone names the assistant,
+ * or when a relevance score of what was said clears chime-in-threshold. */
+#define ROOM_LINES 40
+static const gchar relevance_prompt[] =
+	"You are listening to a live conversation between people in a room. An AI "
+	"assistant named %s is present and hears everything, but nobody addressed it. "
+	"Decide how much the assistant should speak up right now, from 0 (stay quiet) "
+	"to 10 (clearly should speak).\n"
+	"Score high when: a question was asked that nobody answered; someone states "
+	"something that is wrong; the group is stuck or looking for information the "
+	"assistant is likely to have; someone seems to be waiting for the assistant.\n"
+	"Score low when: people are chatting, joking or talking about personal "
+	"matters; the conversation is going fine without help; the point is already "
+	"settled.\n"
+	"Answer with exactly two lines and nothing else:\n"
+	"SCORE: <0-10>\n"
+	"REASON: <one short sentence>";
+/* Named anywhere in the utterance, as whole words: "Ada, what do you think?"
+ * and "what does Ada think?" both are. With no names, everything is. */
+static gboolean
+addressed(AiVoiceSession *self, const gchar *text)
+{
+	g_autofree gchar *words = NULL, *padded = NULL;
+	guint i;
+	if (self->assistant_names == NULL || self->assistant_names[0] == NULL)
+		return TRUE;
+	words = command_words(text);
+	padded = g_strconcat(" ", words, " ", NULL);
+	for (i = 0; self->assistant_names[i] != NULL; i++) {
+		g_autofree gchar *name = command_words(self->assistant_names[i]);
+		g_autofree gchar *needle = g_strconcat(" ", name, " ", NULL);
+		if (*name != '\0' && strstr(padded, needle) != NULL)
+			return TRUE;
+	}
+	return FALSE;
+}
+/* What was said in the room, then LINE, as one turn; the room starts over. */
+static gchar *
+room_turn(AiVoiceSession *self, const gchar *line)
+{
+	GString *turn = g_string_new(NULL);
+	gchar *heard;
+	while ((heard = g_queue_pop_head(&self->room)) != NULL) {
+		g_string_append(turn, heard);
+		g_string_append_c(turn, '\n');
+		g_free(heard);
+	}
+	g_string_append(turn, line);
+	return g_string_free(turn, FALSE);
+}
+static void
+cancel_scoring(AiVoiceSession *self)
+{
+	if (self->scoring != NULL)
+		g_cancellable_cancel(self->scoring);
+	g_clear_object(&self->scoring);
+}
+typedef struct {
+	AiVoiceSession *session;
+	GCancellable *cancel;
+	GList *messages;
+	guint64 revision;
+} Scoring;
+static void
+scoring_free(Scoring *sc)
+{
+	g_object_unref(sc->session);
+	g_object_unref(sc->cancel);
+	g_list_free_full(sc->messages, g_object_unref);
+	g_free(sc);
+}
+/* "SCORE: 7" anywhere, then "REASON: ..." to the end of its line. Anything
+ * unreadable is a zero: a judge that cannot answer is not a reason to speak. */
+static guint
+parse_relevance(const gchar *text, gchar **reason)
+{
+	g_autofree gchar *lower = g_ascii_strdown(text != NULL ? text : "", -1);
+	const gchar *at = strstr(lower, "score"), *why = strstr(lower, "reason:");
+	guint score = 0;
+	*reason = g_strdup("");
+	if (at == NULL)
+		return 0;
+	for (at += 5; *at == ':' || *at == ' ' || *at == '*'; at++)
+		;
+	if (!g_ascii_isdigit(*at))
+		return 0;
+	score = (guint)MIN(g_ascii_strtoull(at, NULL, 10), 10);
+	if (why != NULL) {
+		const gchar *start = text + (why - lower) + 7;
+		const gchar *end = strchr(start, '\n');
+		g_free(*reason);
+		*reason = g_strstrip(end != NULL ? g_strndup(start, end - start) : g_strdup(start));
+	}
+	return score;
+}
+static gboolean
+recognizing(AiVoiceSession *self);
+static void
+scored(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Scoring *sc = data;
+	AiVoiceSession *self = sc->session;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiResponse) response =
+		ai_provider_chat_finish(AI_PROVIDER(source), result, &error);
+	g_autofree gchar *text = NULL, *reason = NULL;
+	guint score;
+	gboolean chime;
+	if (self->scoring == sc->cancel)
+		g_clear_object(&self->scoring);
+	/* Stale: someone spoke since, and that talk has its own score coming. */
+	if (self->stopped || g_cancellable_is_cancelled(sc->cancel) ||
+		sc->revision != self->room_revision) {
+		scoring_free(sc);
+		return;
+	}
+	if (response == NULL) {
+		g_debug("voice: relevance not scored: %s", error->message);
+		scoring_free(sc);
+		return;
+	}
+	text = ai_response_get_text(response);
+	score = parse_relevance(text, &reason);
+	/* Never over anyone, and never on top of a turn already under way. */
+	chime = score >= self->chime_threshold && !self->provider_pending &&
+			self->speech == NULL && g_queue_is_empty(&self->turns) &&
+			!recognizing(self) && !g_queue_is_empty(&self->room);
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "Relevance %u/10 (threshold %u)%s: %s", score,
+		  self->chime_threshold, chime ? ", chiming in" : "", reason);
+	g_signal_emit_by_name(self, "relevance", score, reason, chime);
+	if (chime && !self->stopped) {
+		g_autofree gchar *note = g_strdup_printf(
+			"[Note]: Nobody addressed you. You are chiming in because: %s. Say it "
+			"in one or two sentences, to whoever it is for.",
+			*reason != '\0' ? reason : "it seemed useful");
+		g_queue_push_tail(&self->turns, room_turn(self, note));
+		pump(self);
+	}
+	scoring_free(sc);
+}
+/* Score what was said since the assistant last spoke, superseding any score
+ * still on its way. Nothing is scored in the cooldown after a turn. */
+static void
+maybe_score(AiVoiceSession *self)
+{
+	GString *talk = g_string_new(NULL);
+	g_autofree gchar *system = NULL;
+	Scoring *sc;
+	GList *l;
+	cancel_scoring(self);
+	if (self->relevance_provider == NULL || self->chime_threshold == 0 || self->stopped ||
+		self->muted || g_queue_is_empty(&self->room) ||
+		(self->last_turn_us != 0 &&
+		 g_get_monotonic_time() - self->last_turn_us < (gint64)self->chime_cooldown_ms * 1000)) {
+		g_string_free(talk, TRUE);
+		return;
+	}
+	for (l = self->room.head; l != NULL; l = l->next) {
+		g_string_append(talk, l->data);
+		g_string_append_c(talk, '\n');
+	}
+	system = g_strdup_printf(relevance_prompt,
+							 self->assistant_names != NULL && self->assistant_names[0] != NULL
+								 ? self->assistant_names[0]
+								 : "the assistant");
+	sc = g_new0(Scoring, 1);
+	sc->session = g_object_ref(self);
+	sc->cancel = g_cancellable_new();
+	sc->revision = self->room_revision;
+	sc->messages = g_list_append(NULL, ai_message_new_user(talk->str));
+	g_string_free(talk, TRUE);
+	self->scoring = g_object_ref(sc->cancel);
+	ai_provider_chat_async(AI_PROVIDER(self->relevance_provider), sc->messages, system, 200,
+						   NULL, sc->cancel, scored, sc);
+}
+static void
+hear_room(AiVoiceSession *self, const gchar *name, const gchar *text)
+{
+	g_queue_push_tail(&self->room, g_strdup_printf("[%s]: %s", name, text));
+	while (g_queue_get_length(&self->room) > ROOM_LINES)
+		g_free(g_queue_pop_head(&self->room));
+	self->room_revision++;
+	maybe_score(self);
+}
 static void
 confirm_barge(AiVoiceSession *self, Participant *p)
 {
@@ -1285,8 +1487,17 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 		pump(self);
 		return;
 	}
+	if (self->room_mode && *text != '\0' && !addressed(self, text)) {
+		g_signal_emit_by_name(self, "transcript", p->name, text, TRUE);
+		hear_room(self, p->name, text);
+		pump(self);
+		return;
+	}
 	if (text != NULL && *text != '\0' && g_queue_get_length(&self->turns) < 32) {
-		labelled = g_strdup_printf("[%s]: %s", p->name, text);
+		g_autofree gchar *line = g_strdup_printf("[%s]: %s", p->name, text);
+		cancel_scoring(self);
+		self->room_revision++;
+		labelled = room_turn(self, line);
 		g_queue_push_tail(&self->turns, g_steal_pointer(&labelled));
 	}
 	if (text != NULL && *text != '\0')
@@ -1364,6 +1575,7 @@ ai_voice_session_stop(AiVoiceSession *self)
 		return;
 	self->stopped = TRUE;
 	self->media_recovering = TRUE;
+	cancel_scoring(self);
 	interrupt_turn(self);
 	g_hash_table_iter_init(&iter, self->participants);
 	while (g_hash_table_iter_next(&iter, &key, NULL)) {
@@ -1394,6 +1606,7 @@ dispose(GObject *object)
 	g_clear_object(&self->activity);
 	g_clear_object(&self->conversation);
 	g_clear_object(&self->turn_cancel);
+	g_clear_object(&self->relevance_provider);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->dispose(object);
 }
 static void
@@ -1405,6 +1618,7 @@ finalize(GObject *object)
 	g_hash_table_unref(self->repeats);
 	g_string_free(self->span, TRUE);
 	g_strfreev(self->assistant_names);
+	g_queue_clear_full(&self->room, g_free);
 	g_free(self->mute_message);
 	g_free(self->unmute_message);
 	g_free(self->repeat_message);
@@ -1469,6 +1683,14 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_string(value, self->mute_message);
 	else if (id == PROP_UNMUTE_MESSAGE)
 		g_value_set_string(value, self->unmute_message);
+	else if (id == PROP_ROOM_MODE)
+		g_value_set_boolean(value, self->room_mode);
+	else if (id == PROP_RELEVANCE_PROVIDER)
+		g_value_set_object(value, self->relevance_provider);
+	else if (id == PROP_CHIME_IN_THRESHOLD)
+		g_value_set_uint(value, self->chime_threshold);
+	else if (id == PROP_CHIME_IN_COOLDOWN)
+		g_value_set_uint(value, self->chime_cooldown_ms);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1540,7 +1762,21 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	} else if (id == PROP_UNMUTE_MESSAGE) {
 		g_free(self->unmute_message);
 		self->unmute_message = g_value_dup_string(value);
-	} else if (id == PROP_TRIM_AFTER) {
+	} else if (id == PROP_ROOM_MODE)
+		self->room_mode = g_value_get_boolean(value);
+	else if (id == PROP_RELEVANCE_PROVIDER) {
+		GObject *provider = g_value_get_object(value);
+		cancel_scoring(self);
+		if (provider != NULL && !AI_IS_PROVIDER(provider)) {
+			g_message("relevance-provider: a %s is not an AiProvider; ignored",
+					  G_OBJECT_TYPE_NAME(provider));
+			provider = NULL;
+		}
+		g_set_object(&self->relevance_provider, provider);
+	} else if (id == PROP_CHIME_IN_THRESHOLD)
+		self->chime_threshold = g_value_get_uint(value);
+	else if (id == PROP_CHIME_IN_COOLDOWN)
+		self->chime_cooldown_ms = g_value_get_uint(value); else if (id == PROP_TRIM_AFTER) {
 		self->trim_after = g_value_get_uint(value);
 		if (self->worker != NULL)
 			ai_voice_worker_set_trim_after(self->worker, self->trim_after);
@@ -1670,6 +1906,54 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							"Spoken when the caller unmutes the assistant; empty says nothing",
 							"I'm listening.",
 							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:room-mode:
+	 *
+	 * Several people share the audio. What does not name the assistant (one of
+	 * #AiVoiceSession:assistant-names, anywhere in the utterance) is heard but
+	 * not answered, and is given to the model with the next turn. Without
+	 * assistant names, every utterance names it.
+	 */
+	g_object_class_install_property(
+		oc, PROP_ROOM_MODE,
+		g_param_spec_boolean("room-mode", "Room mode",
+							 "Answer only utterances that name the assistant; hear the rest",
+							 FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:relevance-provider: (type GObject)
+	 *
+	 * An #AiProvider that scores, from 0 to 10, how much the assistant should
+	 * speak up about talk it was not addressed in. A small fast model is
+	 * enough. It must not be the conversation's own provider object, which
+	 * the session's worker thread is using. %NULL never chimes in.
+	 */
+	g_object_class_install_property(
+		oc, PROP_RELEVANCE_PROVIDER,
+		g_param_spec_object("relevance-provider", "Relevance provider",
+							"Provider that scores unaddressed room talk for chiming in",
+							G_TYPE_OBJECT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:chime-in-threshold:
+	 *
+	 * In room mode, a relevance score at or above this takes a turn unasked.
+	 * 0 never does.
+	 */
+	g_object_class_install_property(
+		oc, PROP_CHIME_IN_THRESHOLD,
+		g_param_spec_uint("chime-in-threshold", "Chime-in threshold",
+						  "Relevance (1-10) at which the assistant speaks up unasked; 0 never",
+						  0, 10, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:chime-in-cooldown-ms:
+	 *
+	 * After any turn, room talk is not scored for this long.
+	 */
+	g_object_class_install_property(
+		oc, PROP_CHIME_IN_COOLDOWN,
+		g_param_spec_uint("chime-in-cooldown-ms", "Chime-in cooldown",
+						  "Time after a turn before room talk is scored again",
+						  0, 3600000, 60000,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TRIM_AFTER,
 		g_param_spec_uint("trim-tool-results-after", "Trim tool results after",
@@ -1806,6 +2090,18 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 */
 	g_signal_new("spoken", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
 				 NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_BOOLEAN);
+	/**
+	 * AiVoiceSession::relevance:
+	 * @session: the session
+	 * @score: 0 to 10
+	 * @reason: the scorer's one-line reason, possibly empty
+	 * @chimed: whether the assistant took a turn because of it
+	 *
+	 * Room talk was scored. Emitted for every score, above the threshold or
+	 * not, so a host can log them and tune #AiVoiceSession:chime-in-threshold.
+	 */
+	g_signal_new("relevance", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+				 NULL, G_TYPE_NONE, 3, G_TYPE_UINT, G_TYPE_STRING, G_TYPE_BOOLEAN);
 	/**
 	 * AiVoiceSession::state-changed:
 	 * @self: the session

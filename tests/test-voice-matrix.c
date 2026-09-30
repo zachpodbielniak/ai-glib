@@ -261,6 +261,55 @@ stale_clear(MatrixFixture *f, gconstpointer data)
 		g_source_remove(timeout);
 	}
 }
+/* Room mode reaches the session with a relevance judge of its own -- never
+ * the conversation's provider, which the worker thread is using -- and every
+ * score is in the transcript, so the threshold can be tuned from real calls. */
+static void
+room_mode_call(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-room-XXXXXX", NULL);
+	g_autofree gchar *path = NULL, *contents = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	g_autoptr(GObject) judge = NULL;
+	gboolean room = FALSE;
+	guint threshold = 0, cooldown = 0, timeout;
+	Call *call;
+	a->transcript_dir = dir;
+	a->room_mode = TRUE;
+	a->chime_threshold = 7;
+	a->chime_cooldown_ms = 30000;
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while ((!call->greeted || call->transcript == NULL) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_nonnull(call->voice);
+	g_object_get(call->voice, "room-mode", &room, "chime-in-threshold", &threshold,
+				 "chime-in-cooldown-ms", &cooldown, "relevance-provider", &judge, NULL);
+	g_assert_true(room);
+	g_assert_cmpuint(threshold, ==, 7);
+	g_assert_cmpuint(cooldown, ==, 30000);
+	g_assert_nonnull(judge);
+	{
+		g_autoptr(AiConversation) conversation = NULL;
+		g_object_get(call->voice, "conversation", &conversation, NULL);
+		g_assert_true(judge != (GObject *)ai_conversation_get_provider(conversation));
+	}
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	g_signal_emit_by_name(call->voice, "relevance", 8, "an unanswered question", TRUE);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_nonnull(strstr(contents, "\"type\":\"relevance\""));
+	g_assert_nonnull(strstr(contents, "\"score\":8"));
+	g_assert_nonnull(strstr(contents, "\"reason\":\"an unanswered question\""));
+	g_assert_nonnull(strstr(contents, "\"chimed\":true"));
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	a->transcript_dir = NULL;
+}
 /* An outbound drop file too large to be a request is removed, not reread
  * every second for the life of the process, and starts no call. */
 static void
@@ -920,6 +969,8 @@ main(int argc, char **argv)
 			   transcript_write_failure, matrix_teardown);
 	g_test_add("/voice/matrix/drop-oversized", MatrixFixture, NULL, matrix_setup,
 			   drop_oversized, matrix_teardown);
+	g_test_add("/voice/matrix/room-mode", MatrixFixture, NULL, matrix_setup, room_mode_call,
+			   matrix_teardown);
 	g_test_add("/voice/matrix/stale-membership", MatrixFixture, NULL, matrix_setup,
 			   stale_membership, matrix_teardown);
 	return g_test_run();

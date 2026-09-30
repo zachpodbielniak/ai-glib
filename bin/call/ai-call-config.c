@@ -54,6 +54,15 @@ static const Setting settings[] = {
 	{"speak-code", "AI_VOICE_SPEAK_CODE", NULL, 0, 0, 0},
 	/* Unset or no: "mute", "stop" and "hang up" are things to answer. yes: commands. */
 	{"voice-commands", "AI_VOICE_COMMANDS", NULL, 0, 0, 0},
+	/* Unset or no: every utterance is for the assistant. yes: only those that
+	 * name it (assistant-names); the rest is heard and given to the next turn. */
+	{"room-mode", "AI_VOICE_ROOM_MODE", NULL, 0, 0, 0},
+	/* 0: never speak unasked. 1-10: the relevance score that makes it. */
+	{"chime-in-threshold", "AI_VOICE_CHIME_IN_THRESHOLD", NULL, 0, 0, 10},
+	{"chime-in-cooldown-ms", "AI_VOICE_CHIME_IN_COOLDOWN_MS", NULL, 60000, 0, 3600000},
+	/* Unset: the call's own provider and model, as a separate client. */
+	{"relevance-provider", "AI_VOICE_RELEVANCE_PROVIDER", NULL, 0, 0, 0},
+	{"relevance-model", "AI_VOICE_RELEVANCE_MODEL", NULL, 0, 0, 0},
 	/* Comma-separated; a command may start with one, as in "Name, mute". */
 	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
 	{"mute-message", "AI_VOICE_MUTE_MESSAGE",

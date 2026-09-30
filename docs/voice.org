@@ -385,6 +385,11 @@ ai_call:
   transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
   transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
   live-text: off   # replies: the assistant's words in the room as spoken; both: the caller's too
+  room-mode: no            # yes: answer only when named (assistant-names); hear the rest
+  chime-in-threshold: 0    # 1-10: speak up unasked at this relevance; 0 never
+  chime-in-cooldown-ms: 60000
+  relevance-provider: ""   # unset: the call's own provider, as a separate client
+  relevance-model: ""      # unset: the call's own model; a small fast one is enough
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -507,6 +512,7 @@ header whose =end= and =duration_ms= are still =null=:
 {"type":"utterance","at":"2026-01-01T12:00:04Z","role":"caller","speaker":"Caller","text":"What's on today?"}
 {"type":"tool","at":"2026-01-01T12:00:05Z","name":"calendar","arguments":{"day":"today"},"result":"free until noon","is_error":false}
 {"type":"utterance","at":"2026-01-01T12:00:06Z","role":"assistant","speaker":"@assistant:example.org","text":"Nothing until noon.","complete":true}
+{"type":"relevance","at":"2026-01-01T12:01:10Z","score":8,"reason":"a question about the release went unanswered","chimed":true}
 #+end_example
 
 At hangup the header is rewritten atomically with =end= and =duration_ms=.
@@ -566,6 +572,44 @@ with the name after acting on stop, mute and unmute; hang-up is left to the
 application. ai-call writes each command to the transcript as
 ={"type":"command","at":...,"name":"mute"}= and, with =live-text= set, posts
 =(muted)=, =(listening again)=, =(stopped)= or =(hung up)= to the room.
+
+** Room mode and chiming in
+
+For a device in a room with several people, most of what is said is not
+for the assistant. =room-mode= (=AI_VOICE_ROOM_MODE=, =yes= or =no=, unset:
+no) makes a turn only of an utterance that names the assistant -- any of
+=assistant-names=, anywhere in it, as whole words: "Ada, what do you think?"
+and "what does Ada think?" both do. Everything else is heard: it is reported
+as a transcript like any other line, kept (the last 40 lines), and given to
+the model at the start of the next turn, so the reply knows what was said
+before it was asked. Without =assistant-names=, every utterance names it.
+Voice commands work as before; each is a whole utterance.
+
+=chime-in-threshold= (=AI_VOICE_CHIME_IN_THRESHOLD=, 0-10, unset: 0) lets
+the assistant speak up unasked. After each unaddressed line, what has been
+said since the assistant last spoke is scored from 0 to 10 by a separate
+model: high when a question went unanswered, something said is wrong, or the
+group is stuck on something the assistant is likely to know; low for chat,
+jokes, personal talk, or a point already settled. At or above the threshold,
+and only when nobody is speaking and no turn is under way, the talk becomes a
+turn with a note saying why the assistant is joining in. A score for talk
+that has since moved on is dropped: only the latest counts, and an answer
+the judge could not format is a zero.
+
+=chime-in-cooldown-ms= (=AI_VOICE_CHIME_IN_COOLDOWN_MS=, default 60000)
+stops scoring for that long after any turn, so the assistant does not answer
+its own answer. =relevance-provider= and =relevance-model=
+(=AI_VOICE_RELEVANCE_PROVIDER=, =AI_VOICE_RELEVANCE_MODEL=) choose the judge;
+unset, it is the call's own provider and model, built as a separate client
+because the conversation's is in use on the session's worker thread. A judge
+that cannot be built turns chiming in off for the call and is logged; it
+never fails the call.
+
+Every score is logged at INFO, emitted as =AiVoiceSession::relevance=, and
+written to the call transcript as a =relevance= record with =score=,
+=reason= and =chimed=: the numbers to tune the threshold from. The library
+properties are =room-mode=, =relevance-provider=, =chime-in-threshold= and
+=chime-in-cooldown-ms=; a =NULL= provider or a zero threshold never chimes in.
 
 ** Local audio: a device instead of a call
 

@@ -31,7 +31,9 @@ struct _App {
 	gchar *transcript_dir, *transcript_hook;
 	/* live-text: 0 off, 1 the replies, 2 the replies and the caller's words. */
 	gint live_text;
-	gboolean speak_code, voice_commands;
+	gboolean speak_code, voice_commands, room_mode;
+	guint chime_threshold, chime_cooldown_ms;
+	gchar *relevance_provider, *relevance_model;
 	/* --local: one session on this machine's audio devices, no Matrix. */
 	gboolean local, local_echo_cancel;
 	/* NULL: no state file. What a display beside the speaker reads. */
@@ -670,6 +672,50 @@ voice_tool(AiVoiceSession *voice, const gchar *name, const gchar *arguments,
 		call->transcript_stopped = TRUE;
 	}
 }
+static void
+voice_relevance(AiVoiceSession *voice, guint score, const gchar *reason, gboolean chimed,
+				gpointer data)
+{
+	Call *call = data;
+	g_autoptr(GDateTime) now = NULL;
+	g_autoptr(GError) error = NULL;
+	if (call->transcript == NULL || call->transcript_stopped)
+		return;
+	now = g_date_time_new_now_utc();
+	if (!ai_call_transcript_append_relevance(call->transcript, now, score, reason, chimed,
+											 &error)) {
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
+		call->transcript_stopped = TRUE;
+	}
+}
+/* Room mode, and a relevance judge of its own when chiming in is on. The judge
+ * is a separate client even for the same provider: the conversation's runs on
+ * the session's worker thread. A judge that cannot be built costs chiming in,
+ * never the call. */
+static void
+room_settings(Call *call)
+{
+	App *app = call->app;
+	g_autoptr(GObject) judge = NULL;
+	g_autoptr(GError) error = NULL;
+	g_object_set(call->voice, "room-mode", app->room_mode, "chime-in-threshold",
+				 app->chime_threshold, "chime-in-cooldown-ms", app->chime_cooldown_ms, NULL);
+	if (app->chime_threshold == 0)
+		return;
+	judge = app->relevance_provider != NULL
+				? ai_provider_factory_new_from_string(app->relevance_provider, app->config,
+													  &error)
+				: ai_provider_factory_new(app->provider, app->config, &error);
+	if (judge == NULL) {
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Chiming in is off: %s", error->message);
+		return;
+	}
+	if (app->relevance_model != NULL)
+		g_object_set(judge, "model", app->relevance_model, NULL);
+	else if (app->model != NULL && app->relevance_provider == NULL)
+		g_object_set(judge, "model", app->model, NULL);
+	g_object_set(call->voice, "relevance-provider", judge, NULL);
+}
 static gboolean
 hangup_idle(gpointer data)
 {
@@ -947,6 +993,8 @@ maybe_connect(Call *call)
 	g_signal_connect(call->voice, "tool", G_CALLBACK(voice_tool), call);
 	g_signal_connect(call->voice, "command", G_CALLBACK(voice_command), call);
 	g_signal_connect(call->voice, "notify::muted", G_CALLBACK(voice_muted), call);
+	g_signal_connect(call->voice, "relevance", G_CALLBACK(voice_relevance), call);
+	room_settings(call);
 	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
@@ -1739,6 +1787,26 @@ devices:
 		}
 	}
 	{
+		g_autofree gchar *room = NULL;
+		g_object_get(call_config, "room-mode", &room, "chime-in-threshold",
+					 &app.chime_threshold, "chime-in-cooldown-ms", &app.chime_cooldown_ms,
+					 "relevance-provider", &app.relevance_provider, "relevance-model",
+					 &app.relevance_model, NULL);
+		if (room == NULL || *room == '\0' || g_str_equal(room, "no"))
+			app.room_mode = FALSE;
+		else if (g_str_equal(room, "yes"))
+			app.room_mode = TRUE;
+		else {
+			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+						"room-mode must be yes or no, not \"%s\"", room);
+			goto fail;
+		}
+		if (app.relevance_provider != NULL && *app.relevance_provider == '\0')
+			g_clear_pointer(&app.relevance_provider, g_free);
+		if (app.relevance_model != NULL && *app.relevance_model == '\0')
+			g_clear_pointer(&app.relevance_model, g_free);
+	}
+	{
 		g_autofree gchar *live = NULL;
 		g_object_get(call_config, "live-text", &live, NULL);
 		if (live == NULL || *live == '\0' || g_str_equal(live, "off"))
@@ -1836,6 +1904,8 @@ cleanup:
 	g_free(app.transcript_dir);
 	g_free(app.transcript_hook);
 	g_free(app.state_file);
+	g_free(app.relevance_provider);
+	g_free(app.relevance_model);
 	return app.exit_status;
 fail:
 	g_printerr("ai-call: %s\n", error != NULL ? error->message : "startup failed");

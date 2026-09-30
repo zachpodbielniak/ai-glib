@@ -32,6 +32,11 @@ ai_call_transcript_append_tool(AiCallTranscript *self, GDateTime *at, const gcha
 gboolean
 ai_call_transcript_append_command(AiCallTranscript *self, GDateTime *at, const gchar *name,
 								  GError **error);
+/* Room talk was scored for chiming in: the score, the judge's reason, and
+ * whether the assistant took a turn because of it. */
+gboolean
+ai_call_transcript_append_relevance(AiCallTranscript *self, GDateTime *at, guint score,
+									const gchar *reason, gboolean chimed, GError **error);
 /* Rewrites the header with END and the duration, atomically. Idempotent. */
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error);

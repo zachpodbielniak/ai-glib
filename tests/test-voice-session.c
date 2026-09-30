@@ -249,6 +249,156 @@ slow_tool(AiToolUse *use, GCancellable *cancel, GError **error, gpointer data)
 		return NULL;
 	return g_strdup("finished");
 }
+/* ---- room mode: heard, answered when named, chiming in when relevant ---- */
+typedef struct {
+	guint count;
+	guint score;
+	gboolean chimed;
+	gchar *reason;
+} Relevance;
+static void
+on_relevance(AiVoiceSession *session, guint score, const gchar *reason, gboolean chimed,
+			 gpointer data)
+{
+	Relevance *r = data;
+	r->count++;
+	r->score = score;
+	r->chimed = chimed;
+	g_free(r->reason);
+	r->reason = g_strdup(reason);
+}
+static void
+said_by(Fixture *f, const gchar *speaker, const gchar *text)
+{
+	g_signal_emit_by_name(f->stt, "transcript", speaker, text, TRUE);
+	drain();
+}
+static void
+wait_relevance(Relevance *r, guint n)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	while (r->count < n && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_cmpuint(r->count, >=, n);
+}
+/* The text of the last user message the conversation's provider was sent. */
+static gchar *
+last_user_text(Fixture *f)
+{
+	GList *l;
+	for (l = g_list_last(ai_mock_provider_get_last_messages(f->provider)); l != NULL;
+		 l = l->prev)
+		if (ai_message_get_role(l->data) == AI_ROLE_USER)
+			return ai_message_get_text(l->data);
+	return NULL;
+}
+static AiMockProvider *
+room(Fixture *f, guint threshold)
+{
+	AiMockProvider *judge = ai_mock_provider_new();
+	g_object_set(f->session, "room-mode", TRUE, "assistant-names", "Ada", NULL);
+	if (threshold > 0)
+		g_object_set(f->session, "relevance-provider", judge, "chime-in-threshold",
+					 threshold, NULL);
+	g_signal_emit_by_name(f->transport, "participant-joined", "second", "Sam");
+	return judge;
+}
+/* In a room, talk that does not name the assistant is heard but not answered;
+ * when someone does, the reply sees what was said before. */
+static void
+room_unaddressed_heard(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	g_autofree gchar *sent = NULL;
+	said_by(f, "caller", "We should ship on Friday.");
+	said_by(f, "second", "Friday is tight.");
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	ai_mock_provider_push_text(f->provider, "Friday works if the tests pass.");
+	said_by(f, "caller", "Ada, what do you think?");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Friday works if the tests pass.");
+	sent = last_user_text(f);
+	g_assert_nonnull(strstr(sent, "[Caller]: We should ship on Friday."));
+	g_assert_nonnull(strstr(sent, "[Sam]: Friday is tight."));
+	g_assert_nonnull(strstr(sent, "[Caller]: Ada, what do you think?"));
+}
+/* Scored above the threshold, the assistant speaks up unasked, once, and
+ * then waits out the cooldown before it is scored again. */
+static void
+room_chime_in(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	g_autofree gchar *sent = NULL;
+	Relevance r = {0};
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 8\nREASON: the release date question went unanswered");
+	ai_mock_provider_push_text(f->provider, "The release is Thursday.");
+	said_by(f, "second", "Does anyone know when the release is?");
+	wait_relevance(&r, 1);
+	wait_replies(f, 1);
+	g_assert_cmpuint(r.score, ==, 8);
+	g_assert_true(r.chimed);
+	g_assert_cmpstr(r.reason, ==, "the release date question went unanswered");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "The release is Thursday.");
+	sent = last_user_text(f);
+	g_assert_nonnull(strstr(sent, "[Sam]: Does anyone know when the release is?"));
+	g_assert_nonnull(strstr(sent, "the release date question went unanswered"));
+	/* Just spoke: the next remark is not even scored. */
+	said_by(f, "caller", "Thursday, huh.");
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(judge), ==, 1);
+	g_assert_cmpuint(r.count, ==, 1);
+	g_free(r.reason);
+}
+/* Below the threshold nothing is said, but the score is still reported. */
+static void
+room_chime_below(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	Relevance r = {0};
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 3\nREASON: small talk");
+	said_by(f, "caller", "Nice weather today.");
+	wait_relevance(&r, 1);
+	settle(f);
+	g_assert_cmpuint(r.score, ==, 3);
+	g_assert_false(r.chimed);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_free(r.reason);
+}
+/* Someone speaking again while a score is on its way makes it stale: only
+ * the score of the latest talk counts, and an unreadable one is zero. */
+static void
+room_chime_superseded(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	Relevance r = {0};
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_set_delay_ms(judge, 100);
+	ai_mock_provider_push_text(judge, "SCORE: 9\nREASON: stale");
+	ai_mock_provider_push_text(judge, "I think it is quite relevant.");
+	said_by(f, "caller", "So the release.");
+	said_by(f, "second", "Yeah, the release.");
+	wait_relevance(&r, 1);
+	settle(f);
+	{
+		gint64 until = g_get_monotonic_time() + 300000;
+		while (g_get_monotonic_time() < until) {
+			drain();
+			g_usleep(1000);
+		}
+	}
+	g_assert_cmpuint(r.count, ==, 1);
+	g_assert_cmpuint(r.score, ==, 0);
+	g_assert_false(r.chimed);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_free(r.reason);
+}
 /* The deadline gives up on a turn stuck in a tool, and the caller is heard
  * again: the next question is answered, not queued behind the stuck one. */
 static void
@@ -1404,6 +1554,13 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
 	g_test_add("/voice/session/onset-keeps-preroll", Fixture, NULL, setup,
 			   onset_keeps_preroll, teardown);
+	g_test_add("/voice/session/room-unaddressed-heard", Fixture, NULL, setup,
+			   room_unaddressed_heard, teardown);
+	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);
+	g_test_add("/voice/session/room-chime-below", Fixture, NULL, setup, room_chime_below,
+			   teardown);
+	g_test_add("/voice/session/room-chime-superseded", Fixture, NULL, setup,
+			   room_chime_superseded, teardown);
 	g_test_add("/voice/session/deadline-in-tool", Fixture, NULL, setup, deadline_in_tool,
 			   teardown);
 	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);
