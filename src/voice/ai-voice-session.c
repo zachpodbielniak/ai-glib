@@ -70,6 +70,7 @@ struct _AiVoiceSession {
 	/* speak-code off: this reply's position relative to markdown code */
 	gboolean speak_code, in_fence, in_inline;
 	guint ticks; /* backticks at the end of the last delta, not yet resolved */
+	GString *span; /* the open inline span, decided when it closes */
 	/* repeat-limit: copies of each line this reply, and whether it was stopped */
 	guint repeat_limit;
 	gchar *repeat_message;
@@ -580,10 +581,26 @@ segment(AiVoiceSession *self, gboolean final)
 		offer_line(self, text);
 	}
 }
+/* An inline span with no whitespace is a name — "v81-roadmap.org" — and the
+ * sentence around it means nothing without it. One with whitespace is a
+ * command, and read aloud it is noise. */
+static void
+close_span(AiVoiceSession *self)
+{
+	const gchar *p;
+	for (p = self->span->str; *p != '\0'; p++)
+		if (g_ascii_isspace(*p))
+			break;
+	if (*p == '\0')
+		g_string_append_len(self->pending_text, self->span->str, self->span->len);
+	g_string_truncate(self->span, 0);
+	self->in_inline = FALSE;
+}
 /* speak-code off: markdown code is what a model writes when it shows a command
- * instead of running it, and read aloud it is noise. Fenced blocks and inline
- * spans are left out; the prose around them is kept. A run of backticks at
- * the end of a delta is carried, since "``" and "```" mean different things. */
+ * instead of running it, and read aloud it is noise. Fenced blocks and
+ * multi-word inline spans are left out; the prose around them is kept. A run
+ * of backticks at the end of a delta is carried, since "``" and "```" mean
+ * different things. */
 static void
 append_reply(AiVoiceSession *self, const gchar *text, gboolean final)
 {
@@ -600,24 +617,33 @@ append_reply(AiVoiceSession *self, const gchar *text, gboolean final)
 		if (self->ticks >= 3) {
 			self->in_fence = !self->in_fence;
 			self->in_inline = FALSE;
+			g_string_truncate(self->span, 0);
 			g_string_append_c(self->pending_text, '\n');
-		} else if (self->ticks > 0 && !self->in_fence)
-			self->in_inline = !self->in_inline;
+		} else if (self->ticks > 0 && !self->in_fence) {
+			if (self->in_inline)
+				close_span(self);
+			else
+				self->in_inline = TRUE;
+		}
 		self->ticks = 0;
 		if (self->in_fence)
 			continue;
 		if (self->in_inline) {
 			/* An unclosed span ends with its line rather than eating the reply. */
 			if (*p == '\n') {
-				self->in_inline = FALSE;
+				close_span(self);
 				g_string_append_c(self->pending_text, '\n');
-			}
+			} else
+				g_string_append_c(self->span, *p);
 			continue;
 		}
 		g_string_append_c(self->pending_text, *p);
 	}
-	if (final)
+	if (final) {
+		if (self->in_inline)
+			close_span(self);
 		self->ticks = 0;
+	}
 }
 static void
 speech_complete(Speech *s)
@@ -734,6 +760,7 @@ start_turn(AiVoiceSession *self, const gchar *text)
 	self->progress_used = FALSE;
 	self->in_fence = self->in_inline = self->runaway = FALSE;
 	self->ticks = 0;
+	g_string_truncate(self->span, 0);
 	g_hash_table_remove_all(self->repeats);
 	clear_progress(self);
 	clear_hold(self);
@@ -1209,6 +1236,7 @@ finalize(GObject *object)
 	g_hash_table_unref(self->participants);
 	g_hash_table_unref(self->notices);
 	g_hash_table_unref(self->repeats);
+	g_string_free(self->span, TRUE);
 	g_free(self->repeat_message);
 	g_main_context_unref(self->context);
 	g_queue_clear_full(&self->lines, line_free);
@@ -1559,6 +1587,7 @@ ai_voice_session_init(AiVoiceSession *self)
 	self->notices = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	self->repeats = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	self->speak_code = TRUE;
+	self->span = g_string_new(NULL);
 	self->pending_text = g_string_new(NULL);
 	self->spoken = g_string_new(NULL);
 	self->deadline_ms = 20000;

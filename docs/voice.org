@@ -416,10 +416,12 @@ remainder is sent ahead of EOS, so no audio is lost.
 
 =speak-code= (=AI_VOICE_SPEAK_CODE=, =yes= or =no=, default =yes=). A model that
 shows a command instead of running it writes it as markdown code, and read
-aloud it is noise: "ssh host quote grep dash r i". With =no=, inline code spans
-and fenced blocks are left out of speech and the prose around them is kept, so
-"Run =ls= now" is spoken as "Run now". An unclosed inline span ends with its
-line rather than silencing the rest of the reply. Anything else is a startup
+aloud it is noise: "ssh host quote grep dash r i". With =no=, fenced blocks and
+inline spans containing whitespace are left out of speech and the prose around
+them is kept, so "Run =ssh host ls= now" is spoken as "Run now". A one-word
+span is a file or a name, and a sentence means nothing without it: "renamed
+it to =notes.org=" is spoken with the name. An unclosed inline span ends with
+its line rather than silencing the rest of the reply. Anything else is a startup
 error.
 
 =repeat-limit= (=AI_VOICE_REPEAT_LIMIT=, default 0: off) stops a reply that has

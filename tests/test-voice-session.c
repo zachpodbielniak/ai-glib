@@ -397,8 +397,9 @@ spoken_all(Fixture *f)
 	return g_string_free(all, FALSE);
 }
 /* A model that writes the command instead of calling the tool: read aloud, a
- * shell command is noise. With speak-code off, code spans and fenced blocks
- * are left out of speech and the prose around them is kept. */
+ * shell command is noise. With speak-code off, fenced blocks and multi-word
+ * spans are left out of speech and the prose around them is kept; a one-word
+ * span is a file or a name and is spoken. */
 static void
 code_not_spoken(Fixture *f, gconstpointer data)
 {
@@ -408,7 +409,8 @@ code_not_spoken(Fixture *f, gconstpointer data)
 		g_object_set(f->session, "speak-code", FALSE, NULL);
 	ai_mock_provider_push_text(f->provider,
 							   "Here it is: `ls -la` right now.\n```bash\nssh host "
-							   "'grep -ri garden notes'\n```\nAll set.");
+							   "'grep -ri garden notes'\n```\nI renamed it to "
+							   "`v81-roadmap.org`. All set.");
 	utterance(f, "caller");
 	wait_replies(f, 2);
 	all = spoken_all(f);
@@ -418,6 +420,8 @@ code_not_spoken(Fixture *f, gconstpointer data)
 		g_assert_null(strstr(all, "bash"));
 		g_assert_nonnull(strstr(all, "Here it is"));
 		g_assert_nonnull(strstr(all, "right now."));
+		/* A one-word span is a name, not a command: say it. */
+		g_assert_nonnull(strstr(all, "I renamed it to v81-roadmap.org."));
 		g_assert_nonnull(strstr(all, "All set."));
 	} else
 		g_assert_nonnull(strstr(all, "ssh host"));
