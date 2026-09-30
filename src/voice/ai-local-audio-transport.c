@@ -135,8 +135,10 @@ describe(AiLocalAudioTransport *self)
 					   "appsink name=voice-in sync=false max-buffers=100 drop=true ");
 	/* Playback: the echo probe sees exactly what the speaker plays, which is
 	 * what the canceller subtracts from the microphone. */
+	/* The queue gives the sink its processing deadline; without one it warns
+	 * that the pipeline cannot meet it, and a slow board drops audio. */
 	g_string_append(d, "appsrc name=voice-out is-live=true format=time do-timestamp=false ! "
-					   "audioconvert ! audioresample ! ");
+					   "queue ! audioconvert ! audioresample ! ");
 	if (self->echo_cancel)
 		g_string_append(d, "audio/x-raw,format=S16LE,rate=48000,channels=1 ! "
 						   "webrtcechoprobe ! audioconvert ! audioresample ! ");
