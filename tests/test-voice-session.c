@@ -642,14 +642,23 @@ static const gchar *const streamed_deltas[] = {
 	"Let's get to work", ".", " ", "\360\237\230\210", " Version 3", ".", "5 is out",
 	".", " Hmm", ".", ".", ".", " okay", ".", NULL};
 static const gchar *const streamed_spoken[] = {
-	"Let's get to work.", "Version 3.5 is out.", "Hmm.", "okay.", NULL};
+	"Let's get to work.", "Version 3.5 is out.", "Hmm...", "okay.", NULL};
+/* A delta that ends on a period is not yet a sentence end: the next one
+ * may continue a file name or a domain. Heard live as "garden." / "org)". */
+static const gchar *const file_name_deltas[] = {
+	"One note (garden", ".", "org) lists a plot", ".", " The other is bigger", ".", NULL};
+static const gchar *const file_name_spoken[] = {
+	"One note (garden.org) lists a plot.", "The other is bigger.", NULL};
 static void
 streamed_segments(Fixture *f, gconstpointer data)
 {
 	g_autoptr(GObject) provider = g_object_new(test_stalled_provider_get_type(), NULL);
 	gint64 limit = g_get_monotonic_time() + 3000000;
 	guint i;
-	((TestStalledProvider *)provider)->deltas = streamed_deltas;
+	const gchar *const *deltas = data != NULL ? file_name_deltas : streamed_deltas;
+	const gchar *const *spoken = data != NULL ? file_name_spoken : streamed_spoken;
+	guint expected = g_strv_length((gchar **)spoken);
+	((TestStalledProvider *)provider)->deltas = deltas;
 	ai_voice_session_stop(f->session);
 	g_clear_object(&f->session);
 	g_clear_object(&f->conversation);
@@ -660,17 +669,17 @@ streamed_segments(Fixture *f, gconstpointer data)
 	g_object_set(f->session, "barge-in-ms", 10, NULL);
 	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
 	utterance(f, "caller");
-	while (f->tts->texts->len < G_N_ELEMENTS(streamed_spoken) - 1 &&
-		   g_get_monotonic_time() < limit) {
+	while (f->tts->texts->len < expected && g_get_monotonic_time() < limit) {
 		drain();
 		g_usleep(1000);
 	}
 	iterate_for(50);
 	for (i = 0; i < f->tts->texts->len; i++)
 		g_test_message("tts[%u] = '%s'", i, (gchar *)g_ptr_array_index(f->tts->texts, i));
-	g_assert_cmpuint(f->tts->texts->len, ==, G_N_ELEMENTS(streamed_spoken) - 1);
-	for (i = 0; streamed_spoken[i] != NULL; i++)
-		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, streamed_spoken[i]);
+	iterate_for(400);
+	g_assert_cmpuint(f->tts->texts->len, ==, expected);
+	for (i = 0; spoken[i] != NULL; i++)
+		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, spoken[i]);
 }
 /* What the assistant actually said, as the caller heard it: one report per
  * segment that produced audio, marked complete or cut off. */
@@ -899,6 +908,8 @@ main(int argc, char **argv)
 	g_test_add("/voice/session/never-answering-provider", Fixture, "deadline", setup,
 			   stalled_turn, teardown);
 	g_test_add("/voice/session/streamed-segments", Fixture, NULL, setup,
+			   streamed_segments, teardown);
+	g_test_add("/voice/session/streamed-file-name", Fixture, GINT_TO_POINTER(2), setup,
 			   streamed_segments, teardown);
 	g_test_add("/voice/session/tool-error-multibyte/0", Fixture, GUINT_TO_POINTER(0),
 			   setup, tool_error_multibyte, teardown);

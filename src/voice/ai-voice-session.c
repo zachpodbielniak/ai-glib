@@ -67,6 +67,7 @@ struct _AiVoiceSession {
 	guint turn_lines; /* lines queued since the current provider turn began */
 	guint tool_progress_delay_ms;
 	GSource *progress; /* pending tool-progress line, held for teardown */
+	GSource *hold;     /* flushes a delta that ended on a period */
 	guint64 progress_generation;
 	gboolean progress_used; /* at most one per turn */
 	GBytes *fallback_pcm;
@@ -403,15 +404,72 @@ sentence_end(const gchar *text, gsize len, gboolean final)
 			end++;
 		while ((n = closing_len(text + end, len - end)) != 0)
 			end += n;
-		/* Speak a sentence as soon as it arrives, unless "3." may yet be "3.5". */
-		if (end == len)
-			return final || end - i > 1 || i == 0 || !g_ascii_isdigit(text[i - 1]) ? end
-																				 : 0;
+		/* A delta ending on "?" or "!" ends a sentence. One ending on "." may
+		 * not: the next delta can make it "3.5" or "garden.org". The session
+		 * holds that briefly and flushes it if nothing follows. */
+		if (end == len) {
+			gsize j;
+			if (final)
+				return end;
+			for (j = i; j < end; j++)
+				if (text[j] == '.')
+					return 0;
+			return end;
+		}
 		if (g_ascii_isspace(text[end]))
 			return end;
 		i = end - 1;
 	}
 	return 0;
+}
+#define PERIOD_HOLD_MS 250
+static void
+clear_hold(AiVoiceSession *self)
+{
+	if (self->hold == NULL)
+		return;
+	g_source_destroy(self->hold);
+	g_clear_pointer(&self->hold, g_source_unref);
+}
+static void
+segment(AiVoiceSession *self, gboolean final);
+static void
+pump(AiVoiceSession *self);
+/* Nothing followed the period: it was a sentence end after all. */
+static gboolean
+hold_fire(gpointer data)
+{
+	AiVoiceSession *self = data;
+	g_clear_pointer(&self->hold, g_source_unref);
+	if (self->stopped)
+		return G_SOURCE_REMOVE;
+	segment(self, TRUE);
+	pump(self);
+	return G_SOURCE_REMOVE;
+}
+/* After a streamed delta: arm the hold only while the unspoken text ends on
+ * a period, so a turn that stops there is still spoken. */
+static void
+update_hold(AiVoiceSession *self)
+{
+	const gchar *end = self->pending_text->str + self->pending_text->len;
+	gboolean waiting = FALSE;
+	while (end > self->pending_text->str && closing_len(end - 1, 1) != 0)
+		end--;
+	while (end > self->pending_text->str && terminator(end[-1])) {
+		if (end[-1] == '.')
+			waiting = TRUE;
+		end--;
+	}
+	if (!waiting) {
+		clear_hold(self);
+		return;
+	}
+	if (self->hold != NULL)
+		return;
+	self->hold = g_timeout_source_new(PERIOD_HOLD_MS);
+	g_source_set_callback(self->hold, hold_fire, self, NULL);
+	g_source_attach(self->hold, self->context);
 }
 static void
 segment(AiVoiceSession *self, gboolean final)
@@ -542,6 +600,7 @@ start_turn(AiVoiceSession *self, const gchar *text)
 	self->turn_lines = 0;
 	self->progress_used = FALSE;
 	clear_progress(self);
+	clear_hold(self);
 	state(self, AI_VOICE_THINKING);
 	self->deadline = g_timeout_source_new(self->deadline_ms);
 	g_source_set_callback(self->deadline, deadline, self, NULL);
@@ -611,6 +670,7 @@ interrupt_turn(AiVoiceSession *self)
 {
 	clear_deadline(self);
 	clear_progress(self);
+	clear_hold(self);
 	self->paused_deadline_us = 0;
 	if (self->turn_cancel != NULL)
 		g_cancellable_cancel(self->turn_cancel);
@@ -669,6 +729,7 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 	} else if (kind == AI_VOICE_MAIL_DONE) {
 		if (generation == self->provider_generation) {
 			clear_progress(self);
+			clear_hold(self);
 			self->provider_pending = FALSE;
 			clear_deadline(self);
 			self->paused_deadline_us = 0;
@@ -703,6 +764,7 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 			if (self->pending_text->len < 65536)
 				g_string_append(self->pending_text, ai_event_get_text(event));
 			segment(self, FALSE);
+			update_hold(self);
 		} else if (k == AI_EVENT_TOOL_FINISHED) {
 			AiToolResult *result = ai_event_get_tool_result(event);
 			if (result != NULL && ai_tool_result_get_is_error(result)) {
