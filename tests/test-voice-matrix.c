@@ -243,6 +243,17 @@ stale_clear(MatrixFixture *f, gconstpointer data)
 	pump_ms(100);
 	g_assert_cmpuint(f->clears, ==, clears);
 	g_assert_true(g_hash_table_lookup(a->calls, "!room:test") == fresh);
+	/* With nobody in the room, the late reply may have re-added the old
+	 * membership after its clear: clear it once more. */
+	{
+		gpointer key = NULL;
+		g_assert_true(g_hash_table_steal_extended(a->calls, "!room:test", &key, NULL));
+		g_free(key);
+	}
+	member_posted(a, NULL, NULL, &stale);
+	pump_ms(100);
+	g_assert_cmpuint(f->clears, ==, clears + 1);
+	g_hash_table_insert(a->calls, g_strdup("!room:test"), fresh);
 	{
 		guint timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
 		shutdown_app(a);

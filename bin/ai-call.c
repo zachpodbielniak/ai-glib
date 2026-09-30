@@ -1013,7 +1013,8 @@ member_posted(App *app, JsonNode *root, const GError *error, gpointer data)
 	if (call->closing) {
 		/* A shutdown can race the original PUT. Clear again after its reply --
 		 * unless a new call has the room now, whose membership that would be. */
-		if (g_hash_table_lookup(app->calls, call->room) != call) {
+		Call *current = g_hash_table_lookup(app->calls, call->room);
+		if (current != NULL && current != call) {
 			call->clearing = FALSE;
 			removed_if_done(call);
 			return;
