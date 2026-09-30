@@ -203,7 +203,9 @@ hook(void)
 	gboolean expired = FALSE;
 	guint source;
 	g_assert_true(g_file_set_contents(
-		script, "#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$#\" > \"$(dirname \"$0\")/hook-ran\"\n",
+		script,
+		"#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$2\" \"$#\" > \"$(dirname \"$0\")/hook-ran.tmp\" && "
+		"mv \"$(dirname \"$0\")/hook-ran.tmp\" \"$(dirname \"$0\")/hook-ran\"\n",
 		-1, NULL));
 	g_assert_cmpint(g_chmod(script, 0755), ==, 0);
 	command = g_strdup_printf("'%s' --from-test", script);
@@ -214,10 +216,9 @@ hook(void)
 		g_main_context_iteration(NULL, TRUE);
 	if (!expired)
 		g_source_remove(source);
-	/* Give the child a moment to finish writing, then reap via the loop. */
+	/* The hook renames its output into place, so it exists only complete. */
 	while (g_main_context_iteration(NULL, FALSE))
 		;
-	g_usleep(100000);
 	g_assert_true(g_file_get_contents(out, &seen, NULL, NULL));
 	/* The configured argument first, the transcript path last, unsplit. */
 	expected = g_strdup_printf("--from-test|%s|2", transcript);
