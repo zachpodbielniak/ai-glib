@@ -13,6 +13,7 @@
 
 typedef struct _App App;
 typedef struct _Call Call;
+typedef struct _LiveReply LiveReply;
 typedef void (*Reply)(App *, JsonNode *, const GError *, gpointer);
 struct _App {
 	GMainLoop *loop;
@@ -27,6 +28,8 @@ struct _App {
 	gchar *since, *drop_path, *greeting, *outbound_greeting;
 	/* NULL directory: no transcripts. Resolved once from the call config. */
 	gchar *transcript_dir, *transcript_hook;
+	/* live-text: 0 off, 1 the replies, 2 the replies and the caller's words. */
+	gint live_text;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -51,7 +54,10 @@ struct _Call {
 	gint64 answer_deadline, answered_at, transcript_at;
 	GDateTime *began;
 	AiCallTranscript *transcript;
+	LiveReply *live; /* this turn's reply in the room, when live-text is on */
 };
+static void
+live_reply_unref(gpointer data);
 typedef struct {
 	App *app;
 	SoupMessage *message;
@@ -111,6 +117,7 @@ call_unref(gpointer data)
 	g_clear_object(&call->transport);
 	g_clear_object(&call->synthesizer);
 	g_clear_object(&call->transcript);
+	g_clear_pointer(&call->live, live_reply_unref);
 	g_clear_pointer(&call->began, g_date_time_unref);
 	g_free(call->room);
 	g_free(call->key);
@@ -361,11 +368,139 @@ info_log(const gchar *domain, GLogLevelFlags level, const gchar *message, gpoint
 	/* INFO lifecycle messages are visible without G_MESSAGES_DEBUG. */
 	g_printerr("%s INFO: %s\n", domain, message);
 }
+/* live-text: what is said appears in the room as it is said. A reply is one
+ * notice, edited as each sentence plays, rather than a message per sentence.
+ * Sends for one reply are serialised so edits cannot land out of order, and a
+ * reply owns its own state: an answer arriving after the next turn began
+ * updates its own message, never the new one. */
+struct _LiveReply {
+	grefcount refs;
+	App *app;
+	gchar *room, *event_id;
+	GString *text;
+	gboolean sending, dirty;
+};
+static LiveReply *
+live_reply_ref(LiveReply *live)
+{
+	g_ref_count_inc(&live->refs);
+	return live;
+}
+static void
+live_reply_unref(gpointer data)
+{
+	LiveReply *live = data;
+	if (!g_ref_count_dec(&live->refs))
+		return;
+	g_free(live->room);
+	g_free(live->event_id);
+	g_string_free(live->text, TRUE);
+	g_free(live);
+}
+static gchar *
+live_url(App *app, const gchar *room)
+{
+	g_autofree gchar *escaped = g_uri_escape_string(room, NULL, FALSE);
+	g_autofree gchar *txn = g_uuid_string_random();
+	return g_strdup_printf("%s/_matrix/client/v3/rooms/%s/send/m.room.message/%s",
+						   app->homeserver, escaped, txn);
+}
+static void
+live_reply_send(LiveReply *live);
+static void
+live_reply_sent(App *app, JsonNode *root, const GError *error, gpointer data)
+{
+	LiveReply *live = data;
+	live->sending = FALSE;
+	if (error != NULL)
+		/* Not the call's problem; the next sentence sends the whole reply again. */
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Live text not sent: %s", error->message);
+	else if (live->event_id == NULL)
+		live->event_id = g_strdup(ai_json_get_string(object(root), "event_id", NULL));
+	if (live->dirty && !app->stopping)
+		live_reply_send(live);
+}
+static void
+live_reply_send(LiveReply *live)
+{
+	g_autoptr(JsonNode) body = empty_object();
+	JsonObject *o = object(body);
+	g_autofree gchar *url = live_url(live->app, live->room);
+	json_object_set_string_member(o, "msgtype", "m.notice");
+	if (live->event_id == NULL)
+		json_object_set_string_member(o, "body", live->text->str);
+	else {
+		JsonObject *content = json_object_new(), *relation = json_object_new();
+		g_autofree gchar *fallback = g_strconcat("* ", live->text->str, NULL);
+		json_object_set_string_member(o, "body", fallback);
+		json_object_set_string_member(content, "msgtype", "m.notice");
+		json_object_set_string_member(content, "body", live->text->str);
+		json_object_set_object_member(o, "m.new_content", content);
+		json_object_set_string_member(relation, "rel_type", "m.replace");
+		json_object_set_string_member(relation, "event_id", live->event_id);
+		json_object_set_object_member(o, "m.relates_to", relation);
+	}
+	live->sending = TRUE;
+	live->dirty = FALSE;
+	request(live->app, "PUT", url, TRUE, body, NULL, live_reply_sent,
+			live_reply_ref(live), live_reply_unref);
+}
+static void
+live_notice_sent(App *app, JsonNode *root, const GError *error, gpointer data)
+{
+	if (error != NULL)
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Live text not sent: %s", error->message);
+}
+/* "@user:server:DEVICE" is a participant identity; the room knows who "user" is. */
+static gchar *
+speaker_label(const gchar *speaker)
+{
+	const gchar *colon = speaker[0] == '@' ? strchr(speaker, ':') : NULL;
+	return colon != NULL ? g_strndup(speaker + 1, colon - speaker - 1) : g_strdup(speaker);
+}
+static void
+live_caller(Call *call, const gchar *speaker, const gchar *text)
+{
+	g_autoptr(JsonNode) body = NULL;
+	g_autofree gchar *label = NULL, *line = NULL, *url = NULL;
+	/* Whatever the assistant says next is a new reply. */
+	g_clear_pointer(&call->live, live_reply_unref);
+	if (call->app->live_text < 2)
+		return;
+	body = empty_object();
+	label = speaker_label(speaker);
+	line = g_strdup_printf("%s: %s", label, text);
+	url = live_url(call->app, call->room);
+	json_object_set_string_member(object(body), "msgtype", "m.notice");
+	json_object_set_string_member(object(body), "body", line);
+	request(call->app, "PUT", url, TRUE, body, NULL, live_notice_sent, NULL, NULL);
+}
+static void
+live_spoken(Call *call, const gchar *text)
+{
+	LiveReply *live = call->live;
+	if (live == NULL) {
+		live = call->live = g_new0(LiveReply, 1);
+		g_ref_count_init(&live->refs);
+		live->app = call->app;
+		live->room = g_strdup(call->room);
+		live->text = g_string_new(NULL);
+	}
+	if (live->text->len > 0)
+		g_string_append_c(live->text, ' ');
+	g_string_append(live->text, text);
+	if (live->sending)
+		live->dirty = TRUE;
+	else
+		live_reply_send(live);
+}
 static void
 voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 				 gboolean final, gpointer data)
 {
 	Call *call = data;
+	if (final && call->app->live_text > 0)
+		live_caller(call, speaker, text);
 	if (final) {
 		call->transcripts++;
 		call->transcript_at = g_get_monotonic_time();
@@ -388,6 +523,8 @@ voice_spoken(AiVoiceSession *voice, const gchar *text, gboolean complete, gpoint
 	Call *call = data;
 	g_autoptr(GDateTime) now = NULL;
 	g_autoptr(GError) error = NULL;
+	if (call->app->live_text > 0 && *text != '\0')
+		live_spoken(call, text);
 	if (call->transcript == NULL)
 		return;
 	now = g_date_time_new_now_utc();
@@ -1346,6 +1483,21 @@ main(int argc, char **argv)
 		app.transcript_dir = ai_call_transcript_default_dir();
 	else if (*app.transcript_dir == '\0')
 		g_clear_pointer(&app.transcript_dir, g_free);
+	{
+		g_autofree gchar *live = NULL;
+		g_object_get(call_config, "live-text", &live, NULL);
+		if (live == NULL || *live == '\0' || g_str_equal(live, "off"))
+			app.live_text = 0;
+		else if (g_str_equal(live, "replies"))
+			app.live_text = 1;
+		else if (g_str_equal(live, "both"))
+			app.live_text = 2;
+		else {
+			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+						"live-text must be off, replies or both, not \"%s\"", live);
+			goto fail;
+		}
+	}
 	if (app.transcript_hook != NULL && *app.transcript_hook == '\0')
 		g_clear_pointer(&app.transcript_hook, g_free);
 	if (app.drop_path == NULL)

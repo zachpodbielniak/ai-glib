@@ -18,6 +18,8 @@ static const Setting settings[] = {
 	/* Unset: $XDG_STATE_HOME/ai-glib/calls. Empty: no transcripts. */
 	{"transcript-dir", "AI_CALL_TRANSCRIPT_DIR", NULL, 0, 0, 0},
 	{"transcript-hook", "AI_CALL_TRANSCRIPT_HOOK", NULL, 0, 0, 0},
+	/* Unset or off: nothing is posted. replies|both. */
+	{"live-text", "AI_CALL_LIVE_TEXT", NULL, 0, 0, 0},
 	{"synthesis-error-message", "AI_VOICE_SYNTHESIS_ERROR_MESSAGE",
 	 "Sorry, the speech service is unavailable. Please try again.", 0, 0, 0},
 	{"goodbye-message", "AI_CALL_GOODBYE_MESSAGE", "Goodbye.", 0, 0, 0},

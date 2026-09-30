@@ -75,6 +75,7 @@ typedef struct {
 	gchar *url;
 	guint publications, clears, jwt_requests, summaries;
 	gboolean fail_clear;
+	GPtrArray *sent; /* m.room.message bodies; event id "$live<index>" */
 } MatrixFixture;
 static void
 matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path,
@@ -100,7 +101,15 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 	} else if (strstr(path, "/openid/") != NULL)
 		body = "{\"access_token\":\"openid-test\",\"token_type\":\"Bearer\",\"matrix_"
 			   "server_name\":\"test\",\"expires_in\":600}";
-	else if (strstr(path, "/messages") != NULL)
+	else if (strstr(path, "/send/m.room.message/") != NULL) {
+		SoupMessageBody *request_body = soup_server_message_get_request_body(message);
+		g_autofree gchar *reply = g_strdup_printf("{\"event_id\":\"$live%u\"}", f->sent->len);
+		g_ptr_array_add(f->sent, g_strndup(request_body->data, request_body->length));
+		soup_server_message_set_status(message, 200, NULL);
+		soup_server_message_set_response(message, "application/json", SOUP_MEMORY_COPY,
+										 reply, strlen(reply));
+		return;
+	} else if (strstr(path, "/messages") != NULL)
 		body = "{\"chunk\":[]}";
 	else if (strstr(path, "/state/" MEMBER) != NULL) {
 		g_autoptr(JsonParser) parser = json_parser_new();
@@ -134,6 +143,7 @@ matrix_setup(MatrixFixture *f, gconstpointer data)
 {
 	GSList *uris;
 	App *a = &f->app;
+	f->sent = g_ptr_array_new_with_free_func(g_free);
 	f->server = soup_server_new(NULL, NULL);
 	soup_server_add_handler(f->server, NULL, matrix_request, f, NULL);
 	g_assert_true(soup_server_listen_local(f->server, 0, 0, NULL));
@@ -173,6 +183,7 @@ matrix_teardown(MatrixFixture *f, gconstpointer data)
 	g_free(a->jwt_url);
 	g_free(a->since);
 	g_free(f->url);
+	g_ptr_array_unref(f->sent);
 }
 static gboolean
 matrix_timeout(gpointer data)
@@ -267,6 +278,110 @@ transcript_on_disk(MatrixFixture *f, gconstpointer data)
 	g_assert_true(g_file_get_contents(marker, &seen, NULL, NULL));
 	g_assert_cmpstr(seen, ==, path);
 	a->transcript_dir = a->transcript_hook = NULL;
+}
+static void
+pump_ms(guint ms)
+{
+	gint64 until = g_get_monotonic_time() + ms * 1000;
+	while (g_get_monotonic_time() < until) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+}
+/* Index of the one sent message whose body is TEXT; with EDIT, the one edit
+ * whose new content is TEXT. -1 when there is none. */
+static gint
+find_sent(MatrixFixture *f, guint from, const gchar *text, gboolean edit, gchar **target)
+{
+	guint i;
+	for (i = from; i < f->sent->len; i++) {
+		g_autoptr(JsonParser) parser = json_parser_new();
+		JsonObject *o, *relation, *content;
+		g_assert_true(json_parser_load_from_data(parser, f->sent->pdata[i], -1, NULL));
+		o = ai_json_root_object(parser);
+		g_assert_cmpstr(ai_json_get_string(o, "msgtype", NULL), ==, "m.notice");
+		relation = ai_json_get_object(o, "m.relates_to");
+		content = ai_json_get_object(o, "m.new_content");
+		if (!edit && relation == NULL &&
+			g_strcmp0(ai_json_get_string(o, "body", NULL), text) == 0)
+			return (gint)i;
+		if (edit && relation != NULL && content != NULL &&
+			g_strcmp0(ai_json_get_string(content, "body", NULL), text) == 0) {
+			g_assert_cmpstr(ai_json_get_string(relation, "rel_type", NULL), ==,
+							"m.replace");
+			g_assert_cmpstr(ai_json_get_string(content, "msgtype", NULL), ==, "m.notice");
+			*target = g_strdup(ai_json_get_string(relation, "event_id", NULL));
+			return (gint)i;
+		}
+	}
+	return -1;
+}
+/* live-text: the caller's words and the assistant's reply appear in the room as they
+ * are spoken. A reply is one message, edited as each sentence plays, and the
+ * next turn starts a new one. Off, nothing is sent. */
+static void
+live_text(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	gint mode = GPOINTER_TO_INT(data);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	g_autofree gchar *target = NULL, *first_id = NULL;
+	guint base, expected = mode == 2 ? 5 : mode == 1 ? 3 : 0, timeout;
+	gint first, edit, second;
+	Call *call;
+	a->live_text = mode;
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while ((!call->greeted ||
+			ai_voice_session_get_state(call->voice) != AI_VOICE_LISTENING) &&
+		   g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_true(call->greeted);
+	pump_ms(100); /* let the greeting's own message land */
+	base = f->sent->len;
+	g_signal_emit_by_name(call->voice, "transcript", "@caller:test:DEVICE", "partial",
+						  FALSE);
+	g_signal_emit_by_name(call->voice, "transcript", "@caller:test:DEVICE",
+						  "What's on today?", TRUE);
+	g_signal_emit_by_name(call->voice, "spoken", "Nothing until noon.", TRUE);
+	g_signal_emit_by_name(call->voice, "spoken", "Then lunch.", TRUE);
+	g_signal_emit_by_name(call->voice, "transcript", "@caller:test:DEVICE", "Thanks.",
+						  TRUE);
+	g_signal_emit_by_name(call->voice, "spoken", "You're welcome.", TRUE);
+	limit = g_get_monotonic_time() + 3000000;
+	while (f->sent->len < base + expected && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	pump_ms(100); /* nothing further arrives */
+	g_assert_cmpuint(f->sent->len - base, ==, expected);
+	if (mode != 0) {
+		first = find_sent(f, base, "Nothing until noon.", FALSE, NULL);
+		edit = find_sent(f, base, "Nothing until noon. Then lunch.", TRUE, &target);
+		second = find_sent(f, base, "You're welcome.", FALSE, NULL);
+		g_assert_cmpint(first, >=, 0);
+		g_assert_cmpint(edit, >, first);
+		g_assert_cmpint(second, >=, 0);
+		first_id = g_strdup_printf("$live%d", first);
+		g_assert_cmpstr(target, ==, first_id);
+		if (mode == 2) {
+			g_assert_cmpint(find_sent(f, base, "caller: What's on today?", FALSE, NULL),
+							>=, 0);
+			g_assert_cmpint(find_sent(f, base, "caller: Thanks.", FALSE, NULL), >=, 0);
+		} else
+			g_assert_cmpint(find_sent(f, base, "caller: What's on today?", FALSE, NULL),
+							==, -1);
+		g_assert_cmpint(find_sent(f, base, "caller: partial", FALSE, NULL), ==, -1);
+	}
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	a->live_text = 0;
 }
 static void
 summary_log(const gchar *domain, GLogLevelFlags level, const gchar *message,
@@ -490,6 +605,12 @@ main(int argc, char **argv)
 			   matrix_setup, signal_goodbye, matrix_teardown);
 	g_test_add("/voice/matrix/goodbye-timeout", MatrixFixture, NULL, matrix_setup,
 			   signal_goodbye, matrix_teardown);
+	g_test_add("/voice/matrix/live-text-off", MatrixFixture, GINT_TO_POINTER(0),
+			   matrix_setup, live_text, matrix_teardown);
+	g_test_add("/voice/matrix/live-text-replies", MatrixFixture, GINT_TO_POINTER(1),
+			   matrix_setup, live_text, matrix_teardown);
+	g_test_add("/voice/matrix/live-text-both", MatrixFixture, GINT_TO_POINTER(2),
+			   matrix_setup, live_text, matrix_teardown);
 	g_test_add("/voice/matrix/transcript-on-disk", MatrixFixture, NULL, matrix_setup,
 			   transcript_on_disk, matrix_teardown);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,

@@ -370,6 +370,7 @@ ai_call:
   synthesis-error-message: "Speech is temporarily unavailable. Please try again."
   transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
   transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
+  live-text: off   # replies: the assistant's words in the room as spoken; both: the caller's too
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -421,6 +422,7 @@ bytes or less are left as they are.
 =AI_CALL_GOODBYE_MESSAGE= overrides the shutdown line.
 =AI_CALL_TRANSCRIPT_DIR= and =AI_CALL_TRANSCRIPT_HOOK= set the transcript
 directory and hook described under [[*Call transcripts][Call transcripts]].
+=AI_CALL_LIVE_TEXT= sets =live-text=, described under [[*Live text in the room][Live text in the room]].
 
 At startup, the binary asynchronously synthesizes the configured synthesis-error
 line into a bounded in-memory cache. Prewarming has a four-second deadline and
@@ -498,6 +500,29 @@ failed write, a failed hook or a failed start is logged at INFO and never
 affects the call. The hook is started by the service, so it shares the
 service's lifetime: under systemd, a stop that kills the whole control group
 also kills a hook that is still running.
+
+** Live text in the room
+
+=live-text= (=AI_CALL_LIVE_TEXT=) posts what is said on a call into the call's
+room while it is said, for a caller who wants to read along or check what was
+heard. It is off unless set:
+
+| Value | Posted |
+|-------+--------|
+| unset, =off= | Nothing |
+| =replies= | The assistant's replies |
+| =both= | The replies, and each final utterance of the caller as =name: text= |
+
+Everything is sent as =m.notice=, which clients do not notify for. A reply is
+one message. It is posted when its first segment finishes playing, and each
+later segment edits it (=m.replace=), so a long answer is one growing message
+rather than a message per sentence. Edits to one reply are sent one at a time,
+so they cannot arrive out of order. The caller speaking again starts a new
+reply. A caller's name is the user part of their Matrix ID, since the room
+already shows who that is. Partial transcripts are never posted.
+
+A failed send is logged at INFO and never affects the call; the next segment
+sends the whole reply again. An unrecognized value is a startup error.
 
 Outbound JSON drop files use the Python answerer's =room_id=, =message= and
 =target= fields. The file is consumed before starting the call. Ring events
