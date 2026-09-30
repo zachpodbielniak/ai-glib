@@ -582,10 +582,15 @@ sink works, including a test source for a machine with no sound card:
 Three things about the transport:
 
 - *A write completes when it has been heard*, not when it was queued. Speech
-  is pushed 20 ms at a time, never more than 60 ms ahead of the clock, and a
+  is pushed 10 ms at a time, never more than 60 ms ahead of the clock, and a
   write finishes once its last sample should have left the speaker. The
   session treats completion as "the caller heard it", and a flush (an
   interruption) cancels the rest within a tick.
+- *The speaker path is one unbroken stream.* Silence fills the time between
+  replies, and every buffer is stamped from a count of samples, never from
+  the moment it was pushed. Push-time stamps carry the main loop's jitter;
+  each gap or overlap resets the resampler, and on a small board that was
+  heard as quiet, choppy speech that did not sound like the voice.
 - *Echo cancellation needs the speaker's own signal.* With
   =local-echo-cancel: yes=, a =webrtcechoprobe= on the playback path records
   exactly what the speaker plays and =webrtcdsp= subtracts it from the

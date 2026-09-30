@@ -139,11 +139,21 @@ tone(guint rate, guint ms)
 		s[i] = (gint16)(8000 * sin(2 * G_PI * 440 * i / rate));
 	return g_bytes_new_take(s, n * 2);
 }
+/* Samples in the file louder than silence: the speaker path runs continuously,
+ * so its size says how long the test ran, not how much was spoken. */
 static gsize
-file_size(const gchar *path)
+loud_samples(const gchar *path)
 {
-	GStatBuf st;
-	return g_stat(path, &st) == 0 ? (gsize)st.st_size : 0;
+	g_autofree gchar *raw = NULL;
+	gsize size = 0, i, n = 0;
+	if (!g_file_get_contents(path, &raw, &size, NULL))
+		return 0;
+	for (i = 0; i + 1 < size; i += 2) {
+		gint16 v = (gint16)((guint8)raw[i] | ((guint8)raw[i + 1] << 8));
+		if (ABS(v) > 200)
+			n++;
+	}
+	return n;
 }
 /* Speech plays at the speed it was spoken, and a write completes when it has
  * been played, not when it was queued: the session relies on that for what
@@ -173,8 +183,8 @@ test_playback(void)
 	g_assert_cmpint(w.at - begin, >=, 800000);
 	stop(t);
 	/* One second at 16 kHz, resampled from 24 kHz, give or take a buffer. */
-	g_assert_cmpuint(file_size(path), >, 28000);
-	g_assert_cmpuint(file_size(path), <, 40000);
+	g_assert_cmpuint(loud_samples(path), >, 14000);
+	g_assert_cmpuint(loud_samples(path), <, 18000);
 	g_remove(path);
 	g_rmdir(dir);
 	g_free(h.speaker);
@@ -210,7 +220,7 @@ test_flush(void)
 	pump(300);
 	stop(t);
 	/* About 0.3 s of the 3 s reached the speaker. */
-	g_assert_cmpuint(file_size(path), <, 32000);
+	g_assert_cmpuint(loud_samples(path), <, 16000);
 	g_clear_error(&w.error);
 	g_remove(path);
 	g_rmdir(dir);
@@ -239,6 +249,59 @@ test_initialises_gstreamer(void)
 	}
 	g_clear_object(&t);
 }
+typedef struct {
+	GstClockTime next;
+	guint buffers, breaks;
+} Continuity;
+static gboolean
+on_handoff(GSignalInvocationHint *hint, guint n, const GValue *values, gpointer data)
+{
+	Continuity *c = data;
+	GstBuffer *buffer = g_value_get_boxed(&values[1]);
+	GstClockTime pts = GST_BUFFER_PTS(buffer), duration = GST_BUFFER_DURATION(buffer);
+	if (c->buffers > 0 && GST_CLOCK_TIME_IS_VALID(c->next) &&
+		(pts > c->next + GST_MSECOND || pts + GST_MSECOND < c->next))
+		c->breaks++;
+	c->buffers++;
+	c->next = GST_CLOCK_TIME_IS_VALID(duration) ? pts + duration : GST_CLOCK_TIME_NONE;
+	return TRUE;
+}
+/* Speech reaches the speaker as one unbroken stream. Stamped with the time
+ * each piece was pushed, scheduling jitter became gaps and overlaps, and every
+ * one reset the resampler: on a small board that was choppy, quiet speech. */
+static void
+test_continuous(void)
+{
+	g_autoptr(GBytes) pcm = tone(24000, 1000);
+	GstElement *probe;
+	Continuity c = {GST_CLOCK_TIME_NONE, 0, 0};
+	Heard h = {0};
+	Write w = {0};
+	AiLocalAudioTransport *t;
+	guint signal;
+	gulong hook;
+	if (!available()) {
+		g_test_skip("GStreamer test elements unavailable");
+		return;
+	}
+	probe = gst_element_factory_make("fakesink", NULL);
+	signal = g_signal_lookup("handoff", G_OBJECT_TYPE(probe));
+	gst_object_unref(probe);
+	hook = g_signal_add_emission_hook(signal, 0, on_handoff, &c, NULL);
+	t = start("audiotestsrc is-live=true wave=silence",
+			  "audio/x-raw,format=S16LE,rate=16000,channels=1 ! fakesink "
+			  "signal-handoffs=true sync=true",
+			  FALSE, &h);
+	ai_audio_transport_write_pcm_async(AI_AUDIO_TRANSPORT(t), pcm, 24000, NULL, written, &w);
+	wait_for(&w.done, 5000);
+	pump(300);
+	stop(t);
+	g_signal_remove_emission_hook(signal, hook);
+	g_assert_no_error(w.error);
+	g_assert_cmpuint(c.buffers, >, 20);
+	g_assert_cmpuint(c.breaks, ==, 0);
+	g_free(h.speaker);
+}
 /* A description that does not parse is a join error, not a crash. */
 static void
 test_bad_device(void)
@@ -265,6 +328,7 @@ main(int argc, char **argv)
 						 test_capture);
 	g_test_add_func("/voice/local/playback-paced", test_playback);
 	g_test_add_func("/voice/local/flush", test_flush);
+	g_test_add_func("/voice/local/continuous", test_continuous);
 	g_test_add_func("/voice/local/bad-device", test_bad_device);
 	return g_test_run();
 }

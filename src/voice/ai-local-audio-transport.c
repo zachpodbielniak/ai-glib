@@ -14,18 +14,18 @@
  * write completes when it has been played (the session treats completion as
  * "the caller heard it") and a flush stops speech within a tick. */
 
-/* How far ahead of the clock speech is pushed, and how long the sink is
- * assumed to hold it before it is heard. */
-#define LEAD_US 60000
-#define SINK_LATENCY_US 40000
-#define CHUNK_MS 20
+/* How far ahead of the pipeline clock audio is pushed, and how long the sink
+ * is assumed to hold it before it is heard. */
+#define LEAD (60 * GST_MSECOND)
+#define SINK_LATENCY (40 * GST_MSECOND)
+#define CHUNK_MS 10
 
 typedef struct {
 	GTask *task;
 	GBytes *pcm;
 	guint rate;
 	gsize offset;
-	gint64 end_us; /* when the last pushed sample will have been heard */
+	GstClockTime end; /* running time at which its last sample has been heard */
 } Output;
 
 struct _AiLocalAudioTransport {
@@ -36,8 +36,12 @@ struct _AiLocalAudioTransport {
 	GstElement *pipeline, *appsrc, *appsink;
 	GSource *bus_source, *clock;
 	GQueue playback;
+	/* The speaker path is one unbroken stream: speech or silence, stamped
+	 * from a sample count at the current rate, never from the time a buffer
+	 * happened to be pushed. */
 	guint appsrc_rate;
-	gint64 ahead_until_us;
+	GstClockTime origin;
+	guint64 samples;
 	guint64 generation;
 	gboolean leaving;
 };
@@ -131,7 +135,7 @@ describe(AiLocalAudioTransport *self)
 					   "appsink name=voice-in sync=false max-buffers=100 drop=true ");
 	/* Playback: the echo probe sees exactly what the speaker plays, which is
 	 * what the canceller subtracts from the microphone. */
-	g_string_append(d, "appsrc name=voice-out is-live=true format=time do-timestamp=true ! "
+	g_string_append(d, "appsrc name=voice-out is-live=true format=time do-timestamp=false ! "
 					   "audioconvert ! audioresample ! ");
 	if (self->echo_cancel)
 		g_string_append(d, "audio/x-raw,format=S16LE,rate=48000,channels=1 ! "
@@ -167,42 +171,79 @@ set_rate(AiLocalAudioTransport *self, guint rate)
 	gst_app_src_set_caps(GST_APP_SRC(self->appsrc), caps);
 	gst_caps_unref(caps);
 }
-/* Push speech CHUNK_MS at a time, never more than LEAD_US ahead of now, and
- * complete each write once its last sample should have been heard. */
+static GstClockTime
+stream_time(AiLocalAudioTransport *self)
+{
+	return self->origin + gst_util_uint64_scale(self->samples, GST_SECOND, self->appsrc_rate);
+}
+/* Push CHUNK_MS of audio at a time, speech when there is some and silence
+ * otherwise, until the stream is LEAD ahead of the clock. A write completes
+ * once its last sample should have been heard. */
+static void
+push_chunk(AiLocalAudioTransport *self, Output *o)
+{
+	gsize count = 2 * (self->appsrc_rate * CHUNK_MS / 1000);
+	GstBuffer *buffer;
+	GstClockTime pts = stream_time(self);
+	if (o != NULL)
+		count = MIN(count, g_bytes_get_size(o->pcm) - o->offset);
+	buffer = gst_buffer_new_allocate(NULL, count, NULL);
+	if (o != NULL) {
+		gst_buffer_fill(buffer, 0, (const guint8 *)g_bytes_get_data(o->pcm, NULL) + o->offset,
+						count);
+		o->offset += count;
+	} else
+		gst_buffer_memset(buffer, 0, 0, count);
+	self->samples += count / 2;
+	GST_BUFFER_PTS(buffer) = pts;
+	GST_BUFFER_DTS(buffer) = pts;
+	GST_BUFFER_DURATION(buffer) = stream_time(self) - pts;
+	if (o != NULL && o->offset == g_bytes_get_size(o->pcm))
+		o->end = stream_time(self) + SINK_LATENCY;
+	gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
+}
 static gboolean
 tick(gpointer data)
 {
 	AiLocalAudioTransport *self = data;
-	gint64 now = g_get_monotonic_time();
+	GstClock *clock;
+	GstClockTime now, base, target;
 	Output *o;
+	GList *l;
+	guint chunks;
 	if (self->pipeline == NULL)
 		return G_SOURCE_CONTINUE;
-	if (self->ahead_until_us < now)
-		self->ahead_until_us = now;
-	while ((o = g_queue_peek_head(&self->playback)) != NULL) {
-		gsize size = g_bytes_get_size(o->pcm);
-		if (o->offset == size) {
-			if (now < o->end_us)
+	clock = gst_element_get_clock(self->pipeline);
+	if (clock == NULL)
+		return G_SOURCE_CONTINUE;
+	now = gst_clock_get_time(clock);
+	gst_object_unref(clock);
+	base = gst_element_get_base_time(self->pipeline);
+	if (!GST_CLOCK_TIME_IS_VALID(base) || now < base)
+		return G_SOURCE_CONTINUE;
+	now -= base;
+	while ((o = g_queue_peek_head(&self->playback)) != NULL &&
+		   o->offset == g_bytes_get_size(o->pcm) && now >= o->end) {
+		g_queue_pop_head(&self->playback);
+		g_task_return_boolean(o->task, TRUE);
+		output_free(o);
+	}
+	target = now + LEAD;
+	/* Bounded catch-up after a stalled main loop; the sink drops what is late. */
+	for (chunks = 0; chunks < 40 && stream_time(self) < target; chunks++) {
+		o = NULL;
+		for (l = self->playback.head; l != NULL; l = l->next)
+			if (((Output *)l->data)->offset < g_bytes_get_size(((Output *)l->data)->pcm)) {
+				o = l->data;
 				break;
-			g_queue_pop_head(&self->playback);
-			g_task_return_boolean(o->task, TRUE);
-			output_free(o);
-			continue;
-		}
-		if (self->ahead_until_us >= now + LEAD_US)
-			break;
-		{
-			const guint8 *raw = g_bytes_get_data(o->pcm, NULL);
-			gsize count = MIN((gsize)(2 * (o->rate * CHUNK_MS / 1000)), size - o->offset);
-			GstBuffer *buffer = gst_buffer_new_allocate(NULL, count, NULL);
+			}
+		if (o != NULL && o->rate != self->appsrc_rate) {
+			/* A new rate starts where the old one ended, not at zero. */
+			self->origin = stream_time(self);
+			self->samples = 0;
 			set_rate(self, o->rate);
-			gst_buffer_fill(buffer, 0, raw + o->offset, count);
-			o->offset += count;
-			self->ahead_until_us += (gint64)(count / 2) * G_USEC_PER_SEC / o->rate;
-			gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), buffer);
-			if (o->offset == size)
-				o->end_us = self->ahead_until_us + SINK_LATENCY_US;
 		}
+		push_chunk(self, o);
 	}
 	return G_SOURCE_CONTINUE;
 }
@@ -251,7 +292,6 @@ flush(AiAudioTransport *transport)
 		g_task_return_new_error(o->task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Audio flushed");
 		output_free(o);
 	}
-	self->ahead_until_us = 0;
 }
 /* Detaches the pipeline from this object; the caller stops it. */
 static GstElement *
@@ -320,14 +360,12 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	self->clock = g_timeout_source_new(CHUNK_MS / 2);
 	g_source_set_callback(self->clock, tick, self, NULL);
 	g_source_attach(self->clock, self->context);
-	/* A sink waits for its first buffer before the pipeline may play, and
-	 * nothing is spoken until the first reply: prime it with silence. */
-	{
-		GstBuffer *silence = gst_buffer_new_allocate(NULL, 2 * 16000 * CHUNK_MS / 1000, NULL);
-		gst_buffer_memset(silence, 0, 0, 2 * 16000 * CHUNK_MS / 1000);
-		set_rate(self, 16000);
-		gst_app_src_push_buffer(GST_APP_SRC(self->appsrc), silence);
-	}
+	/* A sink waits for its first buffer before the pipeline may play: prime
+	 * the stream with silence from running time zero. */
+	self->origin = 0;
+	self->samples = 0;
+	set_rate(self, 16000);
+	push_chunk(self, NULL);
 	starter = g_task_new(self, cancel, started, task);
 	g_task_set_task_data(starter, gst_object_ref(self->pipeline),
 						 (GDestroyNotify)gst_object_unref);
