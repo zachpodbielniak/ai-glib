@@ -57,6 +57,7 @@ typedef struct {
 	GObject parent;
 	GHashTable *active;
 	guint cancelled, fed;
+	GByteArray *audio; /* everything fed, in order */
 } TestRecognizer;
 typedef GObjectClass TestRecognizerClass;
 static void
@@ -68,6 +69,7 @@ static void
 recognizer_finalize(GObject *object)
 {
 	g_hash_table_unref(((TestRecognizer *)object)->active);
+	g_byte_array_unref(((TestRecognizer *)object)->audio);
 	G_OBJECT_CLASS(test_recognizer_parent_class)->finalize(object);
 }
 static void
@@ -79,6 +81,7 @@ static void
 test_recognizer_init(TestRecognizer *s)
 {
 	s->active = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	s->audio = g_byte_array_new();
 }
 static gboolean
 begin(AiSpeechRecognizer *self, const gchar *speaker, GError **error)
@@ -91,6 +94,8 @@ feed(AiSpeechRecognizer *self, const gchar *speaker, GBytes *pcm, GError **error
 {
 	g_assert_true(g_hash_table_contains(((TestRecognizer *)self)->active, speaker));
 	((TestRecognizer *)self)->fed++;
+	g_byte_array_append(((TestRecognizer *)self)->audio, g_bytes_get_data(pcm, NULL),
+						g_bytes_get_size(pcm));
 	return TRUE;
 }
 static void

@@ -697,6 +697,33 @@ muted_speech_does_not_interrupt(Fixture *f, gconstpointer data)
 	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 	g_assert_cmpuint(f->transport->flushes, ==, flushes);
 }
+/* A word that starts softly -- an "f", an "h" -- is not speech to the
+ * detector until its vowel. The audio just before speech was detected goes to
+ * recognition too, or "Fai" is heard as "-ay" and becomes "say" or "Bay". */
+static void
+marked(Fixture *f, guint8 activity, guint8 marker)
+{
+	guint8 samples[320] = {0};
+	g_autoptr(GBytes) pcm = NULL;
+	samples[0] = activity;
+	samples[1] = marker;
+	pcm = g_bytes_new(samples, sizeof(samples));
+	g_signal_emit_by_name(f->transport, "audio", "caller", pcm);
+}
+static void
+onset_keeps_preroll(Fixture *f, gconstpointer data)
+{
+	guint i;
+	/* 40 frames of quiet: only the last 300 ms, frames 11 to 40, come along. */
+	for (i = 1; i <= 40; i++)
+		marked(f, 0, i);
+	marked(f, 1, 99);
+	marked(f, 2, 100);
+	g_assert_cmpuint(f->stt->audio->len, >=, 32 * 320);
+	g_assert_cmpuint(f->stt->audio->data[1], ==, 11);
+	g_assert_cmpuint(f->stt->audio->data[29 * 320 + 1], ==, 40);
+	g_assert_cmpuint(f->stt->audio->data[30 * 320 + 1], ==, 99);
+}
 static void
 stalled_turn(Fixture *f, gconstpointer data)
 {
@@ -798,7 +825,8 @@ debounce_noise(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
 	frame(f, "caller", 1);
 	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
-	g_assert_cmpuint(f->stt->fed, ==, 25);
+	/* The 25 frames of speech, and the 250 ms that came before them. */
+	g_assert_cmpuint(f->stt->fed, ==, 50);
 }
 static void
 debounce_notice(Fixture *f, gconstpointer data)
@@ -1374,6 +1402,8 @@ main(int argc, char **argv)
 			   final_words_interrupt, teardown);
 	g_test_add("/voice/session/speakers", Fixture, NULL, setup, speakers, teardown);
 	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
+	g_test_add("/voice/session/onset-keeps-preroll", Fixture, NULL, setup,
+			   onset_keeps_preroll, teardown);
 	g_test_add("/voice/session/deadline-in-tool", Fixture, NULL, setup, deadline_in_tool,
 			   teardown);
 	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);

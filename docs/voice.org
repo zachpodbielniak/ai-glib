@@ -123,7 +123,10 @@ before starting STT or interrupting a turn. It defaults to 250 ms (range
 10–5000 ms, rounded up to a 10 ms frame). A silence frame resets the count;
 participants never share counts. Short bursts do not open STT. Confirmed
 onset audio is buffered in memory and replayed to STT so initial words are
-preserved. Greetings and all =ai_voice_session_say()= notices use this same
+preserved, together with the 300 ms before VAD first called it speech. A word
+that starts softly -- an "f", an "h" -- is not speech to the detector until
+its vowel; without that, a name like "Fay" reaches STT as "-ay" and comes back
+as "say" or "Bay". Greetings and all =ai_voice_session_say()= notices use this same
 debounce, including while waiting for the first synthesized audio.
 
 =noise-suppression= (=AI_VOICE_NOISE_SUPPRESSION=, transport property of the

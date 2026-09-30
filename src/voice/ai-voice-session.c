@@ -29,6 +29,7 @@ ai_voice_state_get_type(void)
 typedef struct {
 	gchar *name;
 	GByteArray *frames, *onset;
+	GByteArray *preroll; /* the last PREROLL_BYTES of audio, speech or not */
 	guint speech_ms;
 	gboolean recognizing, ended, pending_barge;
 } Participant;
@@ -129,6 +130,11 @@ enum {
 	PROP_UNMUTE_MESSAGE
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
+/* A word that starts softly -- "f", "h", "th" -- is not speech to the
+ * detector until its vowel, so recognition would begin mid-word: "Fai" heard
+ * as "-ay", and transcribed "say" or "Bay". This much of what came just
+ * before speech is sent too. */
+#define PREROLL_BYTES (300 * 16 * 2)
 static void
 pump(AiVoiceSession *self);
 static void
@@ -255,6 +261,7 @@ participant_free(gpointer data)
 	g_free(p->name);
 	g_byte_array_unref(p->frames);
 	g_byte_array_unref(p->onset);
+	g_byte_array_unref(p->preroll);
 	g_free(p);
 }
 static void
@@ -966,6 +973,7 @@ joined(AiAudioTransport *transport, const gchar *speaker, const gchar *name,
 	p->name = g_strdup(name != NULL && *name != '\0' ? name : speaker);
 	p->frames = g_byte_array_new();
 	p->onset = g_byte_array_new();
+	p->preroll = g_byte_array_new();
 	g_hash_table_insert(self->participants, g_strdup(speaker), p);
 }
 static void
@@ -1005,6 +1013,8 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 			if (!p->recognizing || p->ended) {
 				gsize size;
 				const guint8 *samples = g_bytes_get_data(frame, &size);
+				if (p->onset->len == 0)
+					g_byte_array_append(p->onset, p->preroll->data, p->preroll->len);
 				g_byte_array_append(p->onset, samples, size);
 			}
 			if (p->speech_ms >= self->barge_in_ms) {
@@ -1069,6 +1079,9 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 			p->speech_ms = 0;
 			g_byte_array_set_size(p->onset, 0);
 		}
+		g_byte_array_append(p->preroll, g_bytes_get_data(frame, NULL), 320);
+		if (p->preroll->len > PREROLL_BYTES)
+			g_byte_array_remove_range(p->preroll, 0, p->preroll->len - PREROLL_BYTES);
 		if (p->recognizing && !p->ended && error == NULL && !fed_onset)
 			ai_speech_recognizer_feed(self->recognizer, speaker, frame, &error);
 		if (self->stopped || g_hash_table_lookup(self->participants, speaker) != p)
