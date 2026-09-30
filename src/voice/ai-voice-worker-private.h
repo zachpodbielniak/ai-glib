@@ -23,3 +23,6 @@ void
 ai_voice_worker_spoken(AiVoiceWorker *worker, const gchar *text, guint64 generation);
 void
 ai_voice_worker_stop(AiVoiceWorker *worker);
+/* Keep tool output in full for the last TURNS turns only; 0 keeps it all. */
+void
+ai_voice_worker_set_trim_after(AiVoiceWorker *worker, guint turns);

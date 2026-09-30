@@ -38,6 +38,8 @@ static const Setting settings[] = {
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
 	/* Unset: received audio is not processed. off|low|moderate|high|very-high. */
 	{"noise-suppression", "AI_VOICE_NOISE_SUPPRESSION", NULL, 0, 0, 0},
+	/* 0: a call's history keeps every tool result in full. */
+	{"trim-tool-results-after", "AI_VOICE_TRIM_TOOL_RESULTS_AFTER", NULL, 0, 0, 1000},
 	{"tool-progress-message", "AI_VOICE_TOOL_PROGRESS_MESSAGE", "One moment, let me check.",
 	 0, 0, 0},
 	{"tool-progress-delay-ms", "AI_VOICE_TOOL_PROGRESS_DELAY_MS", NULL, 1500, 0, 60000},

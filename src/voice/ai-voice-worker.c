@@ -16,6 +16,7 @@ struct _AiVoiceWorker {
 	AiTextContent *spoken_block;
 	gchar *spoken, *answer;
 	guint64 generation;
+	gint trim_after; /* atomic: set from the audio thread, read on this one */
 	gboolean stopping, saw_text;
 };
 typedef struct {
@@ -127,11 +128,48 @@ on_agent(AiConversation *conversation, const gchar *id, gint state, gpointer dat
 	post(w, AI_VOICE_MAIL_AGENT, NULL, line, NULL);
 	maybe_quit(w);
 }
+/* Every turn resends every earlier tool result. On a long call that is most
+ * of the prompt, and a single big one used to be enough to exceed the model's
+ * context. Results older than the configured number of turns become a short
+ * note; the tool_use/tool_result pair survives, since providers require it. */
+#define TRIM_KEEP_BYTES 160
+static void
+trim_history(AiVoiceWorker *w)
+{
+	guint keep = (guint)g_atomic_int_get(&w->trim_after), turns = 0;
+	GList *l;
+	if (keep == 0)
+		return;
+	for (l = g_list_last(ai_conversation_get_messages(w->conversation)); l != NULL;
+		 l = l->prev) {
+		AiMessage *message = l->data;
+		gboolean caller_text = FALSE;
+		GList *b;
+		for (b = ai_message_get_content_blocks(message); b != NULL; b = b->next) {
+			if (AI_IS_TOOL_RESULT(b->data) && turns >= keep) {
+				const gchar *content = ai_tool_result_get_content(b->data);
+				gsize len = content != NULL ? strlen(content) : 0;
+				if (len > TRIM_KEEP_BYTES && !g_str_has_prefix(content, "[Earlier tool output")) {
+					g_autofree gchar *note = g_strdup_printf(
+						"[Earlier tool output trimmed to keep the call's context small; "
+						"it was %" G_GSIZE_FORMAT " bytes. Run the tool again if you need it.]",
+						len);
+					g_object_set(b->data, "content", note, NULL);
+				}
+			} else if (AI_IS_TEXT_CONTENT(b->data) &&
+					   ai_message_get_role(message) == AI_ROLE_USER)
+				caller_text = TRUE;
+		}
+		if (caller_text)
+			turns++;
+	}
+}
 static void
 prepare(AiConversation *conversation, GPtrArray *batch, gpointer data)
 {
 	AiVoiceWorker *w = data;
 	g_autoptr(GPtrArray) projected = g_ptr_array_new_with_free_func(g_object_unref);
+	trim_history(w);
 	g_autoptr(AiMessage) spoken_message = NULL;
 	guint i;
 	for (i = 0; i < batch->len; i++) {
@@ -273,6 +311,11 @@ void
 ai_voice_worker_spoken(AiVoiceWorker *w, const gchar *text, guint64 generation)
 {
 	command(w, 1, text, NULL, generation);
+}
+void
+ai_voice_worker_set_trim_after(AiVoiceWorker *w, guint turns)
+{
+	g_atomic_int_set(&w->trim_after, (gint)MIN(turns, (guint)G_MAXINT));
 }
 void
 ai_voice_worker_stop(AiVoiceWorker *w)

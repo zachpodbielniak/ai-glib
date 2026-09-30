@@ -897,6 +897,58 @@ annotation_is_not_a_barge_in(Fixture *f, gconstpointer data)
 	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
 	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
 }
+/* A long call must not resend every tool's full output forever. With
+ * trim-tool-results-after set, output older than that many turns is
+ * replaced by a short note; unset, history is untouched. */
+static const gchar *
+sent_tool_result(Fixture *f, const gchar *tool_use_id)
+{
+	GList *l, *b;
+	for (l = ai_mock_provider_get_last_messages(f->provider); l != NULL; l = l->next)
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+			if (AI_IS_TOOL_RESULT(b->data))
+				return ai_tool_result_get_content(b->data);
+	return NULL;
+}
+static void
+turn(Fixture *f, guint expected_replies)
+{
+	utterance(f, "caller");
+	wait_replies(f, expected_replies);
+}
+static void
+tool_results_trimmed(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-trim-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "big.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	GString *big = g_string_new(NULL);
+	const gchar *sent;
+	guint i;
+	for (i = 0; i < 200; i++)
+		g_string_append(big, "a line of notes that goes on for a while\n");
+	g_assert_true(g_file_set_contents(path, big->str, -1, NULL));
+	if (data != NULL)
+		g_object_set(f->session, "trim-tool-results-after", 1u, NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "One.");
+	turn(f, 1);
+	ai_mock_provider_push_text(f->provider, "Two.");
+	turn(f, 2);
+	ai_mock_provider_push_text(f->provider, "Three.");
+	turn(f, 3);
+	/* The third turn's request is what the model saw. */
+	sent = sent_tool_result(f, NULL);
+	g_assert_nonnull(sent);
+	if (data != NULL) {
+		g_assert_cmpuint(strlen(sent), <, 300);
+		g_assert_nonnull(strstr(sent, "trimmed"));
+	} else
+		g_assert_nonnull(strstr(sent, "a line of notes"));
+	g_string_free(big, TRUE);
+	g_unlink(path);
+	g_rmdir(directory);
+}
 static void
 recovery_pauses_deadline(Fixture *f, gconstpointer data)
 {
@@ -989,6 +1041,10 @@ main(int argc, char **argv)
 			   annotations_stripped, teardown);
 	g_test_add("/voice/session/annotation-is-not-a-barge-in", Fixture, NULL, setup,
 			   annotation_is_not_a_barge_in, teardown);
+	g_test_add("/voice/session/tool-results-trimmed", Fixture, GINT_TO_POINTER(2), setup,
+			   tool_results_trimmed, teardown);
+	g_test_add("/voice/session/tool-results-kept-by-default", Fixture, NULL, setup,
+			   tool_results_trimmed, teardown);
 	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
 	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
 	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,

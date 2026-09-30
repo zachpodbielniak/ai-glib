@@ -66,6 +66,7 @@ struct _AiVoiceSession {
 	gchar *empty_reply_message, *tool_progress_message;
 	guint turn_lines; /* lines queued since the current provider turn began */
 	guint tool_progress_delay_ms;
+	guint trim_after; /* 0: history keeps every tool result in full */
 	GSource *progress; /* pending tool-progress line, held for teardown */
 	GSource *hold;     /* flushes a delta that ended on a period */
 	guint64 progress_generation;
@@ -103,7 +104,8 @@ enum {
 	PROP_BARGE_IN_CONFIRM,
 	PROP_EMPTY_REPLY_MESSAGE,
 	PROP_TOOL_PROGRESS_MESSAGE,
-	PROP_TOOL_PROGRESS_DELAY
+	PROP_TOOL_PROGRESS_DELAY,
+	PROP_TRIM_AFTER
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -1141,6 +1143,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_string(value, self->tool_progress_message);
 	else if (id == PROP_TOOL_PROGRESS_DELAY)
 		g_value_set_uint(value, self->tool_progress_delay_ms);
+	else if (id == PROP_TRIM_AFTER)
+		g_value_set_uint(value, self->trim_after);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1186,6 +1190,11 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->tool_progress_message = g_value_dup_string(value);
 	} else if (id == PROP_TOOL_PROGRESS_DELAY)
 		self->tool_progress_delay_ms = g_value_get_uint(value);
+	else if (id == PROP_TRIM_AFTER) {
+		self->trim_after = g_value_get_uint(value);
+		if (self->worker != NULL)
+			ai_voice_worker_set_trim_after(self->worker, self->trim_after);
+	}
 	else if (id == PROP_EMPTY_REPLY_MESSAGE) {
 		g_free(self->empty_reply_message);
 		self->empty_reply_message = g_value_dup_string(value);
@@ -1226,6 +1235,7 @@ constructed(GObject *object)
 	g_signal_connect(self->synthesizer, "audio", G_CALLBACK(audio_out), self);
 	self->worker = ai_voice_worker_new(self->conversation, G_OBJECT(self), self->context,
 									   worker_mail);
+	ai_voice_worker_set_trim_after(self->worker, self->trim_after);
 }
 static void
 ai_voice_session_class_init(AiVoiceSessionClass *klass)
@@ -1261,6 +1271,12 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 			"barge-in-ms", "Barge-in debounce",
 			"Consecutive speech required before recognition or interruption", 10, 5000,
 			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_TRIM_AFTER,
+		g_param_spec_uint("trim-tool-results-after", "Trim tool results after",
+						  "Keep tool output in full for this many recent turns and replace "
+						  "older output with a short note; 0 keeps everything",
+						  0, 1000, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TOOL_PROGRESS_MESSAGE,
 		g_param_spec_string("tool-progress-message", "Tool progress message",
