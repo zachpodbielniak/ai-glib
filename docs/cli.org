@@ -622,8 +622,14 @@ The =apps.ai-call= provider/model scope and =voice= settings are documented
 in [[file:voice.org][Live voice sessions]]. Matrix deployment variables retain
 the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =AI_CALL_JWT_URL=, =AI_CALL_FOCUS_URL=, =AI_CALL_OUTBOUND_PATH=, =AI_CALL_GREETING=,
-=AI_CALL_OUTBOUND_GREETING=, =AI_CALL_TRANSCRIPT_DIR= and =AI_CALL_TRANSCRIPT_HOOK=. Speech/media endpoints use =AI_VOICE_STT_URL=,
+=AI_CALL_OUTBOUND_GREETING=, =AI_CALL_TRANSCRIPT_DIR=, =AI_CALL_TRANSCRIPT_HOOK=,
+=AI_CALL_LIVE_TEXT= and =AI_CALL_STATE_FILE=; =--local= uses
+=AI_CALL_LOCAL_INPUT=, =AI_CALL_LOCAL_OUTPUT=, =AI_CALL_LOCAL_ECHO_CANCEL= and
+=AI_CALL_LOCAL_SPEAKER_NAME=. Speech/media endpoints use =AI_VOICE_STT_URL=,
 =AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
+
+=SIGUSR1= toggles mute on every live session, as the spoken commands do; a
+second =SIGINT= or =SIGTERM= exits without waiting for Matrix cleanup.
 
 =ai_call.barge-in-ms= (default 250), =AI_VOICE_BARGE_IN_MS=, or
 =--call-set barge-in-ms=250= configures consecutive speech required before

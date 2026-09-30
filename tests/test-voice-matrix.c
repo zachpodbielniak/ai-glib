@@ -3,6 +3,8 @@
 #include <libsoup/soup.h>
 #include <stdarg.h>
 #include <glib/gstdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 static void
 joined_mock(AiAudioTransport *self, const gchar *room, const gchar *token,
 			GCancellable *cancel, GAsyncReadyCallback cb, gpointer data)
@@ -74,7 +76,7 @@ typedef struct {
 	SoupServer *server;
 	gchar *url;
 	guint publications, clears, jwt_requests, summaries;
-	gboolean fail_clear;
+	guint fail_clear; /* 1: one 503; 2: 403 every time */
 	GPtrArray *sent; /* m.room.message bodies; event id "$live<index>" */
 } MatrixFixture;
 static void
@@ -118,8 +120,10 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 												 request_body->length, NULL));
 		if (json_object_get_size(ai_json_root_object(parser)) == 0) {
 			f->clears++;
-			if (f->fail_clear) {
-				f->fail_clear = FALSE;
+			if (f->fail_clear == 2)
+				status = 403;
+			else if (f->fail_clear) {
+				f->fail_clear = 0;
 				status = 503;
 			}
 		} else {
@@ -212,7 +216,122 @@ answer_cleanup(MatrixFixture *f, gconstpointer data)
 	shutdown_app(a);
 	g_main_loop_run(a->loop);
 	g_source_remove(timeout);
-	g_assert_cmpuint(f->clears, ==, GPOINTER_TO_INT(data) ? 2 : 1);
+	/* A refusal is not retried: shutdown ends rather than asking forever. */
+	g_assert_cmpuint(f->clears, ==, GPOINTER_TO_INT(data) == 1 ? 2 : 1);
+}
+static void
+pump_ms(guint ms);
+/* A call that ended can finish clearing after the caller rang back: it must
+ * not remove the new call, nor clear the membership that is now the new one's. */
+static void
+stale_clear(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	Call stale = {0};
+	Call *fresh = start_call(a, "!room:test", NULL, NULL, FALSE);
+	guint clears = f->clears;
+	stale.app = a;
+	stale.room = "!room:test";
+	stale.key = "stale";
+	g_ref_count_init(&stale.refs);
+	g_ref_count_inc(&stale.refs);
+	stale.left = TRUE;
+	removed_if_done(&stale);
+	g_assert_true(g_hash_table_lookup(a->calls, "!room:test") == fresh);
+	stale.closing = TRUE;
+	member_posted(a, NULL, NULL, &stale);
+	pump_ms(100);
+	g_assert_cmpuint(f->clears, ==, clears);
+	g_assert_true(g_hash_table_lookup(a->calls, "!room:test") == fresh);
+	{
+		guint timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+		shutdown_app(a);
+		g_main_loop_run(a->loop);
+		g_source_remove(timeout);
+	}
+}
+/* An outbound drop file too large to be a request is removed, not reread
+ * every second for the life of the process, and starts no call. */
+static void
+drop_oversized(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-drop-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(dir, "outbound.json", NULL);
+	g_autofree gchar *big = g_strnfill(70000, ' ');
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	g_assert_true(g_file_set_contents(path, big, -1, NULL));
+	a->drop_path = path;
+	a->primed = TRUE;
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, "*over 64 KiB*");
+	watch_drop(a);
+	while (g_file_test(path, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < limit)
+		pump_ms(10);
+	pump_ms(20);
+	g_test_assert_expected_messages();
+	g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+	g_assert_false(a->drop_busy);
+	g_assert_cmpuint(g_hash_table_size(a->calls), ==, 0);
+	a->drop_path = NULL;
+	g_rmdir(dir);
+}
+/* A transcript that could not be written to is still closed, and the hook
+ * still runs: the file is on disk, and post-call processing expects it. */
+static void
+transcript_write_failure(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-transcripts-XXXXXX", NULL);
+	g_autofree gchar *calls = g_build_filename(dir, "calls", NULL);
+	g_autofree gchar *script = g_build_filename(dir, "hook.sh", NULL);
+	g_autofree gchar *marker = g_build_filename(dir, "hook-ran", NULL);
+	g_autofree gchar *path = NULL, *seen = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	Call *call;
+	guint timeout;
+	gint full, fd;
+	g_assert_true(g_file_set_contents(
+		script, "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/hook-ran.tmp\" && "
+				"mv \"$(dirname \"$0\")/hook-ran.tmp\" \"$(dirname \"$0\")/hook-ran\"\n",
+		-1, NULL));
+	g_assert_cmpint(g_chmod(script, 0755), ==, 0);
+	a->transcript_dir = calls;
+	a->transcript_hook = script;
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while ((!call->greeted || call->transcript == NULL) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_nonnull(call->transcript);
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	/* Every later write fails as a full disk would. */
+	full = g_open("/dev/full", O_WRONLY, 0);
+	g_assert_cmpint(full, >=, 0);
+	for (fd = 3; fd < 1024; fd++) {
+		g_autofree gchar *link = g_strdup_printf("/proc/self/fd/%d", fd);
+		g_autofree gchar *target = g_file_read_link(link, NULL);
+		if (target != NULL && g_str_equal(target, path))
+			break;
+	}
+	g_assert_cmpint(fd, <, 1024);
+	g_assert_cmpint(dup2(full, fd), ==, fd);
+	g_close(full, NULL);
+	g_signal_emit_by_name(call->voice, "transcript", "Caller", "Hello?", TRUE);
+	g_signal_emit_by_name(call->voice, "transcript", "Caller", "Anyone?", TRUE);
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	limit = g_get_monotonic_time() + 3000000;
+	while (!g_file_test(marker, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_true(g_file_get_contents(marker, &seen, NULL, NULL));
+	g_assert_cmpstr(seen, ==, path);
+	a->transcript_dir = a->transcript_hook = NULL;
 }
 /* A whole call through ai-call: what the caller says is on disk as they say
  * it, the header is completed at hangup, and the hook gets the path. */
@@ -229,8 +348,9 @@ transcript_on_disk(MatrixFixture *f, gconstpointer data)
 	Call *call;
 	guint timeout;
 	g_assert_true(g_file_set_contents(
-		script, "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/hook-ran\"\n", -1,
-		NULL));
+		script, "#!/bin/sh\nprintf '%s' \"$1\" > \"$(dirname \"$0\")/hook-ran.tmp\" && "
+				"mv \"$(dirname \"$0\")/hook-ran.tmp\" \"$(dirname \"$0\")/hook-ran\"\n",
+		-1, NULL));
 	g_assert_cmpint(g_chmod(script, 0755), ==, 0);
 	a->transcript_dir = calls;
 	a->transcript_hook = script;
@@ -274,7 +394,6 @@ transcript_on_disk(MatrixFixture *f, gconstpointer data)
 		}
 		g_usleep(1000);
 	}
-	g_usleep(100000);
 	g_assert_true(g_file_get_contents(marker, &seen, NULL, NULL));
 	g_assert_cmpstr(seen, ==, path);
 	a->transcript_dir = a->transcript_hook = NULL;
@@ -772,6 +891,14 @@ main(int argc, char **argv)
 			   answer_cleanup, matrix_teardown);
 	g_test_add("/voice/matrix/cleanup-retry", MatrixFixture, GINT_TO_POINTER(1),
 			   matrix_setup, answer_cleanup, matrix_teardown);
+	g_test_add("/voice/matrix/cleanup-refused", MatrixFixture, GINT_TO_POINTER(2),
+			   matrix_setup, answer_cleanup, matrix_teardown);
+	g_test_add("/voice/matrix/stale-clear", MatrixFixture, NULL, matrix_setup, stale_clear,
+			   matrix_teardown);
+	g_test_add("/voice/matrix/transcript-write-failure", MatrixFixture, NULL, matrix_setup,
+			   transcript_write_failure, matrix_teardown);
+	g_test_add("/voice/matrix/drop-oversized", MatrixFixture, NULL, matrix_setup,
+			   drop_oversized, matrix_teardown);
 	g_test_add("/voice/matrix/stale-membership", MatrixFixture, NULL, matrix_setup,
 			   stale_membership, matrix_teardown);
 	return g_test_run();

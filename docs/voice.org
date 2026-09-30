@@ -395,7 +395,11 @@ The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables 
 =AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS=, =AI_VOICE_TTS_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
 fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE=,
 =AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE=, =AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and
-=AI_VOICE_EMPTY_REPLY_MESSAGE=. The last is spoken when a provider turn ends with
+=AI_VOICE_EMPTY_REPLY_MESSAGE=. Spoken acknowledgements and progress use
+=AI_VOICE_MUTE_MESSAGE=, =AI_VOICE_UNMUTE_MESSAGE=, =AI_VOICE_TOOL_PROGRESS_MESSAGE=
+and =AI_VOICE_TOOL_PROGRESS_DELAY_MS=; =--local= reads =AI_CALL_LOCAL_INPUT=,
+=AI_CALL_LOCAL_OUTPUT=, =AI_CALL_LOCAL_ECHO_CANCEL= and =AI_CALL_LOCAL_SPEAKER_NAME=.
+=AI_VOICE_EMPTY_REPLY_MESSAGE= is spoken when a provider turn ends with
 nothing pronounceable, whether the model returned nothing or a tool call went
 unread. A caller cannot see a log, and to them silence is indistinguishable
 from a dropped call. An empty value disables it.
@@ -614,6 +618,9 @@ speaker reads:
 =state= is the session's state nick (=listening=, =transcribing=,
 =thinking=, =speaking=), =starting= before the first, and =ended= once the
 call has closed. A failed write is logged at debug and never affects the call.
+The file is shared: with several calls at once it shows whichever changed
+last, and =ended= is written only when the last of them closes. It is meant
+for =--local= and single-call devices.
 
 =SIGUSR1= toggles mute on every live session, exactly as the spoken
 commands do but without the spoken acknowledgement: a device with a
@@ -643,11 +650,19 @@ A failed send is logged at INFO and never affects the call; the next segment
 sends the whole reply again. An unrecognized value is a startup error.
 
 Outbound JSON drop files use the Python answerer's =room_id=, =message= and
-=target= fields. The file is consumed before starting the call. Ring events
+=target= fields. The file is consumed before starting the call; one over
+64 KiB is removed unread with a message. Ring events
 use =org.matrix.msc4075.rtc.notification= with an =m.reference= to the member
 event, mentions, audio intent and a 30-second lifetime. Outbound speech waits
 for a human member. Recent text/notice/emote room messages seed a bounded call
 context. Call setup and cleanup support more than one room.
+
+Hangup clears the call's membership state and retries a transport or server
+failure every two seconds. A refusal (a 4xx other than 429) is not retried, and
+during shutdown no more than three attempts are made: a membership left behind
+is swept at the next start. A late clear from a call that has ended never
+touches a newer call in the same room. A transcript that could not be written
+stops recording but is still closed and handed to the hook.
 
 * Verification
 
@@ -656,7 +671,8 @@ survival, close, hook argument passing), =test-voice-session= (turns, barge-in, 
 read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
 ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
 =test-voice-activity= and
-=test-voice-matrix= (answer, cleanup retry, stale state).
+=test-voice-matrix= (answer, cleanup retry and refusal, a late clear after a
+new call, drop files, transcript write failure, stale state).
 Additional offline tests cover speech-service failure and successful next-turn
 recovery (=test-voice-failures=), complete-only fallback caching
 (=test-call-speech-cache=), and live-call signal shutdown with a stalled goodbye.

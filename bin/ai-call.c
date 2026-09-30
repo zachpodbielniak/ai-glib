@@ -39,6 +39,7 @@ struct _App {
 	guint pending, startup;
 	gint exit_status;
 	gboolean stopping, primed, drop_busy;
+	guint stop_signals;
 };
 struct _Call {
 	grefcount refs;
@@ -49,6 +50,8 @@ struct _Call {
 	AiVoiceSession *voice;
 	AiSpeechSynthesizer *synthesizer;
 	gboolean outbound, closing, history_ready, greeted, clearing, left;
+	gboolean transcript_stopped; /* a write failed: no more lines, still closed */
+	guint clear_attempts;
 	guint retry_source, answer_source;
 	GSource *goodbye_source, *goodbye_retry;
 	gchar *goodbye_text;
@@ -142,6 +145,8 @@ call_unref(gpointer data)
 	g_string_free(call->context, TRUE);
 	g_free(call);
 }
+/* A Matrix answer that was not 2xx; the code is the HTTP status. */
+#define HTTP_STATUS_ERROR (g_quark_from_static_string("ai-call-http-status"))
 static void
 request_done(GObject *source, GAsyncResult *result, gpointer data)
 {
@@ -156,8 +161,8 @@ request_done(GObject *source, GAsyncResult *result, gpointer data)
 		gsize size;
 		const gchar *raw = g_bytes_get_data(bytes, &size);
 		if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(r->message)))
-			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FAILED, "HTTP %u",
-						soup_message_get_status(r->message));
+			g_set_error(&error, HTTP_STATUS_ERROR, soup_message_get_status(r->message),
+						"HTTP %u", soup_message_get_status(r->message));
 		else if (size > 8 * 1024 * 1024)
 			g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
 								"Matrix response too large");
@@ -241,7 +246,9 @@ static void
 removed_if_done(Call *call)
 {
 	App *app = call->app;
-	if (call->left && !call->clearing)
+	/* A call that ended can finish clearing after the caller rang back and a
+	 * new call took the room: remove only ourselves. */
+	if (call->left && !call->clearing && g_hash_table_lookup(app->calls, call->room) == call)
 		g_hash_table_remove(app->calls, call->room);
 	maybe_exit(app);
 }
@@ -252,6 +259,16 @@ cleared(App *app, JsonNode *root, const GError *error, gpointer data)
 {
 	Call *call = data;
 	if (error != NULL) {
+		gboolean permanent = error->domain == HTTP_STATUS_ERROR && error->code >= 400 &&
+							 error->code < 500 && error->code != 429;
+		/* 401 or 403 will not change by asking again, and a shutdown must end:
+		 * leave the membership for the next start's stale sweep. */
+		if (permanent || (call->app->stopping && ++call->clear_attempts >= 3)) {
+			g_printerr("Membership clear failed; giving up: %s\n", error->message);
+			call->clearing = FALSE;
+			removed_if_done(call);
+			return;
+		}
 		g_printerr("Membership clear failed; retrying: %s\n", error->message);
 		call->retry_source = g_timeout_add_seconds_full(
 			G_PRIORITY_DEFAULT, 2, retry_clear, call_ref(call), call_unref);
@@ -383,6 +400,15 @@ write_state(Call *call)
 	gboolean muted = FALSE;
 	if (call->app->state_file == NULL)
 		return;
+	/* One file for every call: "ended" only when the last one is. */
+	if (call->closing) {
+		GHashTableIter iter;
+		gpointer other;
+		g_hash_table_iter_init(&iter, call->app->calls);
+		while (g_hash_table_iter_next(&iter, NULL, &other))
+			if (other != call && !((Call *)other)->closing)
+				return;
+	}
 	if (call->voice != NULL && !call->closing)
 		g_object_get(call->voice, "muted", &muted, NULL);
 	builder = json_builder_new();
@@ -590,14 +616,15 @@ voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 		call->transcripts++;
 		call->transcript_at = g_get_monotonic_time();
 		g_print("Transcript [%s]: %s\n", speaker, text);
-		if (call->transcript != NULL) {
+		if (call->transcript != NULL && !call->transcript_stopped) {
 			g_autoptr(GDateTime) now = g_date_time_new_now_utc();
 			g_autoptr(GError) error = NULL;
 			if (!ai_call_transcript_append(call->transcript, now, speaker, text, &error)) {
-				/* Report once and stop: a full disk would otherwise log per line. */
+				/* Report once and stop: a full disk would otherwise log per line.
+				 * The file is still closed and handed to the hook at hangup. */
 				g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s",
 					  error->message);
-				g_clear_object(&call->transcript);
+				call->transcript_stopped = TRUE;
 			}
 		}
 	}
@@ -613,13 +640,13 @@ voice_spoken(AiVoiceSession *voice, const gchar *text, gboolean complete, gpoint
 	g_free(call->said);
 	call->said = g_strdup(text);
 	write_state(call);
-	if (call->transcript == NULL)
+	if (call->transcript == NULL || call->transcript_stopped)
 		return;
 	now = g_date_time_new_now_utc();
 	if (!ai_call_transcript_append_spoken(call->transcript, now, call->app->mxid, text,
 										  complete, &error)) {
 		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
-		g_clear_object(&call->transcript);
+		call->transcript_stopped = TRUE;
 	}
 }
 static void
@@ -629,13 +656,13 @@ voice_tool(AiVoiceSession *voice, const gchar *name, const gchar *arguments,
 	Call *call = data;
 	g_autoptr(GDateTime) now = NULL;
 	g_autoptr(GError) error = NULL;
-	if (call->transcript == NULL)
+	if (call->transcript == NULL || call->transcript_stopped)
 		return;
 	now = g_date_time_new_now_utc();
 	if (!ai_call_transcript_append_tool(call->transcript, now, name, arguments, result,
 										is_error, &error)) {
 		g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
-		g_clear_object(&call->transcript);
+		call->transcript_stopped = TRUE;
 	}
 }
 static gboolean
@@ -655,12 +682,12 @@ voice_command(AiVoiceSession *voice, const gchar *name, gpointer data)
 						: g_str_equal(name, "hangup") ? "(hung up)"
 													  : NULL;
 	g_log("ai-call", G_LOG_LEVEL_INFO, "Voice command: room=%s command=%s", call->room, name);
-	if (call->transcript != NULL) {
+	if (call->transcript != NULL && !call->transcript_stopped) {
 		g_autoptr(GDateTime) now = g_date_time_new_now_utc();
 		g_autoptr(GError) error = NULL;
 		if (!ai_call_transcript_append_command(call->transcript, now, name, &error)) {
 			g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
-			g_clear_object(&call->transcript);
+			call->transcript_stopped = TRUE;
 		}
 	}
 	if (call->app->live_text > 0 && note != NULL) {
@@ -984,7 +1011,13 @@ member_posted(App *app, JsonNode *root, const GError *error, gpointer data)
 	g_autofree gchar *user = NULL, *url = NULL;
 	g_autoptr(JsonNode) body = empty_object();
 	if (call->closing) {
-		/* A shutdown can race the original PUT. Clear again after its reply. */
+		/* A shutdown can race the original PUT. Clear again after its reply --
+		 * unless a new call has the room now, whose membership that would be. */
+		if (g_hash_table_lookup(app->calls, call->room) != call) {
+			call->clearing = FALSE;
+			removed_if_done(call);
+			return;
+		}
 		put_member(call, body, cleared);
 		return;
 	}
@@ -1433,6 +1466,12 @@ shutdown_app(gpointer data)
 	App *app = data;
 	GHashTableIter iter;
 	gpointer value;
+	if (app->stop_signals++ > 0) {
+		/* Asked twice: stop waiting on the homeserver and go. */
+		g_printerr("Second stop signal; exiting without waiting for cleanup\n");
+		g_main_loop_quit(app->loop);
+		return G_SOURCE_CONTINUE;
+	}
 	if (app->stopping)
 		return G_SOURCE_CONTINUE;
 	app->stopping = TRUE;
@@ -1457,7 +1496,7 @@ drop_deleted(GObject *source, GAsyncResult *result, gpointer data)
 	g_autoptr(GError) error = NULL;
 	g_autoptr(JsonParser) parser = json_parser_new();
 	if (g_file_delete_finish(G_FILE(source), result, &error) && !app->stopping &&
-		json_parser_load_from_data(parser, drop->contents, -1, NULL)) {
+		drop->contents != NULL && json_parser_load_from_data(parser, drop->contents, -1, NULL)) {
 		JsonObject *o = ai_json_root_object(parser);
 		const gchar *room = ai_json_get_string(o, "room_id", NULL);
 		if (room != NULL && *room == '!' && strchr(room + 1, ':') != NULL)
@@ -1477,9 +1516,13 @@ drop_loaded(GObject *source, GAsyncResult *result, gpointer data)
 	g_autofree gchar *contents = NULL;
 	gsize length = 0;
 	if (g_file_load_contents_finish(G_FILE(source), result, &contents, &length, NULL,
-									NULL) &&
-		length <= 65536) {
+									NULL)) {
 		Drop *drop = g_new0(Drop, 1);
+		/* Consumed either way: left in place, it would be reread every second. */
+		if (length > 65536) {
+			g_message("Outbound drop file is over 64 KiB; removed unread");
+			g_clear_pointer(&contents, g_free);
+		}
 		drop->app = app;
 		drop->contents = g_steal_pointer(&contents);
 		g_file_delete_async(G_FILE(source), G_PRIORITY_DEFAULT, NULL, drop_deleted, drop);
