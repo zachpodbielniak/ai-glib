@@ -30,7 +30,7 @@ struct _App {
 	gchar *transcript_dir, *transcript_hook;
 	/* live-text: 0 off, 1 the replies, 2 the replies and the caller's words. */
 	gint live_text;
-	gboolean speak_code;
+	gboolean speak_code, voice_commands;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -72,6 +72,8 @@ static void
 close_call(Call *call);
 static void
 finish_transcript(Call *call);
+static void
+shutdown_call(Call *call);
 static void
 maybe_connect(Call *call);
 static void
@@ -551,6 +553,48 @@ voice_tool(AiVoiceSession *voice, const gchar *name, const gchar *arguments,
 		g_clear_object(&call->transcript);
 	}
 }
+static gboolean
+hangup_idle(gpointer data)
+{
+	shutdown_call(data);
+	return G_SOURCE_REMOVE;
+}
+/* The session has acted on stop, mute and unmute already; hang-up is ours. */
+static void
+voice_command(AiVoiceSession *voice, const gchar *name, gpointer data)
+{
+	Call *call = data;
+	const gchar *note = g_str_equal(name, "mute")	  ? "(muted)"
+						: g_str_equal(name, "unmute") ? "(listening again)"
+						: g_str_equal(name, "stop")   ? "(stopped)"
+						: g_str_equal(name, "hangup") ? "(hung up)"
+													  : NULL;
+	g_log("ai-call", G_LOG_LEVEL_INFO, "Voice command: room=%s command=%s", call->room, name);
+	if (call->transcript != NULL) {
+		g_autoptr(GDateTime) now = g_date_time_new_now_utc();
+		g_autoptr(GError) error = NULL;
+		if (!ai_call_transcript_append_command(call->transcript, now, name, &error)) {
+			g_log("ai-call", G_LOG_LEVEL_INFO, "Transcript stopped: %s", error->message);
+			g_clear_object(&call->transcript);
+		}
+	}
+	if (call->app->live_text > 0 && note != NULL) {
+		g_autoptr(JsonNode) body = empty_object();
+		g_autofree gchar *url = live_url(call->app, call->room);
+		/* Whatever is said next is a new reply, not an edit of the stopped one. */
+		g_clear_pointer(&call->live, live_reply_unref);
+		json_object_set_string_member(object(body), "msgtype", "m.notice");
+		json_object_set_string_member(object(body), "body", note);
+		request(call->app, "PUT", url, TRUE, body, NULL, live_notice_sent, NULL, NULL);
+	}
+	/* Not from inside the session's own signal: shutdown stops the session. */
+	if (g_str_equal(name, "hangup")) {
+		GSource *idle = g_idle_source_new();
+		g_source_set_callback(idle, hangup_idle, call_ref(call), call_unref);
+		g_source_attach(idle, g_main_context_get_thread_default());
+		g_source_unref(idle);
+	}
+}
 /* One file per answered call; failure costs the transcript, never the call. */
 static void
 open_transcript(Call *call)
@@ -737,7 +781,8 @@ maybe_connect(Call *call)
 		g_autofree gchar *fallback = NULL, *transcription_error = NULL,
 						 *synthesis_error = NULL, *empty_reply = NULL, *progress = NULL;
 		guint progress_delay, trim_after, stt_frame, repeat_limit;
-		g_autofree gchar *repeat_message = NULL;
+		g_autofree gchar *repeat_message = NULL, *names = NULL, *mute_message = NULL,
+						 *unmute_message = NULL;
 		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "stt-frame-ms", &stt_frame,
 					 "tts-timeout-ms",
 					 &tts_timeout, "trailing-silence-ms", &silence, "vad-mode", &mode,
@@ -747,7 +792,8 @@ maybe_connect(Call *call)
 					 "empty-reply-message", &empty_reply, "tool-progress-message", &progress,
 					 "tool-progress-delay-ms", &progress_delay, "trim-tool-results-after",
 					 &trim_after, "repeat-limit", &repeat_limit, "repeat-message",
-					 &repeat_message, NULL);
+					 &repeat_message, "assistant-names", &names, "mute-message",
+					 &mute_message, "unmute-message", &unmute_message, NULL);
 		g_object_set(stt, "timeout-ms", timeout, "frame-ms", stt_frame, NULL);
 		g_object_set(tts, "timeout-ms", tts_timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
@@ -757,7 +803,9 @@ maybe_connect(Call *call)
 					 "empty-reply-message", empty_reply, "tool-progress-message", progress,
 					 "tool-progress-delay-ms", progress_delay, "trim-tool-results-after",
 					 trim_after, "repeat-limit", repeat_limit, "repeat-message",
-					 repeat_message, "speak-code", app->speak_code, NULL);
+					 repeat_message, "speak-code", app->speak_code, "voice-commands",
+					 app->voice_commands, "assistant-names", names, "mute-message",
+					 mute_message, "unmute-message", unmute_message, NULL);
 	}
 	if (app->speech_cache != NULL) {
 		fallback_ready(app->speech_cache, call->voice);
@@ -770,6 +818,7 @@ maybe_connect(Call *call)
 	g_signal_connect(call->voice, "transcript", G_CALLBACK(voice_transcript), call);
 	g_signal_connect(call->voice, "spoken", G_CALLBACK(voice_spoken), call);
 	g_signal_connect(call->voice, "tool", G_CALLBACK(voice_tool), call);
+	g_signal_connect(call->voice, "command", G_CALLBACK(voice_command), call);
 	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
@@ -1497,6 +1546,19 @@ main(int argc, char **argv)
 		else {
 			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 						"speak-code must be yes or no, not \"%s\"", code);
+			goto fail;
+		}
+	}
+	{
+		g_autofree gchar *commands = NULL;
+		g_object_get(call_config, "voice-commands", &commands, NULL);
+		if (commands == NULL || *commands == '\0' || g_str_equal(commands, "no"))
+			app.voice_commands = FALSE;
+		else if (g_str_equal(commands, "yes"))
+			app.voice_commands = TRUE;
+		else {
+			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+						"voice-commands must be yes or no, not \"%s\"", commands);
 			goto fail;
 		}
 	}

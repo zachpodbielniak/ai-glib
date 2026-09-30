@@ -370,6 +370,10 @@ ai_call:
   speak-code: yes    # no: markdown code in a reply is not read aloud
   repeat-limit: 0    # 0 reads a looping reply to the end; try 2
   repeat-message: "I'm going in circles, so I'll stop there."
+  voice-commands: no    # yes: stop, mute, unmute and hang up are commands
+  assistant-names: "Assistant"   # a command may start with one: "Assistant, mute"
+  mute-message: "Okay, I'm not listening. Say unmute when you need me."
+  unmute-message: "I'm listening."
   synthesis-error-message: "Speech is temporarily unavailable. Please try again."
   transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
   transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
@@ -522,6 +526,35 @@ failed write, a failed hook or a failed start is logged at INFO and never
 affects the call. The hook is started by the service, so it shares the
 service's lifetime: under systemd, a stop that kills the whole control group
 also kills a hook that is still running.
+
+** Voice commands
+
+=voice-commands= (=AI_VOICE_COMMANDS=, =yes= or =no=, default =no=) lets the
+caller control the call by voice. A command is the whole utterance, optionally
+led by "hey" or one of =assistant-names= (=AI_VOICE_ASSISTANT_NAMES=,
+comma-separated) and followed by "please". "Assistant, stop listening, please"
+is a command; "I want to stop listening to that podcast" is something to
+answer. Case and punctuation are ignored.
+
+| Command | Said as | What happens |
+|---------+---------+--------------|
+| stop | stop, stop talking, shush, be quiet, enough, cancel, never mind | The reply in progress stops and queued turns are dropped; nothing new is said |
+| mute | mute, stop listening, don't listen, go to sleep | As stop, then the caller is not heard: =mute-message= is spoken once |
+| unmute | unmute, start listening, wake up, I'm back, listen | The caller is heard again: =unmute-message= is spoken once |
+| hang up | hang up, end call, end the call | ai-call says its goodbye and leaves, as on shutdown |
+
+While muted, nothing the caller says reaches the model, and nothing is reported
+as said: no =transcript= signal, no transcript line, no live text. Speech is
+still recognized, because that is the only way to hear "unmute". Hang-up is
+also accepted while muted. The table of phrases is in the session and is the
+registration: a new command is one row and one case.
+
+=AiVoiceSession:muted= is readable and writable, so a button (a GUI, or a
+device with a physical key) mutes the same way. The session emits =command=
+with the name after acting on stop, mute and unmute; hang-up is left to the
+application. ai-call writes each command to the transcript as
+={"type":"command","at":...,"name":"mute"}= and, with =live-text= set, posts
+=(muted)=, =(listening again)=, =(stopped)= or =(hung up)= to the room.
 
 ** Live text in the room
 

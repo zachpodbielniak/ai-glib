@@ -28,6 +28,10 @@ gboolean
 ai_call_transcript_append_tool(AiCallTranscript *self, GDateTime *at, const gchar *name,
 							   const gchar *arguments, const gchar *result,
 							   gboolean is_error, GError **error);
+/* A voice command the caller spoke: "stop", "mute", "unmute" or "hangup". */
+gboolean
+ai_call_transcript_append_command(AiCallTranscript *self, GDateTime *at, const gchar *name,
+								  GError **error);
 /* Rewrites the header with END and the duration, atomically. Idempotent. */
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error);

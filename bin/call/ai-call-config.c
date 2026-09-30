@@ -44,6 +44,13 @@ static const Setting settings[] = {
 	{"noise-suppression", "AI_VOICE_NOISE_SUPPRESSION", NULL, 0, 0, 0},
 	/* Unset or yes: markdown code in a reply is read aloud. no: left out. */
 	{"speak-code", "AI_VOICE_SPEAK_CODE", NULL, 0, 0, 0},
+	/* Unset or no: "mute", "stop" and "hang up" are things to answer. yes: commands. */
+	{"voice-commands", "AI_VOICE_COMMANDS", NULL, 0, 0, 0},
+	/* Comma-separated; a command may start with one, as in "Name, mute". */
+	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
+	{"mute-message", "AI_VOICE_MUTE_MESSAGE",
+	 "Okay, I'm not listening. Say unmute when you need me.", 0, 0, 0},
+	{"unmute-message", "AI_VOICE_UNMUTE_MESSAGE", "I'm listening.", 0, 0, 0},
 	/* 0: a reply that repeats itself is read to the end. */
 	{"repeat-limit", "AI_VOICE_REPEAT_LIMIT", NULL, 0, 0, 100},
 	{"repeat-message", "AI_VOICE_REPEAT_MESSAGE", "I'm going in circles, so I'll stop there.",

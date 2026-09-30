@@ -256,6 +256,34 @@ ai_call_transcript_append_tool(AiCallTranscript *self, GDateTime *at, const gcha
 	return write_line(self, line, error);
 }
 gboolean
+ai_call_transcript_append_command(AiCallTranscript *self, GDateTime *at, const gchar *name,
+								  GError **error)
+{
+	g_autoptr(JsonBuilder) builder = NULL;
+	g_autoptr(JsonNode) root = NULL;
+	g_autofree gchar *when = NULL, *line = NULL;
+	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
+	g_return_val_if_fail(at != NULL && name != NULL, FALSE);
+	if (self->closed) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_CLOSED, "Transcript %s is closed",
+					self->path);
+		return FALSE;
+	}
+	builder = json_builder_new();
+	when = timestamp(at);
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "type");
+	json_builder_add_string_value(builder, "command");
+	json_builder_set_member_name(builder, "at");
+	json_builder_add_string_value(builder, when);
+	json_builder_set_member_name(builder, "name");
+	json_builder_add_string_value(builder, name);
+	json_builder_end_object(builder);
+	root = json_builder_get_root(builder);
+	line = json_to_string(root, FALSE);
+	return write_line(self, line, error);
+}
+gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error)
 {
 	g_autofree gchar *contents = NULL, *first = NULL, *rewritten = NULL;

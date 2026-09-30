@@ -455,6 +455,109 @@ runaway_reply_stopped(Fixture *f, gconstpointer data)
 	}
 }
 static void
+on_command(AiVoiceSession *s, const gchar *name, gpointer data)
+{
+	g_ptr_array_add(data, g_strdup(name));
+}
+static void
+said(Fixture *f, const gchar *text)
+{
+	g_signal_emit_by_name(f->stt, "transcript", "caller", text, TRUE);
+	drain();
+}
+static void
+settle(Fixture *f)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	do {
+		drain();
+		g_usleep(1000);
+	} while (ai_voice_session_get_state(f->session) != AI_VOICE_LISTENING &&
+			 g_get_monotonic_time() < limit);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+/* Voice commands are off unless enabled: "mute" is just something to answer. */
+static void
+commands_off_by_default(Fixture *f, gconstpointer data)
+{
+	ai_mock_provider_push_text(f->provider, "Muting what?");
+	said(f, "Mute.");
+	settle(f);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Muting what?");
+}
+/* Muted, the caller is not heard: nothing reaches the model, and nothing is
+ * reported as said, until they unmute. A name in front is allowed. */
+static void
+mute_and_unmute(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	gboolean muted = FALSE;
+	g_object_set(f->session, "voice-commands", TRUE, "assistant-names", "Ada, Aida, Ayda",
+				 NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	said(f, "Hey Ayda, stop listening, please.");
+	settle(f);
+	g_object_get(f->session, "muted", &muted, NULL);
+	g_assert_true(muted);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1); /* the acknowledgement */
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	said(f, "So anyway, the private thing is this.");
+	settle(f);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	said(f, "Ada, unmute.");
+	settle(f);
+	g_object_get(f->session, "muted", &muted, NULL);
+	g_assert_false(muted);
+	g_assert_cmpuint(f->tts->texts->len, ==, 2);
+	ai_mock_provider_push_text(f->provider, "Back.");
+	said(f, "Are you there?");
+	settle(f);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 2), ==, "Back.");
+	g_assert_cmpuint(commands->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "mute");
+	g_assert_cmpstr(g_ptr_array_index(commands, 1), ==, "unmute");
+}
+/* "Stop" silences the reply in progress and starts no new one. */
+static void
+stop_command(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	guint before;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	speak_and_hold(f);
+	before = ai_mock_provider_get_call_count(f->provider);
+	said(f, "Stop talking.");
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, before);
+	g_assert_cmpuint(commands->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "stop");
+	g_assert_cmpuint(f->tts->texts->len, ==, 2); /* nothing after the held line */
+}
+/* A command is the whole utterance, never a phrase inside one; hang-up is
+ * reported for the application to act on. */
+static void
+command_needs_whole_utterance(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	ai_mock_provider_push_text(f->provider, "Fair enough.");
+	said(f, "I want to stop listening to that podcast.");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 0);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Fair enough.");
+	said(f, "Hang up.");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "hangup");
+}
+static void
 background(Fixture *f, gconstpointer data)
 {
 	g_autoptr(AiBrigade) brigade = ai_brigade_new();
@@ -1100,6 +1203,13 @@ main(int argc, char **argv)
 			   setup, runaway_reply_stopped, teardown);
 	g_test_add("/voice/session/runaway-reply-stopped", Fixture, GINT_TO_POINTER(2), setup,
 			   runaway_reply_stopped, teardown);
+	g_test_add("/voice/session/commands-off-by-default", Fixture, NULL, setup,
+			   commands_off_by_default, teardown);
+	g_test_add("/voice/session/mute-and-unmute", Fixture, NULL, setup, mute_and_unmute,
+			   teardown);
+	g_test_add("/voice/session/stop-command", Fixture, NULL, setup, stop_command, teardown);
+	g_test_add("/voice/session/command-needs-whole-utterance", Fixture, NULL, setup,
+			   command_needs_whole_utterance, teardown);
 	g_test_add("/voice/session/empty-reply-spoken", Fixture, NULL, setup,
 			   empty_reply_spoken, teardown);
 	g_test_add("/voice/session/symbols-only-reply-spoken", Fixture, NULL, setup,

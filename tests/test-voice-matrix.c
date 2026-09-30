@@ -383,6 +383,59 @@ live_text(MatrixFixture *f, gconstpointer data)
 	g_source_remove(timeout);
 	a->live_text = 0;
 }
+/* A spoken command is on the record and in the room, and "hang up" ends the
+ * call the way a shutdown does: goodbye, then membership cleared. */
+static void
+voice_command_call(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-commands-XXXXXX", NULL);
+	g_autofree gchar *path = NULL, *contents = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint base, timeout;
+	Call *call;
+	a->transcript_dir = dir;
+	a->live_text = 2;
+	call = call_ref(start_call(a, "!room:test", NULL, NULL, FALSE));
+	while ((!call->greeted || call->transcript == NULL ||
+			ai_voice_session_get_state(call->voice) != AI_VOICE_LISTENING) &&
+		   g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_nonnull(call->transcript);
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	pump_ms(100);
+	base = f->sent->len;
+	g_signal_emit_by_name(call->voice, "command", "mute");
+	limit = g_get_monotonic_time() + 3000000;
+	while (f->sent->len == base && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_cmpint(find_sent(f, base, "(muted)", FALSE, NULL), >=, 0);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_nonnull(strstr(contents, "\"type\":\"command\""));
+	g_assert_nonnull(strstr(contents, "\"name\":\"mute\""));
+	g_assert_false(call->closing);
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	g_signal_emit_by_name(call->voice, "command", "hangup");
+	limit = g_get_monotonic_time() + 4000000;
+	while (g_hash_table_size(a->calls) != 0 && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_source_remove(timeout);
+	g_assert_true(call->closing);
+	g_assert_cmpuint(f->clears, ==, 1);
+	g_assert_cmpuint(g_hash_table_size(a->calls), ==, 0);
+	call_unref(call);
+	a->transcript_dir = NULL;
+	a->live_text = 0;
+}
 static void
 summary_log(const gchar *domain, GLogLevelFlags level, const gchar *message,
 			gpointer data)
@@ -611,6 +664,8 @@ main(int argc, char **argv)
 			   matrix_setup, live_text, matrix_teardown);
 	g_test_add("/voice/matrix/live-text-both", MatrixFixture, GINT_TO_POINTER(2),
 			   matrix_setup, live_text, matrix_teardown);
+	g_test_add("/voice/matrix/voice-command", MatrixFixture, NULL, matrix_setup,
+			   voice_command_call, matrix_teardown);
 	g_test_add("/voice/matrix/transcript-on-disk", MatrixFixture, NULL, matrix_setup,
 			   transcript_on_disk, matrix_teardown);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,

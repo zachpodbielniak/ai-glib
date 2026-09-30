@@ -74,6 +74,10 @@ struct _AiVoiceSession {
 	/* repeat-limit: copies of each line this reply, and whether it was stopped */
 	guint repeat_limit;
 	gchar *repeat_message;
+	/* voice-commands: spoken controls, and whether the caller is being heard */
+	gboolean voice_commands, muted;
+	gchar **assistant_names;
+	gchar *mute_message, *unmute_message;
 	GHashTable *repeats;
 	gboolean runaway;
 	GSource *progress; /* pending tool-progress line, held for teardown */
@@ -117,7 +121,12 @@ enum {
 	PROP_TRIM_AFTER,
 	PROP_SPEAK_CODE,
 	PROP_REPEAT_LIMIT,
-	PROP_REPEAT_MESSAGE
+	PROP_REPEAT_MESSAGE,
+	PROP_VOICE_COMMANDS,
+	PROP_ASSISTANT_NAMES,
+	PROP_MUTED,
+	PROP_MUTE_MESSAGE,
+	PROP_UNMUTE_MESSAGE
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -1073,6 +1082,121 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		}
 	}
 }
+/* Spoken controls. A command is the whole utterance — "stop listening", or
+ * "Ada, stop listening, please" — never a phrase inside a sentence, so "I want
+ * to stop listening to that podcast" is still something to answer. The table
+ * is the registration: a new command is one row and one case in
+ * run_command(). */
+typedef struct {
+	const gchar *name;
+	const gchar *const *phrases;
+} VoiceCommand;
+static const gchar *const stop_phrases[] = {
+	"stop", "stop talking", "stop it", "shush", "hush", "shut up", "be quiet", "quiet",
+	"enough", "that's enough", "cancel", "cancel that", "never mind", "nevermind", NULL};
+static const gchar *const mute_phrases[] = {
+	"mute", "mute yourself", "stop listening", "don't listen", "go to sleep",
+	"pause listening", NULL};
+static const gchar *const unmute_phrases[] = {
+	"unmute", "start listening", "wake up", "resume listening", "you can listen",
+	"i'm back", "listen", NULL};
+static const gchar *const hangup_phrases[] = {"hang up", "end call", "end the call", NULL};
+static const VoiceCommand voice_command_table[] = {{"stop", stop_phrases},
+												   {"mute", mute_phrases},
+												   {"unmute", unmute_phrases},
+												   {"hangup", hangup_phrases}};
+static const gchar *const lead_words[] = {"hey", "hi", "ok", "okay", "yo", NULL};
+static const gchar *const tail_words[] = {"please", "now", "thanks", NULL};
+/* Lower-case words separated by single spaces; a curly apostrophe is a straight
+ * one, anything else that is not a letter or digit separates words. */
+static gchar *
+command_words(const gchar *text)
+{
+	GString *out = g_string_new(NULL);
+	const gchar *p;
+	for (p = text; *p != '\0'; p = g_utf8_next_char(p)) {
+		gunichar c = g_utf8_get_char(p);
+		if (c == 0x2019)
+			c = '\'';
+		if (g_unichar_isalnum(c) || c == '\'')
+			g_string_append_unichar(out, g_unichar_tolower(c));
+		else if (out->len > 0 && out->str[out->len - 1] != ' ')
+			g_string_append_c(out, ' ');
+	}
+	while (out->len > 0 && out->str[out->len - 1] == ' ')
+		g_string_truncate(out, out->len - 1);
+	return g_string_free(out, FALSE);
+}
+static gboolean
+strip_lead(gchar **words, const gchar *lead)
+{
+	gsize n = strlen(lead);
+	if (n == 0 || strncmp(*words, lead, n) != 0 || ((*words)[n] != ' ' && (*words)[n] != '\0'))
+		return FALSE;
+	memmove(*words, *words + n + ((*words)[n] == ' '), strlen(*words + n) + 1 - ((*words)[n] == ' '));
+	return TRUE;
+}
+static gboolean
+strip_tail(gchar *words, const gchar *tail)
+{
+	gsize n = strlen(words), t = strlen(tail);
+	if (t == 0 || n <= t || words[n - t - 1] != ' ' || strcmp(words + n - t, tail) != 0)
+		return FALSE;
+	words[n - t - 1] = '\0';
+	return TRUE;
+}
+static const gchar *
+match_command(AiVoiceSession *self, const gchar *text)
+{
+	g_autofree gchar *words = command_words(text);
+	gboolean again = TRUE;
+	guint i, j;
+	while (again) {
+		again = FALSE;
+		for (i = 0; lead_words[i] != NULL; i++)
+			again |= strip_lead(&words, lead_words[i]);
+		for (i = 0; self->assistant_names != NULL && self->assistant_names[i] != NULL; i++) {
+			g_autofree gchar *name = command_words(self->assistant_names[i]);
+			again |= strip_lead(&words, name);
+		}
+		for (i = 0; tail_words[i] != NULL; i++)
+			again |= strip_tail(words, tail_words[i]);
+	}
+	for (i = 0; i < G_N_ELEMENTS(voice_command_table); i++)
+		for (j = 0; voice_command_table[i].phrases[j] != NULL; j++)
+			if (strcmp(words, voice_command_table[i].phrases[j]) == 0)
+				return voice_command_table[i].name;
+	return NULL;
+}
+static void
+set_muted(AiVoiceSession *self, gboolean muted)
+{
+	if (self->muted == muted)
+		return;
+	self->muted = muted;
+	g_object_notify(G_OBJECT(self), "muted");
+}
+static void
+run_command(AiVoiceSession *self, const gchar *name)
+{
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "Voice command: %s", name);
+	g_signal_emit_by_name(self, "command", name);
+	if (self->stopped)
+		return;
+	if (g_str_equal(name, "stop") || g_str_equal(name, "mute")) {
+		interrupt_turn(self);
+		g_queue_clear_full(&self->turns, g_free);
+	}
+	if (g_str_equal(name, "mute")) {
+		set_muted(self, TRUE);
+		if (self->mute_message != NULL && *self->mute_message != '\0')
+			queue_line(self, self->mute_message, FALSE);
+	} else if (g_str_equal(name, "unmute")) {
+		set_muted(self, FALSE);
+		if (self->unmute_message != NULL && *self->unmute_message != '\0')
+			queue_line(self, self->unmute_message, FALSE);
+	}
+}
 static void
 confirm_barge(AiVoiceSession *self, Participant *p)
 {
@@ -1092,6 +1216,8 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	g_autofree gchar *trimmed = NULL;
 	gboolean pending;
 	if (self->stopped || p == NULL)
+		return;
+	if (!final && self->muted)
 		return;
 	if (!final) {
 		g_autofree gchar *words = strip_annotations(text);
@@ -1118,6 +1244,22 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	}
 	if (pending && has_words(text))
 		confirm_barge(self, p);
+	if (self->voice_commands && has_words(text)) {
+		const gchar *command = match_command(self, text);
+		/* Muted, only a way back is heard: nothing else reaches the model or
+		 * is reported as said. */
+		if (command != NULL &&
+			(!self->muted || g_str_equal(command, "unmute") || g_str_equal(command, "hangup"))) {
+			run_command(self, command);
+			pump(self);
+			return;
+		}
+	}
+	if (self->muted) {
+		g_debug("voice: muted; not hearing %s", p->name);
+		pump(self);
+		return;
+	}
 	if (text != NULL && *text != '\0' && g_queue_get_length(&self->turns) < 32) {
 		labelled = g_strdup_printf("[%s]: %s", p->name, text);
 		g_queue_push_tail(&self->turns, g_steal_pointer(&labelled));
@@ -1237,6 +1379,9 @@ finalize(GObject *object)
 	g_hash_table_unref(self->notices);
 	g_hash_table_unref(self->repeats);
 	g_string_free(self->span, TRUE);
+	g_strfreev(self->assistant_names);
+	g_free(self->mute_message);
+	g_free(self->unmute_message);
 	g_free(self->repeat_message);
 	g_main_context_unref(self->context);
 	g_queue_clear_full(&self->lines, line_free);
@@ -1287,6 +1432,18 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->repeat_limit);
 	else if (id == PROP_REPEAT_MESSAGE)
 		g_value_set_string(value, self->repeat_message);
+	else if (id == PROP_VOICE_COMMANDS)
+		g_value_set_boolean(value, self->voice_commands);
+	else if (id == PROP_ASSISTANT_NAMES) {
+		g_autofree gchar *joined =
+			self->assistant_names != NULL ? g_strjoinv(",", self->assistant_names) : NULL;
+		g_value_set_string(value, joined);
+	} else if (id == PROP_MUTED)
+		g_value_set_boolean(value, self->muted);
+	else if (id == PROP_MUTE_MESSAGE)
+		g_value_set_string(value, self->mute_message);
+	else if (id == PROP_UNMUTE_MESSAGE)
+		g_value_set_string(value, self->unmute_message);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1339,6 +1496,25 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	else if (id == PROP_REPEAT_MESSAGE) {
 		g_free(self->repeat_message);
 		self->repeat_message = g_value_dup_string(value);
+	} else if (id == PROP_VOICE_COMMANDS)
+		self->voice_commands = g_value_get_boolean(value);
+	else if (id == PROP_ASSISTANT_NAMES) {
+		const gchar *names = g_value_get_string(value);
+		g_clear_pointer(&self->assistant_names, g_strfreev);
+		if (names != NULL && *names != '\0') {
+			guint i;
+			self->assistant_names = g_strsplit(names, ",", -1);
+			for (i = 0; self->assistant_names[i] != NULL; i++)
+				g_strstrip(self->assistant_names[i]);
+		}
+	} else if (id == PROP_MUTED)
+		set_muted(self, g_value_get_boolean(value));
+	else if (id == PROP_MUTE_MESSAGE) {
+		g_free(self->mute_message);
+		self->mute_message = g_value_dup_string(value);
+	} else if (id == PROP_UNMUTE_MESSAGE) {
+		g_free(self->unmute_message);
+		self->unmute_message = g_value_dup_string(value);
 	} else if (id == PROP_TRIM_AFTER) {
 		self->trim_after = g_value_get_uint(value);
 		if (self->worker != NULL)
@@ -1437,6 +1613,37 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 		g_param_spec_string("repeat-message", "Repeat message",
 							"Spoken when repeat-limit stops a reply; empty says nothing",
 							"I'm going in circles, so I'll stop there.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_VOICE_COMMANDS,
+		g_param_spec_boolean("voice-commands", "Voice commands",
+							 "Treat a whole utterance of stop, mute, unmute or hang up as a "
+							 "command instead of something to answer",
+							 FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_ASSISTANT_NAMES,
+		g_param_spec_string("assistant-names", "Assistant names",
+							"Comma-separated names a command may start with, as in "
+							"\"Name, stop listening\"",
+							NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_MUTED,
+		g_param_spec_boolean("muted", "Muted",
+							 "The caller is not heard: nothing they say reaches the model "
+							 "or is reported, except unmute and hang up",
+							 FALSE, G_PARAM_READWRITE | G_PARAM_EXPLICIT_NOTIFY |
+										G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_MUTE_MESSAGE,
+		g_param_spec_string("mute-message", "Mute message",
+							"Spoken when the caller mutes the assistant; empty says nothing",
+							"Okay, I'm not listening. Say unmute when you need me.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_UNMUTE_MESSAGE,
+		g_param_spec_string("unmute-message", "Unmute message",
+							"Spoken when the caller unmutes the assistant; empty says nothing",
+							"I'm listening.",
 							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TRIM_AFTER,
@@ -1561,6 +1768,17 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 * Emitted once per segment after its playback ends, in order. A segment
 	 * that produced no audio at all is not reported: nobody heard it.
 	 */
+	/**
+	 * AiVoiceSession::command:
+	 * @session: the session
+	 * @name: "stop", "mute", "unmute" or "hangup"
+	 *
+	 * A caller spoke a command while #AiVoiceSession:voice-commands is set.
+	 * The session has already acted on stop, mute and unmute; hang-up is the
+	 * application's to carry out.
+	 */
+	g_signal_new("command", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+				 G_TYPE_NONE, 1, G_TYPE_STRING);
 	g_signal_new("spoken", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
 				 NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_BOOLEAN);
 	/**
