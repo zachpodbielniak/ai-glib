@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "voice/ai-livekit-transport.h"
+#include "voice/ai-voice-pipeline-private.h"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
@@ -509,7 +510,13 @@ static void
 start_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
 {
 	GstElement *pipeline = data;
-	if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+	GstStateChangeReturn result = GST_STATE_CHANGE_FAILURE;
+	/* Stopped first: a leave or recovery already detached it. started()
+	 * ignores a pipeline that is no longer current. */
+	if (!ai_pipeline_gate_play(pipeline, &result))
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+								"LiveKit pipeline stopped while starting");
+	else if (result == GST_STATE_CHANGE_FAILURE)
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
 								"Cannot start LiveKit pipeline");
 	else
@@ -689,6 +696,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	self->clock = g_timeout_source_new(10);
 	g_source_set_callback(self->clock, tick, self, NULL);
 	g_source_attach(self->clock, self->context);
+	ai_pipeline_gate_attach(self->pipeline);
 	starter = g_task_new(self, cancel, started, NULL);
 	g_task_set_task_data(starter, gst_object_ref(self->pipeline),
 						 (GDestroyNotify)gst_object_unref);
@@ -697,7 +705,7 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 static void
 stop_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
 {
-	gst_element_set_state(data, GST_STATE_NULL);
+	ai_pipeline_gate_stop(data);
 	g_task_return_boolean(task, TRUE);
 }
 static GstElement *

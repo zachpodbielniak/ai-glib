@@ -350,6 +350,67 @@ test_bad_device(void)
 	g_clear_error(&h.error);
 	g_object_unref(t);
 }
+static void
+count_joined(AiAudioTransport *t, const gchar *speaker, const gchar *name, gpointer data)
+{
+	(*(guint *)data)++;
+}
+/* Hanging up while the devices are still opening: the stop can run before the
+ * start, which must then not leave a pipeline playing into a freed transport. */
+static void
+test_leave_while_opening(void)
+{
+	guint i;
+	if (!available()) {
+		g_test_skip("GStreamer test elements unavailable");
+		return;
+	}
+	for (i = 0; i < 50; i++) {
+		AiLocalAudioTransport *t = g_object_new(
+			AI_TYPE_LOCAL_AUDIO_TRANSPORT, "input", "audiotestsrc is-live=true", "output",
+			"fakesink sync=true", NULL);
+		Heard h = {0};
+		gboolean done = FALSE;
+		ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(t), NULL, NULL, NULL, joined, &h);
+		ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(t), NULL, left, &done);
+		g_object_unref(t);
+		wait_for(&h.done, 5000);
+		wait_for(&done, 5000);
+		g_assert_true(h.done && done);
+		if (h.error != NULL)
+			g_assert_error(h.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+		g_clear_error(&h.error);
+	}
+	pump(100);
+}
+/* Opened, closed and opened again before the first open finished: one join
+ * each, and the first is not reported as the second's success. */
+static void
+test_rejoin_while_opening(void)
+{
+	AiLocalAudioTransport *t;
+	Heard a = {0}, b = {0};
+	gboolean done = FALSE;
+	guint joins = 0;
+	if (!available()) {
+		g_test_skip("GStreamer test elements unavailable");
+		return;
+	}
+	t = g_object_new(AI_TYPE_LOCAL_AUDIO_TRANSPORT, "input", "audiotestsrc is-live=true",
+					 "output", "fakesink sync=true", NULL);
+	g_signal_connect(t, "participant-joined", G_CALLBACK(count_joined), &joins);
+	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(t), NULL, NULL, NULL, joined, &a);
+	ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(t), NULL, left, &done);
+	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(t), NULL, NULL, NULL, joined, &b);
+	wait_for(&a.done, 5000);
+	wait_for(&b.done, 5000);
+	wait_for(&done, 5000);
+	g_assert_error(a.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+	g_assert_no_error(b.error);
+	g_assert_cmpuint(joins, ==, 1);
+	g_clear_error(&a.error);
+	stop(t);
+}
 int
 main(int argc, char **argv)
 {
@@ -364,5 +425,7 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/local/continuous", test_continuous);
 	g_test_add_func("/voice/local/leave-from-completion", test_leave_from_completion);
 	g_test_add_func("/voice/local/bad-device", test_bad_device);
+	g_test_add_func("/voice/local/leave-while-opening", test_leave_while_opening);
+	g_test_add_func("/voice/local/rejoin-while-opening", test_rejoin_while_opening);
 	return g_test_run();
 }

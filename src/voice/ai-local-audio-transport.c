@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "voice/ai-local-audio-transport.h"
+#include "voice/ai-voice-pipeline-private.h"
 #include "voice/ai-voice-input-private.h"
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -90,18 +91,31 @@ captured_free(gpointer data)
 	g_bytes_unref(c->pcm);
 	g_free(c);
 }
+static void
+weak_ref_free(gpointer data)
+{
+	g_weak_ref_clear(data);
+	g_free(data);
+}
 static GstFlowReturn
 new_sample(GstAppSink *sink, gpointer data)
 {
-	AiLocalAudioTransport *self = data;
+	/* Weak: a streaming thread can outlive the transport by a stop. */
+	AiLocalAudioTransport *self = g_weak_ref_get(data);
 	GstSample *sample = gst_app_sink_pull_sample(sink);
 	GstMapInfo map;
 	Captured *c;
 	GSource *idle;
-	if (sample == NULL)
+	if (sample == NULL) {
+		g_clear_object(&self);
 		return GST_FLOW_EOS;
+	}
+	if (self == NULL) {
+		gst_sample_unref(sample);
+		return GST_FLOW_OK;
+	}
 	c = g_new0(Captured, 1);
-	c->self = g_object_ref(self);
+	c->self = self;
 	c->generation = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(sink), "voice-generation"));
 	gst_buffer_map(gst_sample_get_buffer(sample), &map, GST_MAP_READ);
 	c->pcm = g_bytes_new(map.data, map.size);
@@ -264,9 +278,12 @@ started(GObject *source, GAsyncResult *result, gpointer data)
 	GTask *join = data;
 	AiLocalAudioTransport *self = g_task_get_source_object(join);
 	g_autoptr(GError) error = NULL;
-	if (!g_task_propagate_boolean(G_TASK(result), &error)) {
+	/* Detached while opening, or a later join's pipeline: not this join's. */
+	gboolean current = g_task_get_task_data(G_TASK(result)) == (gpointer)self->pipeline &&
+					   !self->leaving;
+	if (!g_task_propagate_boolean(G_TASK(result), &error) && current) {
 		g_task_return_error(join, g_steal_pointer(&error));
-	} else if (self->pipeline == NULL || self->leaving) {
+	} else if (!current) {
 		g_task_return_new_error(join, G_IO_ERROR, G_IO_ERROR_CANCELLED,
 								"Local audio stopped while opening");
 	} else {
@@ -282,7 +299,11 @@ start_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel
 {
 	/* Not waiting for preroll: the speaker side has nothing to play until the
 	 * first reply, and a device that fails later reports it on the bus. */
-	if (gst_element_set_state(data, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+	GstStateChangeReturn result = GST_STATE_CHANGE_FAILURE;
+	if (!ai_pipeline_gate_play(data, &result))
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+								"Local audio stopped while opening");
+	else if (result == GST_STATE_CHANGE_FAILURE)
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
 								"Could not open the local audio devices");
 	else
@@ -291,7 +312,7 @@ start_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel
 static void
 stop_pipeline(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
 {
-	gst_element_set_state(data, GST_STATE_NULL);
+	ai_pipeline_gate_stop(data);
 	g_task_return_boolean(task, TRUE);
 }
 static void
@@ -362,7 +383,13 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	self->appsink = gst_bin_get_by_name(GST_BIN(self->pipeline), "voice-in");
 	g_object_set_data(G_OBJECT(self->appsink), "voice-generation",
 					  GUINT_TO_POINTER((guint)self->generation));
-	gst_app_sink_set_callbacks(GST_APP_SINK(self->appsink), &callbacks, self, NULL);
+	{
+		GWeakRef *ref = g_new0(GWeakRef, 1);
+		g_weak_ref_init(ref, self);
+		gst_app_sink_set_callbacks(GST_APP_SINK(self->appsink), &callbacks, ref,
+								   weak_ref_free);
+	}
+	ai_pipeline_gate_attach(self->pipeline);
 	bus = gst_element_get_bus(self->pipeline);
 	self->bus_source = gst_bus_create_watch(bus);
 	gst_object_unref(bus);
@@ -509,7 +536,7 @@ dispose(GObject *object)
 	self->leaving = TRUE;
 	pipeline = detach(self);
 	if (pipeline != NULL) {
-		gst_element_set_state(pipeline, GST_STATE_NULL);
+		ai_pipeline_gate_stop(pipeline);
 		gst_object_unref(pipeline);
 	}
 	G_OBJECT_CLASS(ai_local_audio_transport_parent_class)->dispose(object);
