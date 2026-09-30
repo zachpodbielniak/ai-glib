@@ -67,6 +67,14 @@ struct _AiVoiceSession {
 	guint turn_lines; /* lines queued since the current provider turn began */
 	guint tool_progress_delay_ms;
 	guint trim_after; /* 0: history keeps every tool result in full */
+	/* speak-code off: this reply's position relative to markdown code */
+	gboolean speak_code, in_fence, in_inline;
+	guint ticks; /* backticks at the end of the last delta, not yet resolved */
+	/* repeat-limit: copies of each line this reply, and whether it was stopped */
+	guint repeat_limit;
+	gchar *repeat_message;
+	GHashTable *repeats;
+	gboolean runaway;
 	GSource *progress; /* pending tool-progress line, held for teardown */
 	GSource *hold;     /* flushes a delta that ended on a period */
 	guint64 progress_generation;
@@ -105,7 +113,10 @@ enum {
 	PROP_EMPTY_REPLY_MESSAGE,
 	PROP_TOOL_PROGRESS_MESSAGE,
 	PROP_TOOL_PROGRESS_DELAY,
-	PROP_TRIM_AFTER
+	PROP_TRIM_AFTER,
+	PROP_SPEAK_CODE,
+	PROP_REPEAT_LIMIT,
+	PROP_REPEAT_MESSAGE
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 static void
@@ -505,20 +516,108 @@ update_hold(AiVoiceSession *self)
 	g_source_set_callback(self->hold, hold_fire, self, NULL);
 	g_source_attach(self->hold, self->context);
 }
+/* A model that loses the thread can emit the same line for as long as it is
+ * allowed to generate, and the caller hears all of it. The third "grep the
+ * notes" is not information; it is the reply looping. */
+static gchar *
+repeat_key(const gchar *text)
+{
+	g_autofree gchar *spoken = speakable(text);
+	GString *key = g_string_new(NULL);
+	const gchar *p;
+	for (p = spoken; p != NULL && *p != '\0'; p = g_utf8_next_char(p)) {
+		gunichar c = g_utf8_get_char(p);
+		if (g_unichar_isalnum(c))
+			g_string_append_unichar(key, g_unichar_tolower(c));
+	}
+	return g_string_free(key, FALSE);
+}
+static void
+stop_runaway(AiVoiceSession *self)
+{
+	g_log("ai-glib", G_LOG_LEVEL_INFO,
+		  "Reply repeated a line more than %u times; stopping it", self->repeat_limit);
+	self->runaway = TRUE;
+	g_string_truncate(self->pending_text, 0);
+	clear_hold(self);
+	clear_progress(self);
+	if (self->turn_cancel != NULL)
+		g_cancellable_cancel(self->turn_cancel);
+	if (self->repeat_message != NULL && *self->repeat_message != '\0')
+		queue_line(self, self->repeat_message, FALSE);
+}
+static void
+offer_line(AiVoiceSession *self, const gchar *text)
+{
+	if (self->runaway)
+		return;
+	if (self->repeat_limit > 0) {
+		g_autofree gchar *key = repeat_key(text);
+		if (*key != '\0') {
+			guint seen = GPOINTER_TO_UINT(g_hash_table_lookup(self->repeats, key)) + 1;
+			g_hash_table_insert(self->repeats, g_steal_pointer(&key), GUINT_TO_POINTER(seen));
+			if (seen > self->repeat_limit) {
+				stop_runaway(self);
+				return;
+			}
+		}
+	}
+	queue_line(self, text, TRUE);
+}
 static void
 segment(AiVoiceSession *self, gboolean final)
 {
 	gsize end;
-	while ((end = sentence_end(self->pending_text->str, self->pending_text->len,
-							   final)) != 0) {
+	while (!self->runaway && (end = sentence_end(self->pending_text->str,
+												 self->pending_text->len, final)) != 0) {
 		g_autofree gchar *text = g_strndup(self->pending_text->str, end);
-		queue_line(self, text, TRUE);
 		g_string_erase(self->pending_text, 0, end);
+		offer_line(self, text);
 	}
 	if (final && self->pending_text->len != 0) {
-		queue_line(self, self->pending_text->str, TRUE);
+		g_autofree gchar *text = g_strdup(self->pending_text->str);
 		g_string_truncate(self->pending_text, 0);
+		offer_line(self, text);
 	}
+}
+/* speak-code off: markdown code is what a model writes when it shows a command
+ * instead of running it, and read aloud it is noise. Fenced blocks and inline
+ * spans are left out; the prose around them is kept. A run of backticks at
+ * the end of a delta is carried, since "``" and "```" mean different things. */
+static void
+append_reply(AiVoiceSession *self, const gchar *text, gboolean final)
+{
+	const gchar *p;
+	if (self->speak_code) {
+		g_string_append(self->pending_text, text);
+		return;
+	}
+	for (p = text; *p != '\0'; p++) {
+		if (*p == '`') {
+			self->ticks++;
+			continue;
+		}
+		if (self->ticks >= 3) {
+			self->in_fence = !self->in_fence;
+			self->in_inline = FALSE;
+			g_string_append_c(self->pending_text, '\n');
+		} else if (self->ticks > 0 && !self->in_fence)
+			self->in_inline = !self->in_inline;
+		self->ticks = 0;
+		if (self->in_fence)
+			continue;
+		if (self->in_inline) {
+			/* An unclosed span ends with its line rather than eating the reply. */
+			if (*p == '\n') {
+				self->in_inline = FALSE;
+				g_string_append_c(self->pending_text, '\n');
+			}
+			continue;
+		}
+		g_string_append_c(self->pending_text, *p);
+	}
+	if (final)
+		self->ticks = 0;
 }
 static void
 speech_complete(Speech *s)
@@ -633,6 +732,9 @@ start_turn(AiVoiceSession *self, const gchar *text)
 	g_string_truncate(self->spoken, 0);
 	self->turn_lines = 0;
 	self->progress_used = FALSE;
+	self->in_fence = self->in_inline = self->runaway = FALSE;
+	self->ticks = 0;
+	g_hash_table_remove_all(self->repeats);
 	clear_progress(self);
 	clear_hold(self);
 	state(self, AI_VOICE_THINKING);
@@ -768,7 +870,9 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 			clear_deadline(self);
 			self->paused_deadline_us = 0;
 		}
-		if (generation == self->generation) {
+		if (generation == self->generation && self->runaway) {
+			/* Stopped on purpose; the cancellation is not an error to speak. */
+		} else if (generation == self->generation) {
 			if (error != NULL) {
 				g_autofree gchar *line =
 					g_strdup_printf("There was an error: %s", error->message);
@@ -776,7 +880,7 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 				queue_line(self, line, FALSE);
 			} else {
 				if (text != NULL)
-					g_string_append(self->pending_text, text);
+					append_reply(self, text, TRUE);
 				segment(self, TRUE);
 				/* No text, no tool error, nothing pronounceable: a model that
 				 * returns an empty turn, or a tool call a provider failed to
@@ -795,8 +899,10 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 		if (k == AI_EVENT_TOOL_STARTED)
 			tool_started(self);
 		else if (k == AI_EVENT_TEXT_DELTA) {
-			if (self->pending_text->len < 65536)
-				g_string_append(self->pending_text, ai_event_get_text(event));
+			if (self->runaway)
+				;
+			else if (self->pending_text->len < 65536)
+				append_reply(self, ai_event_get_text(event), FALSE);
 			segment(self, FALSE);
 			update_hold(self);
 		} else if (k == AI_EVENT_TOOL_FINISHED) {
@@ -1102,6 +1208,8 @@ finalize(GObject *object)
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	g_hash_table_unref(self->participants);
 	g_hash_table_unref(self->notices);
+	g_hash_table_unref(self->repeats);
+	g_free(self->repeat_message);
 	g_main_context_unref(self->context);
 	g_queue_clear_full(&self->lines, line_free);
 	g_queue_clear_full(&self->turns, g_free);
@@ -1145,6 +1253,12 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->tool_progress_delay_ms);
 	else if (id == PROP_TRIM_AFTER)
 		g_value_set_uint(value, self->trim_after);
+	else if (id == PROP_SPEAK_CODE)
+		g_value_set_boolean(value, self->speak_code);
+	else if (id == PROP_REPEAT_LIMIT)
+		g_value_set_uint(value, self->repeat_limit);
+	else if (id == PROP_REPEAT_MESSAGE)
+		g_value_set_string(value, self->repeat_message);
 	else if (id == PROP_FALLBACK_PCM)
 		g_value_set_boxed(value, self->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
@@ -1190,7 +1304,14 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		self->tool_progress_message = g_value_dup_string(value);
 	} else if (id == PROP_TOOL_PROGRESS_DELAY)
 		self->tool_progress_delay_ms = g_value_get_uint(value);
-	else if (id == PROP_TRIM_AFTER) {
+	else if (id == PROP_SPEAK_CODE)
+		self->speak_code = g_value_get_boolean(value);
+	else if (id == PROP_REPEAT_LIMIT)
+		self->repeat_limit = g_value_get_uint(value);
+	else if (id == PROP_REPEAT_MESSAGE) {
+		g_free(self->repeat_message);
+		self->repeat_message = g_value_dup_string(value);
+	} else if (id == PROP_TRIM_AFTER) {
 		self->trim_after = g_value_get_uint(value);
 		if (self->worker != NULL)
 			ai_voice_worker_set_trim_after(self->worker, self->trim_after);
@@ -1271,6 +1392,24 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 			"barge-in-ms", "Barge-in debounce",
 			"Consecutive speech required before recognition or interruption", 10, 5000,
 			250, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_SPEAK_CODE,
+		g_param_spec_boolean("speak-code", "Speak code",
+							 "Read markdown code spans and fenced blocks aloud; when off "
+							 "they are left out of speech",
+							 TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_REPEAT_LIMIT,
+		g_param_spec_uint("repeat-limit", "Repeat limit",
+						  "Stop a reply once one line has been spoken this many times; "
+						  "0 never stops one",
+						  0, 100, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(
+		oc, PROP_REPEAT_MESSAGE,
+		g_param_spec_string("repeat-message", "Repeat message",
+							"Spoken when repeat-limit stops a reply; empty says nothing",
+							"I'm going in circles, so I'll stop there.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(
 		oc, PROP_TRIM_AFTER,
 		g_param_spec_uint("trim-tool-results-after", "Trim tool results after",
@@ -1418,6 +1557,8 @@ ai_voice_session_init(AiVoiceSession *self)
 	self->participants =
 		g_hash_table_new_full(g_str_hash, g_str_equal, g_free, participant_free);
 	self->notices = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	self->repeats = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	self->speak_code = TRUE;
 	self->pending_text = g_string_new(NULL);
 	self->spoken = g_string_new(NULL);
 	self->deadline_ms = 20000;

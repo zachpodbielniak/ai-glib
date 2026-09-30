@@ -385,6 +385,71 @@ symbols_only_reply_spoken(Fixture *f, gconstpointer data)
 	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, message);
 	g_free(message);
 }
+static gchar *
+spoken_all(Fixture *f)
+{
+	GString *all = g_string_new(NULL);
+	guint i;
+	for (i = 0; i < f->tts->texts->len; i++) {
+		g_string_append(all, g_ptr_array_index(f->tts->texts, i));
+		g_string_append_c(all, '\n');
+	}
+	return g_string_free(all, FALSE);
+}
+/* A model that writes the command instead of calling the tool: read aloud, a
+ * shell command is noise. With speak-code off, code spans and fenced blocks
+ * are left out of speech and the prose around them is kept. */
+static void
+code_not_spoken(Fixture *f, gconstpointer data)
+{
+	gboolean skip = GPOINTER_TO_INT(data) == 2;
+	g_autofree gchar *all = NULL;
+	if (skip)
+		g_object_set(f->session, "speak-code", FALSE, NULL);
+	ai_mock_provider_push_text(f->provider,
+							   "Here it is: `ls -la` right now.\n```bash\nssh host "
+							   "'grep -ri garden notes'\n```\nAll set.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	all = spoken_all(f);
+	if (skip) {
+		g_assert_null(strstr(all, "ssh"));
+		g_assert_null(strstr(all, "ls -la"));
+		g_assert_null(strstr(all, "bash"));
+		g_assert_nonnull(strstr(all, "Here it is"));
+		g_assert_nonnull(strstr(all, "right now."));
+		g_assert_nonnull(strstr(all, "All set."));
+	} else
+		g_assert_nonnull(strstr(all, "ssh host"));
+}
+/* A reply that loops is stopped, not read out to the end: after repeat-limit
+ * copies of one line, the rest of the reply is dropped and one line says so. */
+static void
+runaway_reply_stopped(Fixture *f, gconstpointer data)
+{
+	gboolean guard = GPOINTER_TO_INT(data) == 2;
+	g_autofree gchar *all = NULL;
+	if (guard)
+		g_object_set(f->session, "repeat-limit", 2u, "repeat-message",
+					 "I'm going in circles, so I'll stop there.", NULL);
+	ai_mock_provider_push_text(f->provider,
+							   "Let me look.\nGrep the notes.\nFind the file.\nGrep the "
+							   "notes.\nGrep the notes.\nGrep the notes.\nMore after.");
+	utterance(f, "caller");
+	wait_replies(f, 3);
+	all = spoken_all(f);
+	if (guard) {
+		g_assert_nonnull(strstr(all, "Let me look."));
+		g_assert_nonnull(strstr(all, "Find the file."));
+		g_assert_nonnull(strstr(all, "I'm going in circles, so I'll stop there."));
+		g_assert_null(strstr(all, "More after."));
+		/* Two copies spoken, the third is where it stopped. */
+		g_assert_nonnull(strstr(all, "Grep the notes.\nFind the file.\nGrep the notes.\nI'm"));
+	} else {
+		g_assert_nonnull(strstr(all, "More after."));
+		g_assert_null(strstr(all, "circles"));
+	}
+}
 static void
 background(Fixture *f, gconstpointer data)
 {
@@ -1023,6 +1088,14 @@ main(int argc, char **argv)
 			   teardown);
 	g_test_add("/voice/session/tool-error-reported", Fixture, GINT_TO_POINTER(2), setup,
 			   tool_reported, teardown);
+	g_test_add("/voice/session/code-spoken-by-default", Fixture, GINT_TO_POINTER(3), setup,
+			   code_not_spoken, teardown);
+	g_test_add("/voice/session/code-not-spoken", Fixture, GINT_TO_POINTER(2), setup,
+			   code_not_spoken, teardown);
+	g_test_add("/voice/session/runaway-reply-read-by-default", Fixture, GINT_TO_POINTER(3),
+			   setup, runaway_reply_stopped, teardown);
+	g_test_add("/voice/session/runaway-reply-stopped", Fixture, GINT_TO_POINTER(2), setup,
+			   runaway_reply_stopped, teardown);
 	g_test_add("/voice/session/empty-reply-spoken", Fixture, NULL, setup,
 			   empty_reply_spoken, teardown);
 	g_test_add("/voice/session/symbols-only-reply-spoken", Fixture, NULL, setup,

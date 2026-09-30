@@ -42,6 +42,12 @@ static const Setting settings[] = {
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
 	/* Unset: received audio is not processed. off|low|moderate|high|very-high. */
 	{"noise-suppression", "AI_VOICE_NOISE_SUPPRESSION", NULL, 0, 0, 0},
+	/* Unset or yes: markdown code in a reply is read aloud. no: left out. */
+	{"speak-code", "AI_VOICE_SPEAK_CODE", NULL, 0, 0, 0},
+	/* 0: a reply that repeats itself is read to the end. */
+	{"repeat-limit", "AI_VOICE_REPEAT_LIMIT", NULL, 0, 0, 100},
+	{"repeat-message", "AI_VOICE_REPEAT_MESSAGE", "I'm going in circles, so I'll stop there.",
+	 0, 0, 0},
 	/* 0: a call's history keeps every tool result in full. */
 	{"trim-tool-results-after", "AI_VOICE_TRIM_TOOL_RESULTS_AFTER", NULL, 0, 0, 1000},
 	{"tool-progress-message", "AI_VOICE_TOOL_PROGRESS_MESSAGE", "One moment, let me check.",

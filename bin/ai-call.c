@@ -30,6 +30,7 @@ struct _App {
 	gchar *transcript_dir, *transcript_hook;
 	/* live-text: 0 off, 1 the replies, 2 the replies and the caller's words. */
 	gint live_text;
+	gboolean speak_code;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -735,7 +736,8 @@ maybe_connect(Call *call)
 		guint timeout, tts_timeout, silence, mode, deadline, barge_in;
 		g_autofree gchar *fallback = NULL, *transcription_error = NULL,
 						 *synthesis_error = NULL, *empty_reply = NULL, *progress = NULL;
-		guint progress_delay, trim_after, stt_frame;
+		guint progress_delay, trim_after, stt_frame, repeat_limit;
+		g_autofree gchar *repeat_message = NULL;
 		g_object_get(app->call_config, "stt-timeout-ms", &timeout, "stt-frame-ms", &stt_frame,
 					 "tts-timeout-ms",
 					 &tts_timeout, "trailing-silence-ms", &silence, "vad-mode", &mode,
@@ -744,7 +746,8 @@ maybe_connect(Call *call)
 					 &transcription_error, "synthesis-error-message", &synthesis_error,
 					 "empty-reply-message", &empty_reply, "tool-progress-message", &progress,
 					 "tool-progress-delay-ms", &progress_delay, "trim-tool-results-after",
-					 &trim_after, NULL);
+					 &trim_after, "repeat-limit", &repeat_limit, "repeat-message",
+					 &repeat_message, NULL);
 		g_object_set(stt, "timeout-ms", timeout, "frame-ms", stt_frame, NULL);
 		g_object_set(tts, "timeout-ms", tts_timeout, NULL);
 		g_object_set(vad, "trailing-silence-ms", silence, "mode", mode, NULL);
@@ -753,7 +756,8 @@ maybe_connect(Call *call)
 					 "barge-in-ms", barge_in, "synthesis-error-message", synthesis_error,
 					 "empty-reply-message", empty_reply, "tool-progress-message", progress,
 					 "tool-progress-delay-ms", progress_delay, "trim-tool-results-after",
-					 trim_after, NULL);
+					 trim_after, "repeat-limit", repeat_limit, "repeat-message",
+					 repeat_message, "speak-code", app->speak_code, NULL);
 	}
 	if (app->speech_cache != NULL) {
 		fallback_ready(app->speech_cache, call->voice);
@@ -1483,6 +1487,19 @@ main(int argc, char **argv)
 		app.transcript_dir = ai_call_transcript_default_dir();
 	else if (*app.transcript_dir == '\0')
 		g_clear_pointer(&app.transcript_dir, g_free);
+	{
+		g_autofree gchar *code = NULL;
+		g_object_get(call_config, "speak-code", &code, NULL);
+		if (code == NULL || *code == '\0' || g_str_equal(code, "yes"))
+			app.speak_code = TRUE;
+		else if (g_str_equal(code, "no"))
+			app.speak_code = FALSE;
+		else {
+			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+						"speak-code must be yes or no, not \"%s\"", code);
+			goto fail;
+		}
+	}
 	{
 		g_autofree gchar *live = NULL;
 		g_object_get(call_config, "live-text", &live, NULL);
