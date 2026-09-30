@@ -164,6 +164,15 @@ trim_history(AiVoiceWorker *w)
 			turns++;
 	}
 }
+/* The assistant's line in history is what the caller heard. A turn that was
+ * interrupted, failed or timed out before a word was spoken still leaves that
+ * message behind, and an empty one is rejected by providers that require
+ * content -- every later turn of the call would fail. Say so instead. */
+static const gchar *
+spoken_text(const gchar *spoken)
+{
+	return spoken != NULL && *spoken != '\0' ? spoken : "[Nothing was spoken this turn.]";
+}
 static void
 prepare(AiConversation *conversation, GPtrArray *batch, gpointer data)
 {
@@ -194,7 +203,7 @@ prepare(AiConversation *conversation, GPtrArray *batch, gpointer data)
 	for (i = 0; i < projected->len; i++)
 		g_ptr_array_add(batch, g_object_ref(g_ptr_array_index(projected, i)));
 	g_clear_object(&w->spoken_block);
-	w->spoken_block = ai_text_content_new(w->spoken != NULL ? w->spoken : "");
+	w->spoken_block = ai_text_content_new(spoken_text(w->spoken));
 	spoken_message = ai_message_new(AI_ROLE_ASSISTANT);
 	ai_message_add_content_block(spoken_message,
 								 AI_CONTENT_BLOCK(g_object_ref(w->spoken_block)));
@@ -227,7 +236,7 @@ command_run(gpointer data)
 			g_free(w->spoken);
 			w->spoken = g_strdup(c->text);
 			if (w->spoken_block != NULL)
-				ai_text_content_set_text(w->spoken_block, w->spoken);
+				ai_text_content_set_text(w->spoken_block, spoken_text(w->spoken));
 		}
 	} else if (!w->stopping) {
 		w->generation = c->generation;

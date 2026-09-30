@@ -628,6 +628,17 @@ stalled_turn(Fixture *f, gconstpointer data)
 		g_assert_cmpuint(f->transport->flushes, >=, 1);
 	}
 	g_assert_cmpint(g_atomic_int_get(&stalled->cancelled), ==, 1);
+	/* Nothing was spoken, but the turn's assistant message is still in the
+	 * history the next turn sends. Empty, a provider rejects it -- Claude
+	 * answers every later turn of the call with a 400. */
+	{
+		GList *l;
+		for (l = ai_conversation_get_messages(f->conversation); l != NULL; l = l->next) {
+			g_autofree gchar *text = ai_message_get_text(l->data);
+			if (ai_message_get_role(l->data) == AI_ROLE_ASSISTANT)
+				g_assert_true(text != NULL && *text != '\0');
+		}
+	}
 }
 
 static void
