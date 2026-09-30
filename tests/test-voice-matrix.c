@@ -475,6 +475,63 @@ local_session(MatrixFixture *f, gconstpointer data)
 	a->transcript_dir = NULL;
 	a->local = FALSE;
 }
+static JsonObject *
+read_state(const gchar *path, JsonParser *parser)
+{
+	g_autoptr(GError) error = NULL;
+	g_assert_true(json_parser_load_from_file(parser, path, &error));
+	return ai_json_root_object(parser);
+}
+/* state-file: what a display beside the speaker shows. The state, whether
+ * the assistant is muted, and the last thing heard and said, rewritten as
+ * each changes; toggling mute from outside (a button) is reflected there. */
+static void
+state_file(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-state-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(dir, "state.json", NULL);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint timeout;
+	Call *call;
+	a->local = TRUE;
+	a->mxid = "assistant";
+	a->state_file = path;
+	call = call_ref(start_local(a));
+	while (!call->greeted && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_true(g_file_test(path, G_FILE_TEST_EXISTS));
+	g_signal_emit_by_name(call->voice, "transcript", "local", "What's on today?", TRUE);
+	g_signal_emit_by_name(call->voice, "spoken", "Nothing until noon.", TRUE);
+	{
+		g_autoptr(JsonParser) parser = json_parser_new();
+		JsonObject *o = read_state(path, parser);
+		g_assert_cmpstr(ai_json_get_string(o, "heard", NULL), ==, "What's on today?");
+		g_assert_cmpstr(ai_json_get_string(o, "said", NULL), ==, "Nothing until noon.");
+		g_assert_false(ai_json_get_boolean(o, "muted", TRUE));
+		g_assert_nonnull(ai_json_get_string(o, "state", NULL));
+	}
+	toggle_mute(a);
+	{
+		g_autoptr(JsonParser) parser = json_parser_new();
+		g_assert_true(ai_json_get_boolean(read_state(path, parser), "muted", FALSE));
+	}
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	g_signal_emit_by_name(call->voice, "command", "hangup");
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	{
+		g_autoptr(JsonParser) parser = json_parser_new();
+		g_assert_cmpstr(ai_json_get_string(read_state(path, parser), "state", NULL), ==,
+						"ended");
+	}
+	call_unref(call);
+	a->state_file = NULL;
+	a->local = FALSE;
+}
 static void
 summary_log(const gchar *domain, GLogLevelFlags level, const gchar *message,
 			gpointer data)
@@ -707,6 +764,8 @@ main(int argc, char **argv)
 			   voice_command_call, matrix_teardown);
 	g_test_add("/voice/matrix/local-session", MatrixFixture, NULL, matrix_setup,
 			   local_session, matrix_teardown);
+	g_test_add("/voice/matrix/state-file", MatrixFixture, NULL, matrix_setup, state_file,
+			   matrix_teardown);
 	g_test_add("/voice/matrix/transcript-on-disk", MatrixFixture, NULL, matrix_setup,
 			   transcript_on_disk, matrix_teardown);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,

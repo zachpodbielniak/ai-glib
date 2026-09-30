@@ -600,6 +600,25 @@ Three things about the transport:
 - *It initialises GStreamer itself.* A program whose only GStreamer user is
   this transport would otherwise crash parsing the first caps.
 
+** State file and mute toggle
+
+=state-file= (=AI_CALL_STATE_FILE=, unset: none) names a JSON file ai-call
+rewrites, atomically and mode =0600=, whenever the state, the mute flag or
+the last line heard or spoken changes. It is what a display beside the
+speaker reads:
+
+#+begin_example
+{"state":"speaking","muted":false,"heard":"What's on today?","said":"Nothing until noon.","updated_us":1790000000000000}
+#+end_example
+
+=state= is the session's state nick (=listening=, =transcribing=,
+=thinking=, =speaking=), =starting= before the first, and =ended= once the
+call has closed. A failed write is logged at debug and never affects the call.
+
+=SIGUSR1= toggles mute on every live session, exactly as the spoken
+commands do but without the spoken acknowledgement: a device with a
+physical button sends it, and the state file shows the result.
+
 ** Live text in the room
 
 =live-text= (=AI_CALL_LIVE_TEXT=) posts what is said on a call into the call's

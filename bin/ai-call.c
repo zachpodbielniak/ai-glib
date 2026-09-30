@@ -33,6 +33,8 @@ struct _App {
 	gboolean speak_code, voice_commands;
 	/* --local: one session on this machine's audio devices, no Matrix. */
 	gboolean local, local_echo_cancel;
+	/* NULL: no state file. What a display beside the speaker reads. */
+	gchar *state_file;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -58,6 +60,8 @@ struct _Call {
 	GDateTime *began;
 	AiCallTranscript *transcript;
 	LiveReply *live; /* this turn's reply in the room, when live-text is on */
+	const gchar *state_name;
+	gchar *heard, *said; /* the last final utterance, the last line spoken */
 };
 static void
 live_reply_unref(gpointer data);
@@ -76,6 +80,8 @@ static void
 finish_transcript(Call *call);
 static void
 shutdown_call(Call *call);
+static void
+write_state(Call *call);
 static void
 maybe_connect(Call *call);
 static void
@@ -123,6 +129,8 @@ call_unref(gpointer data)
 	g_clear_object(&call->synthesizer);
 	g_clear_object(&call->transcript);
 	g_clear_pointer(&call->live, live_reply_unref);
+	g_free(call->heard);
+	g_free(call->said);
 	g_clear_pointer(&call->began, g_date_time_unref);
 	g_free(call->room);
 	g_free(call->key);
@@ -308,6 +316,7 @@ close_call(Call *call)
 		  transport_counter(call, "dropped-buffers"),
 		  transport_counter(call, "late-buffers"));
 	finish_transcript(call);
+	write_state(call);
 	call->clearing = TRUE;
 	if (call->answer_source != 0) {
 		g_source_remove(call->answer_source);
@@ -362,6 +371,41 @@ terminal_media_error(AiAudioTransport *transport, GError *error, gpointer data)
 		  error != NULL ? error->message : "unknown media error");
 	close_call(call);
 }
+/* state-file: rewritten whole, atomically, on every change, so a reader never
+ * sees half a document. A failure costs the file, never the call. */
+static void
+write_state(Call *call)
+{
+	g_autoptr(JsonBuilder) builder = NULL;
+	g_autoptr(JsonNode) root = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *json = NULL;
+	gboolean muted = FALSE;
+	if (call->app->state_file == NULL)
+		return;
+	if (call->voice != NULL && !call->closing)
+		g_object_get(call->voice, "muted", &muted, NULL);
+	builder = json_builder_new();
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "state");
+	json_builder_add_string_value(builder, call->closing	  ? "ended"
+										   : call->state_name ? call->state_name
+															  : "starting");
+	json_builder_set_member_name(builder, "muted");
+	json_builder_add_boolean_value(builder, muted);
+	json_builder_set_member_name(builder, "heard");
+	json_builder_add_string_value(builder, call->heard != NULL ? call->heard : "");
+	json_builder_set_member_name(builder, "said");
+	json_builder_add_string_value(builder, call->said != NULL ? call->said : "");
+	json_builder_set_member_name(builder, "updated_us");
+	json_builder_add_int_value(builder, g_get_real_time());
+	json_builder_end_object(builder);
+	root = json_builder_get_root(builder);
+	json = json_to_string(root, FALSE);
+	if (!g_file_set_contents_full(call->app->state_file, json, -1,
+								  G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+		g_debug("state file not written: %s", error->message);
+}
 static void
 voice_state(AiVoiceSession *voice, AiVoiceState state, gpointer data)
 {
@@ -370,7 +414,35 @@ voice_state(AiVoiceSession *voice, AiVoiceState state, gpointer data)
 	GEnumValue *value = g_enum_get_value(states, state);
 	g_log("ai-call", G_LOG_LEVEL_INFO, "Voice state: room=%s state=%s", call->room,
 		  value != NULL ? value->value_nick : "unknown");
+	/* Nicks are static strings owned by the enum class, which outlives this. */
+	call->state_name = value != NULL ? value->value_nick : NULL;
 	g_type_class_unref(states);
+	write_state(call);
+}
+static void
+voice_muted(GObject *voice, GParamSpec *pspec, gpointer data)
+{
+	write_state(data);
+}
+/* SIGUSR1, or a button: flip whether every live session hears its caller. */
+static gboolean
+toggle_mute(gpointer data)
+{
+	App *app = data;
+	GHashTableIter iter;
+	gpointer value;
+	g_hash_table_iter_init(&iter, app->calls);
+	while (g_hash_table_iter_next(&iter, NULL, &value)) {
+		Call *call = value;
+		gboolean muted;
+		if (call->voice == NULL || call->closing)
+			continue;
+		g_object_get(call->voice, "muted", &muted, NULL);
+		g_log("ai-call", G_LOG_LEVEL_INFO, "Mute toggled: room=%s muted=%d", call->room,
+			  !muted);
+		g_object_set(call->voice, "muted", !muted, NULL);
+	}
+	return G_SOURCE_CONTINUE;
 }
 static void
 info_log(const gchar *domain, GLogLevelFlags level, const gchar *message, gpointer data)
@@ -512,6 +584,9 @@ voice_transcript(AiVoiceSession *voice, const gchar *speaker, const gchar *text,
 	if (final && call->app->live_text > 0)
 		live_caller(call, speaker, text);
 	if (final) {
+		g_free(call->heard);
+		call->heard = g_strdup(text);
+		write_state(call);
 		call->transcripts++;
 		call->transcript_at = g_get_monotonic_time();
 		g_print("Transcript [%s]: %s\n", speaker, text);
@@ -535,6 +610,9 @@ voice_spoken(AiVoiceSession *voice, const gchar *text, gboolean complete, gpoint
 	g_autoptr(GError) error = NULL;
 	if (call->app->live_text > 0 && *text != '\0')
 		live_spoken(call, text);
+	g_free(call->said);
+	call->said = g_strdup(text);
+	write_state(call);
 	if (call->transcript == NULL)
 		return;
 	now = g_date_time_new_now_utc();
@@ -836,6 +914,7 @@ maybe_connect(Call *call)
 	g_signal_connect(call->voice, "spoken", G_CALLBACK(voice_spoken), call);
 	g_signal_connect(call->voice, "tool", G_CALLBACK(voice_tool), call);
 	g_signal_connect(call->voice, "command", G_CALLBACK(voice_command), call);
+	g_signal_connect(call->voice, "notify::muted", G_CALLBACK(voice_muted), call);
 	open_transcript(call);
 	call->synthesizer = AI_SPEECH_SYNTHESIZER(g_object_ref(tts));
 	g_signal_connect(tts, "audio", G_CALLBACK(first_pcm), call);
@@ -1572,6 +1651,9 @@ main(int argc, char **argv)
 		goto fail;
 	}
 devices:
+	g_object_get(call_config, "state-file", &app.state_file, NULL);
+	if (app.state_file != NULL && *app.state_file == '\0')
+		g_clear_pointer(&app.state_file, g_free);
 	g_object_get(call_config, "device", &app.device, "jwt-url", &app.jwt_url, "focus-url",
 				 &app.foci, "outbound-path", &app.drop_path, "greeting", &app.greeting,
 				 "outbound-greeting", &app.outbound_greeting, "transcript-dir",
@@ -1655,6 +1737,7 @@ devices:
 	app.calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, call_unref);
 	g_unix_signal_add(SIGTERM, shutdown_app, &app);
 	g_unix_signal_add(SIGINT, shutdown_app, &app);
+	g_unix_signal_add(SIGUSR1, toggle_mute, &app);
 	if (!app.local)
 		g_timeout_add_seconds(1, watch_drop, &app);
 	{
@@ -1699,6 +1782,7 @@ cleanup:
 	g_free(app.outbound_greeting);
 	g_free(app.transcript_dir);
 	g_free(app.transcript_hook);
+	g_free(app.state_file);
 	return app.exit_status;
 fail:
 	g_printerr("ai-call: %s\n", error != NULL ? error->message : "startup failed");

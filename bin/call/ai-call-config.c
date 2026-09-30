@@ -42,6 +42,8 @@ static const Setting settings[] = {
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
 	/* Unset: received audio is not processed. off|low|moderate|high|very-high. */
 	{"noise-suppression", "AI_VOICE_NOISE_SUPPRESSION", NULL, 0, 0, 0},
+	/* Unset: none. A JSON file rewritten with the state, mute and last lines. */
+	{"state-file", "AI_CALL_STATE_FILE", NULL, 0, 0, 0},
 	/* --local: this machine's microphone and speaker instead of a call. */
 	{"local-input", "AI_CALL_LOCAL_INPUT", "autoaudiosrc", 0, 0, 0},
 	{"local-output", "AI_CALL_LOCAL_OUTPUT", "autoaudiosink", 0, 0, 0},
