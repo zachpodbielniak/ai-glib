@@ -503,6 +503,7 @@ local tools and background agents. Built by =make= and installed by
 #+begin_example
 ai-call --config /path/to/config.yaml --identity /path/to/identity.md
 ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
+ai-call --config /path/to/config.yaml --local
 #+end_example
 
 | Option | Purpose |
@@ -512,6 +513,7 @@ ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
 | =--call-set PROPERTY=VALUE= | Override a validated call property (repeatable) |
 | =--list-call-settings= | List call property names, types and defaults |
 | =--credentials PATH= | Matrix JSON containing =userId=, =accessToken=, =homeserver= |
+| =--local= | One session on this machine's microphone and speaker; no Matrix, no credentials |
 | =-p=, =--provider NAME= | Existing provider factory selection |
 | =-m=, =--model NAME= | Provider model |
 | =--version=, =--license= | Version or license information |

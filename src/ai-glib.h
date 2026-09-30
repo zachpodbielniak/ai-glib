@@ -128,4 +128,5 @@
 #include "voice/ai-webrtc-voice-activity.h"
 #include "voice/ai-voice-session.h"
 #include "voice/ai-livekit-transport.h"
+#include "voice/ai-local-audio-transport.h"
 #undef AI_GLIB_INSIDE

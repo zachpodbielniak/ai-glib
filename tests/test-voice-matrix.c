@@ -52,7 +52,7 @@ mock_object_new(GType type, const gchar *first, ...)
 {
 	gpointer object;
 	va_list args;
-	if (type == AI_TYPE_LIVEKIT_TRANSPORT)
+	if (type == AI_TYPE_LIVEKIT_TRANSPORT || type == AI_TYPE_LOCAL_AUDIO_TRANSPORT)
 		return mock_livekit(NULL, NULL);
 	va_start(args, first);
 	object = g_object_new_valist(type, first, args);
@@ -436,6 +436,45 @@ voice_command_call(MatrixFixture *f, gconstpointer data)
 	a->transcript_dir = NULL;
 	a->live_text = 0;
 }
+/* --local: one session on this machine's microphone and speaker. No Matrix
+ * request is made, the greeting is spoken, and hanging up ends the program. */
+static void
+local_session(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-local-XXXXXX", NULL);
+	g_autofree gchar *path = NULL, *contents = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint timeout;
+	Call *call;
+	a->local = TRUE;
+	a->mxid = "assistant";
+	a->transcript_dir = dir;
+	call = call_ref(start_local(a));
+	g_assert_nonnull(call);
+	while ((!call->greeted || call->transcript == NULL) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_true(call->greeted);
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	g_signal_emit_by_name(call->voice, "command", "hangup");
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	g_assert_true(call->closing);
+	g_assert_cmpuint(g_hash_table_size(a->calls), ==, 0);
+	/* Nothing went to the homeserver: no membership published or cleared. */
+	g_assert_cmpuint(f->publications, ==, 0);
+	g_assert_cmpuint(f->clears, ==, 0);
+	g_assert_cmpuint(f->jwt_requests, ==, 0);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_nonnull(strstr(contents, "\"room\":\"local\""));
+	call_unref(call);
+	a->transcript_dir = NULL;
+	a->local = FALSE;
+}
 static void
 summary_log(const gchar *domain, GLogLevelFlags level, const gchar *message,
 			gpointer data)
@@ -666,6 +705,8 @@ main(int argc, char **argv)
 			   matrix_setup, live_text, matrix_teardown);
 	g_test_add("/voice/matrix/voice-command", MatrixFixture, NULL, matrix_setup,
 			   voice_command_call, matrix_teardown);
+	g_test_add("/voice/matrix/local-session", MatrixFixture, NULL, matrix_setup,
+			   local_session, matrix_teardown);
 	g_test_add("/voice/matrix/transcript-on-disk", MatrixFixture, NULL, matrix_setup,
 			   transcript_on_disk, matrix_teardown);
 	g_test_add("/voice/matrix/answer-cleanup", MatrixFixture, NULL, matrix_setup,

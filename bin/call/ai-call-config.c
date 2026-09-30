@@ -42,6 +42,12 @@ static const Setting settings[] = {
 	 "Sorry, that is taking too long. Please try again.", 0, 0, 0},
 	/* Unset: received audio is not processed. off|low|moderate|high|very-high. */
 	{"noise-suppression", "AI_VOICE_NOISE_SUPPRESSION", NULL, 0, 0, 0},
+	/* --local: this machine's microphone and speaker instead of a call. */
+	{"local-input", "AI_CALL_LOCAL_INPUT", "autoaudiosrc", 0, 0, 0},
+	{"local-output", "AI_CALL_LOCAL_OUTPUT", "autoaudiosink", 0, 0, 0},
+	/* yes: subtract the speaker's output from the microphone. */
+	{"local-echo-cancel", "AI_CALL_LOCAL_ECHO_CANCEL", NULL, 0, 0, 0},
+	{"local-speaker-name", "AI_CALL_LOCAL_SPEAKER_NAME", "Local", 0, 0, 0},
 	/* Unset or yes: markdown code in a reply is read aloud. no: left out. */
 	{"speak-code", "AI_VOICE_SPEAK_CODE", NULL, 0, 0, 0},
 	/* Unset or no: "mute", "stop" and "hang up" are things to answer. yes: commands. */

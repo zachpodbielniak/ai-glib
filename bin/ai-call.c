@@ -31,6 +31,8 @@ struct _App {
 	/* live-text: 0 off, 1 the replies, 2 the replies and the caller's words. */
 	gint live_text;
 	gboolean speak_code, voice_commands;
+	/* --local: one session on this machine's audio devices, no Matrix. */
+	gboolean local, local_echo_cancel;
 	AiProviderType provider;
 	guint pending, startup;
 	gint exit_status;
@@ -321,7 +323,12 @@ close_call(Call *call)
 		g_signal_handlers_disconnect_by_data(call->transport, call);
 	/* Membership removal runs independently of media teardown and uses a fresh
 	 * cancellable: SIGTERM must not cancel its own cleanup request. */
-	put_member(call, body, cleared);
+	if (call->app->local) {
+		/* No membership to clear, and the program is its one session. */
+		call->clearing = FALSE;
+		call->app->stopping = TRUE;
+	} else
+		put_member(call, body, cleared);
 	if (call->transport != NULL)
 		ai_audio_transport_leave_async(call->transport, NULL, left_room, call_ref(call));
 	else
@@ -764,11 +771,21 @@ maybe_connect(Call *call)
 			g_object_get(app->call_config, "media-reconnect-attempts", &attempts,
 						 "media-reconnect-delay-ms", &delay, "opus-bitrate", &bitrate,
 						 "noise-suppression", &noise, NULL);
-		call->transport =
-			g_object_new(AI_TYPE_LIVEKIT_TRANSPORT, "url", app->livekit_url,
-						 "receive-token", call->rx_token, "reconnect-attempts", attempts,
-						 "reconnect-delay-ms", delay, "opus-bitrate", bitrate,
-						 "noise-suppression", noise, NULL);
+		if (app->local) {
+			g_autofree gchar *input = NULL, *output = NULL, *name = NULL;
+			if (app->call_config != NULL)
+				g_object_get(app->call_config, "local-input", &input, "local-output", &output,
+							 "local-speaker-name", &name, NULL);
+			call->transport = g_object_new(
+				AI_TYPE_LOCAL_AUDIO_TRANSPORT, "input", input, "output", output,
+				"speaker-name", name, "echo-cancel", app->local_echo_cancel,
+				"noise-suppression", noise, NULL);
+		} else
+			call->transport =
+				g_object_new(AI_TYPE_LIVEKIT_TRANSPORT, "url", app->livekit_url,
+							 "receive-token", call->rx_token, "reconnect-attempts", attempts,
+							 "reconnect-delay-ms", delay, "opus-bitrate", bitrate,
+							 "noise-suppression", noise, NULL);
 	}
 	stt = ai_websocket_recognizer_new(app->stt_url);
 	tts = ai_http_synthesizer_new(app->tts_url);
@@ -1020,6 +1037,26 @@ start_call(App *app, const gchar *room, const gchar *opening, const gchar *targe
 		call,
 		"messages?dir=b&limit=20&filter=%7B%22types%22%3A%5B%22m.room.message%22%5D%7D");
 	request(app, "GET", url, TRUE, NULL, NULL, history_ready, call_ref(call), call_unref);
+	return call;
+}
+/* --local: the session is ready to open its devices at once; there is no
+ * room to join, token to mint or chat history to read. */
+static Call *
+start_local(App *app)
+{
+	Call *call = g_new0(Call, 1);
+	g_ref_count_init(&call->refs);
+	call->app = app;
+	call->started_at = g_get_monotonic_time();
+	call->began = g_date_time_new_now_utc();
+	call->room = g_strdup("local");
+	call->key = g_strdup("local");
+	call->tx_token = g_strdup("local");
+	call->rx_token = g_strdup("local");
+	call->history_ready = TRUE;
+	call->context = g_string_new("[CALL CONTEXT]\nDirection: local device\n");
+	g_hash_table_insert(app->calls, g_strdup(call->room), call);
+	maybe_connect(call);
 	return call;
 }
 static void
@@ -1418,6 +1455,9 @@ main(int argc, char **argv)
 		 "Override a ai_call GObject property", "PROPERTY=VALUE"},
 		{"list-call-settings", 0, 0, G_OPTION_ARG_NONE, &list_settings,
 		 "List call property names, types and defaults", NULL},
+		{"local", 0, 0, G_OPTION_ARG_NONE, &app.local,
+		 "Talk through this machine's microphone and speaker instead of answering calls",
+		 NULL},
 		{"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
 		{"license", 0, 0, G_OPTION_ARG_NONE, &license, "Show license", NULL},
 		{NULL}};
@@ -1501,6 +1541,10 @@ main(int argc, char **argv)
 	if (!ai_provider_factory_resolve_defaults(app.config, "ai-call", provider_name, model,
 											  &app.provider, &app.model, &error))
 		goto fail;
+	if (app.local) {
+		app.mxid = g_strdup("assistant");
+		goto devices;
+	}
 	if (credentials == NULL)
 		g_object_get(call_config, "credentials", &credentials, NULL);
 	if (credentials == NULL) {
@@ -1527,6 +1571,7 @@ main(int argc, char **argv)
 							"GStreamer LiveKit plugin unavailable; see docs/voice.org");
 		goto fail;
 	}
+devices:
 	g_object_get(call_config, "device", &app.device, "jwt-url", &app.jwt_url, "focus-url",
 				 &app.foci, "outbound-path", &app.drop_path, "greeting", &app.greeting,
 				 "outbound-greeting", &app.outbound_greeting, "transcript-dir",
@@ -1582,8 +1627,24 @@ main(int argc, char **argv)
 	if (app.drop_path == NULL)
 		app.drop_path =
 			g_build_filename(g_get_user_runtime_dir(), "ai-outbound-call.json", NULL);
-	if (app.jwt_url == NULL || *app.jwt_url == '\0' || app.foci == NULL ||
-		*app.foci == '\0' || app.device == NULL || *app.device == '\0') {
+	{
+		g_autofree gchar *echo = NULL;
+		g_object_get(call_config, "local-echo-cancel", &echo, NULL);
+		if (echo == NULL || *echo == '\0' || g_str_equal(echo, "no"))
+			app.local_echo_cancel = FALSE;
+		else if (g_str_equal(echo, "yes"))
+			app.local_echo_cancel = TRUE;
+		else {
+			g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+						"local-echo-cancel must be yes or no, not \"%s\"", echo);
+			goto fail;
+		}
+	}
+	/* There is no room to post into. */
+	if (app.local)
+		app.live_text = 0;
+	if (!app.local && (app.jwt_url == NULL || *app.jwt_url == '\0' || app.foci == NULL ||
+		*app.foci == '\0' || app.device == NULL || *app.device == '\0')) {
 		g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 							"Configure ai_call.jwt-url, focus-url and a nonempty device");
 		goto fail;
@@ -1594,7 +1655,8 @@ main(int argc, char **argv)
 	app.calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, call_unref);
 	g_unix_signal_add(SIGTERM, shutdown_app, &app);
 	g_unix_signal_add(SIGINT, shutdown_app, &app);
-	g_timeout_add_seconds(1, watch_drop, &app);
+	if (!app.local)
+		g_timeout_add_seconds(1, watch_drop, &app);
 	{
 		g_autofree gchar *message = NULL;
 		g_object_get(app.call_config, "synthesis-error-message", &message, NULL);
@@ -1604,9 +1666,14 @@ main(int argc, char **argv)
 		app.pending++;
 		ai_call_speech_cache_start(app.speech_cache);
 	}
-	url = g_strconcat(app.homeserver, "/_matrix/client/v3/sync?timeout=0", NULL);
-	request(&app, "GET", url, TRUE, NULL, app.sync_cancel, primed, NULL, NULL);
-	g_print("ai-call watching as %s (%s)\n", app.mxid, app.device);
+	if (app.local) {
+		g_print("ai-call listening on this machine's microphone\n");
+		start_local(&app);
+	} else {
+		url = g_strconcat(app.homeserver, "/_matrix/client/v3/sync?timeout=0", NULL);
+		request(&app, "GET", url, TRUE, NULL, app.sync_cancel, primed, NULL, NULL);
+		g_print("ai-call watching as %s (%s)\n", app.mxid, app.device);
+	}
 	g_main_loop_run(app.loop);
 cleanup:
 	g_clear_object(&app.speech_cache);

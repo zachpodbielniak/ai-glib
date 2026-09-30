@@ -556,6 +556,45 @@ application. ai-call writes each command to the transcript as
 ={"type":"command","at":...,"name":"mute"}= and, with =live-text= set, posts
 =(muted)=, =(listening again)=, =(stopped)= or =(hung up)= to the room.
 
+** Local audio: a device instead of a call
+
+=AiLocalAudioTransport= runs a session on the machine's own microphone and
+speaker: a small board with a microphone and speaker on a desk, or a laptop.
+There is one participant, the person in the room, which joins as soon as the
+devices are open. =ai-call --local= uses it in place of a Matrix call: no
+credentials, no LiveKit, no membership. Every other setting applies —
+transcripts (with =room= "local"), voice commands, noise suppression — except
+=live-text=, since there is no room. Hanging up, by voice command or by
+SIGINT/SIGTERM, says the goodbye and ends the program.
+
+#+begin_src yaml
+ai_call:
+  local-input: autoaudiosrc            # or "alsasrc device=hw:1"
+  local-output: autoaudiosink          # or "alsasink device=hw:1"
+  local-echo-cancel: no                # yes when the speaker is near the microphone
+  local-speaker-name: Local            # the name the transcript gives the person
+#+end_src
+
+=local-input= and =local-output= are GStreamer descriptions, so any source or
+sink works, including a test source for a machine with no sound card:
+=--call-set "local-input=audiotestsrc is-live=true wave=silence"=.
+
+Three things about the transport:
+
+- *A write completes when it has been heard*, not when it was queued. Speech
+  is pushed 20 ms at a time, never more than 60 ms ahead of the clock, and a
+  write finishes once its last sample should have left the speaker. The
+  session treats completion as "the caller heard it", and a flush (an
+  interruption) cancels the rest within a tick.
+- *Echo cancellation needs the speaker's own signal.* With
+  =local-echo-cancel: yes=, a =webrtcechoprobe= on the playback path records
+  exactly what the speaker plays and =webrtcdsp= subtracts it from the
+  microphone. Both run at 48 kHz mono, because the canceller refuses any
+  mismatch between the two. Without it, a device whose speaker sits next to
+  its microphone hears its own replies.
+- *It initialises GStreamer itself.* A program whose only GStreamer user is
+  this transport would otherwise crash parsing the first caps.
+
 ** Live text in the room
 
 =live-text= (=AI_CALL_LIVE_TEXT=) posts what is said on a call into the call's
