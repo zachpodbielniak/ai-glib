@@ -1516,6 +1516,40 @@ set.
 
 See `docs/gui.org`.
 
+## Voice (`src/voice/`, `ai-call`)
+
+`AiVoiceSession` composes a transport, a recognizer, a synthesizer and
+voice activity. `ai-call` is the frontend: MatrixRTC, or one local
+session with `--local`. The library does not link Matrix. Matrix
+settings live in `bin/call` (`AiCallConfig`) and are linked only into
+`ai-call` and its tests. `apps.ai-call` is already a row in
+`AI_CONFIG_APPS`.
+
+Rules that are load-bearing:
+
+- **PCM is signed 16-bit little-endian, mono.** The transport, the VAD
+  and speech-to-text run at 16 kHz. The synthesizer keeps its native
+  rate.
+- **LiveKit uses two JWTs with different identities.** The publisher
+  subject is how self-audio is dropped. Do not log either token. The
+  payload is base64url-decoded only to read `sub`, and the decoder pads
+  first.
+- **Hold every GStreamer source and destroy it.** Same rule as the
+  main-context section: `g_source_destroy()` then `g_source_unref()`. A
+  callback that returns `G_SOURCE_REMOVE` drops its own reference.
+- **The transcript hook is an argument vector.** `g_shell_parse_argv()`
+  then `g_spawn_async()`, with the transcript path as the last argument.
+  It is never a shell string. The transcript directory is `0700` and the
+  files are `0600`.
+- **`grep` reads regular files only** and skips a file over 16 MiB, so a
+  FIFO or `/proc` node cannot block a voice turn.
+- **LiveKit integration tests are opt-in** (`AI_VOICE_LIVEKIT_TEST=1`).
+  `make soak` is separate from `make test`.
+- **The build needs `gstreamer-1.0` and `gstreamer-app-1.0`.** The VAD is
+  vendored at `deps/webrtc-vad`. Nothing under `src/voice` includes GTK.
+  The LiveKit GStreamer elements come from gst-plugins-rs; they are not
+  a library link. See `docs/voice.org`.
+
 ## Versions and self-update
 
 `config.mk` holds the release number; `build-aux/gen-build-stamp.sh`
