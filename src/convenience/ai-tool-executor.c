@@ -9,10 +9,13 @@
 
 #include "ai-glib.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
 #include <libxml/HTMLparser.h>
@@ -1159,22 +1162,57 @@ grep_one_file (
 ){
     g_autofree gchar  *contents = NULL;
     gsize              length;
+    gsize              got;
     gchar            **lines;
     gint               i;
     gint               line_num;
-    GStatBuf           st;
+    gint               fd;
+    gint               flags;
+    struct stat        st;
 
     /*
-     * Regular files only. A FIFO, a device or /proc/kmsg blocks inside the
-     * read itself, where the turn's cancellable cannot reach: a grep of "/"
-     * met one and never returned, and a voice call waiting on the turn
-     * heard nothing more until it hung up.
+     * Open first, then decide from that fd. A stat of the path and a later
+     * read of the path are two looks: a FIFO swapped in between blocks
+     * inside the read, where the turn's cancellable cannot reach. A grep
+     * of "/" met one and never returned, and a voice call waiting on the
+     * turn heard nothing more until it hung up. O_NONBLOCK makes the open
+     * of a FIFO return; a regular file is unaffected. The size and type
+     * are the inode that was opened, and the bytes come from that fd.
      */
-    if (g_stat (filepath, &st) != 0 || !S_ISREG (st.st_mode) ||
-        st.st_size > GREP_MAX_FILE_BYTES)
+    fd = open (filepath, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
         return;
-    if (!g_file_get_contents (filepath, &contents, &length, NULL))
+    if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) ||
+        st.st_size < 0 || (guint64) st.st_size > GREP_MAX_FILE_BYTES)
+    {
+        close (fd);
         return;
+    }
+    flags = fcntl (fd, F_GETFL);
+    if (flags >= 0)
+        fcntl (fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    length = (gsize) st.st_size;
+    contents = g_malloc (length + 1);
+    got = 0;
+    while (got < length)
+    {
+        ssize_t n = read (fd, contents + got, length - got);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            close (fd);
+            return;
+        }
+        if (n == 0)
+            break;
+        got += (gsize) n;
+    }
+    close (fd);
+    contents[got] = '\0';
+    length = got;
 
     lines = g_strsplit (contents, "\n", -1);
 

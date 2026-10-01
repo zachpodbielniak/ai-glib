@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #pragma once
+#ifndef AI_GLIB_COMPILATION
+#error "Private header"
+#endif
 #include <glib.h>
 G_BEGIN_DECLS
 /* gst-launch description of the chain every subscribed track passes through

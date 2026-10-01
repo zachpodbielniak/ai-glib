@@ -114,10 +114,14 @@ new_sample(GstAppSink *sink, gpointer data)
 		gst_sample_unref(sample);
 		return GST_FLOW_OK;
 	}
+	if (!gst_buffer_map(gst_sample_get_buffer(sample), &map, GST_MAP_READ)) {
+		gst_sample_unref(sample);
+		g_object_unref(self);
+		return GST_FLOW_ERROR;
+	}
 	c = g_new0(Captured, 1);
 	c->self = self;
 	c->generation = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(sink), "voice-generation"));
-	gst_buffer_map(gst_sample_get_buffer(sample), &map, GST_MAP_READ);
 	c->pcm = g_bytes_new(map.data, map.size);
 	gst_buffer_unmap(gst_sample_get_buffer(sample), &map);
 	gst_sample_unref(sample);

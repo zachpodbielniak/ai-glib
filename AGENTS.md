@@ -1541,8 +1541,10 @@ Rules that are load-bearing:
   then `g_spawn_async()`, with the transcript path as the last argument.
   It is never a shell string. The transcript directory is `0700` and the
   files are `0600`.
-- **`grep` reads regular files only** and skips a file over 16 MiB, so a
-  FIFO or `/proc` node cannot block a voice turn.
+- **`grep` opens the path, then checks that fd.** A stat and a later
+  read are two looks, and a FIFO swapped in between blocks where the
+  turn's cancellable cannot reach. Non-regular files and anything over
+  16 MiB are skipped. A symlink to a regular file is still read.
 - **LiveKit integration tests are opt-in** (`AI_VOICE_LIVEKIT_TEST=1`).
   `make soak` is separate from `make test`.
 - **The build needs `gstreamer-1.0` and `gstreamer-app-1.0`.** The VAD is

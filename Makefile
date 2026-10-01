@@ -259,7 +259,7 @@ VAD_OBJECTS = $(patsubst deps/webrtc-vad/%.c,$(OBJDIR)/webrtc-vad/%.o,$(VAD_SOUR
 
 $(OBJDIR)/webrtc-vad/%.o: deps/webrtc-vad/%.c $(BUILD_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -Ideps/webrtc-vad/src -c $< -o $@
+	$(CC) $(CFLAGS) -fvisibility=hidden $(DEPFLAGS) -Ideps/webrtc-vad/src -c $< -o $@
 
 # Object files
 LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES)) $(VAD_OBJECTS)

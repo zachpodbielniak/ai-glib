@@ -6,6 +6,7 @@
  */
 
 #include <string.h>
+#include <unistd.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -327,6 +328,8 @@ test_executor_grep_skips_special_files (void)
     g_autoptr(AiToolExecutor) exec   = ai_tool_executor_new ();
     g_autofree gchar         *dir    = g_dir_make_tmp ("ai-glib-grep-fifo-XXXXXX", NULL);
     g_autofree gchar         *fifo   = g_build_filename (dir, "pipe", NULL);
+    g_autofree gchar         *link   = g_build_filename (dir, "pipe-link", NULL);
+    g_autofree gchar         *alias  = g_build_filename (dir, "alias.txt", NULL);
     g_autofree gchar         *file   = g_build_filename (dir, "note.txt", NULL);
     g_autofree gchar         *json   = NULL;
     g_autoptr(AiToolUse)      use    = NULL;
@@ -334,13 +337,18 @@ test_executor_grep_skips_special_files (void)
     g_autoptr(GError)         err    = NULL;
 
     g_assert_cmpint (mkfifo (fifo, 0600), ==, 0);
+    g_assert_cmpint (symlink (fifo, link), ==, 0);
     g_assert_true (g_file_set_contents (file, "needle\n", -1, NULL));
+    g_assert_cmpint (symlink ("note.txt", alias), ==, 0);
     json = g_strdup_printf ("{\"pattern\": \"needle\", \"path\": \"%s\"}", dir);
     use = make_tool_use ("grep", json);
     result = ai_tool_executor_execute (exec, use, NULL, &err);
 
     g_assert_no_error (err);
     g_assert_nonnull (strstr (result, "note.txt:1: needle"));
+    g_assert_nonnull (strstr (result, "alias.txt:1: needle"));
+    g_unlink (link);
+    g_unlink (alias);
     g_unlink (fifo);
     g_unlink (file);
     g_rmdir (dir);

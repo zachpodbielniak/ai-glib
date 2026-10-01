@@ -72,6 +72,7 @@ Signals, on the session's constructing thread-default context:
 | =transcript= | display name, text, final boolean |
 | =reply= | text segment submitted for synthesis |
 | =spoken= | segment whose audio was played, and whether it played to the end |
+| =command= | =stop=, =mute=, =unmute= or =hangup=, when voice commands are on |
 | =tool= | name, JSON arguments, result and error flag of a finished tool call |
 | =state-changed= | =AiVoiceState= (registered GEnum) |
 | =error= | =GError= |

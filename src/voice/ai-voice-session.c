@@ -1785,15 +1785,6 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 				 G_TYPE_NONE, 4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
 				 G_TYPE_BOOLEAN);
 	/**
-	 * AiVoiceSession::spoken:
-	 * @self: the session
-	 * @text: a segment of which at least some audio was played
-	 * @complete: FALSE when playback was cut short, by barge-in or failure
-	 *
-	 * Emitted once per segment after its playback ends, in order. A segment
-	 * that produced no audio at all is not reported: nobody heard it.
-	 */
-	/**
 	 * AiVoiceSession::command:
 	 * @session: the session
 	 * @name: "stop", "mute", "unmute" or "hangup"
@@ -1804,6 +1795,15 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 */
 	g_signal_new("command", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
 				 G_TYPE_NONE, 1, G_TYPE_STRING);
+	/**
+	 * AiVoiceSession::spoken:
+	 * @self: the session
+	 * @text: a segment of which at least some audio was played
+	 * @complete: FALSE when playback was cut short, by barge-in or failure
+	 *
+	 * Emitted once per segment after its playback ends, in order. A segment
+	 * that produced no audio at all is not reported: nobody heard it.
+	 */
 	g_signal_new("spoken", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
 				 NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_BOOLEAN);
 	/**

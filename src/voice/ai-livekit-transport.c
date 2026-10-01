@@ -638,13 +638,27 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	g_signal_connect(self->pipeline, "deep-element-added", G_CALLBACK(configure_ice),
 					 NULL);
 	self->input = gst_element_factory_make("livekitwebrtcsrc", NULL);
+	self->output = gst_element_factory_make("livekitwebrtcsink", NULL);
+	self->appsrc = gst_element_factory_make("appsrc", "voice-output");
+	/*
+	 * is_available() only asks whether the factories are registered.
+	 * Creating an element can still fail, and a NULL here is used
+	 * immediately as a GObject.
+	 */
+	if (self->input == NULL || self->output == NULL || self->appsrc == NULL) {
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+								"LiveKit or appsrc element could not be created");
+		gst_clear_object(&self->appsrc);
+		gst_clear_object(&self->input);
+		gst_clear_object(&self->output);
+		gst_clear_object(&self->pipeline);
+		return;
+	}
 	{
 		guint64 *generation = g_new(guint64, 1);
 		*generation = self->generation;
 		g_object_set_data_full(G_OBJECT(self->input), "voice-generation", generation, g_free);
 	}
-	self->output = gst_element_factory_make("livekitwebrtcsink", NULL);
-	self->appsrc = gst_element_factory_make("appsrc", "voice-output");
 	converter = gst_parse_bin_from_description(
 		"audioconvert ! audioresample quality=10 ! "
 		"capsfilter "
@@ -675,6 +689,17 @@ join_async(AiAudioTransport *transport, const gchar *room, const gchar *token,
 	gst_element_link_pads(converter, "src", self->output, "audio_%u");
 	g_object_get(self->input, "signaller", &rx, NULL);
 	g_object_get(self->output, "signaller", &tx, NULL);
+	if (rx == NULL || tx == NULL) {
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+								"LiveKit element has no signaller");
+		g_clear_object(&rx);
+		g_clear_object(&tx);
+		self->input = NULL;
+		self->output = NULL;
+		self->appsrc = NULL;
+		gst_clear_object(&self->pipeline);
+		return;
+	}
 	g_object_set(rx, "ws-url", self->url, "auth-token", self->receive_token, "room-name",
 				 room, NULL);
 	g_object_set(tx, "ws-url", self->url, "auth-token", token, "room-name", room, NULL);
