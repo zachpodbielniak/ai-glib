@@ -36,6 +36,7 @@
 #include "ai-mcp-options.h"
 #include "ai-cli-update.h"
 #include "ai-loop-cli.h"
+#include "ai-project-cli.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -1491,12 +1492,16 @@ main(int argc, char *argv[])
 	if (argc > 1 && (g_str_equal(argv[1], "loop") || g_str_equal(argv[1], "goal")))
 		return loop_cli_main(argc - 1, argv + 1);
 
+	if (argc > 1 && g_str_equal(argv[1], "project"))
+		return project_cli_main(argc - 1, argv + 1);
+
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);
 	g_option_context_add_main_entries(ctx, mcp_option_entries, NULL);
 	g_option_context_set_summary(
 		ctx,
 		"Use ai decide --help for probability-based classification.\n"
+		"Use ai project --help to list and inspect projects.\n"
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "

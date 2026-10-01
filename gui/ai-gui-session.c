@@ -1740,6 +1740,22 @@ ai_gui_session_get_project(AiGuiSession *self)
 	return self->working_directory;
 }
 
+gchar *
+ai_gui_session_dup_subtitle(AiGuiSession *self)
+{
+	g_autofree gchar *project = NULL;
+	const gchar *model;
+
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+
+	project = ai_project_label_for_path(ai_gui_session_get_project(self));
+	model = ai_gui_session_get_model(self);
+
+	return g_strdup_printf("%s · %s · %s", project,
+		ai_gui_session_get_provider_name(self),
+		model != NULL && *model != '\0' ? model : "default");
+}
+
 void
 ai_gui_session_set_working_directory(
 	AiGuiSession *self,

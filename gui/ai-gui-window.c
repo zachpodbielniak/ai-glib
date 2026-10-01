@@ -194,6 +194,8 @@ on_title_changed(
 	                           ai_gui_session_get_title(self->session));
 }
 
+static void on_provider_changed(GObject *object, GParamSpec *pspec, gpointer user_data);
+
 static void
 window_disconnect_session(AiGuiWindow *self)
 {
@@ -207,6 +209,10 @@ window_disconnect_session(AiGuiWindow *self)
 	g_clear_signal_handler(&self->builtin_id, self->session);
 	g_signal_handlers_disconnect_by_func(self->session,
 		G_CALLBACK(on_title_changed), self);
+	/* Provider, model and project all redraw the subtitle; a session left
+	 * connected would keep rewriting this window's header after a switch. */
+	g_signal_handlers_disconnect_by_func(self->session,
+		G_CALLBACK(on_provider_changed), self);
 }
 
 static void
@@ -221,11 +227,7 @@ window_update_subtitle(AiGuiWindow *self)
 		return;
 	}
 
-	subtitle = g_strdup_printf("%s · %s",
-		ai_gui_session_get_provider_name(self->session),
-		ai_gui_session_get_model(self->session) != NULL
-			&& *ai_gui_session_get_model(self->session) != '\0'
-			? ai_gui_session_get_model(self->session) : "default");
+	subtitle = ai_gui_session_dup_subtitle(self->session);
 
 	adw_window_title_set_title(ADW_WINDOW_TITLE(self->title),
 	                           ai_gui_session_get_title(self->session));
@@ -272,6 +274,8 @@ window_set_session(
 		g_signal_connect(session, "notify::provider-name",
 			G_CALLBACK(on_provider_changed), self);
 		g_signal_connect(session, "notify::model",
+			G_CALLBACK(on_provider_changed), self);
+		g_signal_connect(session, "notify::project",
 			G_CALLBACK(on_provider_changed), self);
 
 		ai_gui_composer_set_busy(AI_GUI_COMPOSER(self->composer),

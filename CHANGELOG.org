@@ -4,6 +4,31 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.5.0 - 2026-09-28
+
+** Added
+- Projects as a first-class thing. =AiProject= groups the work registry
+  by repository (worktrees included) with counts, the most urgent status
+  and the main checkout, and finds a project by name or by any path in
+  it. One name (=ai_project_label_for_path()=) and one order
+  (=ai_work_session_compare()=) now serve ai-tui, ai-gui and the CLI. See
+  [[file:docs/projects.org][docs/projects.org]].
+- =ai project [list]= and =ai project show [NAME|PATH]=, with =--json=.
+- ai-tui: the session panel shows the project and branch, the dashboard
+  groups sessions under a heading per project, and a worker launched from
+  it opens as a window in its project's own tmux session.
+- ai-gui: the window subtitle names the project.
+- When account usage cannot be read, ai-tui and ai-gui say why instead of
+  only "Unavailable". Reset times read "in 2h 41m", "Fri 17:59" or "Nov 5".
+
+** Fixed
+- Claude Code account usage always read "Unavailable". It is now read with
+  Claude Code's =get_usage= request, which works in any directory, sends
+  no prompt and writes no transcript, instead of scraping the =/usage=
+  screen, which Claude Code now puts behind a folder-trust prompt.
+- ai-gui kept an old session's header handlers connected after switching
+  sessions.
+
 * 0.4.0 - 2026-09-27
 
 ** Added

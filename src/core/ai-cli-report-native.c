@@ -7,6 +7,7 @@
 #include "core/ai-subprocess-util.h"
 #include "core/ai-error.h"
 #include "core/ai-enums.h"
+#include "providers/ai-claude-launch.h"
 
 #define REPORT_BYTES (4 * 1024 * 1024)
 #define REPORT_LINE_BYTES (1024 * 1024)
@@ -390,6 +391,184 @@ done:
 	return report;
 }
 
+/* Claude sends RFC 3339 with microseconds and an offset. Reports carry UTC
+ * to the second, the same shape copy_unix_time() gives Codex. */
+static void
+copy_iso_time(JsonObject *dst, const gchar *key, JsonObject *src, const gchar *field)
+{
+	const gchar *text = ai_json_get_string(src, field, NULL);
+	g_autoptr(GDateTime) parsed = text != NULL ? g_date_time_new_from_iso8601(text, NULL) : NULL;
+	g_autoptr(GDateTime) utc = parsed != NULL ? g_date_time_to_utc(parsed) : NULL;
+	if (utc != NULL)
+	{
+		g_autofree gchar *stamp = g_date_time_format(utc, "%Y-%m-%dT%H:%M:%SZ");
+		json_object_set_string_member(dst, key, stamp);
+	}
+}
+
+/* The windows Claude Code's get_usage names, in the order a person reads
+ * them. This table is the registration: a window Anthropic adds is one row.
+ * Keys it does not list (codenamed pools, credit schemes) are not guessed at. */
+static const struct {
+	const gchar *field;
+	const gchar *label;
+	gint minutes;
+} CLAUDE_WINDOWS[] = {
+	{ "five_hour",        "Session (5h)",    300 },
+	{ "seven_day",        "Weekly",          10080 },
+	{ "seven_day_opus",   "Weekly (Opus)",   10080 },
+	{ "seven_day_sonnet", "Weekly (Sonnet)", 10080 },
+};
+
+/* One window. `utilization` is documented by the CLI as "Percentage of the
+ * window used, 0-100", so it is used_percent and nothing else; a null one is
+ * a window the account has not got, not a zero. */
+static gboolean
+claude_window(AiCliReport *report, JsonObject *window, const gchar *label, gint minutes)
+{
+	JsonObject *row;
+	JsonNode *used = ai_json_get_node(window, "utilization");
+	if (window == NULL || used == NULL || !JSON_NODE_HOLDS_VALUE(used)) return FALSE;
+	if (json_node_get_value_type(used) != G_TYPE_INT64 && json_node_get_value_type(used) != G_TYPE_DOUBLE) return FALSE;
+	row = _ai_cli_report_add_entry(report, label, "percent");
+	copy_number(row, "used_percent", window, "utilization");
+	json_object_set_int_member(row, "window_minutes", minutes);
+	copy_iso_time(row, "reset_at", window, "resets_at");
+	return TRUE;
+}
+
+static AiCliReport *
+normalize_claude(AiCliClient *client, JsonObject *data, GError **error)
+{
+	g_autoptr(AiCliReport) report = _ai_cli_report_new(client, AI_CLI_REPORT_USAGE, "claude get_usage");
+	JsonObject *limits = ai_json_get_object(data, "rate_limits");
+	JsonArray *scoped;
+	guint i, count = 0;
+	if (!ai_json_get_boolean(data, "rate_limits_available", FALSE) || limits == NULL)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+			"Claude plan limits do not apply to this login (API key, Bedrock or Vertex authentication)");
+		return NULL;
+	}
+	copy_string(_ai_cli_report_object(report), "plan", data, "subscription_type");
+	for (i = 0; i < G_N_ELEMENTS(CLAUDE_WINDOWS); i++)
+		if (claude_window(report, ai_json_get_object(limits, CLAUDE_WINDOWS[i].field),
+		                  CLAUDE_WINDOWS[i].label, CLAUDE_WINDOWS[i].minutes)) count++;
+	/* Per-model weekly windows arrive as a list with the server's own names.
+	 * One that duplicates a named window above is the same allowance. */
+	scoped = ai_json_get_array(limits, "model_scoped");
+	for (i = 0; scoped != NULL && i < json_array_get_length(scoped); i++)
+	{
+		JsonObject *window = ai_json_array_get_object(scoped, i);
+		const gchar *name = ai_json_get_string(window, "display_name", NULL);
+		g_autofree gchar *label = NULL;
+		JsonArray *rows = ai_json_get_array(_ai_cli_report_object(report), "entries");
+		gboolean seen = FALSE;
+		guint j;
+		if (name == NULL || *name == '\0') continue;
+		label = g_strdup_printf("Weekly (%s)", name);
+		for (j = 0; rows != NULL && j < json_array_get_length(rows); j++)
+			if (g_strcmp0(ai_json_get_string(ai_json_array_get_object(rows, j), "label", NULL), label) == 0) seen = TRUE;
+		if (!seen && claude_window(report, window, label, 10080)) count++;
+	}
+	if (count == 0)
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED, "Claude reported no plan usage windows for this account");
+		return NULL;
+	}
+	return g_steal_pointer(&report);
+}
+
+/* Claude Code answers `get_usage` on its stream-json SDK transport: the same
+ * numbers /usage draws, as data. Print mode never shows the workspace-trust
+ * prompt that the interactive panel is now gated behind, sends no prompt,
+ * and writes no transcript. --strict-mcp-config keeps a usage probe from
+ * starting the user's MCP servers. *fallback is set only when the CLI is too
+ * old to know the request, which is the one case the panel is still for. */
+static AiCliReport *
+query_claude_usage(AiCliClient *client, gboolean *fallback, GCancellable *cancel, GError **error)
+{
+	g_autofree gchar *executable = NULL;
+	g_autofree gchar *request_id = g_uuid_string_random();
+	g_autofree gchar *wire = NULL;
+	g_autoptr(GSubprocess) process = NULL;
+	g_autoptr(GString) pending = g_string_new(NULL);
+	ReportRpc rpc = { 0 };
+	AiCliReport *report = NULL;
+	*fallback = FALSE;
+	if (ai_claude_launch_model_is_ollama(ai_cli_client_get_model(client)))
+	{
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+			"Claude plan limits do not apply to ollama/ transport models");
+		return NULL;
+	}
+	executable = ai_cli_client_resolve_executable(client, error);
+	if (executable == NULL) return NULL;
+	{
+		const gchar *argv[] = { executable, "-p", "--input-format", "stream-json",
+			"--output-format", "stream-json", "--verbose", "--strict-mcp-config", NULL };
+		process = ai_cli_client_spawn(client, argv,
+			G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, error);
+	}
+	if (process == NULL) return NULL;
+	rpc.process = process; rpc.pending = pending; rpc.cancel = cancel;
+	rpc.deadline = g_get_monotonic_time() + (gint64)report_timeout(client) * 1000;
+	wire = g_strdup_printf("{\"type\":\"control_request\",\"request_id\":\"%s\","
+		"\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}}\n", request_id);
+	if (!rpc_send(&rpc, wire, error)) goto done;
+	while (report == NULL)
+	{
+		g_autofree gchar *line = NULL;
+		g_autoptr(JsonParser) parser = json_parser_new();
+		JsonObject *obj, *response;
+		const gchar *subtype;
+		if (error != NULL && *error != NULL) break;
+		line = rpc_line(&rpc, error);
+		if (line == NULL)
+		{
+			/* An exit before answering is the CLI failing, not bad data. */
+			if (error != NULL && *error != NULL && (*error)->code == AI_ERROR_CLI_EXECUTION)
+				g_prefix_error(error, "Claude usage query: ");
+			break;
+		}
+		if (!json_parser_load_from_data(parser, line, -1, NULL) || (obj = ai_json_root_object(parser)) == NULL)
+		{
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR, "Invalid Claude stream-json line");
+			break;
+		}
+		response = ai_json_get_object(obj, "response");
+		if (g_strcmp0(ai_json_get_string(obj, "type", NULL), "control_response") != 0 ||
+		    g_strcmp0(ai_json_get_string(response, "request_id", NULL), request_id) != 0)
+			continue;
+		subtype = ai_json_get_string(response, "subtype", NULL);
+		if (g_strcmp0(subtype, "success") == 0)
+		{
+			JsonObject *data = ai_json_get_object(response, "response");
+			if (data == NULL)
+			{
+				g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR, "Claude get_usage answer must be an object");
+				break;
+			}
+			report = normalize_claude(client, data, error);
+			break;
+		}
+		/* Do not echo the backend's text: it is untrusted and may carry
+		 * account detail. The one message worth recognising is "too old". */
+		if (strstr(ai_json_get_string(response, "error", ""), "Unsupported control request subtype") != NULL)
+		{
+			*fallback = TRUE;
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED, "This Claude Code version has no get_usage request");
+		}
+		else
+			g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_EXECUTION,
+				"Claude get_usage failed; check `claude` authentication and version");
+		break;
+	}
+done:
+	g_subprocess_force_exit(process);
+	return report;
+}
+
 /* Execute tmux control commands with the same environment/cwd as the provider.
  * Captures are fixed-size panes; stderr is never mixed into report JSON. */
 static gchar *
@@ -620,8 +799,17 @@ _ai_cli_report_query_native(AiCliClient *client, AiCliReportKind kind,
 		case AI_PROVIDER_GROK_BUILD: return query_rpc(client, kind, limit, TRUE, cancellable, error);
 		case AI_PROVIDER_CLAUDE_CODE:
 		case AI_PROVIDER_CLAUDE_TMUX:
-			return kind == AI_CLI_REPORT_USAGE ? query_panel(client, cancellable, error)
-				: query_claude_history(client, limit, cancellable, error);
+			if (kind == AI_CLI_REPORT_USAGE)
+			{
+				g_autoptr(GError) failure = NULL;
+				gboolean fallback = FALSE;
+				AiCliReport *report = query_claude_usage(client, &fallback, cancellable, &failure);
+				if (report != NULL) return report;
+				if (fallback) return query_panel(client, cancellable, error);
+				g_propagate_error(error, g_steal_pointer(&failure));
+				return NULL;
+			}
+			return query_claude_history(client, limit, cancellable, error);
 		case AI_PROVIDER_ANTIGRAVITY:
 			if (kind == AI_CLI_REPORT_USAGE) return query_panel(client, cancellable, error);
 			break;

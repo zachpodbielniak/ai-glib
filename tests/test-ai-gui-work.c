@@ -93,25 +93,25 @@ fixture_record(
 static void
 test_priority_order(void)
 {
-	g_assert_cmpint(ai_gui_work_priority("INPUT"), <,
-	                ai_gui_work_priority("ERROR"));
-	g_assert_cmpint(ai_gui_work_priority("ERROR"), <,
-	                ai_gui_work_priority("WORK"));
-	g_assert_cmpint(ai_gui_work_priority("WORK"), <,
-	                ai_gui_work_priority("DONE"));
-	g_assert_cmpint(ai_gui_work_priority("DONE"), <,
-	                ai_gui_work_priority("STOPPED"));
-	g_assert_cmpint(ai_gui_work_priority("STOPPED"), <,
-	                ai_gui_work_priority("IDLE"));
-	g_assert_cmpint(ai_gui_work_priority("IDLE"), <,
-	                ai_gui_work_priority("DISCONNECTED"));
+	g_assert_cmpint(ai_work_session_status_priority("INPUT"), <,
+	                ai_work_session_status_priority("ERROR"));
+	g_assert_cmpint(ai_work_session_status_priority("ERROR"), <,
+	                ai_work_session_status_priority("WORK"));
+	g_assert_cmpint(ai_work_session_status_priority("WORK"), <,
+	                ai_work_session_status_priority("DONE"));
+	g_assert_cmpint(ai_work_session_status_priority("DONE"), <,
+	                ai_work_session_status_priority("STOPPED"));
+	g_assert_cmpint(ai_work_session_status_priority("STOPPED"), <,
+	                ai_work_session_status_priority("IDLE"));
+	g_assert_cmpint(ai_work_session_status_priority("IDLE"), <,
+	                ai_work_session_status_priority("DISCONNECTED"));
 
 	/* An unrecognised state sorts last rather than first: a record this
 	 * build does not understand must not jump the queue. */
-	g_assert_cmpint(ai_gui_work_priority("SOMETHING-NEW"), ==,
-	                ai_gui_work_priority("DISCONNECTED"));
-	g_assert_cmpint(ai_gui_work_priority(NULL), ==,
-	                ai_gui_work_priority("DISCONNECTED"));
+	g_assert_cmpint(ai_work_session_status_priority("SOMETHING-NEW"), ==,
+	                ai_work_session_status_priority("DISCONNECTED"));
+	g_assert_cmpint(ai_work_session_status_priority(NULL), ==,
+	                ai_work_session_status_priority("DISCONNECTED"));
 }
 
 static void
@@ -461,7 +461,7 @@ test_project_label(void)
 	for (i = 0; i < G_N_ELEMENTS(cases); i++)
 	{
 		g_autofree gchar *label =
-			ai_gui_work_project_label(cases[i].project);
+			ai_project_label_for_path(cases[i].project);
 
 		g_assert_cmpstr(label, ==, cases[i].expected);
 	}
@@ -477,25 +477,25 @@ test_project_label(void)
 static void
 test_project_compare(void)
 {
-	g_assert_cmpint(ai_gui_work_project_compare("/x/alpha", "/x/beta"),
+	g_assert_cmpint(ai_project_compare_paths("/x/alpha", "/x/beta"),
 	                <, 0);
-	g_assert_cmpint(ai_gui_work_project_compare("/x/beta", "/x/alpha"),
+	g_assert_cmpint(ai_project_compare_paths("/x/beta", "/x/alpha"),
 	                >, 0);
-	g_assert_cmpint(ai_gui_work_project_compare("/x/alpha", "/x/alpha"),
+	g_assert_cmpint(ai_project_compare_paths("/x/alpha", "/x/alpha"),
 	                ==, 0);
 
 	/* Case-insensitively, so "Notes" and "ai-glib" sort as a reader
 	 * expects rather than as ASCII does. */
-	g_assert_cmpint(ai_gui_work_project_compare("/x/ZZ", "/x/aa"), >, 0);
+	g_assert_cmpint(ai_project_compare_paths("/x/ZZ", "/x/aa"), >, 0);
 
 	/* Same label, different checkout: ordered, never equal. */
 	g_assert_cmpint(
-		ai_gui_work_project_compare("/one/ai-glib/.git", "/two/ai-glib/.git"),
+		ai_project_compare_paths("/one/ai-glib/.git", "/two/ai-glib/.git"),
 		!=, 0);
 
 	/* The `.git` suffix is invisible to the ordering. */
 	g_assert_cmpint(
-		ai_gui_work_project_compare("/x/alpha/.git", "/x/beta"), <, 0);
+		ai_project_compare_paths("/x/alpha/.git", "/x/beta"), <, 0);
 }
 
 gint

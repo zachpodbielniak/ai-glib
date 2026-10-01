@@ -12,15 +12,15 @@
  * introspected.
  *
  * `AiCliReport` gives each allowance in whatever direction its provider
- * stated --- Codex says `used_percent`, a Claude panel says remaining,
- * some say a count against a limit. Turning that into one number a person
+ * stated --- Codex and Claude's get_usage say `used_percent`, a native
+ * panel may say remaining, some say a count against a limit. Turning that into one number a person
  * can read is a decision, and it has to be *the same* decision in every
  * front-end: a terminal saying 75% remaining while a window says 25% for
  * the same account is worse than either of them saying nothing.
  *
  * So the direction rule, the bar shape and the accessors live here, and
  * so does the refresh policy. Nothing in this file knows about ncurses or
- * GTK; `bin/ai-tui-usage.h` and `gui/ai-gui-quota.c` are the two views of
+ * GTK; `bin/ai-tui-panel.h` and `gui/ai-gui-quota.c` are the two views of
  * it.
  */
 
@@ -61,6 +61,8 @@ G_BEGIN_DECLS
  * @pending: a query is in flight
  * @stopped: the owner is shutting down; no new queries, no callbacks
  * @failed: the last attempt failed, so @data is stale
+ * @reason: (nullable): why the last attempt failed, in words a person can
+ *   act on; %NULL after a success
  * @generation: bumped whenever the identity changes
  * @query_generation: the generation the in-flight query belongs to
  * @next_refresh: monotonic time before which no query is started
@@ -87,6 +89,7 @@ typedef struct
 	gboolean      pending;
 	gboolean      stopped;
 	gboolean      failed;
+	gchar        *reason;
 	guint         generation;
 	guint         query_generation;
 	gint64        next_refresh;
@@ -269,23 +272,6 @@ ai_quota_row_label(JsonObject *row)
 }
 
 /**
- * ai_quota_row_reset:
- * @row: one allowance
- *
- * Prefers the provider's own words over a timestamp we would have to
- * phrase ourselves.
- *
- * Returns: (transfer none) (nullable): when it refills
- */
-static inline const gchar *
-ai_quota_row_reset(JsonObject *row)
-{
-	const gchar *reset = ai_json_get_string(row, "reset_text", NULL);
-
-	return reset != NULL ? reset : ai_json_get_string(row, "reset_at", NULL);
-}
-
-/**
  * ai_quota_lowest:
  * @self: a cache
  *
@@ -349,6 +335,87 @@ ai_quota_heading(AiQuota *self)
 	                                 : "ACCOUNT REMAINING";
 }
 
+/**
+ * ai_quota_reason:
+ * @self: a cache
+ *
+ * Why there is no current figure.
+ *
+ * Every failure used to look the same --- "Unavailable" --- so a login
+ * with no plan limits, a CLI too old to ask and a broken one were one
+ * dead end. The message is the #GError the report layer already words
+ * for people, and it never carries backend payloads.
+ *
+ * Returns: (transfer none) (nullable): the reason, or %NULL when the last
+ *   attempt succeeded or none has finished
+ */
+static inline const gchar *
+ai_quota_reason(AiQuota *self)
+{
+	return self->failed ? self->reason : NULL;
+}
+
+/**
+ * ai_quota_format_reset:
+ * @row: (nullable): one allowance
+ * @now: the current time, in the zone to answer in
+ *
+ * When @row refills, phrased for a person.
+ *
+ * The provider's own `reset_text` wins over anything computed. A
+ * `reset_at` stamp becomes "in 2h 41m" within a day, a weekday and time
+ * within a week, and a date beyond that. A stamp that does not parse is
+ * shown as the provider gave it rather than turned into a time nobody
+ * stated. @now is a parameter so the answer is testable and so both
+ * front-ends pass the same clock.
+ *
+ * Returns: (transfer full) (nullable): the text, or %NULL when @row says
+ *   nothing about a reset
+ */
+static inline gchar *
+ai_quota_format_reset(JsonObject *row, GDateTime *now)
+{
+	const gchar *text = ai_json_get_string(row, "reset_text", NULL);
+	g_autoptr(GDateTime) reset = NULL;
+	g_autoptr(GDateTime) local = NULL;
+	gint64 seconds;
+
+	if (text != NULL)
+		return g_strdup(text);
+
+	text = ai_json_get_string(row, "reset_at", NULL);
+
+	if (text == NULL)
+		return NULL;
+
+	reset = g_date_time_new_from_iso8601(text, NULL);
+
+	if (reset == NULL)
+		return g_strdup(text);
+
+	seconds = g_date_time_difference(reset, now) / G_TIME_SPAN_SECOND;
+
+	if (seconds <= 0)
+		return g_strdup("now");
+
+	if (seconds < 60)
+		return g_strdup("in <1m");
+
+	if (seconds < 3600)
+		return g_strdup_printf("in %" G_GINT64_FORMAT "m", seconds / 60);
+
+	if (seconds < 86400)
+		return g_strdup_printf("in %" G_GINT64_FORMAT "h %" G_GINT64_FORMAT "m",
+		                       seconds / 3600, (seconds % 3600) / 60);
+
+	local = g_date_time_to_timezone(reset, g_date_time_get_timezone(now));
+
+	if (seconds < 7 * 86400)
+		return g_date_time_format(local, "%a %H:%M");
+
+	return g_date_time_format(local, "%b %-e");
+}
+
 /* ================================================================
  * The refresh policy
  * ================================================================ */
@@ -378,6 +445,14 @@ ai_quota_ready(
 	if (self->query_generation == self->generation)
 	{
 		self->failed = report == NULL;
+		g_clear_pointer(&self->reason, g_free);
+
+		if (report == NULL && error != NULL &&
+		    !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+		{
+			g_debug("account quota: %s", error->message);
+			self->reason = g_strdup(error->message);
+		}
 
 		if (report != NULL)
 		{
@@ -442,6 +517,7 @@ ai_quota_refresh(
 		self->generation++;
 		self->next_refresh = 0;
 		self->failed = FALSE;
+		g_clear_pointer(&self->reason, g_free);
 
 		/* The in-flight answer belongs to the old identity. Cancelling
 		 * is belt-and-braces; the generation check discards it anyway. */
@@ -456,6 +532,10 @@ ai_quota_refresh(
 		/* An HTTP provider has no account report to read. Saying so is
 		 * the answer, not an empty bar. */
 		self->failed = TRUE;
+
+		if (self->reason == NULL)
+			self->reason = g_strdup("This provider has no account report");
+
 		return changed;
 	}
 
@@ -541,6 +621,7 @@ ai_quota_clear(AiQuota *self)
 	g_clear_object(&self->provider);
 	g_clear_pointer(&self->model, g_free);
 	g_clear_pointer(&self->cwd, g_free);
+	g_clear_pointer(&self->reason, g_free);
 	g_clear_pointer(&self->data, json_node_unref);
 }
 

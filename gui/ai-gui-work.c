@@ -36,118 +36,17 @@ work_field(
  * Project identity
  * ================================================================ */
 
-gchar *
-ai_gui_work_project_label(const gchar *project)
-{
-	g_autofree gchar *trimmed = NULL;
-	g_autofree gchar *leaf = NULL;
-
-	if (project == NULL || *project == '\0')
-		return g_strdup("Untitled");
-
-	/*
-	 * A trailing separator would make g_path_get_basename() answer the
-	 * component before it, which is the right answer here -- but only by
-	 * accident, and not for a path that is nothing but separators. Trim
-	 * first so the two cases are told apart on purpose.
-	 */
-	trimmed = g_strdup(project);
-	{
-		gsize len = strlen(trimmed);
-
-		while (len > 1 && G_IS_DIR_SEPARATOR(trimmed[len - 1]))
-			trimmed[--len] = '\0';
-	}
-
-	leaf = g_path_get_basename(trimmed);
-
-	/* The Git common directory is the identity, so its own basename is
-	 * `.git` and the directory holding it is the project. */
-	if (g_strcmp0(leaf, ".git") == 0)
-	{
-		g_autofree gchar *parent = g_path_get_dirname(trimmed);
-		g_autofree gchar *name = g_path_get_basename(parent);
-
-		if (name != NULL && *name != '\0' && g_strcmp0(name, ".") != 0)
-			return g_steal_pointer(&name);
-	}
-
-	if (leaf == NULL || *leaf == '\0' || g_strcmp0(leaf, ".") == 0 ||
-	    G_IS_DIR_SEPARATOR(leaf[0]))
-	{
-		return g_strdup(project);
-	}
-
-	return g_steal_pointer(&leaf);
-}
-
-gint
-ai_gui_work_project_compare(
-	const gchar *a,
-	const gchar *b
-){
-	g_autofree gchar *label_a = ai_gui_work_project_label(a);
-	g_autofree gchar *label_b = ai_gui_work_project_label(b);
-	g_autofree gchar *fold_a = g_utf8_casefold(label_a, -1);
-	g_autofree gchar *fold_b = g_utf8_casefold(label_b, -1);
-	gint order = g_strcmp0(fold_a, fold_b);
-
-	/* Two checkouts of the same repository share a label. Falling through
-	 * to the identity keeps their order stable instead of letting it
-	 * depend on which one the sort happened to see first. */
-	return order != 0 ? order : g_strcmp0(a, b);
-}
-
 /* ================================================================
  * Ordering
  * ================================================================ */
-
-gint
-ai_gui_work_priority(const gchar *status)
-{
-	/*
-	 * The order is the answer to "what needs me next", and it is copied
-	 * from ai-tui deliberately. Two dashboards reading one registry must
-	 * not disagree about which row is at the top.
-	 */
-	static const gchar *const STATES[] = {
-		"INPUT", "ERROR", "WORK", "DONE", "STOPPED", "IDLE", "DISCONNECTED"
-	};
-	guint i;
-
-	if (status == NULL)
-		return (gint)G_N_ELEMENTS(STATES) - 1;
-
-	for (i = 0; i < G_N_ELEMENTS(STATES); i++)
-	{
-		if (g_str_equal(status, STATES[i]))
-			return (gint)i;
-	}
-
-	return (gint)G_N_ELEMENTS(STATES) - 1;
-}
 
 gint
 ai_gui_work_compare(
 	gconstpointer a,
 	gconstpointer b
 ){
-	AiWorkSession *left = *(AiWorkSession * const *)a;
-	AiWorkSession *right = *(AiWorkSession * const *)b;
-	gint order;
-
-	order = ai_gui_work_priority(work_field(left, "status"))
-		- ai_gui_work_priority(work_field(right, "status"));
-
-	if (order != 0)
-		return order;
-
-	order = g_strcmp0(work_field(left, "project"), work_field(right, "project"));
-
-	/* The id last, so the order is total: two rows that tie on both keys
-	 * must not swap places between refreshes. */
-	return order != 0 ? order
-		: g_strcmp0(ai_work_session_get_id(left), ai_work_session_get_id(right));
+	return ai_work_session_compare(*(AiWorkSession * const *)a,
+	                               *(AiWorkSession * const *)b);
 }
 
 GPtrArray *

@@ -9,6 +9,7 @@
  * says 25% for the same account is the failure this file exists to stop.
  */
 #include <stdio.h>
+#include <string.h>
 #include <ai-glib.h>
 
 #include "core/ai-quota.h"
@@ -294,6 +295,70 @@ test_cancel_and_stale(void)
 	ai_quota_clear(&usage);
 }
 
+/* A failure used to be dropped on the floor, so every cause of a missing
+ * number read as the same "Unavailable". The reason is kept, replaced on
+ * the next answer and forgotten when the identity changes. */
+static void
+test_reason(void)
+{
+	g_autoptr(AiCliClient) client = AI_CLI_CLIENT(ai_codex_cli_client_new());
+	g_autoptr(AiClient) http = AI_CLIENT(ai_claude_client_new());
+	AiQuota usage = { 0 };
+	ai_cli_client_set_executable_path(client, self_path);
+	ai_cli_client_set_process_timeout_ms(client, 1500);
+	ai_cli_client_set_env(client, "TUI_USAGE_MODE", "error");
+	g_assert_null(ai_quota_reason(&usage));
+	g_assert_true(ai_quota_refresh(&usage, G_OBJECT(client), TRUE));
+	drain(&usage);
+	g_assert_true(usage.failed);
+	g_assert_nonnull(ai_quota_reason(&usage));
+	g_assert_nonnull(strstr(ai_quota_reason(&usage), "authentication"));
+	/* Success forgets the old reason. */
+	ai_cli_client_unset_env(client, "TUI_USAGE_MODE");
+	ai_cli_client_set_env(client, "TUI_USAGE_USED", "25");
+	usage.next_refresh = 0;
+	g_assert_true(ai_quota_refresh(&usage, G_OBJECT(client), TRUE));
+	drain(&usage);
+	g_assert_false(usage.failed);
+	g_assert_null(ai_quota_reason(&usage));
+	/* An HTTP provider has no account report, and says so. */
+	g_assert_true(ai_quota_refresh(&usage, G_OBJECT(http), TRUE));
+	g_assert_cmpstr(ai_quota_reason(&usage), ==, "This provider has no account report");
+	ai_quota_stop(&usage);
+	drain(&usage);
+	ai_quota_clear(&usage);
+}
+
+/* A person reads "in 2h 41m", not an ISO stamp. The provider's own words
+ * still win, and a stamp nobody can parse is shown as given rather than
+ * invented into a time. */
+static void
+test_format_reset(void)
+{
+	g_autoptr(GDateTime) now = g_date_time_new_utc(2026, 9, 28, 4, 49, 0);
+	const struct { const gchar *json; const gchar *expected; } cases[] = {
+		{ "{\"reset_text\":\"Resets tomorrow\",\"reset_at\":\"2026-09-28T07:30:00Z\"}", "Resets tomorrow" },
+		{ "{\"reset_at\":\"2026-09-28T07:30:00Z\"}", "in 2h 41m" },
+		{ "{\"reset_at\":\"2026-09-28T05:00:00Z\"}", "in 11m" },
+		{ "{\"reset_at\":\"2026-09-28T04:49:30Z\"}", "in <1m" },
+		{ "{\"reset_at\":\"2026-09-28T04:00:00Z\"}", "now" },
+		{ "{\"reset_at\":\"2026-09-29T04:49:00Z\"}", "Tue 04:49" },
+		{ "{\"reset_at\":\"2026-10-02T17:59:59Z\"}", "Fri 17:59" },
+		{ "{\"reset_at\":\"2026-11-05T07:59:00Z\"}", "Nov 5" },
+		{ "{\"reset_at\":\"next week\"}", "next week" },
+		{ "{\"reset_at\":7}", NULL },
+		{ "{}", NULL }
+	};
+	guint i;
+	for (i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autoptr(JsonNode) node = json_from_string(cases[i].json, NULL);
+		g_autofree gchar *actual = ai_quota_format_reset(ai_quota_object(node), now);
+		g_assert_cmpstr(actual, ==, cases[i].expected);
+	}
+	g_assert_null(ai_quota_format_reset(NULL, now));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -307,6 +372,8 @@ main(int argc, char **argv)
 	g_test_add_func("/ai-glib/quota/heading", test_heading);
 	g_test_add_func("/ai-glib/quota/cache", test_cache);
 	g_test_add_func("/ai-glib/quota/cancel-stale", test_cancel_and_stale);
+	g_test_add_func("/ai-glib/quota/reason", test_reason);
+	g_test_add_func("/ai-glib/quota/format-reset", test_format_reset);
 	result = g_test_run();
 	g_free(self_path);
 	return result;
