@@ -872,7 +872,17 @@ info_visible(void)
 int
 main(int argc, char **argv)
 {
-	g_test_init(&argc, &argv, G_TEST_OPTION_ISOLATE_DIRS, NULL);
+	/*
+	 * ai_config_new() reads the user config. Point it at an empty
+	 * directory before anything caches g_get_user_config_dir().
+	 * G_TEST_OPTION_ISOLATE_DIRS also hides the system GSettings
+	 * schemas, and this binary initialises GStreamer.
+	 */
+	g_autofree gchar *config_home = g_dir_make_tmp("ai-voice-matrix-XXXXXX", NULL);
+
+	g_assert_nonnull(config_home);
+	g_setenv("XDG_CONFIG_HOME", config_home, TRUE);
+	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/voice/matrix/info-without-debug", info_visible);
 	g_test_add("/voice/matrix/terminal-media-error", MatrixFixture, NULL, matrix_setup,
 			   terminal_media_error_test, matrix_teardown);
