@@ -488,7 +488,9 @@ path_score(AiProject *project, const gchar *path)
  * the deepest one winning. Otherwise @query is a name, compared
  * case-insensitively. A name two projects share is an error that lists
  * both, never a guess: acting on the wrong repository is worse than
- * asking. Paths are compared as written, without touching the disk.
+ * asking. The query is canonicalised against the current directory
+ * (relative segments, and symlinks where that path exists) and then
+ * compared with the stored paths. The registry is not read again.
  *
  * Returns: (transfer full) (nullable): the project, or %NULL with
  *   @error set (%AI_ERROR_INVALID_REQUEST) when nothing or more than one

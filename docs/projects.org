@@ -45,8 +45,9 @@ and ai-gui, and the names had drifted apart. Both now call the library.
   identity, root or any session directory contains it, the deepest match
   winning, so a worktree nested in another project's checkout still
   resolves to its own project. Matching is on whole path components:
-  =/r/alphabet= is not inside =/r/alpha=. Paths are compared as written;
-  nothing is read from disk.
+  =/r/alphabet= is not inside =/r/alpha=. The query is canonicalised
+  against the current directory first, so =.= and a symlinked checkout
+  match the stored path. The registry is not read again.
 - Anything else is a name, compared case-insensitively.
 - A name two projects share is an error that lists both roots. Picking
   one would mean acting on the wrong repository half the time.
