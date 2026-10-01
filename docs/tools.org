@@ -129,6 +129,18 @@ Matches filenames recursively. =*.c=, =test-*=.
 A regular expression over file contents, returning matching lines with
 file and line number.
 
+=grep= opens each path and then keeps it only when that file descriptor
+is a regular file of at most 16 MiB. A FIFO, a device or =/proc/kmsg=
+blocks inside the read, where no cancel reaches, so a search of =/= would
+otherwise never return. The type is taken from the descriptor that was
+opened, so a symlink to a text file is still read and a symlink to a FIFO
+is not.
+
+Both walk the whole tree under =path=, which for a home directory on a slow
+disk can take minutes. They stop at the next entry once the turn is
+cancelled and return =G_IO_ERROR_CANCELLED=, so a stop button or a voice
+call's turn deadline ends the turn instead of waiting for the walk.
+
 ** ls
 | Parameter | Type   | Required | Default           |
 |-----------+--------+----------+-------------------|

@@ -1,0 +1,345 @@
+diff --git a/net/webrtc/src/livekit_signaller/imp.rs b/net/webrtc/src/livekit_signaller/imp.rs
+index 7fe8121..7ac0aa9 100644
+--- a/net/webrtc/src/livekit_signaller/imp.rs
++++ b/net/webrtc/src/livekit_signaller/imp.rs
+@@ -81,7 +81,20 @@ struct Channels {
+     lossy_channel: gst_webrtc::WebRTCDataChannel,
+ }
+ 
++struct PrimarySubscriber {
++    pipeline: gst::Pipeline,
++    peer: gst::Element,
++}
++
++impl Drop for PrimarySubscriber {
++    fn drop(&mut self) {
++        let _ = self.pipeline.set_state(gst::State::Null);
++    }
++}
++
+ struct Connection {
++    primary_subscriber: Option<PrimarySubscriber>,
++    ice_servers: Vec<proto::IceServer>,
+     signal_client: Arc<signal_client::SignalClient>,
+     pending_tracks: HashMap<String, oneshot::Sender<proto::TrackInfo>>,
+     signal_task: JoinHandle<()>,
+@@ -230,7 +243,7 @@ impl Signaller {
+                         break;
+                     }
+                 },
+-                Ok(None) => {}
++                Ok(None) => break,
+                 Err(err) => match err {
+                     WaitError::FutureAborted => {
+                         gst::debug!(CAT, imp = self, "Closing signal_task");
+@@ -242,6 +255,139 @@ impl Signaller {
+         }
+     }
+ 
++    // Full-grant tokens make the subscriber PC primary even for a producer.
++    // Auto-subscription remains disabled: this PC carries only server data channels.
++    async fn answer_primary_subscriber(
++        &self,
++        offer: proto::SessionDescription,
++    ) -> anyhow::Result<()> {
++        let client = self
++            .signal_client()
++            .ok_or_else(|| anyhow!("Disconnected"))?;
++        let existing = self
++            .connection
++            .lock()
++            .unwrap()
++            .as_ref()
++            .and_then(|c| c.primary_subscriber.as_ref().map(|p| p.peer.clone()));
++        let peer = if let Some(peer) = existing {
++            peer
++        } else {
++            let pipeline = gst::Pipeline::new();
++            let peer = gst::ElementFactory::make("webrtcbin")
++                .property("bundle-policy", gst_webrtc::WebRTCBundlePolicy::MaxBundle)
++                .build()?;
++            pipeline.add(&peer)?;
++            let servers = self
++                .connection
++                .lock()
++                .unwrap()
++                .as_ref()
++                .map(|c| c.ice_servers.clone())
++                .unwrap_or_default();
++            for server in servers {
++                for uri in server.urls {
++                    let Some((scheme, address)) = uri.split_once(':') else {
++                        continue;
++                    };
++                    let mut uri = url::Url::parse(&format!(
++                        "{}://{}",
++                        scheme,
++                        address.trim_start_matches('/')
++                    ))?;
++                    if scheme == "stun" {
++                        peer.set_property("stun-server", uri.as_str());
++                    } else if scheme == "turn" || scheme == "turns" {
++                        uri.set_username(&server.username)
++                            .map_err(|_| anyhow!("Invalid TURN username"))?;
++                        uri.set_password(Some(&server.credential))
++                            .map_err(|_| anyhow!("Invalid TURN credential"))?;
++                        if !peer.emit_by_name::<bool>("add-turn-server", &[&uri.as_str()]) {
++                            return Err(anyhow!("Invalid TURN server"));
++                        }
++                    }
++                }
++            }
++            let sender = client.clone();
++            peer.connect_closure(
++                "on-ice-candidate",
++                false,
++                glib::closure!(move |_peer: &gst::Element, mline: u32, candidate: &str| {
++                    let sender = sender.clone();
++                    let candidate_init = serde_json::to_string(&IceCandidateJson {
++                        sdp_mid: String::new(),
++                        sdp_m_line_index: mline as i32,
++                        candidate: candidate.to_string(),
++                    })
++                    .unwrap();
++                    RUNTIME.spawn(async move {
++                        sender
++                            .send(proto::signal_request::Message::Trickle(
++                                proto::TrickleRequest {
++                                    candidate_init,
++                                    target: proto::SignalTarget::Subscriber as i32,
++                                },
++                            ))
++                            .await;
++                    });
++                }),
++            );
++            let primary = PrimarySubscriber {
++                pipeline,
++                peer: peer.clone(),
++            };
++            primary.pipeline.set_state(gst::State::Playing)?;
++            let mut connection = self.connection.lock().unwrap();
++            let connection = connection.as_mut().ok_or_else(|| anyhow!("Disconnected"))?;
++            connection.primary_subscriber = Some(primary);
++            peer
++        };
++        let sdp = gst_sdp::SDPMessage::parse_buffer(offer.sdp.as_bytes())?;
++        let offer =
++            gst_webrtc::WebRTCSessionDescription::new(gst_webrtc::WebRTCSDPType::Offer, sdp);
++        let (promise, future) = gst::Promise::new_future();
++        peer.emit_by_name::<()>("set-remote-description", &[&offer, &promise]);
++        let reply = tokio::time::timeout(Duration::from_secs(10), future)
++            .await?
++            .map_err(|err| anyhow!("Promise failed: {err:?}"))?;
++        if let Some(reply) = reply {
++            if let Ok(error) = reply.get::<glib::Error>("error") {
++                return Err(error.into());
++            }
++        }
++        let (promise, future) = gst::Promise::new_future();
++        peer.emit_by_name::<()>("create-answer", &[&None::<gst::Structure>, &promise]);
++        let reply = tokio::time::timeout(Duration::from_secs(10), future)
++            .await?
++            .map_err(|err| anyhow!("Promise failed: {err:?}"))?
++            .ok_or_else(|| anyhow!("Missing subscriber answer"))?;
++        let answer = reply.get::<gst_webrtc::WebRTCSessionDescription>("answer")?;
++        let (promise, future) = gst::Promise::new_future();
++        peer.emit_by_name::<()>("set-local-description", &[&answer, &promise]);
++        let reply = tokio::time::timeout(Duration::from_secs(10), future)
++            .await?
++            .map_err(|err| anyhow!("Promise failed: {err:?}"))?;
++        if let Some(reply) = reply {
++            if let Ok(error) = reply.get::<glib::Error>("error") {
++                return Err(error.into());
++            }
++        }
++        client
++            .send(proto::signal_request::Message::Answer(
++                proto::SessionDescription {
++                    r#type: "answer".to_string(),
++                    sdp: answer.sdp().to_string(),
++                },
++            ))
++            .await;
++        gst::info!(
++            CAT,
++            imp = self,
++            "Answered primary subscriber offer for producer"
++        );
++        Ok(())
++    }
++
+     async fn on_signal_event(&self, event: proto::signal_response::Message) {
+         match event {
+             proto::signal_response::Message::Answer(answer) => {
+@@ -267,12 +413,9 @@ impl Signaller {
+ 
+             proto::signal_response::Message::Offer(offer) => {
+                 if !self.is_subscriber() {
+-                    gst::warning!(
+-                        CAT,
+-                        imp = self,
+-                        "Ignoring subscriber offer in non-subscriber mode: {:?}",
+-                        offer
+-                    );
++                    if let Err(err) = self.answer_primary_subscriber(offer).await {
++                        self.raise_error(format!("Subscriber handshake failed: {err}"));
++                    }
+                     return;
+                 }
+                 gst::debug!(CAT, imp = self, "Received subscriber offer: {:?}", offer);
+@@ -298,6 +441,25 @@ impl Signaller {
+                     return;
+                 };
+ 
++                if !self.is_subscriber() && trickle.target() == proto::SignalTarget::Subscriber {
++                    let peer = self
++                        .connection
++                        .lock()
++                        .unwrap()
++                        .as_ref()
++                        .and_then(|c| c.primary_subscriber.as_ref().map(|p| p.peer.clone()));
++                    if let (Some(peer), Ok(json)) = (
++                        peer,
++                        serde_json::from_str::<IceCandidateJson>(&trickle.candidate_init),
++                    ) {
++                        peer.emit_by_name::<()>(
++                            "add-ice-candidate",
++                            &[&(json.sdp_m_line_index as u32), &json.candidate],
++                        );
++                    }
++                    return;
++                }
++
+                 if target == trickle.target() {
+                     if let Ok(json) =
+                         serde_json::from_str::<IceCandidateJson>(&trickle.candidate_init)
+@@ -581,7 +743,6 @@ impl Signaller {
+                 }
+                 _ => return,
+             }
+-            return;
+         }
+ 
+         let mut connection = self.connection.lock().unwrap();
+@@ -792,6 +953,8 @@ impl SignallableImpl for Signaller {
+             });
+ 
+             let mut connection = Connection {
++                primary_subscriber: None,
++                ice_servers: join_response.ice_servers.clone(),
+                 signal_client,
+                 signal_task,
+                 pending_tracks: Default::default(),
+@@ -938,9 +1101,17 @@ impl SignallableImpl for Signaller {
+ 
+         let connection = self.connection.lock().unwrap().take();
+         if let Some(connection) = connection {
++            // The recv AbortHandle does not cancel an in-flight SDP callback.
++            // Cancel the whole task so it cannot install a new uncancelled recv
++            // while stop waits for it before closing the signalling socket.
++            connection.signal_task.abort();
+             RUNTIME.block_on(async {
+-                connection.signal_task.await.unwrap();
+-                Self::close_signal_client(&connection.signal_client).await;
++                let _ = connection.signal_task.await;
++                let _ = tokio::time::timeout(
++                    Duration::from_secs(2),
++                    Self::close_signal_client(&connection.signal_client),
++                )
++                .await;
+             });
+         }
+         self.obj().notify("connection-state");
+diff --git a/net/webrtc/src/webrtcsink/imp.rs b/net/webrtc/src/webrtcsink/imp.rs
+index bcbc06d..54c346a 100644
+--- a/net/webrtc/src/webrtcsink/imp.rs
++++ b/net/webrtc/src/webrtcsink/imp.rs
+@@ -2526,7 +2526,12 @@ impl BaseWebRTCSink {
+             let session_id = session.id.clone();
+             drop(session);
+ 
+-            self.on_remote_description_set(&session_id)
++            // Promise callbacks run on webrtcbin's PC thread. Building and
++            // synchronizing its parent pipeline here can wait for that same
++            // thread while a concurrent disconnect finalizes the session.
++            self.obj().call_async(move |obj| {
++                obj.imp().on_remote_description_set(&session_id);
++            });
+         }
+     }
+ 
+@@ -4002,7 +4007,11 @@ impl BaseWebRTCSink {
+                 session_id,
+                 move |reply| {
+                     gst::debug!(CAT, imp = this, "received reply {:?}", reply);
+-                    this.on_remote_description_set(&session_id);
++                    // Do not change the parent pipeline's state from the
++                    // webrtcbin PC thread that completed this promise.
++                    this.obj().call_async(move |obj| {
++                        obj.imp().on_remote_description_set(&session_id);
++                    });
+                 }
+             ));
+ 
+diff --git a/net/webrtc/src/webrtcsrc/pad.rs b/net/webrtc/src/webrtcsrc/pad.rs
+index f8d10f2..d62b86f 100644
+--- a/net/webrtc/src/webrtcsrc/pad.rs
++++ b/net/webrtc/src/webrtcsrc/pad.rs
+@@ -57,14 +57,48 @@ impl ObjectImpl for WebRTCSrcPad {
+     }
+     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+         match pspec.name() {
+-            "msid" => self
+-                .webrtcbin_pad
+-                .lock()
+-                .unwrap()
+-                .as_ref()
+-                .and_then(|p| p.upgrade())
+-                .and_then(|p| p.property::<Option<String>>("msid"))
+-                .to_value(),
++            "msid" => {
++                let pad = self
++                    .webrtcbin_pad
++                    .lock()
++                    .unwrap()
++                    .as_ref()
++                    .and_then(|p| p.upgrade());
++                let msid = pad.and_then(|pad| {
++                    pad.property::<Option<String>>("msid").or_else(|| {
++                        // A replacement SSRC after renegotiation can have no cached
++                        // webrtcbin pad MSID. The negotiated media section remains
++                        // authoritative for the stream's participant/track identity.
++                        let transceiver =
++                            pad.property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
++                        let parent = pad.parent()?.downcast::<gst::Element>().ok()?;
++                        let description = parent
++                            .property::<Option<gst_webrtc::WebRTCSessionDescription>>(
++                                "remote-description",
++                            )?;
++                        let media = description.sdp().media(transceiver.mlineindex())?;
++                        media
++                            .attribute_val("msid")
++                            .and_then(|value| value.split_whitespace().next())
++                            .map(String::from)
++                            .or_else(|| {
++                                media.attributes().find_map(|attribute| {
++                                    if attribute.key() != "ssrc" {
++                                        return None;
++                                    }
++                                    attribute
++                                        .value()?
++                                        .split_once(" msid:")?
++                                        .1
++                                        .split_whitespace()
++                                        .next()
++                                        .map(String::from)
++                                })
++                            })
++                    })
++                });
++                msid.to_value()
++            }
+             name => panic!("no readable property {name:?}"),
+         }
+     }

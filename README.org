@@ -35,6 +35,8 @@ A GLib/GObject-based C library for interacting with AI providers.
 - *Projects*: the repositories you work in, worktrees included, named and
   ranked by what needs you once for =ai project=, the ai-tui dashboard (one
   tmux session per project) and ai-gui (see [[file:docs/projects.org][docs/projects.org]])
+- *Voice*: =AiVoiceSession= and =ai-call=, a MatrixRTC call or one local
+  session with =--local= (see [[file:docs/voice.org][docs/voice.org]])
 - *Account usage*: remaining plan allowance for Codex, Grok Build, Claude Code
   and Antigravity in =ai --usage= and both front-ends (see [[file:docs/cli-reporting.org][docs/cli-reporting.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
@@ -55,13 +57,15 @@ A GLib/GObject-based C library for interacting with AI providers.
 *** Fedora
 #+begin_src sh
 dnf install glib2-devel libsoup3-devel json-glib-devel \
-            gobject-introspection-devel ncurses-devel
+            gobject-introspection-devel ncurses-devel \
+            gstreamer1-devel gstreamer1-plugins-base-devel
 #+end_src
 
 *** Ubuntu/Debian
 #+begin_src sh
 apt install libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libncursesw5-dev \
-            gobject-introspection
+            gobject-introspection libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
 #+end_src
 
 ** Building

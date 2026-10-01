@@ -96,7 +96,7 @@ $(OBJ_DIRS): | $(OBJDIR)
 # and the shell both pass it through to the linker unexpanded.
 #
 $(OUTDIR)/tests/%: $(TESTDIR)/%.c $(TEST_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) $< -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) $< $(EXTRA_LINK_OBJECTS) -o $@ -L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(OUTDIR)/tests: | $(OUTDIR)
 	mkdir -p $@
@@ -115,7 +115,7 @@ $(OUTDIR)/examples: | $(OUTDIR)
 # (glib/gobject/gio/libsoup/json-glib/libxml2) and the bundled yaml-glib
 # static archive (via $(LDFLAGS)) are pulled in as usual.
 $(OUTDIR)/bin/%: $(BINDIR)/%.c $(LIB_STATIC) | $(OUTDIR)/bin
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) $< -o $@ $(LIB_STATIC) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $@.d -I$(SRCDIR) $< $(EXTRA_LINK_OBJECTS) -o $@ $(LIB_STATIC) $(LDFLAGS)
 
 $(OUTDIR)/bin: | $(OUTDIR)
 	mkdir -p $@

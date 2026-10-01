@@ -45,6 +45,11 @@ see their provider pages.
 - [[file:cli-reporting.org][CLI usage and history reports]] - Native account reporting through C, text, and JSON
 - [[file:updating.org][Versions and self-update]] - Build provenance, =--check-update=, =--update= and =/update=
 
+*** Voice
+| Guide | Description |
+|-------+-------------|
+| [[file:voice.org][Live voice sessions]] | Audio interfaces, barge-in, agents, wire protocols and =ai-call= |
+
 *** Providers
 - [[file:providers/index.org][Providers Overview]] - Common provider interface
 - [[file:providers/claude.org][Claude]] - Anthropic Claude HTTP API

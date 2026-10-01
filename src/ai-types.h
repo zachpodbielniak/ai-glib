@@ -129,4 +129,19 @@ typedef struct _AiStreamableInterface  AiStreamableInterface;
 typedef struct _AiImageGenerator           AiImageGenerator;
 typedef struct _AiImageGeneratorInterface  AiImageGeneratorInterface;
 
+/* Voice interfaces and implementations */
+typedef struct _AiAudioTransport AiAudioTransport;
+typedef struct _AiAudioTransportInterface AiAudioTransportInterface;
+typedef struct _AiSpeechRecognizer AiSpeechRecognizer;
+typedef struct _AiSpeechRecognizerInterface AiSpeechRecognizerInterface;
+typedef struct _AiSpeechSynthesizer AiSpeechSynthesizer;
+typedef struct _AiSpeechSynthesizerInterface AiSpeechSynthesizerInterface;
+typedef struct _AiVoiceActivity AiVoiceActivity;
+typedef struct _AiVoiceActivityInterface AiVoiceActivityInterface;
+typedef struct _AiVoiceSession AiVoiceSession;
+typedef struct _AiLivekitTransport AiLivekitTransport;
+typedef struct _AiWebsocketRecognizer AiWebsocketRecognizer;
+typedef struct _AiHttpSynthesizer AiHttpSynthesizer;
+typedef struct _AiWebrtcVoiceActivity AiWebrtcVoiceActivity;
+
 G_END_DECLS

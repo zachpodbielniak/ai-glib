@@ -251,8 +251,18 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-loop.c \
 	$(SRCDIR)/harness/ai-loop-runner.c
 
+PUBLIC_HEADERS += $(filter-out %-private.h,$(wildcard $(SRCDIR)/voice/*.h))
+LIB_SOURCES += $(wildcard $(SRCDIR)/voice/*.c)
+
+VAD_SOURCES = $(wildcard deps/webrtc-vad/src/*.c deps/webrtc-vad/src/vad/*.c deps/webrtc-vad/src/signal_processing/*.c)
+VAD_OBJECTS = $(patsubst deps/webrtc-vad/%.c,$(OBJDIR)/webrtc-vad/%.o,$(VAD_SOURCES))
+
+$(OBJDIR)/webrtc-vad/%.o: deps/webrtc-vad/%.c $(BUILD_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fvisibility=hidden $(DEPFLAGS) -Ideps/webrtc-vad/src -c $< -o $@
+
 # Object files
-LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES))
+LIB_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SOURCES)) $(VAD_OBJECTS)
 
 # Test files
 TEST_SOURCES = $(wildcard $(TESTDIR)/test-*.c)
@@ -734,3 +744,34 @@ vars:
 	@echo "LIB_OBJECTS   = $(LIB_OBJECTS)"
 
 endif # ifndef __MIXED
+
+# Matrix-only configuration stays outside the library and its GIR.
+CALL_CONFIG_OBJECT = $(OBJDIR)/bin/ai-call-config.o
+$(CALL_CONFIG_OBJECT): bin/call/ai-call-config.c bin/call/ai-call-config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: EXTRA_LINK_OBJECTS = $(CALL_CONFIG_OBJECT)
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: $(CALL_CONFIG_OBJECT)
+CALL_SPEECH_CACHE_OBJECT = $(OBJDIR)/bin/ai-call-speech-cache.o
+$(CALL_SPEECH_CACHE_OBJECT): bin/call/ai-call-speech-cache.c bin/call/ai-call-speech-cache.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_SPEECH_CACHE_OBJECT)
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-speech-cache: $(CALL_SPEECH_CACHE_OBJECT)
+$(OUTDIR)/tests/test-call-speech-cache: EXTRA_LINK_OBJECTS = $(CALL_SPEECH_CACHE_OBJECT)
+CALL_TRANSCRIPT_OBJECT = $(OBJDIR)/bin/ai-call-transcript.o
+$(CALL_TRANSCRIPT_OBJECT): bin/call/ai-call-transcript.c bin/call/ai-call-transcript.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_TRANSCRIPT_OBJECT)
+$(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-transcript: $(CALL_TRANSCRIPT_OBJECT)
+$(OUTDIR)/tests/test-call-transcript: EXTRA_LINK_OBJECTS = $(CALL_TRANSCRIPT_OBJECT)
+-include $(CALL_CONFIG_OBJECT:.o=.d) $(CALL_SPEECH_CACHE_OBJECT:.o=.d) $(CALL_TRANSCRIPT_OBJECT:.o=.d)
+
+# Real-media validation is opt-in; callers supply the installed plugin search path.
+.PHONY: soak test-voice-endurance
+soak: $(OUTDIR)/tests/test-voice-livekit
+	AI_VOICE_LIVEKIT_TEST=1 AI_VOICE_SOAK_SECONDS=900 $<
+
+test-voice-endurance: $(OUTDIR)/tests/test-voice-livekit
+	AI_VOICE_LIVEKIT_TEST=1 AI_VOICE_ENDURANCE_TEST=1 $<

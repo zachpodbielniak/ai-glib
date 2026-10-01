@@ -170,7 +170,7 @@ config_yaml_acyclic(yaml_document_t *document, gint id, guint8 *state, guint dep
  * and was rejected on load. The index into this table is the index into
  * app_providers and app_models, which is what keeps them in step.
  */
-static const gchar *const AI_CONFIG_APPS[] = { "ai", "ai-tui", "ai-gui" };
+static const gchar *const AI_CONFIG_APPS[] = { "ai", "ai-tui", "ai-gui", "ai-call" };
 
 static gint
 config_app_index(const gchar *app)
@@ -250,7 +250,7 @@ config_yaml_validate_updates(yaml_document_t *document)
 static gboolean
 config_yaml_validate(yaml_document_t *document)
 {
-	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-gui"};
+	const gchar *apps[] = {NULL, "ai", "ai-tui", "ai-gui", "ai-call"};
 	yaml_node_t *node;
 	gint apps_id;
 	guint i;
@@ -278,6 +278,16 @@ config_yaml_validate(yaml_document_t *document)
 				return FALSE;
 		}
 	}
+    {
+        gint voice_id = config_yaml_member(document, 1, "voice");
+        if (voice_id != 0) {
+            yaml_node_pair_t *pair;
+            yaml_node_t *voice = yaml_document_get_node(document, voice_id);
+            if (voice->type != YAML_MAPPING_NODE) return FALSE;
+            for (pair = voice->data.mapping.pairs.start; pair < voice->data.mapping.pairs.top; pair++)
+                if (yaml_document_get_node(document, pair->value)->type != YAML_SCALAR_NODE) return FALSE;
+        }
+    }
 	apps_id = config_yaml_member(document, 1, "apps");
 	if (apps_id != 0 && yaml_document_get_node(document, apps_id)->type != YAML_MAPPING_NODE)
 		return FALSE;
@@ -399,6 +409,9 @@ struct _AiConfig
 	gchar   *update_upstream;
 	gchar   *update_source_dir;
 	gboolean update_run_tests;
+
+	gchar *voice_values[4];
+	gboolean voice_explicit[4];
 };
 
 G_DEFINE_TYPE(AiConfig, ai_config, G_TYPE_OBJECT)
@@ -417,10 +430,18 @@ enum
     PROP_UPDATE_UPSTREAM,
     PROP_UPDATE_SOURCE_DIR,
     PROP_UPDATE_RUN_TESTS,
+    PROP_VOICE_STT_URL,
+    PROP_VOICE_TTS_URL,
+    PROP_VOICE_LIVEKIT_URL,
+    PROP_VOICE_IDENTITY_FILE,
     N_PROPS
 };
 
 static GParamSpec *properties[N_PROPS];
+static const gchar *voice_keys[] = {"stt_url", "tts_url", "livekit_url", "identity_file"};
+static const gchar *voice_env[] = {"AI_VOICE_STT_URL", "AI_VOICE_TTS_URL", "AI_VOICE_LIVEKIT_URL", "AI_VOICE_IDENTITY_FILE"};
+static const gchar *voice_props[] = {"voice-stt-url", "voice-tts-url", "voice-livekit-url", "voice-identity-file"};
+static const gchar *voice_defaults[] = {"ws://localhost:8001/stt/stream", "http://localhost:8089/synthesize/stream", "ws://localhost:7880", NULL};
 
 /* Singleton instance for get_default() */
 static AiConfig *default_config = NULL;
@@ -450,6 +471,7 @@ ai_config_finalize(GObject *object)
     g_clear_pointer(&self->default_model, g_free);
 	g_clear_pointer(&self->update_upstream, g_free);
 	g_clear_pointer(&self->update_source_dir, g_free);
+	{ guint v; for (v = 0; v < G_N_ELEMENTS(self->voice_values); v++) g_free(self->voice_values[v]); }
 	{
 		gsize i;
 
@@ -469,6 +491,14 @@ ai_config_get_property(
 ){
     AiConfig *self = AI_CONFIG(object);
 
+    if (prop_id >= PROP_VOICE_STT_URL && prop_id <= PROP_VOICE_IDENTITY_FILE) {
+        guint i = prop_id - PROP_VOICE_STT_URL;
+        const gchar *env = g_getenv(voice_env[i]);
+        g_value_set_string(value, self->voice_explicit[i] ? self->voice_values[i] :
+                           env != NULL && *env != '\0' ? env :
+                           self->voice_values[i] != NULL ? self->voice_values[i] : voice_defaults[i]);
+        return;
+    }
     switch (prop_id)
     {
         case PROP_OPEN_DASHBOARD_ON_LOAD:
@@ -520,6 +550,13 @@ ai_config_set_property(
 ){
     AiConfig *self = AI_CONFIG(object);
 
+    if (prop_id >= PROP_VOICE_STT_URL && prop_id <= PROP_VOICE_IDENTITY_FILE) {
+        guint i = prop_id - PROP_VOICE_STT_URL;
+        g_free(self->voice_values[i]);
+        self->voice_values[i] = g_value_dup_string(value);
+        self->voice_explicit[i] = TRUE;
+        return;
+    }
     switch (prop_id)
     {
         case PROP_OPEN_DASHBOARD_ON_LOAD:
@@ -651,6 +688,12 @@ ai_config_class_init(AiConfigClass *klass)
     properties[PROP_UPDATE_RUN_TESTS] = g_param_spec_boolean(
         "update-run-tests", "Run tests on update", "Run make test before installing",
         FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+    {
+        guint i;
+        for (i = 0; i < 4; i++)
+            properties[PROP_VOICE_STT_URL + i] = g_param_spec_string(voice_props[i], voice_props[i],
+                "Voice setting; environment overrides YAML", voice_defaults[i], G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+    }
     g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -1355,6 +1398,22 @@ ai_config_load_from_file(
 		}
 	}
 
+    {
+        gint voice = config_yaml_member(document, 1, "voice");
+        for (i = 0; i < 4; i++) {
+            gint entry = config_yaml_member(document, voice, voice_keys[i]);
+            if (entry != 0 && !self->voice_explicit[i]) {
+                yaml_node_t *node = yaml_document_get_node(document, entry);
+                if (node->type != YAML_SCALAR_NODE) {
+                    g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "voice.%s must be a string", voice_keys[i]);
+                    return FALSE;
+                }
+                g_free(self->voice_values[i]);
+                self->voice_values[i] = g_strdup((const gchar *)node->data.scalar.value);
+            }
+        }
+    }
+
     /* default_provider */
     if (has_provider)
     {
@@ -1584,7 +1643,7 @@ ai_config_set_default_model(
 /**
  * ai_config_get_app_provider:
  * @self: an #AiConfig
- * @app: application name: `ai`, `ai-tui` or `ai-gui`
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
  *
  * Reads only apps.@app.default_provider, never library or environment defaults.
  *
@@ -1604,7 +1663,7 @@ ai_config_get_app_provider(AiConfig *self, const gchar *app)
 /**
  * ai_config_get_app_model:
  * @self: an #AiConfig
- * @app: application name: `ai`, `ai-tui` or `ai-gui`
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
  *
  * Reads only apps.@app.default_model, never library or environment defaults.
  *
@@ -1624,7 +1683,7 @@ ai_config_get_app_model(AiConfig *self, const gchar *app)
 /**
  * ai_config_get_app_dashboard:
  * @self: an #AiConfig
- * @app: application name: `ai`, `ai-tui` or `ai-gui`
+ * @app: application name: `ai`, `ai-tui`, `ai-gui` or `ai-call`
  *
  * Reads only apps.@app.open-dashboard-on-load.
  *
@@ -1766,7 +1825,7 @@ config_yaml_store_user(yaml_document_t **document, GError **error)
 /**
  * ai_config_save_defaults:
  * @self: an #AiConfig
- * @app: (nullable): `ai` or `ai-tui`, or %NULL for library defaults
+ * @app: (nullable): `ai`, `ai-tui`, `ai-gui` or `ai-call`, or %NULL for library defaults
  * @provider: the provider to save
  * @model: (nullable): model name, or %NULL for the provider's native default
  * @error: (out) (optional): return location for a #GError

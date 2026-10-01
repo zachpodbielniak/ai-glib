@@ -1,0 +1,1415 @@
+#include "voice-mocks.h"
+#include "voice-stalled-provider.h"
+
+typedef struct {
+	TestTransport *transport;
+	TestRecognizer *stt;
+	TestSynthesizer *tts;
+	TestActivity *vad;
+	AiMockProvider *provider;
+	AiConversation *conversation;
+	AiVoiceSession *session;
+	GArray *states;
+	GPtrArray *speakers;
+} Fixture;
+static void
+on_state(AiVoiceSession *s, gint state, gpointer data)
+{
+	Fixture *f = data;
+	g_array_append_val(f->states, state);
+}
+static void
+on_transcript(AiVoiceSession *s, const gchar *speaker, const gchar *text, gboolean final,
+			  gpointer data)
+{
+	if (final)
+		g_ptr_array_add(((Fixture *)data)->speakers, g_strdup(speaker));
+}
+static void
+setup(Fixture *f, gconstpointer data)
+{
+	gint initial = AI_VOICE_LISTENING;
+	f->transport = g_object_new(test_transport_get_type(), NULL);
+	f->stt = g_object_new(test_recognizer_get_type(), NULL);
+	f->tts = g_object_new(test_synthesizer_get_type(), NULL);
+	f->vad = g_object_new(test_activity_get_type(), NULL);
+	f->provider = ai_mock_provider_new();
+	f->conversation = ai_conversation_new(G_OBJECT(f->provider));
+	ai_conversation_set_local_tools(f->conversation, TRUE);
+	f->states = g_array_new(FALSE, FALSE, sizeof(gint));
+	f->speakers = g_ptr_array_new_with_free_func(g_free);
+	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
+							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
+							  f->vad, "conversation", f->conversation, NULL);
+	if (data != GINT_TO_POINTER(1))
+		g_object_set(f->session, "barge-in-ms", 10, NULL);
+	g_array_append_val(f->states, initial);
+	g_signal_connect(f->session, "state-changed", G_CALLBACK(on_state), f);
+	g_signal_connect(f->session, "transcript", G_CALLBACK(on_transcript), f);
+	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
+}
+static void
+drain(void)
+{
+	while (g_main_context_iteration(NULL, FALSE))
+		;
+}
+static void
+teardown(Fixture *f, gconstpointer data)
+{
+	ai_voice_session_stop(f->session);
+	if (f->tts->held != NULL) {
+		g_task_return_boolean(f->tts->held, TRUE);
+		g_clear_object(&f->tts->held);
+	}
+	drain();
+	g_object_unref(f->session);
+	g_object_unref(f->transport);
+	g_object_unref(f->stt);
+	g_object_unref(f->tts);
+	g_object_unref(f->vad);
+	g_object_unref(f->conversation);
+	g_object_unref(f->provider);
+	g_array_unref(f->states);
+	g_ptr_array_unref(f->speakers);
+	drain();
+}
+static void
+frame(Fixture *f, const gchar *speaker, guint8 activity)
+{
+	guint8 samples[320] = {0};
+	g_autoptr(GBytes) pcm = NULL;
+	samples[0] = activity;
+	pcm = g_bytes_new(samples, sizeof(samples));
+	g_signal_emit_by_name(f->transport, "audio", speaker, pcm);
+}
+static void
+utterance(Fixture *f, const gchar *speaker)
+{
+	frame(f, speaker, 1);
+	frame(f, speaker, 2);
+}
+static void
+wait_replies(Fixture *f, guint n)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	while ((f->tts->texts->len < n ||
+			ai_voice_session_get_state(f->session) != AI_VOICE_LISTENING) &&
+		   g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_cmpuint(f->tts->texts->len, >=, n);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+static void
+full_turn(Fixture *f, gconstpointer data)
+{
+	static const gint expected[] = {AI_VOICE_LISTENING, AI_VOICE_TRANSCRIBING,
+									AI_VOICE_THINKING, AI_VOICE_SPEAKING,
+									AI_VOICE_LISTENING};
+	ai_mock_provider_push_text(f->provider, "Hello Caller.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpuint(f->transport->writes, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Hello Caller.");
+	g_assert_cmpmem(f->states->data, f->states->len * sizeof(gint), expected,
+					sizeof(expected));
+	g_assert_cmpstr(g_ptr_array_index(f->speakers, 0), ==, "Caller");
+}
+static void
+barge_in(Fixture *f, gconstpointer data)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	f->tts->hold_after = 2;
+	ai_mock_provider_push_text(f->provider, "First sentence. Unspoken ending.");
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	if (data != NULL)
+		g_object_set(f->session, "barge-in-confirm", FALSE, NULL);
+	frame(f, "caller", 1);
+	if (data == NULL) {
+		/* Sound alone is not an interruption while speaking: it may be our own
+		 * voice coming back through the caller's speaker. Words are. */
+		g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+		g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+		g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+		g_signal_emit_by_name(f->stt, "transcript", "caller", "wait a moment", FALSE);
+	}
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, 1);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_TRANSCRIBING);
+	{
+		GList *messages = ai_conversation_get_messages(f->conversation);
+		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
+		g_assert_cmpstr(text, ==, "First sentence.");
+	}
+}
+/* Hold the reply on its second segment, then let the caller's line carry
+ * something while the assistant is still talking. */
+static void
+speak_and_hold(Fixture *f)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	f->tts->hold_after = 2;
+	ai_mock_provider_push_text(f->provider, "First sentence. Unspoken ending.");
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	frame(f, "caller", 1);
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+}
+static void
+echo_is_not_a_turn(Fixture *f, gconstpointer data)
+{
+	guint heard;
+	speak_and_hold(f);
+	heard = f->speakers->len;
+	/* What the caller's microphone picked up was our own first sentence. */
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "first sentence", FALSE);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "First sentence.", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->speakers->len, ==, heard);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
+}
+static void
+noise_is_not_a_turn(Fixture *f, gconstpointer data)
+{
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
+}
+static void
+final_words_interrupt(Fixture *f, gconstpointer data)
+{
+	guint heard;
+	speak_and_hold(f);
+	heard = f->speakers->len;
+	/* No partial arrived; the final alone is enough, and it becomes the turn. */
+	ai_mock_provider_push_text(f->provider, "Stopping.");
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "Hold on, stop.", TRUE);
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, 1);
+	g_assert_cmpuint(f->speakers->len, ==, heard + 1);
+}
+static void
+speakers(Fixture *f, gconstpointer data)
+{
+	g_signal_emit_by_name(f->transport, "participant-joined", "sam", "Sam");
+	frame(f, "caller", 1);
+	frame(f, "sam", 1);
+	g_signal_emit_by_name(f->transport, "participant-left", "sam");
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+	g_assert_false(g_hash_table_contains(f->stt->active, "sam"));
+	g_assert_cmpuint(f->stt->cancelled, ==, 1);
+	ai_mock_provider_push_text(f->provider, "Hello.");
+	frame(f, "caller", 2);
+	wait_replies(f, 1);
+	g_signal_emit_by_name(f->transport, "participant-joined", "sam", "Sam");
+	ai_mock_provider_push_text(f->provider, "Welcome.");
+	utterance(f, "sam");
+	wait_replies(f, 2);
+	g_assert_cmpstr(g_ptr_array_index(f->speakers, 0), ==, "Caller");
+	g_assert_cmpstr(g_ptr_array_index(f->speakers, 1), ==, "Sam");
+}
+static void
+timeout_turn(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "turn-deadline-ms", 30, "deadline-message",
+				 "Custom deadline fallback", NULL);
+	ai_mock_provider_set_delay_ms(f->provider, 5000);
+	ai_mock_provider_push_text(f->provider, "Too late.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Custom deadline fallback");
+}
+static void
+settle(Fixture *f);
+/* A tool that runs until its turn is cancelled, as a search of a whole home
+ * directory on a slow disk does. */
+static gchar *
+slow_tool(AiToolUse *use, GCancellable *cancel, GError **error, gpointer data)
+{
+	gint64 limit = g_get_monotonic_time() + 10000000;
+	while (!g_cancellable_is_cancelled(cancel) && g_get_monotonic_time() < limit)
+		g_usleep(1000);
+	if (g_cancellable_set_error_if_cancelled(cancel, error))
+		return NULL;
+	return g_strdup("finished");
+}
+/* The deadline gives up on a turn stuck in a tool, and the caller is heard
+ * again: the next question is answered, not queued behind the stuck one. */
+static void
+deadline_in_tool(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiTool) tool = ai_tool_new("slow_search", "Search everything");
+	ai_tool_executor_register_callback(ai_conversation_get_executor(f->conversation), tool,
+									   slow_tool, NULL, NULL);
+	g_object_set(f->session, "turn-deadline-ms", 200, "tool-progress-message", "", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "slow_search", "{}");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Sorry, that is taking too long. Please try again.");
+	settle(f);
+	ai_mock_provider_push_text(f->provider, "Here I am.");
+	utterance(f, "caller");
+	wait_replies(f, f->tts->texts->len + 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Here I am.");
+}
+static void
+tools(Fixture *f, gconstpointer data)
+{
+	ai_mock_provider_push_tool_use(f->provider, "read",
+								   "{\"path\":\"/definitely-missing-voice-fixture\"}");
+	ai_mock_provider_push_text(f->provider, "The file was unavailable.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_nonnull(strstr(g_ptr_array_index(f->tts->texts, 0), "error"));
+}
+/* A tool error is cut at 512 bytes before it is spoken. Cut through a
+ * two-byte character, the line must still be spoken rather than rejected by
+ * the synthesizer as invalid text, which the session reads as a TTS outage. */
+static void
+tool_error_multibyte(Fixture *f, gconstpointer data)
+{
+	GString *input = g_string_new("{\"path\":\"/missing-voice-fixture-");
+	guint i;
+	if (GPOINTER_TO_UINT(data) != 0)
+		g_string_append_c(input, 'x');
+	for (i = 0; i < 400; i++)
+		g_string_append(input, "\303\251");
+	g_string_append(input, "\"}");
+	ai_mock_provider_push_tool_use(f->provider, "read", input->str);
+	ai_mock_provider_push_text(f->provider, "The file was unavailable.");
+	g_string_free(input, TRUE);
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	for (i = 0; i < f->tts->texts->len; i++) {
+		const gchar *text = g_ptr_array_index(f->tts->texts, i);
+		g_assert_true(g_utf8_validate(text, -1, NULL));
+		g_assert_null(strstr(text, "speech service"));
+	}
+	g_assert_nonnull(strstr(g_ptr_array_index(f->tts->texts, 0), "error"));
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "The file was unavailable.");
+}
+static gboolean
+contains_tool_result(Fixture *f, const gchar *needle)
+{
+	GList *l;
+	for (l = ai_mock_provider_get_last_messages(f->provider); l != NULL; l = l->next) {
+		GList *b;
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+			if (AI_IS_TOOL_RESULT(b->data) &&
+				strstr(ai_tool_result_get_content(b->data), needle) != NULL)
+				return TRUE;
+	}
+	return FALSE;
+}
+static void
+read_fixture(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-read-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "voice fixture content", -1, NULL));
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "voice fixture content");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_true(contains_tool_result(f, "voice fixture content"));
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "voice fixture content");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+/* Every tool the model ran during a call is reported, with what it was
+ * asked and what it answered, whether or not it succeeded. */
+typedef struct {
+	gchar *name, *arguments, *result;
+	gboolean is_error;
+	guint count;
+} ToolSeen;
+static void
+on_tool(AiVoiceSession *s, const gchar *name, const gchar *arguments, const gchar *result,
+		gboolean is_error, gpointer data)
+{
+	ToolSeen *seen = data;
+	seen->count++;
+	g_free(seen->name);
+	g_free(seen->arguments);
+	g_free(seen->result);
+	seen->name = g_strdup(name);
+	seen->arguments = g_strdup(arguments);
+	seen->result = g_strdup(result);
+	seen->is_error = is_error;
+}
+static void
+tool_reported(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-tool-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	ToolSeen seen = {0};
+	g_assert_true(g_file_set_contents(path, "voice fixture content", -1, NULL));
+	g_signal_connect(f->session, "tool", G_CALLBACK(on_tool), &seen);
+	if (data == NULL)
+		ai_mock_provider_push_tool_use(f->provider, "read", input);
+	else
+		ai_mock_provider_push_tool_use(f->provider, "read",
+									   "{\"path\":\"/definitely-missing-voice-fixture\"}");
+	ai_mock_provider_push_text(f->provider, "Done.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_signal_handlers_disconnect_by_data(f->session, &seen);
+	g_assert_cmpuint(seen.count, ==, 1);
+	g_assert_cmpstr(seen.name, ==, "read");
+	g_assert_nonnull(strstr(seen.arguments, "\"path\""));
+	if (data == NULL) {
+		g_assert_false(seen.is_error);
+		g_assert_nonnull(strstr(seen.result, "voice fixture content"));
+	} else {
+		g_assert_true(seen.is_error);
+		g_assert_cmpstr(seen.result, !=, "");
+	}
+	g_free(seen.name);
+	g_free(seen.arguments);
+	g_free(seen.result);
+	g_unlink(path);
+	g_rmdir(directory);
+}
+/* A turn that ends with nothing to say must say so. Silence reads to a
+ * caller as a dropped call, and they cannot see a log. */
+static void
+empty_reply_spoken(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "empty-reply-message", "I came up empty on that one.", NULL);
+	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+						  "Provider turn ended with nothing to say*");
+	ai_mock_provider_push_text(f->provider, "");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_test_assert_expected_messages();
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "I came up empty on that one.");
+}
+/* A reply that is only unpronounceable symbols is also nothing to say. */
+static void
+symbols_only_reply_spoken(Fixture *f, gconstpointer data)
+{
+	gchar *message = NULL;
+	g_object_get(f->session, "empty-reply-message", &message, NULL);
+	g_assert_nonnull(message);
+	g_assert_cmpstr(message, !=, "");
+	ai_mock_provider_push_text(f->provider, "\360\237\230\210");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, message);
+	g_free(message);
+}
+static gchar *
+spoken_all(Fixture *f)
+{
+	GString *all = g_string_new(NULL);
+	guint i;
+	for (i = 0; i < f->tts->texts->len; i++) {
+		g_string_append(all, g_ptr_array_index(f->tts->texts, i));
+		g_string_append_c(all, '\n');
+	}
+	return g_string_free(all, FALSE);
+}
+/* A model that writes the command instead of calling the tool: read aloud, a
+ * shell command is noise. With speak-code off, fenced blocks and multi-word
+ * spans are left out of speech and the prose around them is kept; a one-word
+ * span is a file or a name and is spoken. */
+static void
+code_not_spoken(Fixture *f, gconstpointer data)
+{
+	gboolean skip = GPOINTER_TO_INT(data) == 2;
+	g_autofree gchar *all = NULL;
+	if (skip)
+		g_object_set(f->session, "speak-code", FALSE, NULL);
+	ai_mock_provider_push_text(f->provider,
+							   "Here it is: `ls -la` right now.\n```bash\nssh host "
+							   "'grep -ri garden notes'\n```\nI renamed it to "
+							   "`v81-roadmap.org`. All set.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	all = spoken_all(f);
+	if (skip) {
+		g_assert_null(strstr(all, "ssh"));
+		g_assert_null(strstr(all, "ls -la"));
+		g_assert_null(strstr(all, "bash"));
+		g_assert_nonnull(strstr(all, "Here it is"));
+		g_assert_nonnull(strstr(all, "right now."));
+		/* A one-word span is a name, not a command: say it. */
+		g_assert_nonnull(strstr(all, "I renamed it to v81-roadmap.org."));
+		g_assert_nonnull(strstr(all, "All set."));
+	} else
+		g_assert_nonnull(strstr(all, "ssh host"));
+}
+/* The closing backtick is the last thing streamed: the span still closes, and
+ * the name in it is said. */
+static void
+code_span_ends_reply(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *all = NULL;
+	g_object_set(f->session, "speak-code", FALSE, NULL);
+	ai_mock_provider_push_text(f->provider, "The file is `notes.org`");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	all = spoken_all(f);
+	g_assert_nonnull(strstr(all, "notes.org"));
+}
+/* A reply that loops is stopped, not read out to the end: after repeat-limit
+ * copies of one line, the rest of the reply is dropped and one line says so. */
+static void
+runaway_reply_stopped(Fixture *f, gconstpointer data)
+{
+	gboolean guard = GPOINTER_TO_INT(data) == 2;
+	g_autofree gchar *all = NULL;
+	if (guard)
+		g_object_set(f->session, "repeat-limit", 2u, "repeat-message",
+					 "I'm going in circles, so I'll stop there.", NULL);
+	ai_mock_provider_push_text(f->provider,
+							   "Let me look.\nGrep the notes.\nFind the file.\nGrep the "
+							   "notes.\nGrep the notes.\nGrep the notes.\nMore after.");
+	utterance(f, "caller");
+	wait_replies(f, 3);
+	all = spoken_all(f);
+	if (guard) {
+		g_assert_nonnull(strstr(all, "Let me look."));
+		g_assert_nonnull(strstr(all, "Find the file."));
+		g_assert_nonnull(strstr(all, "I'm going in circles, so I'll stop there."));
+		g_assert_null(strstr(all, "More after."));
+		/* Two copies spoken, the third is where it stopped. */
+		g_assert_nonnull(strstr(all, "Grep the notes.\nFind the file.\nGrep the notes.\nI'm"));
+	} else {
+		g_assert_nonnull(strstr(all, "More after."));
+		g_assert_null(strstr(all, "circles"));
+	}
+}
+static void
+on_command(AiVoiceSession *s, const gchar *name, gpointer data)
+{
+	g_ptr_array_add(data, g_strdup(name));
+}
+static void
+said(Fixture *f, const gchar *text)
+{
+	g_signal_emit_by_name(f->stt, "transcript", "caller", text, TRUE);
+	drain();
+}
+static void
+settle(Fixture *f)
+{
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	do {
+		drain();
+		g_usleep(1000);
+	} while (ai_voice_session_get_state(f->session) != AI_VOICE_LISTENING &&
+			 g_get_monotonic_time() < limit);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+/* Voice commands are off unless enabled: "mute" is just something to answer. */
+static void
+commands_off_by_default(Fixture *f, gconstpointer data)
+{
+	ai_mock_provider_push_text(f->provider, "Muting what?");
+	said(f, "Mute.");
+	settle(f);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Muting what?");
+}
+/* Muted, the caller is not heard: nothing reaches the model, and nothing is
+ * reported as said, until they unmute. A name in front is allowed. */
+static void
+mute_and_unmute(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	gboolean muted = FALSE;
+	g_object_set(f->session, "voice-commands", TRUE, "assistant-names", "Ada, Aida, Ayda",
+				 NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	said(f, "Hey Ayda, stop listening, please.");
+	settle(f);
+	g_object_get(f->session, "muted", &muted, NULL);
+	g_assert_true(muted);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1); /* the acknowledgement */
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	said(f, "So anyway, the private thing is this.");
+	settle(f);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	said(f, "Ada, unmute.");
+	settle(f);
+	g_object_get(f->session, "muted", &muted, NULL);
+	g_assert_false(muted);
+	g_assert_cmpuint(f->tts->texts->len, ==, 2);
+	ai_mock_provider_push_text(f->provider, "Back.");
+	said(f, "Are you there?");
+	settle(f);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 2), ==, "Back.");
+	g_assert_cmpuint(commands->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "mute");
+	g_assert_cmpstr(g_ptr_array_index(commands, 1), ==, "unmute");
+}
+/* "Stop" silences the reply in progress and starts no new one. */
+static void
+stop_command(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	guint before;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	speak_and_hold(f);
+	before = ai_mock_provider_get_call_count(f->provider);
+	said(f, "Stop talking.");
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, before);
+	g_assert_cmpuint(commands->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "stop");
+	g_assert_cmpuint(f->tts->texts->len, ==, 2); /* nothing after the held line */
+}
+/* A command is the whole utterance, never a phrase inside one; hang-up is
+ * reported for the application to act on. */
+static void
+command_needs_whole_utterance(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GPtrArray) commands = g_ptr_array_new_with_free_func(g_free);
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	g_signal_connect(f->session, "command", G_CALLBACK(on_command), commands);
+	ai_mock_provider_push_text(f->provider, "Fair enough.");
+	said(f, "I want to stop listening to that podcast.");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 0);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Fair enough.");
+	said(f, "Hang up.");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(commands, 0), ==, "hangup");
+	/* A polite lead-in is still the command, as a caller said it on a real call. */
+	said(f, "Go ahead and hang up.");
+	settle(f);
+	said(f, "Can you stop talking, please?");
+	settle(f);
+	g_assert_cmpuint(commands->len, ==, 3);
+	g_assert_cmpstr(g_ptr_array_index(commands, 1), ==, "hangup");
+	g_assert_cmpstr(g_ptr_array_index(commands, 2), ==, "stop");
+}
+static void
+background(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiBrigade) brigade = ai_brigade_new();
+	g_autoptr(GObject) worker = g_object_new(test_agent_worker_get_type(), NULL);
+	guint i, notices = 0;
+	ai_brigade_set_worker(brigade, AI_AGENT_WORKER(worker));
+	ai_conversation_set_brigade(f->conversation, brigade);
+	ai_mock_provider_push_tool_use(f->provider, "agent_spawn",
+								   "{\"prompt\":\"read background fixture\"}");
+	ai_mock_provider_push_text(f->provider, "I started it.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	for (i = 0; i < f->tts->texts->len; i++)
+		if (strstr(g_ptr_array_index(f->tts->texts, i),
+				   "Background agent agent-1 finished") != NULL)
+			notices++;
+	g_assert_cmpuint(notices, ==, 1);
+	g_assert_nonnull(ai_brigade_get(brigade, "agent-1"));
+	ai_mock_provider_push_tool_use(f->provider, "agent_result",
+								   "{\"agent_id\":\"agent-1\"}");
+	ai_mock_provider_push_text(f->provider, "The background fixture result");
+	utterance(f, "caller");
+	wait_replies(f, 3);
+	g_assert_true(contains_tool_result(f, "The background fixture result"));
+	g_assert_null(ai_brigade_get(brigade, "agent-1"));
+}
+/* "Stop" during a background agent's notice ends it; it is not replayed the
+ * moment it is cut off, as it would be after an ordinary barge-in. */
+static void
+stop_during_notice(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiBrigade) brigade = ai_brigade_new();
+	g_autoptr(GObject) worker = g_object_new(test_agent_worker_get_type(), NULL);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint i, notices = 0;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	ai_brigade_set_worker(brigade, AI_AGENT_WORKER(worker));
+	ai_conversation_set_brigade(f->conversation, brigade);
+	ai_mock_provider_push_tool_use(f->provider, "agent_spawn",
+								   "{\"prompt\":\"read background fixture\"}");
+	ai_mock_provider_push_text(f->provider, "I started it.");
+	f->tts->hold_after = 2;
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	said(f, "Stop.");
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	settle(f);
+	for (i = 0; i < f->tts->texts->len; i++)
+		if (strstr(g_ptr_array_index(f->tts->texts, i),
+				   "Background agent agent-1 finished") != NULL)
+			notices++;
+	g_assert_cmpuint(notices, ==, 1);
+}
+/* Muted, the caller is not heard -- and so cannot interrupt either, whether
+ * words confirm the barge-in or sound alone would. */
+static void
+muted_speech_does_not_interrupt(Fixture *f, gconstpointer data)
+{
+	guint i, flushes;
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	said(f, "Mute.");
+	settle(f);
+	flushes = f->transport->flushes;
+	f->tts->hold_after = 2;
+	ai_voice_session_say(f->session, "A notice.");
+	g_assert_nonnull(f->tts->held);
+	for (i = 0; i < 25; i++)
+		frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "talking to someone else", TRUE);
+	drain();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, flushes);
+	g_object_set(f->session, "barge-in-confirm", FALSE, NULL);
+	for (i = 0; i < 25; i++)
+		frame(f, "caller", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(f->transport->flushes, ==, flushes);
+}
+/* A word that starts softly -- an "f", an "h" -- is not speech to the
+ * detector until its vowel. The audio just before speech was detected goes to
+ * recognition too, or "Fai" is heard as "-ay" and becomes "say" or "Bay". */
+static void
+marked(Fixture *f, guint8 activity, guint8 marker)
+{
+	guint8 samples[320] = {0};
+	g_autoptr(GBytes) pcm = NULL;
+	samples[0] = activity;
+	samples[1] = marker;
+	pcm = g_bytes_new(samples, sizeof(samples));
+	g_signal_emit_by_name(f->transport, "audio", "caller", pcm);
+}
+static void
+onset_keeps_preroll(Fixture *f, gconstpointer data)
+{
+	guint i;
+	/* 40 frames of quiet: only the last 300 ms, frames 11 to 40, come along. */
+	for (i = 1; i <= 40; i++)
+		marked(f, 0, i);
+	marked(f, 1, 99);
+	marked(f, 2, 100);
+	g_assert_cmpuint(f->stt->audio->len, >=, 32 * 320);
+	g_assert_cmpuint(f->stt->audio->data[1], ==, 11);
+	g_assert_cmpuint(f->stt->audio->data[29 * 320 + 1], ==, 40);
+	g_assert_cmpuint(f->stt->audio->data[30 * 320 + 1], ==, 99);
+}
+static void
+stalled_turn(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GObject) provider = g_object_new(test_stalled_provider_get_type(), NULL);
+	TestStalledProvider *stalled = (TestStalledProvider *)provider;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	ai_voice_session_stop(f->session);
+	g_clear_object(&f->session);
+	g_clear_object(&f->conversation);
+	f->conversation = ai_conversation_new(provider);
+	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
+							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
+							  f->vad, "conversation", f->conversation, NULL);
+	g_object_set(f->session, "barge-in-ms", 10, NULL);
+	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
+	if (data != NULL) {
+		stalled->emit_text = FALSE;
+		g_object_set(f->session, "turn-deadline-ms", 30, NULL);
+		utterance(f, "caller");
+		wait_replies(f, 1);
+		g_assert_nonnull(strstr(g_ptr_array_index(f->tts->texts, 0), "taking too long"));
+	} else {
+		f->tts->hold_after = 1;
+		utterance(f, "caller");
+		while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
+			drain();
+			g_usleep(1000);
+		}
+		g_assert_nonnull(f->tts->held);
+		g_assert_cmpint(g_atomic_int_get(&stalled->cancelled), ==, 0);
+		frame(f, "caller", 1);
+		g_signal_emit_by_name(f->stt, "transcript", "caller", "never mind", FALSE);
+		g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+		g_assert_cmpuint(f->transport->flushes, >=, 1);
+	}
+	g_assert_cmpint(g_atomic_int_get(&stalled->cancelled), ==, 1);
+	/* Nothing was spoken, but the turn's assistant message is still in the
+	 * history the next turn sends. Empty, a provider rejects it -- Claude
+	 * answers every later turn of the call with a 400. */
+	{
+		GList *l;
+		for (l = ai_conversation_get_messages(f->conversation); l != NULL; l = l->next) {
+			g_autofree gchar *text = ai_message_get_text(l->data);
+			if (ai_message_get_role(l->data) == AI_ROLE_ASSISTANT)
+				g_assert_true(text != NULL && *text != '\0');
+		}
+	}
+}
+
+static void
+say_non_silent(Fixture *f, gconstpointer data)
+{
+	guint8 samples[3200];
+	guint i;
+	for (i = 0; i < sizeof(samples); i += 2) {
+		samples[i] = 0x40;
+		samples[i + 1] = 0x1f;
+	}
+	f->tts->pcm = g_bytes_new(samples, sizeof(samples));
+	ai_voice_session_say(f->session, "A generic greeting.");
+	wait_replies(f, 1);
+	g_assert_cmpuint(f->transport->non_silent_samples, ==, 1600);
+}
+static void
+recognition_error_spoken(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GError) error =
+		g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, "Recognition unavailable");
+	g_object_set(f->session, "transcription-error-message", "Please repeat that.", NULL);
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "error", "caller", error);
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Please repeat that.");
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+}
+static void
+silence_final(Fixture *f, gconstpointer data)
+{
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", " \t\r\n", TRUE);
+	drain();
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+static void
+debounce_noise(Fixture *f, gconstpointer data)
+{
+	guint i, debounce;
+	g_object_get(f->session, "barge-in-ms", &debounce, NULL);
+	g_assert_cmpuint(debounce, ==, 250);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+	frame(f, "caller", 0);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	frame(f, "caller", 1);
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+	/* The 25 frames of speech, and the 250 ms that came before them. */
+	g_assert_cmpuint(f->stt->fed, ==, 50);
+}
+static void
+debounce_notice(Fixture *f, gconstpointer data)
+{
+	guint i;
+	f->tts->hold_after = 1;
+	f->tts->delay_audio = TRUE;
+	ai_voice_session_say(f->session, "A notice.");
+	g_assert_nonnull(f->tts->held);
+	for (i = 0; i < 24; i++)
+		frame(f, "caller", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpuint(g_hash_table_size(f->stt->active), ==, 0);
+	g_signal_emit_by_name(f->transport, "participant-joined", "second", "Second");
+	frame(f, "second", 1);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_test_expect_message(
+		"ai-glib", G_LOG_LEVEL_INFO,
+		"possible barge-in by Caller after 250 ms of speech, waiting for words");
+	frame(f, "caller", 1);
+	g_test_assert_expected_messages();
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_test_expect_message("ai-glib", G_LOG_LEVEL_INFO,
+						  "barge-in by Caller confirmed by speech, cancelling speaking");
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "stop", FALSE);
+	g_test_assert_expected_messages();
+	g_assert_true(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_true(g_hash_table_contains(f->stt->active, "caller"));
+	g_assert_cmpuint(f->stt->fed, ==, 25);
+	g_assert_false(g_hash_table_contains(f->stt->active, "second"));
+}
+static void
+media_recovery(Fixture *f, gconstpointer data)
+{
+	guint states;
+	f->tts->hold_after = 1;
+	ai_voice_session_say(f->session, "Continued notice.");
+	g_assert_nonnull(f->tts->held);
+	states = f->states->len;
+	g_signal_emit_by_name(f->transport, "reconnecting");
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->states->len, ==, states);
+	g_assert_cmpuint(f->transport->flushes, ==, 0);
+	ai_voice_session_say(f->session, "Queued during recovery.");
+	drain();
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_signal_emit_by_name(f->transport, "reconnected");
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	f->tts->hold_after = 0;
+	wait_replies(f, 2);
+	ai_mock_provider_push_text(f->provider, "The next turn works.");
+	utterance(f, "caller");
+	wait_replies(f, 3);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 2), ==, "The next turn works.");
+}
+
+static void
+iterate_for(guint milliseconds)
+{
+	gint64 until = g_get_monotonic_time() + (gint64)milliseconds * 1000;
+	while (g_get_monotonic_time() < until) {
+		drain();
+		g_usleep(1000);
+	}
+}
+static void
+completed_provider_playback(Fixture *f, gconstpointer data)
+{
+	gint64 until = g_get_monotonic_time() + 3000000;
+	g_object_set(f->session, "turn-deadline-ms", 100, NULL);
+	f->tts->hold_after = 1;
+	ai_mock_provider_push_text(f->provider, "A complete long reply.");
+	utterance(f, "caller");
+	while (f->tts->held == NULL && g_get_monotonic_time() < until) {
+		drain();
+		g_usleep(1000);
+	}
+	g_assert_nonnull(f->tts->held);
+	iterate_for(250);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	wait_replies(f, 1);
+	{
+		GList *messages = ai_conversation_get_messages(f->conversation);
+		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
+		g_assert_cmpstr(text, ==, "A complete long reply.");
+	}
+}
+/* A TTS model handed nothing it can pronounce does not fail: it invents
+ * several seconds of audio, identical on every call when it is seeded. */
+typedef struct {
+	const gchar *reply;
+	const gchar *spoken[6];
+} SpeakableCase;
+static const SpeakableCase speakable_cases[] = {
+	{"Let's get to work. \360\237\230\210", {"Let's get to work.", NULL}},
+	{"Done! \360\237\230\210\360\237\224\245", {"Done!", NULL}},
+	{"Hmm... okay then.", {"Hmm...", "okay then.", NULL}},
+	{"Version 3.5 is out. Upgrade.", {"Version 3.5 is out.", "Upgrade.", NULL}},
+	{"That is **really** it.\n\n---\n", {"That is really it.", NULL}},
+	{"Shipped \342\234\205 and green.", {"Shipped and green.", NULL}},
+	{"Wait?! Really?", {"Wait?!", "Really?", NULL}},
+	{"He said \"stop.\" Then left.", {"He said \"stop.\"", "Then left.", NULL}},
+	{"Steps:\n1. Pull the branch.\n2. Build it.",
+	 {"Steps:", "1. Pull the branch.", "2. Build it.", NULL}},
+	{"## Summary\n> All green.\n- One fix.\n* Two tests.",
+	 {"Summary", "All green.", "One fix.", "Two tests.", NULL}},
+	{"It is 5 - 3 degrees.", {"It is 5 - 3 degrees.", NULL}},
+};
+static void
+speakable_segments(Fixture *f, gconstpointer data)
+{
+	const SpeakableCase *c = data;
+	guint n = 0, i;
+	while (c->spoken[n] != NULL)
+		n++;
+	ai_mock_provider_push_text(f->provider, c->reply);
+	utterance(f, "caller");
+	wait_replies(f, n);
+	iterate_for(50);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_test_message("tts[%u] = '%s'", i, (gchar *)g_ptr_array_index(f->tts->texts, i));
+	g_assert_cmpuint(f->tts->texts->len, ==, n);
+	for (i = 0; i < n; i++)
+		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, c->spoken[i]);
+}
+/* The same boundaries when the reply arrives a token at a time and the turn
+ * has not finished: nothing is held back waiting for more, except a "3."
+ * that may still become "3.5". */
+static const gchar *const streamed_deltas[] = {
+	"Let's get to work", ".", " ", "\360\237\230\210", " Version 3", ".", "5 is out",
+	".", " Hmm", ".", ".", ".", " okay", ".", NULL};
+static const gchar *const streamed_spoken[] = {
+	"Let's get to work.", "Version 3.5 is out.", "Hmm...", "okay.", NULL};
+/* A delta that ends on a period is not yet a sentence end: the next one
+ * may continue a file name or a domain. Heard live as "garden." / "org)". */
+static const gchar *const file_name_deltas[] = {
+	"One note (garden", ".", "org) lists a plot", ".", " The other is bigger", ".", NULL};
+static const gchar *const file_name_spoken[] = {
+	"One note (garden.org) lists a plot.", "The other is bigger.", NULL};
+static void
+streamed_segments(Fixture *f, gconstpointer data)
+{
+	g_autoptr(GObject) provider = g_object_new(test_stalled_provider_get_type(), NULL);
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint i;
+	const gchar *const *deltas = data != NULL ? file_name_deltas : streamed_deltas;
+	const gchar *const *spoken = data != NULL ? file_name_spoken : streamed_spoken;
+	guint expected = g_strv_length((gchar **)spoken);
+	((TestStalledProvider *)provider)->deltas = deltas;
+	ai_voice_session_stop(f->session);
+	g_clear_object(&f->session);
+	g_clear_object(&f->conversation);
+	f->conversation = ai_conversation_new(provider);
+	f->session = g_object_new(AI_TYPE_VOICE_SESSION, "transport", f->transport,
+							  "recognizer", f->stt, "synthesizer", f->tts, "activity",
+							  f->vad, "conversation", f->conversation, NULL);
+	g_object_set(f->session, "barge-in-ms", 10, NULL);
+	g_signal_emit_by_name(f->transport, "participant-joined", "caller", "Caller");
+	utterance(f, "caller");
+	while (f->tts->texts->len < expected && g_get_monotonic_time() < limit) {
+		drain();
+		g_usleep(1000);
+	}
+	iterate_for(50);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_test_message("tts[%u] = '%s'", i, (gchar *)g_ptr_array_index(f->tts->texts, i));
+	iterate_for(400);
+	g_assert_cmpuint(f->tts->texts->len, ==, expected);
+	for (i = 0; spoken[i] != NULL; i++)
+		g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), ==, spoken[i]);
+}
+/* What the assistant actually said, as the caller heard it: one report per
+ * segment that produced audio, marked complete or cut off. */
+typedef struct {
+	GPtrArray *texts;
+	GArray *complete;
+} Spoken;
+static void
+on_spoken(AiVoiceSession *s, const gchar *text, gboolean complete, gpointer data)
+{
+	Spoken *spoken = data;
+	g_ptr_array_add(spoken->texts, g_strdup(text));
+	g_array_append_val(spoken->complete, complete);
+}
+static Spoken *
+watch_spoken(Fixture *f)
+{
+	Spoken *spoken = g_new0(Spoken, 1);
+	spoken->texts = g_ptr_array_new_with_free_func(g_free);
+	spoken->complete = g_array_new(FALSE, FALSE, sizeof(gboolean));
+	g_signal_connect(f->session, "spoken", G_CALLBACK(on_spoken), spoken);
+	return spoken;
+}
+static void
+spoken_free(Fixture *f, Spoken *spoken)
+{
+	g_signal_handlers_disconnect_by_data(f->session, spoken);
+	g_ptr_array_unref(spoken->texts);
+	g_array_unref(spoken->complete);
+	g_free(spoken);
+}
+static void
+spoken_complete(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	ai_mock_provider_push_text(f->provider, "Hello Caller. Second line.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpuint(spoken->texts->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 0), ==, "Hello Caller.");
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 1), ==, "Second line.");
+	g_assert_true(g_array_index(spoken->complete, gboolean, 0));
+	g_assert_true(g_array_index(spoken->complete, gboolean, 1));
+	spoken_free(f, spoken);
+}
+static void
+spoken_interrupted(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "wait a moment", FALSE);
+	g_task_return_boolean(f->tts->held, TRUE);
+	g_clear_object(&f->tts->held);
+	drain();
+	g_assert_cmpuint(spoken->texts->len, ==, 2);
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 0), ==, "First sentence.");
+	g_assert_true(g_array_index(spoken->complete, gboolean, 0));
+	g_assert_cmpstr(g_ptr_array_index(spoken->texts, 1), ==, "Unspoken ending.");
+	g_assert_false(g_array_index(spoken->complete, gboolean, 1));
+	spoken_free(f, spoken);
+}
+static void
+silent_failure_not_spoken(Fixture *f, gconstpointer data)
+{
+	Spoken *spoken = watch_spoken(f);
+	f->tts->hold_after = 1;
+	f->tts->delay_audio = TRUE;
+	g_object_set(f->session, "synthesis-error-message", "", NULL);
+	ai_voice_session_say(f->session, "Never heard.");
+	g_assert_nonnull(f->tts->held);
+	g_task_return_new_error(f->tts->held, G_IO_ERROR, G_IO_ERROR_FAILED, "TTS down");
+	g_clear_object(&f->tts->held);
+	drain();
+	/* No audio reached the caller, so nothing was said. */
+	g_assert_cmpuint(spoken->texts->len, ==, 0);
+	spoken_free(f, spoken);
+}
+/* While a tool runs and nothing has been said, one short line fills the
+ * silence -- but only once it has gone on long enough to notice, and only
+ * once per turn. It plays while the tool keeps working. */
+static void
+progress_setup(Fixture *f, guint delay_ms, guint provider_delay_ms)
+{
+	g_object_set(f->session, "tool-progress-message", "One moment, let me check.",
+				 "tool-progress-delay-ms", delay_ms, NULL);
+	ai_mock_provider_set_delay_ms(f->provider, provider_delay_ms);
+}
+static void
+tool_progress_slow(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "content", -1, NULL));
+	progress_setup(f, 50, 300);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "Found nothing.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	iterate_for(100);
+	g_unlink(path);
+	g_rmdir(directory);
+	/* Once, however many tools ran, and the answer after it. */
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "One moment, let me check.");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"Found nothing.");
+	{
+		guint i, fillers = 0;
+		for (i = 0; i < f->tts->texts->len; i++)
+			fillers += g_str_equal(g_ptr_array_index(f->tts->texts, i),
+								   "One moment, let me check.");
+		g_assert_cmpuint(fillers, ==, 1);
+	}
+}
+static void
+tool_progress_fast(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "quick", -1, NULL));
+	/* The answer lands long before the delay: nothing to fill. */
+	progress_setup(f, 2000, 0);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "Quick answer.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	iterate_for(100);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Quick answer.");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+static void
+tool_progress_not_an_answer(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-progress-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "fixture.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	g_assert_true(g_file_set_contents(path, "content", -1, NULL));
+	/* The filler is not a reply: a turn that then ends with nothing still
+	 * says so. */
+	progress_setup(f, 50, 300);
+	g_object_set(f->session, "empty-reply-message", "I came up empty.", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "One moment, let me check.");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "I came up empty.");
+	g_unlink(path);
+	g_rmdir(directory);
+}
+static void
+tool_progress_disabled(Fixture *f, gconstpointer data)
+{
+	progress_setup(f, 50, 300);
+	g_object_set(f->session, "tool-progress-message", "", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", "{\"path\":\"/definitely-missing\"}");
+	ai_mock_provider_push_text(f->provider, "Done.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	iterate_for(100);
+	{
+		guint i;
+		for (i = 0; i < f->tts->texts->len; i++)
+			g_assert_cmpstr(g_ptr_array_index(f->tts->texts, i), !=,
+							"One moment, let me check.");
+	}
+}
+/* Recognizers mark non-speech as [throat clearing], (coughs) or *sniff*.
+ * Those are not words: alone they are silence, inside a sentence they are
+ * dropped. */
+static void
+annotations_are_silence(Fixture *f, gconstpointer data)
+{
+	static const gchar *const noises[] = {"[throat clearing]", "(coughs)", "*sniff*",
+										  "[BLANK_AUDIO]", " [Music] (laughs) ", NULL};
+	guint i, heard = f->speakers->len;
+	for (i = 0; noises[i] != NULL; i++) {
+		frame(f, "caller", 1);
+		g_signal_emit_by_name(f->stt, "transcript", "caller", noises[i], TRUE);
+		drain();
+	}
+	g_assert_cmpuint(f->speakers->len, ==, heard);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_LISTENING);
+}
+static void
+annotations_stripped(Fixture *f, gconstpointer data)
+{
+	GList *messages;
+	ai_mock_provider_push_text(f->provider, "Sure.");
+	frame(f, "caller", 1);
+	g_signal_emit_by_name(f->stt, "transcript", "caller",
+						  "[clears throat] Okay, (coughs) do it.", TRUE);
+	wait_replies(f, 1);
+	messages = ai_mock_provider_get_last_messages(f->provider);
+	g_assert_nonnull(messages);
+	{
+		g_autofree gchar *text = ai_message_get_text(g_list_last(messages)->data);
+		g_assert_nonnull(strstr(text, "Okay, do it."));
+		g_assert_null(strstr(text, "clears"));
+		g_assert_null(strstr(text, "coughs"));
+	}
+}
+/* A noise mark must not confirm an interruption either. */
+static void
+annotation_is_not_a_barge_in(Fixture *f, gconstpointer data)
+{
+	speak_and_hold(f);
+	g_signal_emit_by_name(f->stt, "transcript", "caller", "[footsteps]", FALSE);
+	g_assert_false(g_cancellable_is_cancelled(g_task_get_cancellable(f->tts->held)));
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_SPEAKING);
+}
+/* A long call must not resend every tool's full output forever. With
+ * trim-tool-results-after set, output older than that many turns is
+ * replaced by a short note; unset, history is untouched. */
+static const gchar *
+sent_tool_result(Fixture *f, const gchar *tool_use_id)
+{
+	GList *l, *b;
+	for (l = ai_mock_provider_get_last_messages(f->provider); l != NULL; l = l->next)
+		for (b = ai_message_get_content_blocks(l->data); b != NULL; b = b->next)
+			if (AI_IS_TOOL_RESULT(b->data))
+				return ai_tool_result_get_content(b->data);
+	return NULL;
+}
+static void
+turn(Fixture *f, guint expected_replies)
+{
+	utterance(f, "caller");
+	wait_replies(f, expected_replies);
+}
+static void
+tool_results_trimmed(Fixture *f, gconstpointer data)
+{
+	g_autofree gchar *directory = g_dir_make_tmp("ai-voice-trim-XXXXXX", NULL);
+	g_autofree gchar *path = g_build_filename(directory, "big.txt", NULL);
+	g_autofree gchar *input = g_strdup_printf("{\"path\":\"%s\"}", path);
+	GString *big = g_string_new(NULL);
+	const gchar *sent;
+	guint i;
+	for (i = 0; i < 200; i++)
+		g_string_append(big, "a line of notes that goes on for a while\n");
+	g_assert_true(g_file_set_contents(path, big->str, -1, NULL));
+	if (data != NULL)
+		g_object_set(f->session, "trim-tool-results-after", 1u, NULL);
+	ai_mock_provider_push_tool_use(f->provider, "read", input);
+	ai_mock_provider_push_text(f->provider, "One.");
+	turn(f, 1);
+	ai_mock_provider_push_text(f->provider, "Two.");
+	turn(f, 2);
+	ai_mock_provider_push_text(f->provider, "Three.");
+	turn(f, 3);
+	/* The third turn's request is what the model saw. */
+	sent = sent_tool_result(f, NULL);
+	g_assert_nonnull(sent);
+	if (data != NULL) {
+		g_assert_cmpuint(strlen(sent), <, 300);
+		g_assert_nonnull(strstr(sent, "trimmed"));
+	} else
+		g_assert_nonnull(strstr(sent, "a line of notes"));
+	g_string_free(big, TRUE);
+	g_unlink(path);
+	g_rmdir(directory);
+}
+static void
+recovery_pauses_deadline(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "turn-deadline-ms", 200, "deadline-message",
+				 "Provider deadline expired.", NULL);
+	ai_mock_provider_set_delay_ms(f->provider, 5000);
+	ai_mock_provider_push_text(f->provider, "Too late.");
+	utterance(f, "caller");
+	iterate_for(60);
+	g_signal_emit_by_name(f->transport, "reconnecting");
+	iterate_for(300);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpint(ai_voice_session_get_state(f->session), ==, AI_VOICE_THINKING);
+	g_signal_emit_by_name(f->transport, "reconnected");
+	iterate_for(60);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	/* The remaining approximately 140 ms resumes, rather than a new 200 ms. */
+	iterate_for(110);
+	g_assert_cmpuint(f->tts->texts->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==,
+					"Provider deadline expired.");
+	wait_replies(f, 1);
+}
+
+int
+main(int argc, char **argv)
+{
+	g_test_init(&argc, &argv, NULL);
+	{
+		guint i;
+		for (i = 0; i < G_N_ELEMENTS(speakable_cases); i++) {
+			g_autofree gchar *path = g_strdup_printf("/voice/session/speakable/%u", i);
+			g_test_add(path, Fixture, &speakable_cases[i], setup, speakable_segments,
+					   teardown);
+		}
+	}
+	g_test_add("/voice/session/completed-provider-playback", Fixture, NULL, setup,
+			   completed_provider_playback, teardown);
+	g_test_add("/voice/session/recovery-pauses-deadline", Fixture, NULL, setup,
+			   recovery_pauses_deadline, teardown);
+	g_test_add("/voice/session/media-recovery", Fixture, NULL, setup, media_recovery,
+			   teardown);
+	g_test_add("/voice/session/debounce-noise", Fixture, GINT_TO_POINTER(1), setup,
+			   debounce_noise, teardown);
+	g_test_add("/voice/session/debounce-notice", Fixture, GINT_TO_POINTER(1), setup,
+			   debounce_notice, teardown);
+	g_test_add("/voice/session/stt-error-spoken", Fixture, NULL, setup,
+			   recognition_error_spoken, teardown);
+	g_test_add("/voice/session/silence-final", Fixture, NULL, setup, silence_final,
+			   teardown);
+	g_test_add("/voice/session/say-non-silent-pcm", Fixture, NULL, setup, say_non_silent,
+			   teardown);
+	g_test_add("/voice/session/barge-in-pending-provider", Fixture, NULL, setup,
+			   stalled_turn, teardown);
+	g_test_add("/voice/session/never-answering-provider", Fixture, "deadline", setup,
+			   stalled_turn, teardown);
+	g_test_add("/voice/session/streamed-segments", Fixture, NULL, setup,
+			   streamed_segments, teardown);
+	g_test_add("/voice/session/streamed-file-name", Fixture, GINT_TO_POINTER(2), setup,
+			   streamed_segments, teardown);
+	g_test_add("/voice/session/tool-error-multibyte/0", Fixture, GUINT_TO_POINTER(0),
+			   setup, tool_error_multibyte, teardown);
+	g_test_add("/voice/session/tool-error-multibyte/1", Fixture, GUINT_TO_POINTER(2),
+			   setup, tool_error_multibyte, teardown);
+	g_test_add("/voice/session/spoken-complete", Fixture, NULL, setup, spoken_complete,
+			   teardown);
+	g_test_add("/voice/session/spoken-interrupted", Fixture, NULL, setup,
+			   spoken_interrupted, teardown);
+	g_test_add("/voice/session/silent-failure-not-spoken", Fixture, NULL, setup,
+			   silent_failure_not_spoken, teardown);
+	g_test_add("/voice/session/tool-reported", Fixture, NULL, setup, tool_reported,
+			   teardown);
+	g_test_add("/voice/session/tool-error-reported", Fixture, GINT_TO_POINTER(2), setup,
+			   tool_reported, teardown);
+	g_test_add("/voice/session/code-spoken-by-default", Fixture, GINT_TO_POINTER(3), setup,
+			   code_not_spoken, teardown);
+	g_test_add("/voice/session/code-not-spoken", Fixture, GINT_TO_POINTER(2), setup,
+			   code_not_spoken, teardown);
+	g_test_add("/voice/session/code-span-ends-reply", Fixture, NULL, setup,
+			   code_span_ends_reply, teardown);
+	g_test_add("/voice/session/runaway-reply-read-by-default", Fixture, GINT_TO_POINTER(3),
+			   setup, runaway_reply_stopped, teardown);
+	g_test_add("/voice/session/runaway-reply-stopped", Fixture, GINT_TO_POINTER(2), setup,
+			   runaway_reply_stopped, teardown);
+	g_test_add("/voice/session/commands-off-by-default", Fixture, NULL, setup,
+			   commands_off_by_default, teardown);
+	g_test_add("/voice/session/mute-and-unmute", Fixture, NULL, setup, mute_and_unmute,
+			   teardown);
+	g_test_add("/voice/session/stop-command", Fixture, NULL, setup, stop_command, teardown);
+	g_test_add("/voice/session/stop-during-notice", Fixture, NULL, setup,
+			   stop_during_notice, teardown);
+	g_test_add("/voice/session/muted-speech-does-not-interrupt", Fixture, NULL, setup,
+			   muted_speech_does_not_interrupt, teardown);
+	g_test_add("/voice/session/command-needs-whole-utterance", Fixture, NULL, setup,
+			   command_needs_whole_utterance, teardown);
+	g_test_add("/voice/session/empty-reply-spoken", Fixture, NULL, setup,
+			   empty_reply_spoken, teardown);
+	g_test_add("/voice/session/symbols-only-reply-spoken", Fixture, NULL, setup,
+			   symbols_only_reply_spoken, teardown);
+	g_test_add("/voice/session/tool-progress-slow", Fixture, NULL, setup,
+			   tool_progress_slow, teardown);
+	g_test_add("/voice/session/tool-progress-fast", Fixture, NULL, setup,
+			   tool_progress_fast, teardown);
+	g_test_add("/voice/session/tool-progress-not-an-answer", Fixture, NULL, setup,
+			   tool_progress_not_an_answer, teardown);
+	g_test_add("/voice/session/tool-progress-disabled", Fixture, NULL, setup,
+			   tool_progress_disabled, teardown);
+	g_test_add("/voice/session/annotations-are-silence", Fixture, NULL, setup,
+			   annotations_are_silence, teardown);
+	g_test_add("/voice/session/annotations-stripped", Fixture, NULL, setup,
+			   annotations_stripped, teardown);
+	g_test_add("/voice/session/annotation-is-not-a-barge-in", Fixture, NULL, setup,
+			   annotation_is_not_a_barge_in, teardown);
+	g_test_add("/voice/session/tool-results-trimmed", Fixture, GINT_TO_POINTER(2), setup,
+			   tool_results_trimmed, teardown);
+	g_test_add("/voice/session/tool-results-kept-by-default", Fixture, NULL, setup,
+			   tool_results_trimmed, teardown);
+	g_test_add("/voice/session/full-turn", Fixture, NULL, setup, full_turn, teardown);
+	g_test_add("/voice/session/barge-in", Fixture, NULL, setup, barge_in, teardown);
+	g_test_add("/voice/session/barge-in-vad-only", Fixture, GINT_TO_POINTER(2), setup,
+			   barge_in, teardown);
+	g_test_add("/voice/session/echo-is-not-a-turn", Fixture, NULL, setup,
+			   echo_is_not_a_turn, teardown);
+	g_test_add("/voice/session/noise-is-not-a-turn", Fixture, NULL, setup,
+			   noise_is_not_a_turn, teardown);
+	g_test_add("/voice/session/final-words-interrupt", Fixture, NULL, setup,
+			   final_words_interrupt, teardown);
+	g_test_add("/voice/session/speakers", Fixture, NULL, setup, speakers, teardown);
+	g_test_add("/voice/session/deadline", Fixture, NULL, setup, timeout_turn, teardown);
+	g_test_add("/voice/session/onset-keeps-preroll", Fixture, NULL, setup,
+			   onset_keeps_preroll, teardown);
+	g_test_add("/voice/session/deadline-in-tool", Fixture, NULL, setup, deadline_in_tool,
+			   teardown);
+	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);
+	g_test_add("/voice/session/read-fixture", Fixture, NULL, setup, read_fixture,
+			   teardown);
+	g_test_add("/voice/session/background-agent", Fixture, NULL, setup, background,
+			   teardown);
+	return g_test_run();
+}

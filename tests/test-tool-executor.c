@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <string.h>
+#include <unistd.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -284,6 +286,74 @@ test_executor_glob (void)
     g_unlink (tmp_path);
 }
 
+/* A search over a large tree has to stop when its turn is cancelled. A voice
+ * call's deadline cancels the turn and waits for it to end; a walk of a whole
+ * home directory on a slow disk that ignored the cancel kept the call deaf
+ * until it finished. */
+static void
+test_executor_search_cancelled (gconstpointer data)
+{
+    const gchar              *tool = data;
+    g_autoptr(AiToolExecutor) exec   = ai_tool_executor_new ();
+    g_autoptr(GCancellable)   cancel = g_cancellable_new ();
+    g_autofree gchar         *dir    = g_dir_make_tmp ("ai-glib-search-XXXXXX", NULL);
+    g_autofree gchar         *sub    = g_build_filename (dir, "sub", NULL);
+    g_autofree gchar         *file   = g_build_filename (sub, "match.txt", NULL);
+    g_autofree gchar         *json   = NULL;
+    g_autoptr(AiToolUse)      use    = NULL;
+    g_autofree gchar         *result = NULL;
+    g_autoptr(GError)         err    = NULL;
+
+    g_assert_cmpint (g_mkdir (sub, 0700), ==, 0);
+    g_assert_true (g_file_set_contents (file, "needle\n", -1, NULL));
+    json = g_strdup_printf ("{\"pattern\": \"%s\", \"path\": \"%s\"}",
+                            g_str_equal (tool, "glob") ? "*.txt" : "needle", dir);
+    use = make_tool_use (tool, json);
+    g_cancellable_cancel (cancel);
+    result = ai_tool_executor_execute (exec, use, cancel, &err);
+
+    g_assert_error (err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    g_assert_null (result);
+    g_unlink (file);
+    g_rmdir (sub);
+    g_rmdir (dir);
+}
+
+/* grep reads only regular files. A FIFO, a device or /proc/kmsg met on a
+ * walk blocks the read itself, where no cancel can reach it: a search of "/"
+ * then never ends, and a voice call waiting on the turn stays deaf. */
+static void
+test_executor_grep_skips_special_files (void)
+{
+    g_autoptr(AiToolExecutor) exec   = ai_tool_executor_new ();
+    g_autofree gchar         *dir    = g_dir_make_tmp ("ai-glib-grep-fifo-XXXXXX", NULL);
+    g_autofree gchar         *fifo   = g_build_filename (dir, "pipe", NULL);
+    g_autofree gchar         *link   = g_build_filename (dir, "pipe-link", NULL);
+    g_autofree gchar         *alias  = g_build_filename (dir, "alias.txt", NULL);
+    g_autofree gchar         *file   = g_build_filename (dir, "note.txt", NULL);
+    g_autofree gchar         *json   = NULL;
+    g_autoptr(AiToolUse)      use    = NULL;
+    g_autofree gchar         *result = NULL;
+    g_autoptr(GError)         err    = NULL;
+
+    g_assert_cmpint (mkfifo (fifo, 0600), ==, 0);
+    g_assert_cmpint (symlink (fifo, link), ==, 0);
+    g_assert_true (g_file_set_contents (file, "needle\n", -1, NULL));
+    g_assert_cmpint (symlink ("note.txt", alias), ==, 0);
+    json = g_strdup_printf ("{\"pattern\": \"needle\", \"path\": \"%s\"}", dir);
+    use = make_tool_use ("grep", json);
+    result = ai_tool_executor_execute (exec, use, NULL, &err);
+
+    g_assert_no_error (err);
+    g_assert_nonnull (strstr (result, "note.txt:1: needle"));
+    g_assert_nonnull (strstr (result, "alias.txt:1: needle"));
+    g_unlink (link);
+    g_unlink (alias);
+    g_unlink (fifo);
+    g_unlink (file);
+    g_rmdir (dir);
+}
+
 /* ================================================================
  * grep
  * ================================================================ */
@@ -546,6 +616,86 @@ test_executor_run_full_includes_tool_results (void)
     /* assistant(tool_use) + tool_result + assistant(text) */
     g_assert_cmpuint (g_list_length (produced), >=, 3);
 
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
+/* A command that prints megabytes must not put megabytes into the
+ * conversation: every later turn resends it. A voice call that grepped a
+ * notes tree, .git included, grew to 2.7 million tokens and every turn after
+ * failed. The start and the end are kept, with a note of what was cut. */
+static const gchar *
+tool_result_text (GList *messages)
+{
+    GList *l, *b;
+
+    for (l = messages; l != NULL; l = l->next)
+        for (b = ai_message_get_content_blocks (l->data); b != NULL; b = b->next)
+            if (AI_IS_TOOL_RESULT (b->data))
+                return ai_tool_result_get_content (b->data);
+    return NULL;
+}
+
+static void
+test_executor_caps_tool_output (gconstpointer data)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("search everything");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+    const gchar *text;
+    guint cap = GPOINTER_TO_UINT (data);
+
+    if (cap != G_MAXUINT)
+        g_object_set (exec, "max-tool-result-bytes", cap, NULL);
+    else
+        g_object_get (exec, "max-tool-result-bytes", &cap, NULL);
+    g_assert_cmpuint (cap, >, 0);
+    /* 400 KB: "START", 400 000 x's, "END". */
+    ai_mock_provider_push_tool_use (mock, "bash",
+        "{\"command\": \"printf START; head -c 400000 /dev/zero | tr '\\\\\\\\0' x; printf END\"}");
+    ai_mock_provider_push_text (mock, "done");
+    messages = g_list_append (NULL, user);
+
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+
+    g_assert_no_error (error);
+    text = tool_result_text (produced);
+    g_assert_nonnull (text);
+    g_assert_cmpuint (strlen (text), <=, cap + 256);
+    g_assert_true (g_str_has_prefix (text, "START"));
+    g_assert_true (g_str_has_suffix (text, "END"));
+    g_assert_nonnull (strstr (text, "bytes of output omitted"));
+    g_assert_true (g_utf8_validate (text, -1, NULL));
+
+    g_list_free_full (produced, g_object_unref);
+    g_list_free (messages);
+}
+
+/* Output under the cap is untouched, byte for byte. */
+static void
+test_executor_small_output_untouched (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("run something");
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *reply = NULL;
+    GList *messages = NULL;
+    GList *produced = NULL;
+
+    ai_mock_provider_push_tool_use (mock, "bash",
+                                    "{\"command\": \"printf 'caf\\\\303\\\\251 ok'\"}");
+    ai_mock_provider_push_text (mock, "done");
+    messages = g_list_append (NULL, user);
+    reply = ai_tool_executor_run_full (exec, AI_PROVIDER (mock), messages,
+                                       NULL, 0, NULL, &produced, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (tool_result_text (produced), ==, "caf\303\251 ok");
     g_list_free_full (produced, g_object_unref);
     g_list_free (messages);
 }
@@ -966,6 +1116,12 @@ main (
                      test_executor_edit);
     g_test_add_func ("/ai-glib/tool-executor/glob",
                      test_executor_glob);
+    g_test_add_func ("/ai-glib/tool-executor/grep-skips-special-files",
+                     test_executor_grep_skips_special_files);
+    g_test_add_data_func ("/ai-glib/tool-executor/glob-cancelled", "glob",
+                          test_executor_search_cancelled);
+    g_test_add_data_func ("/ai-glib/tool-executor/grep-cancelled", "grep",
+                          test_executor_search_cancelled);
     g_test_add_func ("/ai-glib/tool-executor/grep",
                      test_executor_grep);
     g_test_add_func ("/ai-glib/tool-executor/ls",
@@ -990,6 +1146,12 @@ main (
                      test_a_plain_executor_gains_nothing);
     g_test_add_func ("/ai-glib/tool-executor/run-full/new-messages",
                      test_executor_run_full_returns_new_messages);
+    g_test_add_data_func ("/ai-glib/tool-executor/run-full/caps-tool-output-default",
+                          GUINT_TO_POINTER (G_MAXUINT), test_executor_caps_tool_output);
+    g_test_add_data_func ("/ai-glib/tool-executor/run-full/caps-tool-output-4k",
+                          GUINT_TO_POINTER (4096), test_executor_caps_tool_output);
+    g_test_add_func ("/ai-glib/tool-executor/run-full/small-output-untouched",
+                     test_executor_small_output_untouched);
     g_test_add_func ("/ai-glib/tool-executor/run-full/tool-results",
                      test_executor_run_full_includes_tool_results);
     g_test_add_func ("/ai-glib/tool-executor/run-full/null-out",

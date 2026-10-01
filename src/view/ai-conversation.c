@@ -127,7 +127,8 @@ struct _AiConversation
     gulong          agent_finished_id;
 };
 
-G_DEFINE_TYPE(AiConversation, ai_conversation, G_TYPE_OBJECT)
+G_DEFINE_TYPE_WITH_CODE(AiConversation, ai_conversation, G_TYPE_OBJECT,
+    G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
 
 enum
 {
@@ -158,6 +159,7 @@ enum
 {
     SIGNAL_APPROVAL_REQUESTED,
     SIGNAL_AGENT_FINISHED,
+    SIGNAL_PREPARE_MESSAGES,
     N_SIGNALS
 };
 
@@ -501,6 +503,8 @@ fold_event(
     AiConversation *self,
     AiEvent        *event
 ){
+    ai_event_source_emit(AI_EVENT_SOURCE(self), event);
+
     switch (ai_event_get_kind(event))
     {
         case AI_EVENT_TEXT_DELTA:
@@ -732,6 +736,23 @@ conversation_finish_turn(
     g_object_unref(task);
 }
 
+/* An opt-in presentation filter; ordinary conversations keep their messages. */
+static void
+commit_messages(AiConversation *self, GList *messages)
+{
+    g_autoptr(GPtrArray) batch = g_ptr_array_new_with_free_func(g_object_unref);
+    GList *iter;
+    guint i;
+
+    for (iter = messages; iter != NULL; iter = iter->next)
+        g_ptr_array_add(batch, iter->data);
+    g_list_free(messages);
+    g_signal_emit(self, signals[SIGNAL_PREPARE_MESSAGES], 0, batch);
+    for (i = 0; i < batch->len; i++)
+        self->messages = g_list_append(self->messages,
+                                      g_object_ref(g_ptr_array_index(batch, i)));
+}
+
 static void
 on_executor_done(
     GObject      *source,
@@ -755,6 +776,7 @@ on_executor_done(
         self->open_tools = NULL;
         ai_transcript_append(self->transcript, block);
 
+        commit_messages(self, NULL);
         conversation_finish_turn(self, g_steal_pointer(&error));
         return;
     }
@@ -771,7 +793,7 @@ on_executor_done(
         ai_view_text_block_append(AI_VIEW_TEXT_BLOCK(block), answer);
     }
 
-    self->messages = g_list_concat(self->messages, new_messages);
+    commit_messages(self, new_messages);
 
     conversation_finish_turn(self, NULL);
 }
@@ -806,6 +828,7 @@ on_provider_done(
         self->open_tools = NULL;
         ai_transcript_append(self->transcript, block);
 
+        commit_messages(self, NULL);
         conversation_finish_turn(self,
             error != NULL
                 ? g_steal_pointer(&error)
@@ -826,9 +849,8 @@ on_provider_done(
 
     if (ai_response_get_content_blocks(response) != NULL)
     {
-        self->messages = g_list_append(
-            self->messages,
-            ai_message_new_from_response(response));
+        commit_messages(self, g_list_append(NULL,
+            ai_message_new_from_response(response)));
     }
 
     conversation_finish_turn(self, NULL);
@@ -1940,6 +1962,20 @@ ai_conversation_class_init(AiConversationClass *klass)
                      NULL,
                      G_TYPE_INT, 1,
                      AI_TYPE_TOOL_USE);
+
+    /**
+     * AiConversation::prepare-messages:
+     * @self: the conversation
+     * @messages: (element-type AiMessage): mutable batch about to enter history
+     *
+     * An opt-in history projection for presentations such as speech. Handlers
+     * may replace entries; the array owns its message references. An empty
+     * batch is emitted on failure so an interrupted spoken prefix can survive.
+     * With no handler, history is unchanged.
+     */
+    signals[SIGNAL_PREPARE_MESSAGES] = g_signal_new("prepare-messages",
+        G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+        G_TYPE_NONE, 1, G_TYPE_PTR_ARRAY);
 
     /**
      * AiConversation::agent-finished:

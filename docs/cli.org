@@ -632,3 +632,76 @@ HTTP video generation submits once, then polls to completion with retry handling
 ** Typed decisions
 See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
 including question syntax, request files, cancellation and server configuration.
+
+* ai-call
+
+=ai-call= is the MatrixRTC voice frontend. It embeds =AiVoiceSession= with
+LiveKit transport, WebRTC VAD, streaming STT/TTS and an =AiConversation= with
+local tools and background agents. Built by =make= and installed by
+=make install=.
+
+#+begin_example
+ai-call --config /path/to/config.yaml --identity /path/to/identity.md
+ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
+ai-call --config /path/to/config.yaml --local
+#+end_example
+
+| Option | Purpose |
+|--------+---------|
+| =--config PATH= | Load an additional ai-glib YAML configuration |
+| =--identity PATH= | Read the identity/system prompt from a file |
+| =--call-set PROPERTY=VALUE= | Override a validated call property (repeatable) |
+| =--list-call-settings= | List call property names, types and defaults |
+| =--credentials PATH= | Matrix JSON containing =userId=, =accessToken=, =homeserver= |
+| =--local= | One session on this machine's microphone and speaker; no Matrix, no credentials |
+| =-p=, =--provider NAME= | Existing provider factory selection |
+| =-m=, =--model NAME= | Provider model |
+| =--version=, =--license= | Version or license information |
+
+The =apps.ai-call= provider/model scope and =voice= settings are documented
+in [[file:voice.org][Live voice sessions]]. Matrix deployment variables retain
+the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
+=AI_CALL_JWT_URL=, =AI_CALL_FOCUS_URL=, =AI_CALL_OUTBOUND_PATH=, =AI_CALL_GREETING=,
+=AI_CALL_OUTBOUND_GREETING=, =AI_CALL_TRANSCRIPT_DIR=, =AI_CALL_TRANSCRIPT_HOOK=,
+=AI_CALL_LIVE_TEXT= and =AI_CALL_STATE_FILE=; =--local= uses
+=AI_CALL_LOCAL_INPUT=, =AI_CALL_LOCAL_OUTPUT=, =AI_CALL_LOCAL_ECHO_CANCEL= and
+=AI_CALL_LOCAL_SPEAKER_NAME=. Speech/media endpoints use =AI_VOICE_STT_URL=,
+=AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
+
+=SIGUSR1= toggles mute on every live session, as the spoken commands do; a
+second =SIGINT= or =SIGTERM= exits without waiting for Matrix cleanup.
+
+=ai_call.barge-in-ms= (default 250), =AI_VOICE_BARGE_IN_MS=, or
+=--call-set barge-in-ms=250= configures consecutive speech required before
+STT and barge-in, including greetings and notices.
+
+Every answered call is written as JSON Lines to =ai_call.transcript-dir=
+(default =$XDG_STATE_HOME/ai-glib/calls=, empty to disable). The file is
+appended as the call goes, and its header is completed at hangup.
+=ai_call.transcript-hook= runs a command with the file's path as its last
+argument once the call ends. See [[file:voice.org::*Call transcripts][Call transcripts]].
+
+SIGINT/SIGTERM cancels the current turn, attempts =ai_call.goodbye-message=
+(default =Goodbye.=) for at most two seconds, then leaves media and removes
+the configured identity's Matrix membership before exit;
+failed removals are retried. Startup sweeps stale memberships for that identity. Run only
+one answerer for a Matrix identity/device. The outbound drop file format is
+={"room_id":"!room:server","message":"Opening line","target":"@caller:server"}=.
+
+Media recovery is configured with =ai_call.media-reconnect-attempts= (default 3)
+and =ai_call.media-reconnect-delay-ms= (default 500); zero attempts disables
+recovery. =ai_call.opus-bitrate= defaults to 64000 bits/s, with a minimum of
+48000. The corresponding environment overrides are =AI_VOICE_RECONNECT_ATTEMPTS=,
+=AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Media errors log the
+GStreamer element and debug detail, and successful recovery resumes the voice
+session without discarding its conversation.
+Retry delays double up to ten seconds. Pending speech resumes after media
+returns, with a short replay window that may repeat audio near the failure.
+
+=ai_call.tts-timeout-ms= (default 10000; =AI_VOICE_TTS_TIMEOUT_MS=) bounds
+synthesis inactivity. The binary prewarms =ai_call.synthesis-error-message=
+in memory for speech-service failures. A failed request plays that cache once;
+if startup prewarming also failed, spoken fallback cannot be guaranteed.
+=AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and =AI_CALL_GOODBYE_MESSAGE= override the
+corresponding text. Call summaries report duration, transcripts, errors,
+reconnects and dropped/late buffers at INFO.

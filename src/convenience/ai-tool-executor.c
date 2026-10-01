@@ -9,10 +9,13 @@
 
 #include "ai-glib.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
 #include <libxml/HTMLparser.h>
@@ -20,6 +23,7 @@
 #include <libxml/uri.h>
 
 #include "convenience/ai-tool-executor.h"
+#include <glib/gstdio.h>
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-streamable.h"
@@ -118,6 +122,7 @@ struct _AiToolExecutor
 
     /* Which optional tool groups this executor is willing to offer. */
     AiToolFeatures    features;
+    guint             max_tool_result_bytes;
 };
 
 static void
@@ -142,10 +147,13 @@ enum
     PROP_RESOURCE_REGISTRY,
     PROP_BRIGADE,
     PROP_FEATURES,
+    PROP_MAX_TOOL_RESULT_BYTES,
     N_PROPS
 };
 
 static GParamSpec *properties[N_PROPS];
+
+static gchar *cap_tool_result (gchar *text, guint max);
 
 enum
 {
@@ -600,6 +608,9 @@ on_run_response_common (
                 }
             }
 
+            tool_result = cap_tool_result (tool_result,
+                                           ctx->executor->max_tool_result_bytes);
+
             {
                 g_autoptr(AiToolResult) result_block =
                     ai_tool_result_new_with_name (tool_id, tool_name,
@@ -797,6 +808,34 @@ executor_resolve_path (
         return g_strdup (path);
 
     return g_build_filename (self->working_directory, path, NULL);
+}
+
+/*
+ * Keep the start and the end of an oversized tool result, cut on character
+ * boundaries: the start is usually the most relevant match and the end is
+ * where errors and summaries land. Takes ownership of TEXT.
+ */
+static gchar *
+cap_tool_result (gchar *text, guint max)
+{
+    gsize len, head, tail;
+    gchar *capped;
+
+    if (text == NULL || max == 0 || (len = strlen (text)) <= max)
+        return text;
+
+    head = max * 3 / 4;
+    while (head > 0 && (((guchar) text[head]) & 0xC0) == 0x80)
+        head--;
+    tail = len - (max - max * 3 / 4);
+    while (tail < len && (((guchar) text[tail]) & 0xC0) == 0x80)
+        tail++;
+
+    capped = g_strdup_printf ("%.*s\n\n[... %" G_GSIZE_FORMAT " bytes of output omitted. "
+                              "Narrow the command, or read a smaller range ...]\n\n%s",
+                              (int) head, text, tail - head, text + tail);
+    g_free (text);
+    return capped;
 }
 
 static gchar *
@@ -1029,11 +1068,18 @@ tool_edit (
 
 /* ---- glob helpers ---- */
 
+/*
+ * The walks below check the turn's cancellable at every entry. They can cover
+ * a whole home directory, and on a slow disk that takes minutes; a caller that
+ * cancels -- a voice call's turn deadline, a user pressing stop -- waits for
+ * the turn to end, and would otherwise wait for the whole walk.
+ */
 static void
 glob_collect (
     const gchar  *base_dir,
     GPatternSpec *pattern,
-    GString      *output
+    GString      *output,
+    GCancellable *cancellable
 ){
     g_autoptr(GError) dir_err = NULL;
     GDir        *dir;
@@ -1043,7 +1089,8 @@ glob_collect (
     if (dir == NULL)
         return;
 
-    while ((name = g_dir_read_name (dir)) != NULL)
+    while (!g_cancellable_is_cancelled (cancellable)
+           && (name = g_dir_read_name (dir)) != NULL)
     {
         g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
 
@@ -1052,7 +1099,7 @@ glob_collect (
             /* Follow an explicitly requested root, but not directory links
              * encountered during traversal: they can lead back to an ancestor. */
             if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                glob_collect (full, pattern, output);
+                glob_collect (full, pattern, output, cancellable);
         }
         else if (g_pattern_spec_match_string (pattern, name))
         {
@@ -1077,9 +1124,6 @@ tool_glob (
     GString              *output;
     g_autofree gchar *resolved = NULL;
 
-    (void)cancellable;
-    (void)error;
-
     pattern_str = ai_tool_use_get_input_string (tool_use, "pattern");
     if (pattern_str == NULL)
     {
@@ -1095,12 +1139,20 @@ tool_glob (
     pattern = g_pattern_spec_new (pattern_str);
     output  = g_string_new (NULL);
 
-    glob_collect (path, pattern, output);
+    glob_collect (path, pattern, output, cancellable);
 
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+        g_string_free (output, TRUE);
+        return NULL;
+    }
     return g_string_free (output, FALSE);
 }
 
 /* ---- grep helpers ---- */
+
+/* Largest file grep reads; past this it is data, not text to search. */
+#define GREP_MAX_FILE_BYTES (16 * 1024 * 1024)
 
 static void
 grep_one_file (
@@ -1110,12 +1162,57 @@ grep_one_file (
 ){
     g_autofree gchar  *contents = NULL;
     gsize              length;
+    gsize              got;
     gchar            **lines;
     gint               i;
     gint               line_num;
+    gint               fd;
+    gint               flags;
+    struct stat        st;
 
-    if (!g_file_get_contents (filepath, &contents, &length, NULL))
+    /*
+     * Open first, then decide from that fd. A stat of the path and a later
+     * read of the path are two looks: a FIFO swapped in between blocks
+     * inside the read, where the turn's cancellable cannot reach. A grep
+     * of "/" met one and never returned, and a voice call waiting on the
+     * turn heard nothing more until it hung up. O_NONBLOCK makes the open
+     * of a FIFO return; a regular file is unaffected. The size and type
+     * are the inode that was opened, and the bytes come from that fd.
+     */
+    fd = open (filepath, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
         return;
+    if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) ||
+        st.st_size < 0 || (guint64) st.st_size > GREP_MAX_FILE_BYTES)
+    {
+        close (fd);
+        return;
+    }
+    flags = fcntl (fd, F_GETFL);
+    if (flags >= 0)
+        fcntl (fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    length = (gsize) st.st_size;
+    contents = g_malloc (length + 1);
+    got = 0;
+    while (got < length)
+    {
+        ssize_t n = read (fd, contents + got, length - got);
+
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            close (fd);
+            return;
+        }
+        if (n == 0)
+            break;
+        got += (gsize) n;
+    }
+    close (fd);
+    contents[got] = '\0';
+    length = got;
 
     lines = g_strsplit (contents, "\n", -1);
 
@@ -1136,7 +1233,8 @@ grep_dir_recurse (
     const gchar  *base_dir,
     GPatternSpec *file_pattern, /* nullable — match all files */
     GRegex       *regex,
-    GString      *output
+    GString      *output,
+    GCancellable *cancellable
 ){
     g_autoptr(GError) dir_err = NULL;
     GDir        *dir;
@@ -1146,14 +1244,15 @@ grep_dir_recurse (
     if (dir == NULL)
         return;
 
-    while ((name = g_dir_read_name (dir)) != NULL)
+    while (!g_cancellable_is_cancelled (cancellable)
+           && (name = g_dir_read_name (dir)) != NULL)
     {
         g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
 
         if (g_file_test (full, G_FILE_TEST_IS_DIR))
         {
             if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                grep_dir_recurse (full, file_pattern, regex, output);
+                grep_dir_recurse (full, file_pattern, regex, output, cancellable);
         }
         else if (file_pattern == NULL
                  || g_pattern_spec_match_string (file_pattern, name))
@@ -1180,8 +1279,6 @@ tool_grep (
     GString               *output;
     g_autofree gchar *resolved = NULL;
 
-    (void)cancellable;
-
     pattern_str = ai_tool_use_get_input_string (tool_use, "pattern");
     if (pattern_str == NULL)
     {
@@ -1206,10 +1303,15 @@ tool_grep (
     output = g_string_new (NULL);
 
     if (g_file_test (path, G_FILE_TEST_IS_DIR))
-        grep_dir_recurse (path, file_pattern, regex, output);
-    else
+        grep_dir_recurse (path, file_pattern, regex, output, cancellable);
+    else if (!g_cancellable_is_cancelled (cancellable))
         grep_one_file (path, regex, output);
 
+    if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    {
+        g_string_free (output, TRUE);
+        return NULL;
+    }
     return g_string_free (output, FALSE);
 }
 
@@ -3721,6 +3823,22 @@ ai_tool_executor_class_init (AiToolExecutorClass *klass)
                            AI_TOOL_FEATURE_ALL,
                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiToolExecutor:max-tool-result-bytes:
+     *
+     * The most of any one tool result that goes back to the model. Longer
+     * output keeps its start and its end with a note of how much was cut.
+     * Every later turn resends every earlier result, so one command that
+     * prints megabytes makes every turn after it fail for context length.
+     * 0 means no limit.
+     */
+    properties[PROP_MAX_TOOL_RESULT_BYTES] =
+        g_param_spec_uint ("max-tool-result-bytes",
+                           "Max tool result bytes",
+                           "Largest tool result passed back to the model; 0 for no limit",
+                           0, G_MAXUINT, 64 * 1024,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties (object_class, N_PROPS, properties);
 
     /**
@@ -3804,6 +3922,9 @@ ai_tool_executor_get_property (
         case PROP_FEATURES:
             g_value_set_uint (value, (guint) self->features);
             break;
+        case PROP_MAX_TOOL_RESULT_BYTES:
+            g_value_set_uint (value, self->max_tool_result_bytes);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
             break;
@@ -3841,6 +3962,9 @@ ai_tool_executor_set_property (
         case PROP_FEATURES:
             ai_tool_executor_set_features (
                 self, (AiToolFeatures) g_value_get_uint (value));
+            break;
+        case PROP_MAX_TOOL_RESULT_BYTES:
+            self->max_tool_result_bytes = g_value_get_uint (value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -3933,6 +4057,7 @@ ai_tool_executor_init (AiToolExecutor *self)
     self->registry        = NULL;
     self->brigade         = NULL;
     self->features        = AI_TOOL_FEATURE_ALL;
+    self->max_tool_result_bytes = 64 * 1024;
     self->task_depth      = 0;
     self->todos           = g_ptr_array_new_with_free_func (
                                 (GDestroyNotify)ai_todo_free);

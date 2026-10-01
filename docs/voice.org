@@ -1,0 +1,836 @@
+#+title: Live voice sessions
+#+description: Audio transports, streaming speech, conversations and Matrix calls
+
+* Composition
+
+=AiVoiceSession= connects four replaceable audio interfaces to an existing
+=AiConversation=. The conversation remains responsible for provider selection,
+tools, tool history and background agents. The library has no Matrix dependency.
+
+| Interface | Contract | Shipped implementation |
+|-----------+----------+------------------------|
+| =AiAudioTransport= | Async join/leave; participant identity and audio; cancellable local playout | =AiLivekitTransport=, GStreamer LiveKit source/sink |
+| =AiSpeechRecognizer= | Independent streaming utterances keyed by participant | =AiWebsocketRecognizer= |
+| =AiSpeechSynthesizer= | Text request, streamed PCM, cancellable completion | =AiHttpSynthesizer= |
+| =AiVoiceActivity= | Per-participant speech and utterance-end decisions | =AiWebrtcVoiceActivity=, vendored WebRTC VAD through libfvad |
+
+All PCM is signed 16-bit *little-endian*, mono. Transport input, VAD and STT
+use 16 kHz. Synthesizer output retains its native sample rate: the =audio=
+signal carries =(pcm, sample_rate)=. The session forwards both through
+=ai_audio_transport_write_pcm_async()=. The legacy =write_async()= accepts
+16 kHz output. Backends without native-rate support reject other rates.
+
+LiveKit appsrc caps follow each queued buffer's rate. GStreamer's
+=audioresample quality=10= converts to a fixed 48 kHz encoder input, preserving
+high-frequency speech content without the former hand-written interpolator.
+Sample counts and media timestamps use integers, including rate changes.
+No audio is written to disk. The VAD accepts 10, 20 or 30 ms frames; the
+session splits incoming transport buffers into 10 ms frames.
+
+The VAD's =trailing-silence-ms= property defaults to 600. Its =mode= property is
+WebRTC's aggressiveness, from 0 to 3, default 2. State is independent for each
+participant, and leaving resets only that participant's VAD and STT connection.
+
+* Session lifecycle
+
+#+begin_example
+listening -> transcribing -> thinking -> speaking -> listening
+                      ^                     |
+                      +------ barge-in -----+
+#+end_example
+
+A session begins listening. Confirmed VAD speech opens that participant's STT stream;
+trailing silence sends EOS. A final transcript becomes =[Display name]: text=
+in the conversation. Final utterances from multiple participants are queued.
+Leaving a participant cancels only that participant's recognition.
+
+Streaming provider text is split at sentence-ending punctuation/newlines and
+submitted incrementally to TTS. Non-streaming providers submit their final
+reply.
+
+A terminator ends a sentence only when whitespace or the end of the text
+follows it. A run such as =?!= or =...= and any closing quote stay with their
+sentence. =3.5= is not split, and a streamed =3.= waits for the next delta.
+The number opening a list item (=1. Pull the branch.=) stays with its item,
+and leading markdown block markers (=##=, =>=, =-=, =+=) are dropped.
+Before a segment is sent, emoji, other pictographic symbols, invisible format
+characters and the markdown marks =*=, =`= and =~= are removed. Whitespace is
+collapsed and invalid UTF-8 is repaired. A segment with no letter or digit left
+is not sent.
+
+That last rule is what stops the tail artifact. A voice-cloning TTS model given
+nothing it can pronounce does not fail. It invents several seconds of babble.
+A seeded model invents the /same/ babble every time. A reply ending in an emoji
+used to reach the synthesizer as a request for just that emoji. Tool execution remains inside the conversation's executor. Tool failure
+events enqueue an explicit spoken error notice. Tool results remain available
+to the model through the existing executor history.
+
+Signals, on the session's constructing thread-default context:
+
+| Signal | Parameters |
+|--------+------------|
+| =transcript= | display name, text, final boolean |
+| =reply= | text segment submitted for synthesis |
+| =spoken= | segment whose audio was played, and whether it played to the end |
+| =command= | =stop=, =mute=, =unmute= or =hangup=, when voice commands are on |
+| =tool= | name, JSON arguments, result and error flag of a finished tool call |
+| =state-changed= | =AiVoiceState= (registered GEnum) |
+| =error= | =GError= |
+
+=reply= means synthesis was requested; it does not mean the caller heard it.
+=state= is also a read-only property. =turn-deadline-ms= defaults to 20000. At
+the deadline the provider and TTS cancellables are cancelled, pending playback
+is flushed, and the session says a fallback line instead of going silent.
+The next turn starts once the cancelled one has ended, so a tool that ignores
+cancellation keeps the caller waiting until it finishes. Every built-in tool
+that can run long stops at the cancel; a host registering its own should too.
+The deadline bounds provider work, not playback of a completed reply. Its
+remaining time is paused during media recovery. Speech-service errors are
+reported through =error= and logged with their specific cause.
+
+An embedding host can supply =fallback-pcm= (a =GBytes= of mono S16LE samples,
+at most 4 MiB) and =fallback-sample-rate= (default 16000). A failed synthesis
+cancels the failed turn and plays this cached =synthesis-error-message= once.
+Without cached PCM, the session makes one synthesis attempt for that message;
+failure of the fallback cannot recursively generate more fallbacks.
+
+=ai_voice_session_say()= queues greetings and other out-of-band notices.
+=ai_voice_session_stop()= must be called before releasing an active session.
+It cancels recognition, speech and the conversation worker. The embedding host
+owns asynchronous transport leave and any external room-membership cleanup.
+
+** Context and ownership
+
+The session takes references to all five components. It exclusively borrows
+the conversation for its lifetime: configure its provider, working directory,
+executor and brigade before constructing the voice session, and do not drive
+that conversation concurrently from another thread.
+
+Audio and network callbacks use the constructing thread-default context.
+Conversation/provider/brigade work runs on a persistent private context in a
+worker thread. This isolates existing synchronous tool implementations from
+the audio main loop without changing provider or executor behavior. Events
+are copied onto the audio context; generation ids discard late replies from
+cancelled turns. Sources are retained as =GSource *= and destroyed explicitly.
+
+The existing provider factory and =AiConversation= provider-switching APIs are
+reused. The current session API does not expose an in-call provider-switch
+command; select/configure a conversation before lending it to the session.
+
+** Barge-in and history
+
+The writable =barge-in-ms= session property requires consecutive VAD speech
+before starting STT or interrupting a turn. It defaults to 250 ms (range
+10–5000 ms, rounded up to a 10 ms frame). A silence frame resets the count;
+participants never share counts. Short bursts do not open STT. Confirmed
+onset audio is buffered in memory and replayed to STT so initial words are
+preserved, together with the 300 ms before VAD first called it speech. A word
+that starts softly -- an "f", an "h" -- is not speech to the detector until
+its vowel; without that, a name like "Fay" reaches STT as "-ay" and comes back
+as "say" or "Bay". Greetings and all =ai_voice_session_say()= notices use this same
+debounce, including while waiting for the first synthesized audio.
+
+=noise-suppression= (=AI_VOICE_NOISE_SUPPRESSION=, transport property of the
+same name) is off unless configured. Set to =low=, =moderate=, =high= or
+=very-high=, every subscribed track passes through GStreamer's =webrtcdsp=
+after conversion to 16 kHz: WebRTC noise suppression at that level, plus a
+high-pass filter for the rumble of footsteps and handling. It runs on the
+CPU, so the speech services' GPU carries nothing more. Echo cancellation and
+gain control stay off: the caller's client already does both, and doing them
+twice pumps the noise floor. Higher levels remove more noise and distort more
+speech. =moderate= is the place to start. Measured on pink noise, =high= cuts
+the level about 21 dB. If the plugin is missing, the track is received
+unprocessed and that is logged at INFO. The call never loses the caller. A
+change applies to tracks subscribed afterwards.
+
+Recognizers mark non-speech inline, as =[throat clearing]=, =(coughs)=,
+=*sniff*= or =[BLANK_AUDIO]=. The session removes every bracketed,
+parenthesized or starred span of up to 60 bytes from partial and final
+transcripts. A final with nothing left is silence and starts no turn, and a
+partial with nothing left cannot confirm a barge-in. The cost is that a
+parenthesized phrase the caller really said is dropped too, which recognizers
+almost never produce.
+
+While speaking, reaching the threshold is not yet an interruption. A caller
+on speakerphone sends our own voice back, and to VAD that is speech. The
+session opens recognition and logs a "possible barge-in", and playback
+continues. It interrupts only when a partial or final transcript carries
+words, and at least four in five of those words are not words we said in the
+last 20 seconds. A transcript that only repeats our recent speech is logged as
+echo and dropped rather than answered, and an empty final lets playback run
+on. Set =barge-in-confirm= to FALSE to interrupt on VAD alone, as before. The
+cost is the partial-transcript delay, a few hundred milliseconds.
+
+Once an interruption is decided, during thinking (on VAD alone) or during
+speaking (once confirmed), the session logs an INFO decision and cancels the provider run's
+=GCancellable= and the current synthesis/playback cancellable, then flushes the
+transport queue. An old turn cannot enqueue speech into its successor.
+
+The conversation now implements =AiEventSource= and has an opt-in
+=prepare-messages= signal. Voice uses that signal to preserve tool calls and
+results while projecting assistant prose to the acknowledged spoken prefix.
+Ordinary conversations, with no filter connected, retain their previous
+history behavior.
+
+*Precision limit:* the supplied TTS protocol has no word timestamps, and RTP
+has no acknowledgement that a human heard a word. History therefore retains
+fully played *segments*, using local playout acknowledgements. It omits the
+partially played segment at interruption. It never retains the unsaid ending,
+but cannot promise an exact word boundary within that interrupted segment.
+The transport paces PCM in 10 ms packets; remote jitter buffers may still
+contain audio after local cancellation.
+
+** Background agents
+
+Enable agents on the conversation with
+=ai_conversation_enable_background_agents()=, or install an existing brigade.
+The voice worker receives =AiConversation::agent-finished= and queues one
+short status notice, with a terminal-state distinction for success, failure
+and cancellation. It does *not* reap the result or drain the brigade's finish
+queue. The executor's existing next-turn notification and =agent_result=
+semantics therefore remain intact. A notice waits until the current utterance
+and turn are idle; an interrupted notice is queued again. Duplicate finish
+events do not enqueue another notice. A notice is not a provider turn.
+
+* Wire protocols
+
+** STT
+
+A websocket connects to =ws://HOST:8001/stt/stream= for each utterance.
+
+1. Server sends ={"type":"ready"}=.
+2. Client sends binary 16 kHz mono S16LE PCM frames.
+3. Client sends the text frame =EOS= after trailing silence.
+4. Server sends ={"type":"partial","text":"..."}= and finally
+   ={"type":"final","text":"..."}=.
+
+Audio received before ready is bounded and queued. EOS follows queued audio,
+never precedes ready. JSON members are type checked. Malformed protocol,
+unexpected closure and queue overflow are failures, not empty successful
+transcripts. Each participant connection is independently cancellable. The
+recognizer's =timeout-ms= property bounds waiting for ready and final replies
+(default 30000 ms).
+
+** TTS
+
+POST ={"text":"..."}= to =http://HOST:8089/synthesize/stream=.
+The response is:
+
+#+begin_example
+SR=<decimal sample rate>\n
+[u32 big-endian byte length][S16LE mono PCM]
+[u32 big-endian byte length][S16LE mono PCM]
+[u32 zero]
+#+end_example
+
+HTTP chunk boundaries are unrelated to protocol frames. Parsing spans reads,
+validates sample rate and even PCM byte lengths, bounds frame allocation, and
+requires the zero sentinel. EOF without it is an error. Native PCM bytes are emitted unchanged, with the validated header rate on
+every audio signal. Every HTTP operation and body read is cancellable.
+=AiHttpSynthesizer:timeout-ms= bounds inactivity (default 10000 ms), including
+waiting for response headers. Successful reads reset the timer. Expiry reports
+=G_IO_ERROR_TIMED_OUT= and releases the synthesizer for the next request without
+cancelling the caller's =GCancellable=.
+
+* LiveKit
+
+The transport uses =livekitwebrtcsrc= and =livekitwebrtcsink= from
+=gst-plugins-rs=. There is no Rust FFI shim or Python audio runtime in ai-glib.
+These elements create separate consumer and producer connections. They need
+*distinct JWT identities*: the constructor accepts =receive-token=, and
+=join_async()= accepts the publishing token. Server auto-subscription remains enabled so tracks
+published after join are received. The publisher's own pads are consumed by a
+local discard sink; they never enter VAD/STT. JWT base64url payloads are padded
+before decoding the subject used by this filter.
+
+Incoming source-pad =participant-info= supplies the stable participant id and
+display name. The outgoing appsrc is paced in 10 ms frames and publishes silence
+while listening so its track remains negotiated. Async write completion means
+local playout completion, not just insertion into a queue.
+
+** Build and dependencies
+
+In addition to the project's normal GLib, libsoup, JSON, libdex and YAML
+packages, C builds need =gstreamer1-devel= and
+=gstreamer1-plugins-base-devel= on Fedora. Runtime media needs the LiveKit,
+libnice, Opus, DTLS, SRTP and RTP congestion-control plugins. Missing LiveKit
+plugins produce a clear join error; they do not make offline mocks unusable.
+
+The shipping host was tested with gst-plugins-rs 0.14.5, revision
+=18a88c8=, and libnice 0.1.22. This plugin revision has an early return in
+=on_participant()= that prevents subscription updates and participant metadata
+registration. It also ignores subscriber offers in producer mode: full-grant
+tokens can make that subscriber connection primary, causing a server join
+timeout even while publisher audio flows. The patch completes the producer's
+primary subscriber handshake using a separate data-channel peer connection,
+routes subscriber ICE (including server-provided STUN/TURN settings), and tears
+it down with the signalling connection. Media auto-subscription stays disabled
+on the producer; input continues through the receive transport.
+The patch also resolves a replacement pad's missing cached =msid= from the
+negotiated remote SDP after renegotiation. This preserves participant attribution
+and subscription delivery when an existing publisher rejoins.
+Signaller shutdown cancels the complete event task, rather than only its current
+receive wait, and bounds signalling-client closure. A closed event stream exits
+the task instead of spinning. This prevents teardown from blocking reconnection
+when the SFU disappears during negotiation.
+Publisher payload-chain setup is dispatched with GStreamer's =call_async= from
+remote-description callbacks. Pipeline state changes must not run on the WebRTC
+peer-connection thread, where they can wait for that same thread and deadlock
+teardown.
+Apply =deps/gst-plugins-rs-livekit-participants.patch= to that
+upstream checkout before building. This is an upstream dependency fix, not an
+FFI shim. Newer plugin revisions need only the portions of the patch not already fixed
+upstream. A checkout with an earlier version of this patch must reverse that
+version before applying this combined patch. Build upstream plugins outside this repository:
+
+#+begin_src sh
+git apply /path/to/ai-glib/deps/gst-plugins-rs-livekit-participants.patch
+cargo build --release -p gst-plugin-webrtc --no-default-features --features livekit
+cargo build --release -p gst-plugin-rtp
+install -m755 target/release/libgstrswebrtc.so target/release/libgstrsrtp.so \
+  "$HOME/.local/lib/gstreamer-1.0/"
+#+end_src
+
+Those Rust builds also need GStreamer WebRTC development headers, OpenSSL
+headers and =protoc=. Rust is only a build dependency of the upstream plugins.
+The vendored C VAD revision/license/compatibility changes are recorded in
+=deps/webrtc-vad/README.ai-glib=.
+
+On hosts with addressless VPN interfaces, libnice UPnP discovery may warn.
+If necessary, build libnice with =-Dgupnp=disabled= and install it in a private
+prefix. Point =LD_LIBRARY_PATH= and =GST_PLUGIN_PATH= at that prefix; there
+is no need to replace system libraries or suppress warnings.
+
+* Configuration
+
+The normal layered ai-glib YAML file accepts:
+
+#+begin_src yaml
+apps:
+  ai-call:
+    default_provider: ollama
+    default_model: example-model
+voice:
+  stt_url: ws://speech.example.org:8001/stt/stream
+  tts_url: http://speech.example.org:8089/synthesize/stream
+  livekit_url: ws://127.0.0.1:7880
+  identity_file: /path/to/identity.md
+#+end_src
+
+=AiConfig= exposes =voice-stt-url=, =voice-tts-url=, =voice-livekit-url= and
+=voice-identity-file= properties. Explicit property setters override environment
+and YAML; otherwise environment overrides file values. =AI_VOICE_STT_URL=, =AI_VOICE_TTS_URL=,
+=AI_VOICE_LIVEKIT_URL= and =AI_VOICE_IDENTITY_FILE= override file values.
+Endpoint defaults use localhost. Provider/model selection uses the existing
+factory and scoped defaults, with =-p= and =-m= overrides.
+
+** Extending and configuring components
+
+=AiVoiceSession= has construct-only =transport=, =recognizer=, =synthesizer=,
+=activity= and =conversation= object properties, typed to their interfaces (or
+=AiConversation=). =ai_voice_session_new()= is a convenience wrapper around
+that same construction path. Bindings can use native property construction.
+A custom backend implements the corresponding GInterface and can be injected
+without modifying the session or any provider. The binary composes the shipped
+backends; it does not discover arbitrary backend modules at runtime.
+
+=deadline-message=, =transcription-error-message= and =synthesis-error-message= are writable session
+properties; NULL or an empty string disables that spoken fallback. VAD exposes
+=mode= and =trailing-silence-ms=; the websocket recognizer exposes =timeout-ms=.
+Backend endpoint properties are construct-only, avoiding endpoint changes
+halfway through an active stream. Select a new backend for a new session.
+
+** Binary deployment settings
+
+Matrix-specific settings live in the binary's private =AiCallConfig= GObject,
+not the library. Its property schema drives validation, defaults and parsing.
+The same layered config files also accept a =ai_call= mapping:
+
+#+begin_src yaml
+ai_call:
+  credentials: /path/to/matrix-credentials.json
+  device: AIVOICE01
+  jwt-url: https://rtc.example.org/sfu/get
+  focus-url: https://rtc.example.org/livekit/jwt
+  outbound-path: /path/to/outbound-call.json
+  greeting: "Hello. How can I help?"
+  outbound-greeting: "Hello. Is now a good time?"
+  goodbye-message: "Goodbye."
+  turn-deadline-ms: 20000
+  trailing-silence-ms: 600
+  barge-in-ms: 250
+  media-reconnect-attempts: 3
+  media-reconnect-delay-ms: 500
+  opus-bitrate: 64000
+  vad-mode: 2
+  stt-timeout-ms: 30000
+  stt-frame-ms: 0       # 0 sends 10 ms messages; 100 keeps a VAD-per-message server real-time
+  tts-timeout-ms: 10000
+  max-agents: 4
+  deadline-message: "Please try again shortly."
+  transcription-error-message: "Please repeat that."
+  empty-reply-message: "I came up empty on that. Ask me again?"
+  noise-suppression: moderate   # unset or off: received audio is untouched
+  tool-progress-message: "One moment, let me check."
+  tool-progress-delay-ms: 1500
+  trim-tool-results-after: 0   # 0 keeps every tool result; try 3 for long calls
+  speak-code: yes    # no: markdown code in a reply is not read aloud
+  repeat-limit: 0    # 0 reads a looping reply to the end; try 2
+  repeat-message: "I'm going in circles, so I'll stop there."
+  voice-commands: no    # yes: stop, mute, unmute and hang up are commands
+  assistant-names: "Assistant"   # a command may start with one: "Assistant, mute"
+  mute-message: "Okay, I'm not listening. Say unmute when you need me."
+  unmute-message: "I'm listening."
+  synthesis-error-message: "Speech is temporarily unavailable. Please try again."
+  transcript-dir: /path/to/call-transcripts   # unset: $XDG_STATE_HOME/ai-glib/calls
+  transcript-hook: "/path/to/post-call --flag" # optional; gets the file path last
+  live-text: off   # replies: the assistant's words in the room as spoken; both: the caller's too
+#+end_src
+
+Precedence: built-in defaults, standard system/admin/user YAML files, explicit
+=--config= file, environment, then =--call-set PROPERTY=VALUE=. The dedicated
+=--credentials= flag also overrides configuration. Unknown names, wrong node
+types and out-of-range integers fail; invalid overlays leave previous values
+unchanged. Settings are loaded at startup; there is no promise of live reload.
+=--list-call-settings= lists property names, types and defaults without loading
+credentials or contacting a service.
+
+Credentials, identity file, JWT URL and public focus URL must be supplied.
+There are no compiled personal paths, Matrix domains, participant names or UID.
+The default outbound path uses =g_get_user_runtime_dir()=. Deployment variables use the =AI_CALL_= prefix. Numeric policy overrides are
+=AI_VOICE_TURN_DEADLINE_MS=, =AI_VOICE_TRAILING_SILENCE_MS=,
+=AI_VOICE_VAD_MODE=, =AI_VOICE_STT_TIMEOUT_MS=, =AI_VOICE_TTS_TIMEOUT_MS= and =AI_VOICE_MAX_AGENTS=;
+fallback text overrides are =AI_VOICE_DEADLINE_MESSAGE=,
+=AI_VOICE_TRANSCRIPTION_ERROR_MESSAGE=, =AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and
+=AI_VOICE_EMPTY_REPLY_MESSAGE=. Spoken acknowledgements and progress use
+=AI_VOICE_MUTE_MESSAGE=, =AI_VOICE_UNMUTE_MESSAGE=, =AI_VOICE_TOOL_PROGRESS_MESSAGE=
+and =AI_VOICE_TOOL_PROGRESS_DELAY_MS=; =--local= reads =AI_CALL_LOCAL_INPUT=,
+=AI_CALL_LOCAL_OUTPUT=, =AI_CALL_LOCAL_ECHO_CANCEL= and =AI_CALL_LOCAL_SPEAKER_NAME=.
+=AI_VOICE_EMPTY_REPLY_MESSAGE= is spoken when a provider turn ends with
+nothing pronounceable, whether the model returned nothing or a tool call went
+unread. A caller cannot see a log, and to them silence is indistinguishable
+from a dropped call. An empty value disables it.
+
+=tool-progress-message= (=AI_VOICE_TOOL_PROGRESS_MESSAGE=) fills the silence
+while a tool works, without narrating every lookup. It is spoken only when a
+tool has run for =tool-progress-delay-ms= (default 1500) and nothing has been
+said in that turn. It is spoken at most once per turn, however many tools run.
+A quick tool, or a model that already said "let me look", hears nothing extra.
+It plays while the tool keeps running, and it can be interrupted like any other
+line. It is not a reply: a turn that then ends with nothing still speaks
+=empty-reply-message=. An empty value disables it.
+
+=stt-frame-ms= (=AI_VOICE_STT_FRAME_MS=, default 0: as fed) sends the
+recognizer audio in messages of that many milliseconds instead of one per 10 ms
+frame. A streaming server that runs voice activity detection over its buffer on
+every message can fall behind real time on 10 ms messages. Measured against a
+faster-whisper server of that kind, a 12-second sentence's final transcript
+arrived 4.5 s after the speaker stopped with 10 ms messages, and 0.8 s with
+20 ms or more. Short sentences were unaffected. 100 is a safe value; the short
+remainder is sent ahead of EOS, so no audio is lost.
+
+=speak-code= (=AI_VOICE_SPEAK_CODE=, =yes= or =no=, default =yes=). A model that
+shows a command instead of running it writes it as markdown code, and read
+aloud it is noise: "ssh host quote grep dash r i". With =no=, fenced blocks and
+inline spans containing whitespace are left out of speech and the prose around
+them is kept, so "Run =ssh host ls= now" is spoken as "Run now". A one-word
+span is a file or a name, and a sentence means nothing without it: "renamed
+it to =notes.org=" is spoken with the name. An unclosed inline span ends with
+its line rather than silencing the rest of the reply. Anything else is a startup
+error.
+
+=repeat-limit= (=AI_VOICE_REPEAT_LIMIT=, default 0: off) stops a reply that has
+started looping. A model that loses the thread can emit the same line for as
+long as it is allowed to generate; one did, reading the same search command
+aloud eight times over a minute. With a value of N, the (N+1)th copy of any
+line in one reply stops it: generation is cancelled, lines already queued
+still play, the rest is dropped, and =repeat-message= (=AI_VOICE_REPEAT_MESSAGE=)
+is spoken once. Lines are compared on their letters and digits, ignoring case
+and punctuation. An empty =repeat-message= stops the reply silently.
+
+=trim-tool-results-after= (=AI_VOICE_TRIM_TOOL_RESULTS_AFTER=, default 0: off)
+keeps long calls small. Every turn resends every earlier tool result, so after a
+few file reads or searches most of each request is output the model has already
+used. That makes replies slower and can overflow the model's context. With a
+value of N, tool results from before the caller's last N utterances become a
+one-line note giving their original size and saying to run the tool again. The
+tool call and its result stay paired, as providers require. Results of 160
+bytes or less are left as they are.
+=AI_CALL_GOODBYE_MESSAGE= overrides the shutdown line.
+=AI_CALL_TRANSCRIPT_DIR= and =AI_CALL_TRANSCRIPT_HOOK= set the transcript
+directory and hook described under [[*Call transcripts][Call transcripts]].
+=AI_CALL_LIVE_TEXT= sets =live-text=, described under [[*Live text in the room][Live text in the room]].
+
+At startup, the binary asynchronously synthesizes the configured synthesis-error
+line into a bounded in-memory cache. Prewarming has a four-second deadline and
+does not delay Matrix sync. Only a complete, valid stream enters the cache.
+Sessions receive the cache when it becomes available. If TTS has never been
+reachable during this process, there is no cached voice to play: the failure
+is logged and the session still returns to listening. A cache is not an
+independent speech service and cannot guarantee a spoken line in that case.
+
+* ai-call and Matrix
+
+See [[file:cli.org::*ai-call][the CLI reference]]. The binary implements Matrix
+sync, OpenID/JWT exchange, state publication and cleanup; none of those
+operations is inside the library.
+
+Startup primes sync, reads joined-room state and clears nonempty memberships
+sent by the configured identity before watching new calls. Memberships from
+other identities trigger an answer. Hangup checks room state rather than assuming the first departure
+means everyone left. Cleanup writes empty membership content and retries
+failed clears, including during SIGTERM/SIGINT. The cleanup HTTP requests use
+an independent cancellation scope. A late membership PUT is cleared again.
+
+SIGTERM/SIGINT during a connected call cancels the active turn and attempts
+=goodbye-message= before leaving. Synthesis and local playout share a two-second
+shutdown budget; an unreachable or stalled synthesizer cannot delay leave past
+that budget. Empty goodbye text disables this attempt. Matrix membership
+clearing and its retries follow independently; the two-second audio budget is
+not a deadline for successful Matrix cleanup.
+
+** Call transcripts
+
+Each answered call gets one JSON Lines file in =transcript-dir=, which defaults
+to =$XDG_STATE_HOME/ai-glib/calls=. An empty =transcript-dir= turns transcripts
+off. The directory is created =0700= and each file =0600=. File names are the
+UTC start time, a digest of the room id and a random suffix. The room id itself
+carries a server name, so it goes inside the file rather than into its name.
+
+The file is opened when the call's audio is set up. The first line is the
+header, and each final utterance is appended, and synced to disk, as it is
+recognized. A crash therefore keeps everything said up to that moment, under a
+header whose =end= and =duration_ms= are still =null=:
+
+#+begin_example
+{"type":"call","room":"!abc:example.org","start":"2026-01-01T12:00:00Z","end":null,"duration_ms":null}
+{"type":"utterance","at":"2026-01-01T12:00:04Z","role":"caller","speaker":"Caller","text":"What's on today?"}
+{"type":"tool","at":"2026-01-01T12:00:05Z","name":"calendar","arguments":{"day":"today"},"result":"free until noon","is_error":false}
+{"type":"utterance","at":"2026-01-01T12:00:06Z","role":"assistant","speaker":"@assistant:example.org","text":"Nothing until noon.","complete":true}
+#+end_example
+
+At hangup the header is rewritten atomically with =end= and =duration_ms=.
+Times are UTC ISO 8601, with milliseconds only when they are not zero.
+=role= is =caller= or =assistant=. A caller's =speaker= is their display name,
+and only their final transcripts are written: partials are revisions, not
+things that were said. The assistant's lines come from the session's =spoken=
+signal: one per segment whose audio actually played, written when playback
+ends, with the assistant's Matrix ID as =speaker=. =complete= is =false= when
+the caller interrupted it. The text is then the whole segment, of which the
+caller heard only the beginning. A segment that produced no audio, because
+synthesis failed first, is not written, because nobody heard it.
+
+Each tool call the assistant made is a =tool= line, written when the tool
+finishes. It has the tool's name, its =arguments= as structured JSON (kept as a
+string when they do not parse), its =result= and =is_error=. Results are capped
+at 4000 characters on a character boundary, with =result_truncated= set when
+that happens: a file read or a command's output can be megabytes. A call from
+a turn that was then interrupted is still written, because the tool ran. Tools
+run by a wrapped CLI provider inside its own process are not visible to the
+session and do not appear.
+
+=transcript-hook= is a command line, split the way a shell would split it but
+not run by a shell. After the header is finalized it is started with the
+transcript path appended as its last argument, and it is not waited for. That
+is where a deployment posts a summary or files the transcript elsewhere. A
+failed write, a failed hook or a failed start is logged at INFO and never
+affects the call. The hook is started by the service, so it shares the
+service's lifetime: under systemd, a stop that kills the whole control group
+also kills a hook that is still running.
+
+** Voice commands
+
+=voice-commands= (=AI_VOICE_COMMANDS=, =yes= or =no=, default =no=) lets the
+caller control the call by voice. A command is the whole utterance, optionally
+led by "hey", "go ahead and", "can you" or one of =assistant-names=
+(=AI_VOICE_ASSISTANT_NAMES=, comma-separated) and followed by "please". "Assistant, stop listening, please"
+is a command; "I want to stop listening to that podcast" is something to
+answer. Case and punctuation are ignored.
+
+| Command | Said as | What happens |
+|---------+---------+--------------|
+| stop | stop, stop talking, shush, be quiet, enough, cancel, never mind | The reply in progress stops and queued turns are dropped; nothing new is said |
+| mute | mute, stop listening, don't listen, go to sleep | As stop, then the caller is not heard: =mute-message= is spoken once |
+| unmute | unmute, start listening, wake up, I'm back, listen | The caller is heard again: =unmute-message= is spoken once |
+| hang up | hang up, end call, end the call | ai-call says its goodbye and leaves, as on shutdown |
+
+While muted, nothing the caller says reaches the model, and nothing is reported
+as said: no =transcript= signal, no transcript line, no live text. Speech is
+still recognized, because that is the only way to hear "unmute". Hang-up is
+also accepted while muted. The table of phrases is in the session and is the
+registration: a new command is one row and one case.
+
+=AiVoiceSession:muted= is readable and writable, so a button (a GUI, or a
+device with a physical key) mutes the same way. The session emits =command=
+with the name after acting on stop, mute and unmute; hang-up is left to the
+application. ai-call writes each command to the transcript as
+={"type":"command","at":...,"name":"mute"}= and, with =live-text= set, posts
+=(muted)=, =(listening again)=, =(stopped)= or =(hung up)= to the room.
+
+** Local audio: a device instead of a call
+
+=AiLocalAudioTransport= runs a session on the machine's own microphone and
+speaker: a small board with a microphone and speaker on a desk, or a laptop.
+There is one participant, the person in the room, which joins as soon as the
+devices are open. =ai-call --local= uses it in place of a Matrix call: no
+credentials, no LiveKit, no membership. Every other setting applies —
+transcripts (with =room= "local"), voice commands, noise suppression — except
+=live-text=, since there is no room. Hanging up, by voice command or by
+SIGINT/SIGTERM, says the goodbye and ends the program.
+
+#+begin_src yaml
+ai_call:
+  local-input: autoaudiosrc            # or "alsasrc device=hw:1"
+  local-output: autoaudiosink          # or "alsasink device=hw:1"
+  local-echo-cancel: no                # yes when the speaker is near the microphone
+  local-speaker-name: Local            # the name the transcript gives the person
+#+end_src
+
+=local-input= and =local-output= are GStreamer descriptions, so any source or
+sink works, including a test source for a machine with no sound card:
+=--call-set "local-input=audiotestsrc is-live=true wave=silence"=.
+
+Three things about the transport:
+
+- *A write completes when it has been heard*, not when it was queued. Speech
+  is pushed 10 ms at a time, never more than 60 ms ahead of the clock, and a
+  write finishes once its last sample should have left the speaker. The
+  session treats completion as "the caller heard it", and a flush (an
+  interruption) cancels the rest within a tick.
+- *The speaker path is one unbroken stream.* Silence fills the time between
+  replies, and every buffer is stamped from a count of samples, never from
+  the moment it was pushed. Push-time stamps carry the main loop's jitter;
+  each gap or overlap resets the resampler, and on a small board that was
+  heard as quiet, choppy speech that did not sound like the voice.
+- *Echo cancellation needs the speaker's own signal.* With
+  =local-echo-cancel: yes=, a =webrtcechoprobe= on the playback path records
+  exactly what the speaker plays and =webrtcdsp= subtracts it from the
+  microphone. Both run at 48 kHz mono, because the canceller refuses any
+  mismatch between the two. Without it, a device whose speaker sits next to
+  its microphone hears its own replies.
+- *It initialises GStreamer itself.* A program whose only GStreamer user is
+  this transport would otherwise crash parsing the first caps.
+
+** State file and mute toggle
+
+=state-file= (=AI_CALL_STATE_FILE=, unset: none) names a JSON file ai-call
+rewrites, atomically and mode =0600=, whenever the state, the mute flag or
+the last line heard or spoken changes. It is what a display beside the
+speaker reads:
+
+#+begin_example
+{"state":"speaking","muted":false,"heard":"What's on today?","said":"Nothing until noon.","updated_us":1790000000000000}
+#+end_example
+
+=state= is the session's state nick (=listening=, =transcribing=,
+=thinking=, =speaking=), =starting= before the first, and =ended= once the
+call has closed. A failed write is logged at debug and never affects the call.
+The file is shared: with several calls at once it shows whichever changed
+last, and =ended= is written only when the last of them closes. It is meant
+for =--local= and single-call devices.
+
+=SIGUSR1= toggles mute on every live session, exactly as the spoken
+commands do but without the spoken acknowledgement: a device with a
+physical button sends it, and the state file shows the result.
+
+** Live text in the room
+
+=live-text= (=AI_CALL_LIVE_TEXT=) posts what is said on a call into the call's
+room while it is said, for a caller who wants to read along or check what was
+heard. It is off unless set:
+
+| Value | Posted |
+|-------+--------|
+| unset, =off= | Nothing |
+| =replies= | The assistant's replies |
+| =both= | The replies, and each final utterance of the caller as =name: text= |
+
+Everything is sent as =m.notice=, which clients do not notify for. A reply is
+one message. It is posted when its first segment finishes playing, and each
+later segment edits it (=m.replace=), so a long answer is one growing message
+rather than a message per sentence. Edits to one reply are sent one at a time,
+so they cannot arrive out of order. The caller speaking again starts a new
+reply. A caller's name is the user part of their Matrix ID, since the room
+already shows who that is. Partial transcripts are never posted.
+
+A failed send is logged at INFO and never affects the call; the next segment
+sends the whole reply again. An unrecognized value is a startup error.
+
+Outbound JSON drop files use the Python answerer's =room_id=, =message= and
+=target= fields. The file is consumed before starting the call; one over
+64 KiB is removed unread with a message. Ring events
+use =org.matrix.msc4075.rtc.notification= with an =m.reference= to the member
+event, mentions, audio intent and a 30-second lifetime. Outbound speech waits
+for a human member. Recent text/notice/emote room messages seed a bounded call
+context. Call setup and cleanup support more than one room.
+
+Hangup clears the call's membership state and retries a transport or server
+failure every two seconds. A refusal (a 4xx other than 429) is not retried, and
+during shutdown no more than three attempts are made: a membership left behind
+is swept at the next start. A late clear from a call that has ended never
+touches a newer call in the same room. A transcript that could not be written
+stops recording but is still closed and handed to the hook.
+
+* Verification
+
+Offline GTests: =test-call-transcript= (file format, permissions, crash
+survival, close, hook argument passing), =test-voice-session= (turns, barge-in, speakers, deadline,
+read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
+ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
+=test-voice-activity= and
+=test-voice-matrix= (answer, cleanup retry and refusal, a late clear after a
+new call, drop files, transcript write failure, stale state).
+Additional offline tests cover speech-service failure and successful next-turn
+recovery (=test-voice-failures=), complete-only fallback caching
+(=test-call-speech-cache=), and live-call signal shutdown with a stalled goodbye.
+
+The local media integration is opt-in and skips when LiveKit or the plugins
+are absent:
+
+#+begin_src sh
+LD_LIBRARY_PATH="$HOME/.local/lib/ai-call" \
+GST_PLUGIN_PATH="$HOME/.local/lib/gstreamer-1.0" \
+AI_VOICE_LIVEKIT_TEST=1 build/release/tests/test-voice-livekit
+#+end_src
+
+It starts its own dev server and a receive-only observer before the transport
+joins. =ai_voice_session_say()= uses an in-process HTTP synthesis server; the
+observer must receive at least 24000 decoded 48 kHz samples with 10 kHz tone
+amplitude above 1000 before any remote microphone is published. The fake TTS emits 24 kHz
+10 kHz sine audio in non-10-ms frames. Spectral detection rejects a 6 kHz alias. A pad probe checks contiguous timestamps on the
+real appsrc, including silence and a deliberately delayed main-loop dispatch. A second transport then publishes late; audio must
+flow in both directions. Self-audio must never appear as a remote participant.
+The test leaves all connections when finished. The offline
+=/voice/session/say-non-silent-pcm= test separately asserts that synthesis
+samples reach the transport through the session. It does not contact a real Matrix room.
+
+Live acceptance still requires a human call. The binary logs integer timing
+for membership-to-first-PCM and final-transcript-to-first-PCM. These are local
+measurements, not proof of when a caller hears audio. The three-second acceptance
+limits must be measured from answering and the end of the caller's sentence,
+including VAD, STT and remote playout.
+
+** Lifecycle diagnostics
+
+=ai-call= prints =ai-call= and =ai-glib= INFO lifecycle messages without needing
+=G_MESSAGES_DEBUG= or =GST_DEBUG=. They include session state transitions,
+media join/leave, subscribed audio pads, participant join/leave, first received
+PCM, first non-silent appsrc PCM and synthesis first-PCM timings. Missing pad
+metadata reports the dependency-patch requirement. Tokens and credentials are
+never logged. A first appsrc acceptance is local evidence, not remote hearing;
+the media regression checks a real remote decoded stream separately.
+
+** Audio timing and recognition failures
+
+The LiveKit publisher timestamps both silence and synthesized PCM from one
+integer sample counter anchored to the pipeline clock. It disables appsrc
+wall-clock timestamping: delayed dispatch and short synthesis frames must not
+introduce timestamp gaps. Each dispatch catches up with bounded work, keeps
+at most one 10 ms packet ahead, and completes writes only after their local
+media-clock end time. This is not an acknowledgement of remote playout.
+
+STT ignores additional response metadata, including fractional =start= and
+=end= timestamps and integer =stable_ms= and =transcribe_ms= fields.
+={"type":"error","detail":"..."}= emits a recognition failure with the server
+detail; the session speaks its configurable =transcription-error-message=.
+An empty final completes recognition and resets VAD without a session
+transcript, provider turn or spoken reply.
+
+The binary maps =ai_call.barge-in-ms=, =AI_VOICE_BARGE_IN_MS= and
+=--call-set barge-in-ms=250= to the session property. Whitespace-only final
+transcripts are discarded; valid phrases are never filtered by a blacklist.
+
+The native-rate output change adds =sample_rate= to =AiSpeechSynthesizer::audio=;
+consumers of this unreleased voice API must update their callback signature.
+Input =AiAudioTransport::audio= retains its existing speaker/16-kHz-PCM shape.
+
+** Media recovery and encoder diagnostics
+
+A bus error logs the source element, error message and GStreamer debug detail
+at INFO. After an established connection fails, LiveKit emits =reconnecting=,
+asynchronously stops the failed pipeline, and rejoins using the existing room
+credentials. Pending playback keeps its queue and current offset. The session
+preserves its active turn, state, participant recognition and conversation
+history; notices queued during recovery wait for media to return. It emits =reconnected= after
+a successful rejoin. Exhausted retries emit the terminal =error= signal.
+
+Construct-only LiveKit properties =reconnect-attempts= (default 3, zero
+disables recovery), =reconnect-delay-ms= (default 500), and =opus-bitrate=
+(default 64000, minimum 48000) configure this behavior. The binary maps them
+from =media-reconnect-attempts=, =media-reconnect-delay-ms= and =opus-bitrate=,
+with environment overrides =AI_VOICE_RECONNECT_ATTEMPTS=,
+=AI_VOICE_RECONNECT_DELAY_MS= and =AI_VOICE_OPUS_BITRATE=. Explicit leave
+cancels pending recovery; callbacks from old media generations are ignored.
+Retry delay doubles after each failed attempt, capped at 10000 ms. Reconnection
+is a safety net: the patched primary handshake completes the original join
+without depending on periodic reconnects.
+
+A short recent-audio replay window covers packets accepted locally just before
+the connection failed. This can repeat a small portion of speech. RTP does not
+acknowledge remote playout, so exactly-once hearing across a network failure is
+not a guarantee of the write API. Barge-in and explicit leave discard this
+replay along with queued speech.
+
+The encoder setup hook selects generic audio and fullband Opus and logs its
+bitrate. Appsrc has a 4 MiB queue limit setting and retains sample-clock pacing.
+With =GST_DEBUG_DUMP_DOT_DIR= set, first speech writes a pipeline graph containing
+media types for diagnosis; audio is never saved. The graph and element audit
+in the media test contain no =webrtcdsp= stage.
+
+The local test injects a publisher error during a reply, checks resumed speech
+and subscription recovery, and checks that leaving during recovery creates no
+new media connection. A decoded 100 Hz + 200 Hz test requires each component to
+lose less than 3 dB.
+
+The primary-connection regression uses full publish/subscribe grants, plays
+80 seconds of audio across the server's 60-second join timeout, then checks
+fresh decoded speech after more than 90 seconds without any reconnect event.
+This test failed with =JOIN_TIMEOUT= before the signaller handshake fix.
+
+** Extended runs
+
+=make test-voice-endurance= runs more than five minutes of continuous PCM in
+both directions, checking progress across the join-timeout boundary with no
+media errors or reconnects. =make soak= runs the scripted peer for fifteen
+minutes with speech, silence and talk-over cycles. Both targets use the local
+LiveKit server and runtime plugins; they are separate from the default suite.
+Set =GST_PLUGIN_PATH= and =LD_LIBRARY_PATH= for privately installed dependencies
+as in the media-test example above.
+
+** Failure modes and caller-visible behavior
+
+| Failure | What the caller hears | INFO diagnostics |
+|---------+-----------------------+------------------|
+| Short VAD noise burst | Playback continues; no recognition opens | A barge-in decision appears only after confirmed speech reaches the configured threshold |
+| Confirmed talk-over | Current speech stops; the caller's buffered onset is recognized | Speaker, consecutive speech duration and cancelled state |
+| A tool runs for a while before anything is said | One =tool-progress-message= line, played while the tool keeps running | — |
+| Provider turn ends with no text and no tool error | The =empty-reply-message= line, never silence | "Provider turn ended with nothing to say" |
+| Long sentences get slow replies; short ones don't | Set =stt-frame-ms= (100): the recognizer server is falling behind on 10 ms messages | Compare "state=transcribing" and the transcript line against the sentence's length |
+| The model reads commands aloud, or repeats one line over and over | With =speak-code: no=, code is not spoken; with =repeat-limit= set, the loop stops after N copies and =repeat-message= plays | "Reply repeated a line more than N times; stopping it" |
+| A long call with many tool results | With =trim-tool-results-after= set, old results shrink to a note and replies stay fast; unset, each turn resends them all | — |
+| Steady background noise (fan, traffic, footsteps' rumble) | With =noise-suppression= set, suppressed before VAD; unset, passed through | "LiveKit noise suppression unavailable" if the plugin is missing |
+| Recognizer marks a noise as =[throat clearing]=, =(coughs)=, =*sniff*= | Nothing: alone it is silence, inside a sentence it is removed | — |
+| Own voice echoed back by the caller's speaker | Playback continues; the echo is not answered | "possible barge-in", then "ignoring transcript ... repeats our own recent speech" |
+| STT ready/final timeout or server error | One configured transcription-error line when speech output is available; next turn can proceed | Specific recognition error or server detail |
+| TTS unreachable, truncated response or inactivity timeout | One cached synthesis-error line; if no cache exists, one bounded synthesis attempt, then listening | Specific connection/protocol/timeout error; cache readiness or unavailability |
+| Publisher/receiver media error | Speech pauses during recovery and resumes, possibly with a short repeated prefix | GStreamer element/debug reason, attempt number and retry delay, recovery result |
+| Recovery attempts exhausted | The binary ends the call and clears its membership | Final media error and accumulated recovery counters |
+| Provider deadline | Configured deadline line, then listening | Provider timeout |
+| SIGTERM/SIGINT | Short goodbye if it can be synthesized and played within two seconds | Goodbye failure/timeout if applicable, leave and membership cleanup |
+
+Transport health properties =reconnect-count=, =dropped-buffers= and
+=late-buffers= are read-only 64-bit counters. Each call logs join-to-first
+published PCM and final-transcript-to-first PCM timings. Hangup emits one
+summary with duration, transcript/error totals and the three transport counters.
+These diagnostics need no GStreamer debug flags in =ai-call=.
+
+** Recorded robustness validation
+
+The 305-second bidirectional run completed 610 writes with PCM progress in
+both directions every second, no media errors and no reconnects. The
+900-second scripted soak completed 90 speech/silence/talk-over cycles:
+180 transcripts and decoded replies, zero missed utterances, zero media
+errors and zero reconnects. Recovery and leave-during-recovery checks also
+passed after the soak. These measurements use a local LiveKit server and
+scripted speech services; they do not replace listening tests with external
+speech services and a Matrix client.
