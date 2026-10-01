@@ -131,7 +131,7 @@ The alternation is the point. Narration, a collapsed group of what the model
 actually did, more narration --- rather than a wall of tool output with the
 explanation lost inside it.
 
-The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits. Panel values wrap at word boundaries, including long model names, usage reports, and agent identifiers; todos and agents use hanging bullets so continuation lines remain grouped with their entry. Text stops above the shortcut footer; =/todos=, =/running= and =/tools= provide full listings. =C-p= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders and the wordmark fall back to ASCII.
+The session panel appears at widths of at least 110 columns and heights of at least 20 rows. It shows the provider/model, the project and branch, theme, latest reported usage, up to three todos, agent states, and tool/approval mode when space permits. Panel values wrap at word boundaries, including long model names, usage reports, and agent identifiers; todos and agents use hanging bullets so continuation lines remain grouped with their entry. Text stops above the shortcut footer; =/todos=, =/running= and =/tools= provide full listings. =C-p= toggles the panel, and that choice survives narrowing and widening the terminal. Below 32 columns or nine rows, a resize notice replaces the interface and preserves the draft. Nothing requires a Nerd Font. In non-UTF-8 locales, composer borders and the wordmark fall back to ASCII.
 
 *** Whose turn it is
 A finished turn and a slow one look alike on a quiet screen: the sweep stops either way and nothing on the screen says the harness is now waiting on a person. So the composer states it. When a turn hands control back --- answered, stopped by =C-c=, or failed --- the composer frame turns from the accent color to the confirmation color, its title changes from =COMPOSE= to =YOUR TURN=, the placeholder line reads =Your turn · type a reply=, and the status strip reads =your turn · type to reply= in place of =ready=.
@@ -872,6 +872,17 @@ command barriers, cancellation, context isolation and the library APIs.
 =Ctrl+\= toggles the dashboard; =--dashboard= opens it at startup.
 See [[file:dashboard.org][Projects, dashboard and linked work]] for the startup
 preference, tmux status names, issue/PR side-panel links and task recovery.
+The dashboard groups sessions under a heading per project, and a worker
+started from it opens as a window in that project's own tmux session.
+
+** The project in the session panel
+
+Under the model, the panel shows =Project: NAME= and, when the checkout
+is on one, =Branch: NAME=. The name is =ai_project_label_for_path()=,
+the same one the dashboard headings, ai-gui and =ai project= use, so a
+worktree shows its repository's name. Until the session has registered,
+the working directory names itself the same way. A long branch wraps
+rather than running into the next column. See [[file:projects.org][projects]].
 
 ** Account quota in the session panel
 
@@ -908,9 +919,14 @@ result. Shutdown cancels and drains pending reporting work.
 The panel names loading, refreshing, unavailable, partial and stale results.
 It shows up to three allowance entries, subject to terminal height; use
 =ai --usage -p PROVIDER= for the complete report. A failed
-refresh keeps the previous snapshot explicitly marked stale. Providers
-without native reporting show =Unavailable=, and only quota entries with
-known direction receive a bar. Long or control-bearing labels are sanitized
+refresh keeps the previous snapshot explicitly marked stale. When there is
+no figure at all the panel shows =Unavailable= and, beneath it, why:
+the report's own error, e.g. that Claude plan limits do not apply to an
+API-key login, that the CLI is too old to ask, or that it failed
+authentication. Only quota entries with known direction receive a bar.
+Reset times read =Reset: in 2h 41m= within a day, =Reset: Fri 17:59=
+within a week and =Reset: Nov 5= beyond that; a provider's own reset
+wording is shown as given. Long or control-bearing labels are sanitized
 and clipped to the panel; the terminal footer remains reserved.
 
 *** Quota regression tests
@@ -919,7 +935,10 @@ and clipped to the panel; the terminal footer remains reserved.
 unknown/invalid values, independent client snapshots, caching, failed
 refreshes, provider/model/directory changes and cancellation.
 =tests/test-ai-tui-panel.c= inspects real curses cells for bars, partial/stale
-states, hostile labels, Unicode clipping and footer preservation.
+states, the failure reason, the project and branch lines, hostile labels,
+Unicode clipping and footer preservation. =/ai-glib/quota/reason= and
+=/ai-glib/quota/format-reset= in =tests/test-quota.c= cover the reason's
+lifetime and every reset-phrasing boundary.
 The =/ai-glib/ai-tui/keys/usage-sidebar= case in =tests/test-ai-tui.c= uses
 a tmux PTY and a local Python reporting fixture to verify the complete
 sidebar wiring, hidden/dump behavior, cache reuse, and responsive typing

@@ -62,26 +62,6 @@ work_pane_valid(const gchar *pane)
 	return TRUE;
 }
 
-static gint
-work_priority(const gchar *state)
-{
-	const gchar *states[] = {"INPUT", "ERROR", "WORK", "DONE", "STOPPED", "IDLE", "DISCONNECTED"};
-	guint i;
-	for (i = 0; i < G_N_ELEMENTS(states); i++) if (g_str_equal(state, states[i])) return i;
-	return 6;
-}
-
-static gint
-work_compare(gconstpointer a, gconstpointer b)
-{
-	AiWorkSession *left = *(AiWorkSession * const *)a;
-	AiWorkSession *right = *(AiWorkSession * const *)b;
-	gint order = work_priority(work_field(left, "status")) - work_priority(work_field(right, "status"));
-	if (order != 0) return order;
-	order = g_strcmp0(work_field(left, "project"), work_field(right, "project"));
-	return order != 0 ? order : g_strcmp0(ai_work_session_get_id(left), ai_work_session_get_id(right));
-}
-
 /* Serialized across ai-tui processes on this machine. The worker never touches
  * App or GObjects owned by the main context. Pane options are the live source
  * for window aggregation, so two panes never race to install different names. */
@@ -165,7 +145,7 @@ work_title_thread(GTask *task, gpointer source, gpointer data, GCancellable *can
 		if (stamp == NULL) continue;
 		*stamp++ = '\0';
 		age = g_get_real_time() / G_USEC_PER_SEC - g_ascii_strtoll(stamp, NULL, 10);
-		if (age >= 0 && age <= 15 && *lines[i] && (!*best || work_priority(lines[i]) < work_priority(best))) best = lines[i];
+		if (age >= 0 && age <= 15 && *lines[i] && (!*best || ai_work_session_status_priority(lines[i]) < ai_work_session_status_priority(best))) best = lines[i];
 	}
 	/* Respect a user rename made since our last write. */
 	if (*values[3] && !g_str_equal(values[1], values[3]))
@@ -292,16 +272,25 @@ static void
 work_refresh(App *app)
 {
 	g_autoptr(GError) error = NULL;
-	g_autoptr(GPtrArray) rows = work_list(app->work_directory, &error);
+	g_autolist(AiProject) projects = ai_project_list(app->work_directory, &error);
+	g_autoptr(GPtrArray) rows = g_ptr_array_new_with_free_func(g_object_unref);
 	g_autofree gchar *selected = NULL;
+	GList *l;
 	guint i;
 	if (app->work_rows != NULL && app->work_selected < app->work_rows->len)
 		selected = g_strdup(ai_work_session_get_id(g_ptr_array_index(app->work_rows, app->work_selected)));
-	if (rows == NULL)
+	if (error != NULL)
 	{
 		g_free(app->work_notice); app->work_notice = g_strdup(error->message); return;
 	}
-	g_ptr_array_sort(rows, work_compare);
+	/* Grouped by project, the most urgent project first, then each
+	 * project's sessions most urgent first: the library's one order. */
+	for (l = projects; l != NULL; l = l->next)
+	{
+		g_autoptr(GPtrArray) sessions = ai_project_dup_sessions(l->data);
+		for (i = 0; i < sessions->len; i++)
+			g_ptr_array_add(rows, g_object_ref(g_ptr_array_index(sessions, i)));
+	}
 	g_clear_pointer(&app->work_rows, g_ptr_array_unref);
 	app->work_rows = g_steal_pointer(&rows);
 	app->work_selected = MIN(app->work_selected, app->work_rows->len ? app->work_rows->len - 1 : 0);
@@ -393,25 +382,63 @@ work_open_url(App *app, const gchar *url)
 	if (child == NULL) { g_free(app->work_notice); app->work_notice = g_strdup(error->message); }
 }
 
+/* A session's project key: its project, or its directory for a record
+ * written without one --- the same fallback ai_project_list() uses. */
+static const gchar *
+work_project_key(AiWorkSession *row)
+{
+	return *work_field(row, "project") ? work_field(row, "project") : work_field(row, "directory");
+}
+
 static void
 work_draw(App *app)
 {
-	guint i, first;
-	gint y = 3;
+	g_autoptr(GArray) lines = g_array_new(FALSE, FALSE, sizeof(gint));
+	guint i, n = app->work_rows != NULL ? app->work_rows->len : 0, first, selected_line = 0;
+	gint y = 3, avail = MAX(1, LINES - 7);
 	erase();
 	chrome_text(0, 1, COLS - 2, "PROJECT DASHBOARD", A_BOLD);
 	chrome_text(1, 1, COLS - 2, "State       Project / branch / task", A_DIM);
-	first = app->work_selected >= (guint)MAX(1, LINES - 7) ? app->work_selected - MAX(1, LINES - 7) + 1 : 0;
-	for (i = first; app->work_rows != NULL && i < app->work_rows->len && y < LINES - 4; i++, y++)
+	/* Display lines: -1 - k is the heading of the group starting at row k,
+	 * k is row k. Scrolling is by line so a heading scrolls with its rows. */
+	for (i = 0; i < n; i++)
 	{
-		AiWorkSession *row = g_ptr_array_index(app->work_rows, i);
-		g_autofree gchar *project_path = g_str_has_suffix(work_field(row, "project"), "/.git") ?
-			g_path_get_dirname(work_field(row, "project")) : g_strdup(work_field(row, "project"));
-		g_autofree gchar *project = g_path_get_basename(project_path);
-		g_auto(GStrv) links = ai_work_session_dup_links(row);
-		g_autoptr(GString) badges = g_string_new("");
+		gint entry = (gint)i;
+		if (i == 0 || g_strcmp0(work_project_key(g_ptr_array_index(app->work_rows, i)),
+		                        work_project_key(g_ptr_array_index(app->work_rows, i - 1))) != 0)
+		{
+			gint heading = -1 - (gint)i;
+			g_array_append_val(lines, heading);
+		}
+		if (i == app->work_selected) selected_line = lines->len;
+		g_array_append_val(lines, entry);
+	}
+	first = selected_line >= (guint)avail ? selected_line - (guint)avail + 1 : 0;
+	for (i = first; i < lines->len && y < LINES - 4; i++, y++)
+	{
+		gint entry = g_array_index(lines, gint, i);
+		AiWorkSession *row;
+		g_autofree gchar *project = NULL;
+		g_auto(GStrv) links = NULL;
+		g_autoptr(GString) badges = NULL;
 		g_autofree gchar *line = NULL;
 		guint link_index;
+		if (entry < 0)
+		{
+			guint start = (guint)(-1 - entry), end = start, count;
+			const gchar *key = work_project_key(g_ptr_array_index(app->work_rows, start));
+			g_autofree gchar *name = ai_project_label_for_path(key);
+			g_autofree gchar *root = g_str_has_suffix(key, "/.git") ? g_path_get_dirname(key) : g_strdup(key);
+			while (end < n && g_strcmp0(work_project_key(g_ptr_array_index(app->work_rows, end)), key) == 0) end++;
+			count = end - start;
+			line = g_strdup_printf("%s - %u session%s  %s", name, count, count == 1 ? "" : "s", root);
+			chrome_text(y, 1, COLS - 2, line, A_BOLD);
+			continue;
+		}
+		row = g_ptr_array_index(app->work_rows, (guint)entry);
+		project = ai_project_label_for_path(work_field(row, "project"));
+		links = ai_work_session_dup_links(row);
+		badges = g_string_new("");
 		for (link_index = 0; links[link_index] != NULL && link_index < 2; link_index++)
 		{
 			g_autofree gchar *display_url = g_strdup(links[link_index]);
@@ -426,11 +453,11 @@ work_draw(App *app)
 			 * loops and goals whether or not that process is running. */
 			g_autofree gchar *schedule = *work_field(row, "loop-owner")
 				? ai_loop_store_dup_summary(NULL, work_field(row, "loop-owner"), g_get_real_time()) : NULL;
-			line = g_strdup_printf("%-12s %s%s / %s / %s%s%s", work_field(row, "status"), project, badges->str,
+			line = g_strdup_printf("  %-12s %s%s / %s / %s%s%s", work_field(row, "status"), project, badges->str,
 				work_field(row, "branch"), *work_field(row, "title") ? work_field(row, "title") : work_field(row, "provider"),
 				schedule != NULL ? " / " : "", schedule != NULL ? schedule : "");
 		}
-		chrome_text(y, 1, COLS - 2, line, i == app->work_selected ? A_REVERSE : A_NORMAL);
+		chrome_text(y, 1, COLS - 2, line, (guint)entry == app->work_selected ? A_REVERSE : A_NORMAL);
 	}
 	if (app->work_rows == NULL || app->work_rows->len == 0)
 		chrome_text(3, 1, COLS - 2, "No sessions yet. Press n to start here.", A_NORMAL);
@@ -476,6 +503,7 @@ typedef struct
 	gchar *session;
 	gchar *provider;
 	gchar *model;
+	gchar *project;
 	gboolean worktree;
 	gchar **environment;
 } WorkLaunch;
@@ -484,10 +512,88 @@ static void
 work_launch_free(WorkLaunch *job)
 {
 	g_free(job->socket); g_free(job->directory); g_free(job->executable);
-	g_free(job->session); g_free(job->provider); g_free(job->model); g_strfreev(job->environment); g_free(job);
+	g_free(job->session); g_free(job->provider); g_free(job->model); g_free(job->project);
+	g_strfreev(job->environment); g_free(job);
 }
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(WorkLaunch, work_launch_free)
+
+/* A tmux session name for a project label: tmux reserves '.' and ':' in
+ * targets, so anything outside a conservative set becomes '-'. */
+static gchar *
+work_session_name(const gchar *project, guint attempt)
+{
+	g_autofree gchar *label = ai_project_label_for_path(project);
+	g_autoptr(GString) name = g_string_new(NULL);
+	const gchar *p;
+	for (p = label; *p != '\0' && name->len < 48; p++)
+		g_string_append_c(name, g_ascii_isalnum(*p) || *p == '_' || *p == '-' ? *p : '-');
+	if (name->len == 0) g_string_assign(name, "project");
+	if (attempt > 1) g_string_append_printf(name, "-%u", attempt);
+	return g_string_free(g_steal_pointer(&name), FALSE);
+}
+
+/* One tmux session per project, one window per worker.
+ *
+ * A session is claimed with @ai_project, so two repositories that share
+ * a name get "alpha" and "alpha-2" instead of one's worker landing in the
+ * other's session, and a session a person made by hand is never adopted.
+ *
+ * Targets are always `=NAME:`. Without `=` tmux prefix-matches, so
+ * "alpha" would find "alpha-2"; and set-option rejects a bare `=NAME`
+ * ("no such session") while accepting `=NAME:`, so the colon is not
+ * decoration.
+ *
+ * Creation and the claim are one tmux command list, so no other launch
+ * sees the session before it says whose it is. If that list fails and
+ * the name now exists unclaimed, something is wrong with tmux rather
+ * than raced, and the loop stops instead of creating session after
+ * session.
+ *
+ * @tail is everything after the verb: -e, -c, -n, -P -F, the command.
+ * Returns the new pane id, or %NULL. */
+static gchar *
+work_launch_in_project(const gchar *socket, const gchar *project, const gchar * const *tail)
+{
+	guint attempt = 1, tries;
+	for (tries = 0; attempt <= 16 && tries < 32; tries++)
+	{
+		g_autofree gchar *name = work_session_name(project, attempt);
+		g_autofree gchar *target = g_strconcat("=", name, ":", NULL);
+		const gchar *exists[] = {"has-session", "-t", target, NULL};
+		const gchar *owner_args[] = {"show-options", "-t", target, "-qv", "@ai_project", NULL};
+		g_autoptr(GPtrArray) argv = g_ptr_array_new();
+		g_autofree gchar *present = work_tmux(socket, exists);
+		g_autofree gchar *owner = NULL;
+		guint i;
+		if (present == NULL)
+		{
+			gchar *pane;
+			g_autofree gchar *after = NULL;
+			g_autofree gchar *claimed = NULL;
+			g_ptr_array_add(argv, "new-session"); g_ptr_array_add(argv, "-d");
+			g_ptr_array_add(argv, "-s"); g_ptr_array_add(argv, name);
+			for (i = 0; tail[i] != NULL; i++) g_ptr_array_add(argv, (gpointer)tail[i]);
+			g_ptr_array_add(argv, ";"); g_ptr_array_add(argv, "set-option"); g_ptr_array_add(argv, "-t");
+			g_ptr_array_add(argv, target); g_ptr_array_add(argv, "@ai_project"); g_ptr_array_add(argv, (gpointer)project);
+			g_ptr_array_add(argv, NULL);
+			pane = work_tmux(socket, (const gchar * const *)argv->pdata);
+			if (pane != NULL) return pane;
+			after = work_tmux(socket, exists);
+			if (after == NULL) return NULL;           /* tmux refused outright */
+			claimed = work_tmux(socket, owner_args);
+			if (claimed == NULL || *claimed == '\0') return NULL; /* made but unclaimable */
+			continue;                                /* raced: look again at the same name */
+		}
+		owner = work_tmux(socket, owner_args);
+		if (g_strcmp0(owner, project) != 0) { attempt++; continue; }
+		g_ptr_array_add(argv, "new-window"); g_ptr_array_add(argv, "-t"); g_ptr_array_add(argv, target);
+		for (i = 0; tail[i] != NULL; i++) g_ptr_array_add(argv, (gpointer)tail[i]);
+		g_ptr_array_add(argv, NULL);
+		return work_tmux(socket, (const gchar * const *)argv->pdata);
+	}
+	return NULL;
+}
 
 static void
 work_launch_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
@@ -524,13 +630,15 @@ work_launch_thread(GTask *task, gpointer source, gpointer data, GCancellable *ca
 			g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED, "Git could not create a worktree at %s", path); return;
 		}
 	}
-	g_ptr_array_add(args, "new-window");
+	/* Everything after the tmux verb is the same for a new session and a
+	 * new window, so it is built once and the two cannot drift apart. */
 	for (i = 0; job->environment[i] != NULL; i++)
 	{
 		g_ptr_array_add(args, "-e"); g_ptr_array_add(args, job->environment[i]);
 	}
 	g_ptr_array_add(args, "-c"); g_ptr_array_add(args, path);
 	g_ptr_array_add(args, "-n"); g_ptr_array_add(args, name);
+	g_ptr_array_add(args, "-P"); g_ptr_array_add(args, "-F"); g_ptr_array_add(args, "#{pane_id}");
 	g_ptr_array_add(args, job->executable); g_ptr_array_add(args, "--no-dashboard");
 	if (job->session != NULL)
 	{
@@ -542,11 +650,18 @@ work_launch_thread(GTask *task, gpointer source, gpointer data, GCancellable *ca
 		if (*job->model) { g_ptr_array_add(args, "-m"); g_ptr_array_add(args, job->model); }
 	}
 	g_ptr_array_add(args, NULL);
-	result = work_tmux(job->socket, (const gchar * const *)args->pdata);
+	result = work_launch_in_project(job->socket, job->project, (const gchar * const *)args->pdata);
 	if (result == NULL)
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
-			"Cannot open tmux window. Working directory retained at %s", path);
-	else g_task_return_boolean(task, TRUE);
+			"Cannot open tmux project session. Working directory retained at %s", path);
+	else
+	{
+		/* Follow the new worker, as a new window in this session used to
+		 * do by itself. No attached client (a script, a test) is fine. */
+		const gchar *follow[] = {"switch-client", "-t", result, NULL};
+		g_autofree gchar *ignored = work_tmux(job->socket, follow);
+		g_task_return_boolean(task, TRUE);
+	}
 }
 
 static void
@@ -573,7 +688,7 @@ work_launch_full(App *app, AiWorkSession *row, gboolean resume, gboolean worktre
 	}
 	if (!*work_field(app->work, "socket"))
 	{
-		g_free(app->work_notice); app->work_notice = g_strdup("Open ai-tui in tmux to create project windows. ^\\ opens a prompt here."); return;
+		g_free(app->work_notice); app->work_notice = g_strdup("Open ai-tui in tmux to start project sessions. ^\\ opens a prompt here."); return;
 	}
 	job = g_new0(WorkLaunch, 1);
 	job->socket = g_strdup(work_field(app->work, "socket"));
@@ -582,6 +697,7 @@ work_launch_full(App *app, AiWorkSession *row, gboolean resume, gboolean worktre
 	job->session = resume ? g_strdup(ai_work_session_get_id(row)) : NULL;
 	job->provider = g_strdup(work_field(row, "provider"));
 	job->model = g_strdup(work_field(row, "model"));
+	job->project = g_strdup(*work_field(row, "project") ? work_field(row, "project") : work_field(row, "directory"));
 	job->worktree = worktree;
 	{
 		const gchar *names[] = {"HOME", "PATH", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",

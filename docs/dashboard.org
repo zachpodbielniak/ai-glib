@@ -16,9 +16,15 @@ pending approval intact. Provider work continues while the dashboard is open.
 approval. Bracketed paste never invokes dashboard shortcuts.
 
 Each interactive conversation registers automatically. The dashboard includes
-sessions launched manually, groups related worktrees by their Git common
-directory, and orders rows by attention: INPUT, ERROR, WORK, DONE, STOPPED,
-IDLE, then DISCONNECTED. A non-Git directory is also a project. The current
+sessions launched manually and groups them under one heading per project:
+the project's name, its session count and its main checkout, e.g.
+=ai-glib - 3 sessions  /home/z/src/ai-glib=. Related worktrees share their
+repository's heading, because a project is identified by its Git common
+directory; a non-Git directory is a project of its own. The project that
+needs you most comes first, then each project's rows by attention: INPUT,
+ERROR, WORK, DONE, STOPPED, IDLE, then DISCONNECTED. Both orders and the
+name are the library's (=AiProject=, see [[file:projects.org][projects]]), so
+ai-gui and =ai project= agree with this list. The current
 activity and links belong to the selected row. There is no estimated percentage:
 a finished model turn does not prove an issue is resolved or a PR is merged.
 
@@ -26,7 +32,7 @@ a finished model turn does not prove an issue is resolved or a PR is merged.
 |-----+--------|
 | Up / Down | Select a session |
 | Enter | Focus its tmux pane, or return to this conversation |
-| n | Start here from the initial dashboard, otherwise open another project window |
+| n | Start here from the initial dashboard, otherwise open another worker in the selected row's project session |
 | w | Create an isolated Git worktree and open ai-tui there |
 | r | Resume a disconnected session with a native provider session ID |
 | o | Open the selected linked issue or PR |
@@ -34,9 +40,10 @@ a finished model turn does not prove an issue is resolved or a PR is merged.
 | Ctrl+\ | Return to the current conversation |
 | q | Exit this ai-tui, cancelling its foreground turn |
 
-=/project /path/to/repository= opens a project in a tmux window. With no
-argument, =/project= opens the dashboard. Existing windows and panes remain
-where you put them: registering a session does not rearrange tmux.
+=/project /path/to/repository= opens a worker in that project's tmux
+session. With no argument, =/project= opens the dashboard. Existing windows
+and panes remain where you put them: registering a session does not
+rearrange tmux.
 
 =w= branches from the selected checkout's HEAD into =ai/<UUID>= and creates
 an adjacent =.ai-worktrees/<directory>-<UUID>= checkout. Changes in the source
@@ -44,6 +51,35 @@ checkout are not copied. The worktree is retained if terminal launch fails;
 its path is shown in the error. Cleanup is explicit, using Git's usual worktree
 commands after your work is committed. Git and tmux run in a worker with bounded
 subprocess waits, so creation does not block the dashboard.
+
+* One tmux session per project
+
+A worker launched from the dashboard (=n=, =w=, =r= or =/project DIR=)
+opens as a new window in its project's own tmux session: one session per
+project, one window (and one pane) per worker. The session is named after
+the project, so =prefix s= lists each project with its workers beneath it,
+and every worker keeps a full-size window with its own activity flag.
+The client then switches to the new worker, as a new window used to do.
+
+- The first launch for a project creates the session, detached, with the
+  worker as its only window. Later launches add windows to it.
+- A session is claimed by setting the tmux user option =@ai_project= to the
+  project identity when it is created. A session with that name that belongs
+  to another project, or that a person created by hand, is never used:
+  the launch takes the next free name, =alpha-2=, =alpha-3= and so on. Two
+  repositories both called =alpha= therefore get two sessions.
+- Names keep letters, digits, =-= and =_=; anything else becomes =-=, since
+  tmux reserves =.= and =:= in targets. Targets are always the exact form
+  ~=NAME:~. Without the leading ~=~ tmux prefix-matches (=alpha= would find
+  =alpha-2=), and =set-option= refuses ~=NAME~ without the trailing colon.
+- Creation and the claim run as one tmux command list, so a second launch
+  never sees an unclaimed session. If two launches race to create the same
+  session, the loser finds the winner's session and adds its window there.
+  If creation fails and nobody else created the session, the launch stops
+  with an error instead of trying another name; it never creates sessions
+  in a loop.
+- The dashboard itself stays where it is. Focusing a row still switches to
+  that worker's pane, in whichever session holds it.
 
 * Open the dashboard at startup
 
@@ -160,7 +196,11 @@ records without a native resume ID remain visible but cannot be resumed with =r=
 URLs, persistence, expiry, config validation and asynchronous metadata errors.
 =tests/test-tui-dashboard.c= drives the real binary in isolated tmux terminals,
 checking startup preference/overrides, dashboard navigation, draft preservation,
-link opening, active turns and window names. Existing approval, cancellation,
+link opening, active turns and window names. =/dashboard/project-sessions=
+launches workers for two repositories that share a name and asserts one
+session per project, a second window rather than a second session for the
+same project, the =@ai_project= claim, the project heading, and that no
+other sessions were created. Existing approval, cancellation,
 background-agent and terminal suites remain part of =make test=. Metadata tests
 use stub CLIs; no model service or live forge authentication is required.
 

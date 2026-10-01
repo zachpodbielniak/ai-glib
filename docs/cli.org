@@ -13,6 +13,7 @@ installed into =$(PREFIX)/bin= by =make install=.
 ai [OPTIONS] [PROMPT]
 echo "PROMPT" | ai [OPTIONS]
 ai loop|goal SUBCOMMAND ...     see "Loops and goals" below
+ai project [list|show] ...      see "Projects" below
 ai decide ...                   see "Typed decisions"
 #+end_example
 
@@ -139,6 +140,45 @@ Session 3f2a... (running)  /home/me/src/app
 =state= is always one of =active=, =paused=, =met=, =failed=,
 =stopped=, =expired=. Exit status is 0 on success, 1 when the edit was
 refused or nothing matched, 2 for a usage error.
+
+** Projects (=ai project=)
+
+Lists the projects ai-tui and ai-gui are working in, read from the same
+work registry their dashboards show, and grouped the same way: by
+repository, worktrees included. What a project is, how it is named and
+how the order is decided is in [[file:projects.org][Projects]].
+
+#+begin_example
+ai project [list] [--json] [--registry DIR]
+ai project show [NAME|PATH] [--json] [--registry DIR]
+#+end_example
+
+=list= (the default) puts the project that needs you most first:
+
+#+begin_example
+$ ai project
+beta                 INPUT        1 session, 1 needs you           /r/beta
+alpha                WORK         2 sessions, 1 working            /r/alpha
+notes                IDLE         1 session                        /home/me/notes
+#+end_example
+
+=show= takes a project name (case-insensitive), or any path inside a
+project, worktrees included; with neither it shows the project of the
+current directory. It lists that project's sessions, most urgent first,
+with each one's directory, branch, provider and model.
+
+A name that two projects share is refused with both roots listed; give a
+path instead. =--json= prints a schema-versioned document: =list= gives
+={"schema_version":1,"projects":[...]}= and =show= gives
+={"schema_version":1,"project":{...,"sessions":[...]}}=, each project with
+=id=, =name=, =root=, =status=, =session_count=, =live_count=,
+=busy_count= and =attention_count=. =--registry= reads another state
+directory; the default is =$XDG_STATE_HOME/ai-glib/sessions=.
+
+The command only reads; it never changes a session. Exit status is 0 on
+success (including an empty registry), 1 when no project matches or the
+registry cannot be read, 2 for a usage error. A prompt that is literally
+"project" still works as =ai -- project=.
 
 ** CLI Process Deadline
 CLI chat runs default to =process-timeout-ms=0= in =ai=: the wrapper does not terminate a turn after thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline, or explicitly use =--set process-timeout-ms=0= to disable it. This applies to synchronous and shared streaming subprocess runs; cancellation remains available. The library default remains 1800000 ms. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls.

@@ -30,4 +30,6 @@ gchar *ai_work_session_dup_link_manifest(AiWorkSession *self);
 void ai_work_session_read_context_async(AiWorkSession *self, GCancellable *cancellable,
 	GAsyncReadyCallback callback, gpointer user_data);
 gchar *ai_work_session_read_context_finish(AiWorkSession *self, GAsyncResult *result, GError **error);
+gint ai_work_session_status_priority(const gchar *status);
+gint ai_work_session_compare(AiWorkSession *a, AiWorkSession *b);
 G_END_DECLS

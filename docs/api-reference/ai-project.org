@@ -1,0 +1,63 @@
+#+title: AiProject
+
+=AiProject= is a final GObject for one project in the work registry: the
+sessions that share a =project= identity. It is read-only and built only
+by =ai_project_list()=; it is a snapshot, so list again to see changes.
+See [[file:../projects.org][Projects]] for the concept.
+
+* Properties
+
+All read-only.
+
+| Property | Type | Meaning |
+|----------+------+---------|
+| =id= | string | Canonical identity: the Git common directory, or the directory itself |
+| =name= | string | =ai_project_label_for_path(id)= |
+| =root= | string | Main checkout: the parent of a =.git= identity, else the identity |
+| =status= | string | Most urgent session status; =DISCONNECTED= when there are none |
+| =session-count= | uint | Every recorded session, disconnected ones included |
+| =live-count= | uint | Sessions not DISCONNECTED |
+| =busy-count= | uint | Sessions in WORK |
+| =attention-count= | uint | Sessions in INPUT or ERROR |
+
+Each has a getter, =ai_project_get_<property>()= with =-= as =_=. String
+getters return borrowed values.
+
+* Functions
+
+#+begin_src c
+GList      *ai_project_list          (const gchar *directory, GError **error);
+AiProject  *ai_project_find          (GList *projects, const gchar *query, GError **error);
+GPtrArray  *ai_project_dup_sessions  (AiProject *self);
+gchar      *ai_project_label_for_path(const gchar *project);
+gint        ai_project_compare_paths (const gchar *a, const gchar *b);
+#+end_src
+
+- =ai_project_list()= reads the registry at =directory= (usually
+  =ai_work_session_default_directory()=) and groups it. Returns
+  =(transfer full) (element-type AiProject)=, most urgent project first;
+  free with =g_list_free_full(list, g_object_unref)=. A registry that does
+  not exist is =NULL= with no error. A corrupt record is skipped, exactly
+  as =ai_work_session_list()= skips it. Directory errors propagate.
+- =ai_project_find()= resolves a name (case-insensitive) or a path inside
+  a project (deepest match wins, whole path components only, no disk
+  access). Returns =(transfer full)=, or =NULL= with =AI_ERROR_INVALID_REQUEST=
+  when nothing matches or when two projects share the name; that message
+  lists both roots.
+- =ai_project_dup_sessions()= returns =(transfer container)
+  (element-type AiWorkSession)= in =ai_work_session_compare()= order. The
+  array holds references; freeing it releases them.
+- =ai_project_label_for_path()= returns the display name for any
+  identity, never =NULL=: =/r/x/.git= and =/r/x/= are both =x=, =""= and
+  =NULL= are =Untitled=.
+- =ai_project_compare_paths()= orders identities by name
+  (case-insensitive), then by identity, so equal names stay stable.
+
+Related, on =AiWorkSession=: =ai_work_session_status_priority()= and
+=ai_work_session_compare()=. See [[file:ai-work-session.org][AiWorkSession]].
+
+* Threading
+
+Like =ai_work_session_list()=, listing reads files synchronously. It does
+no Git subprocess work, so it is cheap, but a front-end that refreshes
+often should still keep it off its drawing path.

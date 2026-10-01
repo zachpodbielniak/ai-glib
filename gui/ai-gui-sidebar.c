@@ -90,7 +90,7 @@ sidebar_order(
 	AiGuiSession *second = (AiGuiSession *)b;
 	gint order;
 
-	order = ai_gui_work_project_compare(
+	order = ai_project_compare_paths(
 		ai_gui_session_get_project(first),
 		ai_gui_session_get_project(second));
 
@@ -128,7 +128,7 @@ sidebar_section(
 	gconstpointer b,
 	gpointer      user_data
 ){
-	return ai_gui_work_project_compare(
+	return ai_project_compare_paths(
 		ai_gui_session_get_project((AiGuiSession *)a),
 		ai_gui_session_get_project((AiGuiSession *)b));
 }
@@ -526,7 +526,7 @@ on_header_bind(
 		return;
 
 	project = ai_gui_session_get_project(session);
-	label = ai_gui_work_project_label(project);
+	label = ai_project_label_for_path(project);
 
 	gtk_label_set_text(
 		GTK_LABEL(g_object_get_data(G_OBJECT(child), "ai-header-name")),
@@ -558,7 +558,7 @@ sidebar_filter_match(
 
 	{
 		const gchar *project = ai_gui_session_get_project(item);
-		g_autofree gchar *label = ai_gui_work_project_label(project);
+		g_autofree gchar *label = ai_project_label_for_path(project);
 
 		/* The project label and its path both, so "ai-glib" and
 		 * "~/source/projects/ai-glib" are each a way of narrowing the

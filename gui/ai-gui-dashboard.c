@@ -421,7 +421,7 @@ dashboard_build_header(const gchar *project)
 	GtkWidget *path;
 	/* Shared with the sidebar's own group headings: one project must not
 	 * appear under two names in one window. */
-	g_autofree gchar *base = ai_gui_work_project_label(project);
+	g_autofree gchar *base = ai_project_label_for_path(project);
 
 	gtk_widget_set_margin_start(box, 10);
 	gtk_widget_set_margin_end(box, 10);

@@ -1,0 +1,90 @@
+#+title: Projects
+
+A project is the repository, or the plain directory, that a piece of work
+happens in. ai-glib does not keep a list of projects. It works them out
+from the work registry that ai-tui and ai-gui write to (see
+[[file:dashboard.org][the dashboard]]): every =AiWorkSession= record has a
+=project= field, and the records that share one are a project. A project
+therefore exists exactly as long as something in the registry mentions it,
+and there is no second store to fall out of step.
+
+* Identity
+
+The identity is the canonical *Git common directory* of the checkout,
+e.g. =/home/z/src/ai-glib/.git=. Every linked worktree of a repository
+shares that directory, so =ai-glib= and =~/.worktrees/ai-glib-feature=
+are one project. Outside Git, the directory itself is the identity. A
+record written without a =project= field groups under its own
+=directory= instead of disappearing.
+
+* Name, root and order
+
+The same three answers appear in every front-end because they come from
+one place, =src/harness/ai-project.c=.
+
+- *Name*: =ai_project_label_for_path()=. The identity's own basename is
+  =.git=, so the name is the directory holding it: =/r/ai-glib/.git= is
+  =ai-glib=. Trailing separators are ignored, a path with no usable
+  basename is shown whole, and an empty identity is =Untitled=.
+- *Root*: the main checkout, i.e. the directory holding =.git=, or the
+  identity itself for a bare repository or plain directory.
+- *Order*: "what needs me next". Each session ranks by
+  =ai_work_session_status_priority()= (INPUT, ERROR, WORK, DONE, STOPPED,
+  IDLE, DISCONNECTED; anything unknown ranks last). A project ranks by
+  its most urgent session, then by name, case-insensitively, then by
+  identity so two projects with the same name never swap places.
+
+There used to be two copies of the name and two of the order, in ai-tui
+and ai-gui, and the names had drifted apart. Both now call the library.
+
+* Finding a project
+
+=ai_project_find()= resolves what a person typed:
+
+- Anything containing a =/=, and =.= or =..=, is a path. It matches the project whose
+  identity, root or any session directory contains it, the deepest match
+  winning, so a worktree nested in another project's checkout still
+  resolves to its own project. Matching is on whole path components:
+  =/r/alphabet= is not inside =/r/alpha=. The query is canonicalised
+  against the current directory first, so =.= and a symlinked checkout
+  match the stored path. The registry is not read again.
+- Anything else is a name, compared case-insensitively.
+- A name two projects share is an error that lists both roots. Picking
+  one would mean acting on the wrong repository half the time.
+
+* Where projects appear
+
+| Front-end | What it shows |
+|-----------+---------------|
+| =ai project= | Every project, most urgent first; =show= lists one project's sessions. See [[file:cli.org][the CLI]]. |
+| ai-tui session panel | =Project:= and =Branch:= under the model. See [[file:tui.org][ai-tui]]. |
+| ai-tui dashboard | A heading per project over its sessions; launching opens a window in the project's own tmux session. See [[file:dashboard.org][the dashboard]]. |
+| ai-gui | Sidebar and dashboard headings, and the project first in the window subtitle. See [[file:gui.org][ai-gui]]. |
+
+* Library
+
+See [[file:api-reference/ai-project.org][AiProject]] for the API.
+
+#+begin_src c
+g_autofree gchar *registry = ai_work_session_default_directory();
+g_autoptr(GError) error = NULL;
+g_autolist(AiProject) projects = ai_project_list(registry, &error);
+GList *l;
+
+for (l = projects; l != NULL; l = l->next)
+    g_print("%s  %s  %u need you\n",
+            ai_project_get_name(l->data),
+            ai_project_get_status(l->data),
+            ai_project_get_attention_count(l->data));
+#+end_src
+
+The same from Python, through GObject introspection:
+
+#+begin_src python
+import gi
+gi.require_version("AiGlib", "1.0")
+from gi.repository import AiGlib
+
+for project in AiGlib.Project.list(AiGlib.WorkSession.default_directory()):
+    print(project.props.name, project.props.status, project.props.session_count)
+#+end_src

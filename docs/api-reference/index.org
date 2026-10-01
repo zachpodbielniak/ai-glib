@@ -335,3 +335,4 @@ if (error != NULL)
 - Use =GTask= for thread-safe async patterns
 
 - [[file:ai-work-session.org][AiWorkSession — project/session metadata and linked work]]
+- [[file:ai-project.org][AiProject — the work registry grouped by project]]

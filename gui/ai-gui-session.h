@@ -98,6 +98,19 @@ ai_gui_session_get_working_directory(AiGuiSession *self);
 const gchar *
 ai_gui_session_get_project(AiGuiSession *self);
 
+/**
+ * ai_gui_session_dup_subtitle:
+ * @self: a session
+ *
+ * The window subtitle: the project, named by ai_project_label_for_path()
+ * so it matches the sidebar heading and `ai project`, then the provider
+ * and the model.
+ *
+ * Returns: (transfer full): e.g. "ai-glib · Claude Code · opus"
+ */
+gchar *
+ai_gui_session_dup_subtitle(AiGuiSession *self);
+
 gint64
 ai_gui_session_get_updated_at(AiGuiSession *self);
 

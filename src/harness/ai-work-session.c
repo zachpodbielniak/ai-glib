@@ -789,3 +789,51 @@ ai_work_session_get_link_relationship(AiWorkSession *self, const gchar *url)
 	g_return_val_if_fail(AI_IS_WORK_SESSION(self), NULL);
 	return g_hash_table_lookup(self->relationships, canonical);
 }
+
+/**
+ * ai_work_session_status_priority:
+ * @status: (nullable): a session's `status` field
+ *
+ * How urgently a session in @status needs a person, lowest first:
+ * INPUT, ERROR, WORK, DONE, STOPPED, IDLE, DISCONNECTED.
+ *
+ * This is the one answer to "what needs me next". Every dashboard and
+ * `ai project` sort by it, so two front-ends reading one registry cannot
+ * disagree about which row belongs at the top. An unknown or missing
+ * status ranks with DISCONNECTED rather than ahead of real work.
+ *
+ * Returns: 0 for the most urgent status, larger for less urgent ones
+ */
+gint
+ai_work_session_status_priority(const gchar *status)
+{
+	static const gchar *const states[] = {"INPUT", "ERROR", "WORK", "DONE", "STOPPED", "IDLE", "DISCONNECTED"};
+	guint i;
+	for (i = 0; status != NULL && i < G_N_ELEMENTS(states); i++)
+		if (g_str_equal(status, states[i])) return (gint)i;
+	return (gint)G_N_ELEMENTS(states) - 1;
+}
+
+/**
+ * ai_work_session_compare:
+ * @a: a session
+ * @b: another session
+ *
+ * Orders by ai_work_session_status_priority(), then by project, then by
+ * id. The id makes the order total, so two rows that tie on both other
+ * keys never swap places between refreshes.
+ *
+ * Returns: negative, zero or positive, as strcmp()
+ */
+gint
+ai_work_session_compare(AiWorkSession *a, AiWorkSession *b)
+{
+	gint order;
+	g_return_val_if_fail(AI_IS_WORK_SESSION(a), 0);
+	g_return_val_if_fail(AI_IS_WORK_SESSION(b), 0);
+	order = ai_work_session_status_priority(ai_work_session_get_field(a, "status"))
+		- ai_work_session_status_priority(ai_work_session_get_field(b, "status"));
+	if (order != 0) return order;
+	order = g_strcmp0(ai_work_session_get_field(a, "project"), ai_work_session_get_field(b, "project"));
+	return order != 0 ? order : g_strcmp0(a->id, b->id);
+}

@@ -119,6 +119,7 @@
 
 /* Harness layer - commands, skills and agents on disk */
 #include "harness/ai-work-session.h"
+#include "harness/ai-project.h"
 #include "harness/ai-resource.h"
 #include "harness/ai-resource-registry.h"
 #include "harness/ai-mention.h"

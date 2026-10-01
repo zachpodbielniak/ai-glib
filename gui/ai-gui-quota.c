@@ -62,7 +62,25 @@ quota_sync_button(AiGuiQuota *self)
 	 */
 	if (percent == NULL)
 	{
-		gtk_widget_set_visible(self->button, FALSE);
+		/*
+		 * A CLI provider whose report failed is different from one that
+		 * has none: the person can fix it, so the button stays with a
+		 * dash and the reason as its tooltip instead of disappearing.
+		 */
+		const gchar *reason = ai_quota_reason(&self->quota);
+
+		if (reason == NULL || !AI_IS_CLI_CLIENT(self->quota.provider))
+		{
+			gtk_widget_set_visible(self->button, FALSE);
+			return;
+		}
+
+		gtk_widget_set_visible(self->button, TRUE);
+		gtk_label_set_text(GTK_LABEL(self->label), "–");
+		gtk_widget_remove_css_class(self->button, "ai-quota-low");
+		gtk_widget_remove_css_class(self->button, "ai-quota-spent");
+		gtk_widget_add_css_class(self->button, "dim-label");
+		gtk_widget_set_tooltip_text(self->button, reason);
 		return;
 	}
 
@@ -102,7 +120,8 @@ quota_build_row(JsonObject *row)
 	GtkWidget *heading = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 	gdouble fraction = ai_quota_fraction(row);
 	g_autofree gchar *percent = ai_quota_format_percent(ai_quota_remaining(row));
-	const gchar *reset = ai_quota_row_reset(row);
+	g_autoptr(GDateTime) now = g_date_time_new_now_local();
+	g_autofree gchar *reset = ai_quota_format_reset(row, now);
 	GtkWidget *label;
 
 	label = gtk_label_new(ai_quota_row_label(row));
@@ -173,8 +192,10 @@ quota_rebuild(AiGuiQuota *self)
 
 	if (count == 0)
 	{
+		const gchar *reason = ai_quota_reason(&self->quota);
 		GtkWidget *label = gtk_label_new(self->quota.pending
 			? "Loading…"
+			: reason != NULL ? reason
 			: "No account report for this provider.");
 
 		gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
