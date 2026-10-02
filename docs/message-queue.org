@@ -31,7 +31,7 @@ the failed submission is not automatically retried.
 
 * Viewing and editing the queue
 
-Both frontends use =F6= or =/queue= to inspect pending submissions. Dispatch pauses
+Both frontends use =Alt+Q= or =/queue= to inspect pending submissions. Dispatch pauses
 while an editor is open, so completing a turn cannot shift the selected entry.
 The active turn continues. Attachments and FIFO order are preserved; nothing
 in the unsent composer is submitted by opening the queue.
@@ -40,7 +40,7 @@ in the unsent composer is submitted by opening the queue.
   composer (including multiline editing and =Ctrl+G= for your editor). Enter
   saves; Escape cancels that edit. =d= removes the selected entry. Escape from
   the list resumes sending. Your earlier draft and cursor are restored.
-- *GUI:* Use =F6= or =Queue (n)= in the header. Each message has a multiline
+- *GUI:* Use =Alt+Q= or =Queue (n)= in the header. Each message has a multiline
   editor and a removal checkbox. =Save and resume= validates the whole edit
   before changing the queue. =Cancel= resumes without applying edits.
 

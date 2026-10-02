@@ -477,7 +477,7 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/agents=           | Agents                                            |
 | =/reload=           | Rescan the search paths                           |
 | =/cwd [PATH]=       | Show directory; switch within a project or open another project |
-| =/queue=            | View, edit or remove queued messages (also =F6=) |
+| =/queue=            | View, edit or remove queued messages (also =Alt+Q=) |
 | =/todos=            | The current todo list                             |
 | =/running=          | Background agents, and what they are doing        |
 | =/kill ID\vert all=      | Stop a background agent, or every one             |
@@ -966,7 +966,7 @@ create a worker in the selected project's tmux session, even from startup.
 Recent projects stay openable after dead session rows are removed. See
 [[file:dashboard.org][Project dashboard]] for lifecycle and recovery details.
 
-=F6= opens all queued messages. Select with Up/Down; Enter edits the full
+=Alt+Q= opens all queued messages. Select with Up/Down; Enter edits the full
 text, =d= removes, Escape resumes sending. While editing, Enter saves and
 Escape cancels the edit. The active turn may finish, but pending messages stay
 put until you close the queue. Your unsent draft and its attachments survive.

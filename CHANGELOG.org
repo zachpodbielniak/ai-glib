@@ -10,7 +10,7 @@ release may change the API.
 - Project path entry in both dashboards; recent projects remain available after
   disconnected work records are removed. GUI quick-open reuses an already loaded
   conversation for the directory.
-- Queued-message editors in GUI and TUI (=F6=), with full text editing,
+- Queued-message editors in GUI and TUI (=Alt+Q=), with full text editing,
   removal, attachment preservation, and paused dispatch while editing.
 
 ** Fixed

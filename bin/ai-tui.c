@@ -326,6 +326,7 @@ attr_for_tag(AiStyleTag tag)
 #define KEY_PASTE_START (KEY_MAX + 2)
 #define KEY_PASTE_END (KEY_MAX + 3)
 #define KEY_CTRL_C (KEY_MAX + 4)
+#define KEY_ALT_Q (KEY_MAX + 5)
 
 /*
  * How long a first ^C stays armed, in milliseconds.
@@ -1562,11 +1563,11 @@ draw_input(App *app)
 		if (app->queue_edit)
 			label = g_strdup(" EDIT QUEUED MESSAGE · Enter save · Esc cancel ");
 		else if (busy && queued > 0)
-			label = g_strdup_printf(" QUEUED %u / F6 edit / waiting for turn ", queued);
+			label = g_strdup_printf(" QUEUED %u / Alt-Q edit / waiting for turn ", queued);
 		else if (busy)
 			label = g_strdup(" DRAFT / waiting for turn ");
 		else if (queued > 0)
-			label = g_strdup_printf(" QUEUED %u / F6 edit ", queued);
+			label = g_strdup_printf(" QUEUED %u / Alt-Q edit ", queued);
 		else if (awaiting)
 			label = g_strdup(" YOUR TURN ");
 		else
@@ -1703,7 +1704,7 @@ draw_chrome(App *app)
 		app->searching ? "RET next | <up> / S-RET previous | C-u clear | ESC close" :
 		app->candidates != NULL ? "TAB / arrows choose | RET accept | ESC dismiss | C-o help" :
 		COLS < 65 ? "RET send  ^\\ dashboard  C-c stop" :
-		COLS < 100 ? "RET send | F6 queue | ^\\ dashboard | C-f find | C-o help | C-p panel" :
+		COLS < 100 ? "RET send | Alt-Q queue | ^\\ dashboard | C-f find | C-o help | C-p panel" :
 		"RET send  ^\\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
@@ -4408,7 +4409,7 @@ drain_keys(App *app)
 		}
         if (app->queue_edit && kind == OK && ch == 27) { queue_edit_done(app, FALSE); continue; }
 		if (app->queue_view) { queue_key(app, ch); continue; }
-		if (kind == KEY_CODE_YES && ch == KEY_F(6) && !app->queue_edit && !app->clipboard_pending && app->project_input == NULL && app->approval_prompt == NULL) {
+		if (kind == KEY_CODE_YES && ch == KEY_ALT_Q && !app->queue_edit && !app->clipboard_pending && app->project_input == NULL && app->approval_prompt == NULL) {
 			completion_close(app);
 			app->queue_view = TRUE;
 			ai_prompt_queue_set_paused(app->send_queue, TRUE);
@@ -5715,7 +5716,7 @@ queue_key(App *app, gint ch)
 		app->queue_edit = TRUE;
 		ui_feedback(app, "Editing queued message: Enter saves, Esc cancels; attachments are preserved", AI_STYLE_STATUS);
 	}
-	else if (ch == 27 || ch == 'q' || ch == KEY_F(6)) {
+	else if (ch == 27 || ch == 'q' || ch == KEY_ALT_Q) {
 		app->queue_view = FALSE;
 		ai_prompt_queue_set_paused(app->send_queue, FALSE);
 		app_flush_send_queue(app);
@@ -7009,6 +7010,9 @@ main(int argc, char *argv[])
      * Alt+Enter needs none of this and works everywhere, which is why it
      * is the binding the documentation leads with.
      */
+    define_key("\033q", KEY_ALT_Q);
+	define_key("\033[113;3u", KEY_ALT_Q);
+	define_key("\033[27;3;113~", KEY_ALT_Q);
     define_key("\033[13;2u", KEY_SHIFT_ENTER);
     define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
 	/* gst's negotiated keyboard protocol and xterm modifyOtherKeys send

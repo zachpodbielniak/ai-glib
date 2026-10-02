@@ -1441,7 +1441,7 @@ typedef struct
 } AiGuiShortcut;
 
 static const AiGuiShortcut SHORTCUTS[] = {
-	{ "Conversation", "F6",           "View and edit queued messages" },
+	{ "Conversation", "Alt+Q",           "View and edit queued messages" },
 	{ "Conversation", "Enter",            "Send, or queue a follow-up while a turn runs" },
 	{ "Conversation", "Shift+Enter",      "New line" },
 	{ "Conversation", "Esc",              "Stop the turn in flight" },
@@ -1925,7 +1925,7 @@ window_build_content(AiGuiWindow *self)
 	 * provider has no account report to give.
 	 */
 	self->queue_button = gtk_button_new_with_label("Queue (0)");
-	gtk_widget_set_tooltip_text(self->queue_button, "View and edit queued messages (F6)");
+	gtk_widget_set_tooltip_text(self->queue_button, "View and edit queued messages (Alt+Q)");
 	gtk_actionable_set_action_name(GTK_ACTIONABLE(self->queue_button), "win.queue");
 	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->queue_button);
 
@@ -2193,8 +2193,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.export", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_g,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.agents", NULL);
-	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_F6,
-		0, "win.queue", NULL);
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_q,
+		GDK_ALT_MASK, "win.queue", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_l,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.loops", NULL);
 }

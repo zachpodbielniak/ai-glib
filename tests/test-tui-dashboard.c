@@ -558,7 +558,7 @@ test_queue_editor(void)
 	g_assert_true(wait_text("queue", "QUEUED 1"));
 	send("queue", "remove this queued message"); key("queue", "Enter");
 	g_assert_true(wait_text("queue", "QUEUED 2"));
-	send("queue", "unsent draft"); key("queue", "F6");
+	send("queue", "unsent draft"); key("queue", "M-q");
 	g_assert_true(wait_text("queue", "QUEUED MESSAGES"));
 	g_assert_true(wait_text("queue", "queued original"));
 	demonstrate("queue", "Full pending-message list while the active turn finishes");

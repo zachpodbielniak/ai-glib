@@ -5,6 +5,7 @@
 #include "ai-gui-dashboard.h"
 #include "ai-gui-util.h"
 #include "ai-gui.h"
+#include "ai-gui-composer.h"
 #include <glib/gstdio.h>
 #include <unistd.h>
 
@@ -221,6 +222,37 @@ test_window_projects(void)
 	drain();
 	rows = ai_work_session_list(registry, NULL);
 	g_assert_cmpuint(g_list_length(rows), ==, 2);
+	/* Exercise the composer's real key controller while a draft is present. */
+	{
+		g_autoptr(GPtrArray) composers = g_ptr_array_new();
+		g_autoptr(GPtrArray) views = g_ptr_array_new();
+		g_autofree gchar *draft = NULL;
+		guint i, j;
+		gboolean handled = FALSE;
+		AdwDialog *dialog;
+		collect(GTK_WIDGET(window), AI_GUI_TYPE_COMPOSER, composers);
+		g_assert_cmpuint(composers->len, ==, 1);
+		ai_gui_composer_set_text(g_ptr_array_index(composers, 0), "retain this draft");
+		collect(g_ptr_array_index(composers, 0), GTK_TYPE_TEXT_VIEW, views);
+		for (i = 0; i < views->len; i++) {
+			g_autoptr(GListModel) controllers = gtk_widget_observe_controllers(g_ptr_array_index(views, i));
+			for (j = 0; j < g_list_model_get_n_items(controllers); j++) {
+				g_autoptr(GtkEventController) controller = g_list_model_get_item(controllers, j);
+				gboolean accepted = FALSE;
+				if (!GTK_IS_EVENT_CONTROLLER_KEY(controller)) continue;
+				g_signal_emit_by_name(controller, "key-pressed", GDK_KEY_q, 0u, GDK_ALT_MASK, &accepted);
+				handled |= accepted;
+			}
+		}
+		g_assert_true(handled);
+		drain();
+		dialog = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(window));
+		g_assert_nonnull(dialog);
+		draft = ai_gui_composer_get_text(g_ptr_array_index(composers, 0));
+		g_assert_cmpstr(draft, ==, "retain this draft");
+		g_signal_emit_by_name(button_named(GTK_WIDGET(dialog), "Cancel"), "clicked");
+		drain();
+	}
 	ai_gui_window_show_dashboard(window, TRUE);
 	drain();
 	demonstrate(GTK_WIDGET(window), "gui-projects.png");

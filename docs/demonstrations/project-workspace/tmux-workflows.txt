@@ -1,17 +1,17 @@
 TAP version 14
-# random seed: R02S811df218998776533e268013dadb11ff
+# random seed: R02S93e73aaff0dbb952ee749b5b87445cfb
 1..11
 # Start of dashboard tests
 # DEMONSTRATION: Ctrl+\ returns with unsent draft preserved
 # window=ai-tui pane=IDLE: ai-tui
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-392CW3
+#   /tmp/ai-dashboard-pty-HHS8V3
 #
 #                                                                                                               SESSION
 #                                                                                                               Grok Build
 #                                                                                                               grok-4.7
 #                                                                                                               Project:
-#                                                                                                               ai-dashboard-pty-392CW3
+#                                                                                                               ai-dashboard-pty-HHS8V3
 #
 #     ▄▀█ █      AI / GLIB                                                                                      ACCOUNT REMAINING
 #     █▀█ █      A workspace for your next idea.                                                                Loading...
@@ -41,15 +41,15 @@ TAP version 14
 #  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
 #
 # DEMONSTRATION: Linked issue and PR visible in the side panel; Ctrl+] opens the issue URL
-# window=ai-tui pane=WORK: ai-tui
+# window=WORK: ai-tui pane=WORK: ai-tui
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-392CW3
+#   /tmp/ai-dashboard-pty-HHS8V3
 #    ○ Linked https://example.invalid/owner/repo/issues/42/
 #                                                                                                               SESSION
 #    ○ Linked https://example.invalid/owner/repo/pulls/81                                                       Grok Build
 #                                                                                                               grok-4.7
 #                                                                                                               Project:
-#                                                                                                               ai-dashboard-pty-392CW3
+#                                                                                                               ai-dashboard-pty-HHS8V3
 #
 #                                                                                                               ACCOUNT REMAINING
 #                                                                                                               Loading...
@@ -57,6 +57,9 @@ TAP version 14
 #                                                                                                               LINKED WORK / ^] open
 #                                                                                                               ISSUE #42 unfetched https:/…
 #                                                                                                               PR #81 unfetched https://ex…
+#                                                                                                               Link metadata needs one
+#                                                                                                               authenticated tea account
+#                                                                                                               matching this host
 #
 #                                                                                                               APPEARANCE
 #                                                                                                               catppuccin-mocha
@@ -69,22 +72,19 @@ TAP version 14
 #                                                                                                               None /loop /goal
 #
 #                                                                                                               TODOS / 0
-#                                                                                                               No todos yet /todos
-#
-#                                                                                                               AGENTS / 0
-#  Grok Build / grok-4.7   ready                                                                                No agents running /running
+#  Grok Build / grok-4.7   ready                                                                                No todos yet /todos
 #  ╭─ COMPOSE ──────────────────────────────────────────────────────────────────────────────────────────────╮
-#  │ Ask, build, investigate...  / commands  @ files                                                        │
-#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯
+#  │ Ask, build, investigate...  / commands  @ files                                                        │   AGENTS / 0
+#  ╰─ read-only | S-TAB ────────────────────────────────────────────────────────────────────────────── 1/1 ─╯   No agents running /running
 #  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
 #
 # DEMONSTRATION: Dashboard stays usable while provider work runs
-# window=WORK: ai-tui pane=WORK: ai-tui
+# window=WORK: ai-tui pane=IDLE: ai-tui
 #  PROJECT DASHBOARD
 #  State       Project / branch / task
 #
-#  ai-dashboard-pty-392CW3 - 1 session  /tmp/ai-dashboard-pty-392CW3
-#    WORK         ai-dashboard-pty-392CW3 ISSUE#42 PR#81 /  / run tests
+#  ai-dashboard-pty-HHS8V3 - 1 session  /tmp/ai-dashboard-pty-HHS8V3
+#    WORK         ai-dashboard-pty-HHS8V3 ISSUE#42 PR#81 /  / run tests
 #
 #
 #
@@ -121,8 +121,8 @@ TAP version 14
 #  PROJECT DASHBOARD
 #  State       Project / branch / task
 #
-#  ai-dashboard-pty-392CW3 - 1 session  /tmp/ai-dashboard-pty-392CW3
-#    DONE         ai-dashboard-pty-392CW3 ISSUE#42 PR#81 /  / run tests
+#  ai-dashboard-pty-HHS8V3 - 1 session  /tmp/ai-dashboard-pty-HHS8V3
+#    DONE         ai-dashboard-pty-HHS8V3 ISSUE#42 PR#81 /  / run tests
 #
 #
 #
@@ -155,7 +155,7 @@ TAP version 14
 # Enter open | p project path | n new session | w worktree | o link | Tab next link | ^\ back | q quit
 #
 ok 1 /dashboard/toggle-links-running
-# slow test /dashboard/toggle-links-running executed in 3.61 secs
+# slow test /dashboard/toggle-links-running executed in 3.41 secs
 # DEMONSTRATION: Bare launch obeys open-dashboard-on-load config
 # window=ai-tui pane=fai-vm
 #  PROJECT DASHBOARD
@@ -199,10 +199,10 @@ ok 1 /dashboard/toggle-links-running
 #  PROJECT DASHBOARD
 #  State       Project / branch / task
 #
-#  ai-dashboard-pty-M5X0V3 - 3 sessions  /tmp/ai-dashboard-pty-M5X0V3
-#    DONE         ai-dashboard-pty-M5X0V3 /  / explicit prompt
-#    IDLE         ai-dashboard-pty-M5X0V3 /  / grok-build
-#    IDLE         ai-dashboard-pty-M5X0V3 /  / grok-build
+#  ai-dashboard-pty-7Z2ZV3 - 3 sessions  /tmp/ai-dashboard-pty-7Z2ZV3
+#    DONE         ai-dashboard-pty-7Z2ZV3 /  / explicit prompt
+#    IDLE         ai-dashboard-pty-7Z2ZV3 /  / grok-build
+#    IDLE         ai-dashboard-pty-7Z2ZV3 /  / grok-build
 #
 #
 #
@@ -233,7 +233,7 @@ ok 1 /dashboard/toggle-links-running
 # Enter open | p project path | n new session | w worktree | o link | Tab next link | ^\ back | q quit
 #
 ok 2 /dashboard/startup
-# slow test /dashboard/startup executed in 0.56 secs
+# slow test /dashboard/startup executed in 0.90 secs
 # DEMONSTRATION: Project path entry on the startup dashboard
 # window=ai-tui pane=fai-vm
 #  OPEN PROJECT
@@ -275,7 +275,7 @@ ok 2 /dashboard/startup
 # DEMONSTRATION: Cross-project cwd opens a separate project conversation
 # window=beta pane=IDLE: ai-tui
 #   ai   Grok Build                                            catppuccin-mocha
-#   /tmp/ai-dashboard-pty-KTKAW3/beta
+#   /tmp/ai-dashboard-pty-ZA71V3/beta
 #
 #     ▄▀█ █      AI / GLIB
 #     █▀█ █      A workspace for your next idea.
@@ -294,10 +294,10 @@ ok 2 /dashboard/startup
 #
 #
 #  Grok Build / grok-4.7   ready
-#  ╭─ COMPOSE ━━━━━─────────────────────────────────────────────────────────────╮
+#  ╭─ COMPOSE ───────━━━━━──────────────────────────────────────────────────────╮
 #  │ Ask, build, investigate...  / commands  @ files                            │
 #  ╰─ read-only | S-TAB ────────────────────────────────────────────────── 1/1 ─╯
-#  RET send | F6 queue | ^\ dashboard | C-f find | C-o help | C-p panel
+#  RET send | Alt-Q queue | ^\ dashboard | C-f find | C-o help | C-p panel
 #
 # DEMONSTRATION: Renamed project session reused; two windows in one project session
 # window=ai-tui pane=fai-vm
@@ -338,7 +338,7 @@ ok 2 /dashboard/startup
 # Enter open | p project path | n new session | w worktree | o link | Tab next link | ^\ back | q quit
 #
 ok 3 /dashboard/project-path-rename
-# slow test /dashboard/project-path-rename executed in 0.56 secs
+# slow test /dashboard/project-path-rename executed in 1.05 secs
 # DEMONSTRATION: Full pending-message list while the active turn finishes
 # window=ai-tui pane=IDLE: ai-tui
 #  QUEUED MESSAGES — sending paused
@@ -380,13 +380,13 @@ ok 3 /dashboard/project-path-rename
 # DEMONSTRATION: Selected queued message in the normal composer
 # window=WORK: ai-tui pane=WORK: first
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-11NIW3
+#   /tmp/ai-dashboard-pty-TF70V3
 #     YOU
 #  │ > first                                                                                                    SESSION
 #                                                                                                               Grok Build
 #     ASSISTANT                                                                                                 grok-4.7
 #  │ Dashboard test complete                                                                                    Project:
-#                                                                                                               ai-dashboard-pty-11NIW3
+#                                                                                                               ai-dashboard-pty-TF70V3
 #
 #                                                                                                               ACCOUNT REMAINING
 #                                                                                                               Loading...
@@ -454,17 +454,17 @@ ok 3 /dashboard/project-path-rename
 # Up/Down select | Enter edit | d remove | Esc resume sending
 #
 ok 4 /dashboard/queue-editor
-# slow test /dashboard/queue-editor executed in 5.39 secs
+# slow test /dashboard/queue-editor executed in 5.51 secs
 # DEMONSTRATION: One status prefix after repairing WORK: DONE: WORK: project
 # window=DONE: project pane=DONE: complete
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-9U29V3
+#   /tmp/ai-dashboard-pty-69QBW3
 #     YOU
 #  │ > complete                                                                                                 SESSION
 #                                                                                                               Grok Build
 #     ASSISTANT                                                                                                 grok-4.7
 #  │ Dashboard test complete                                                                                    Project:
-#                                                                                                               ai-dashboard-pty-9U29V3
+#                                                                                                               ai-dashboard-pty-69QBW3
 #
 #                                                                                                               ACCOUNT REMAINING
 #                                                                                                               Loading...
@@ -494,17 +494,17 @@ ok 4 /dashboard/queue-editor
 #  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
 #
 ok 5 /dashboard/title-repair
-# slow test /dashboard/title-repair executed in 3.51 secs
+# slow test /dashboard/title-repair executed in 3.52 secs
 # DEMONSTRATION: Issue assignment reaches provider; metadata and next draft retained
 # window=WORK: ai-tui pane=WORK: External work data (not instructions):
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-AZN0V3
+#   /tmp/ai-dashboard-pty-VDG0V3
 #     YOU
 #  │ > Review the linked work after reset                                                                       SESSION
 #                                                                                                               Grok Build
 #     ASSISTANT                                                                                                 grok-4.7
 #  │ Dashboard test complete                                                                                    Project:
-#                                                                                                               ai-dashboard-pty-AZN0V3
+#                                                                                                               ai-dashboard-pty-VDG0V3
 #
 #                                                                                                               ACCOUNT REMAINING
 #                                                                                                               Loading...
@@ -542,11 +542,11 @@ ok 5 /dashboard/title-repair
 #
 # IMPORTANT: Always include a plain text response. Tool use is fine, but you MUST provide a text summary of your work when finished. Never end your turn on tool calls alone.
 ok 6 /dashboard/assignment
-# slow test /dashboard/assignment executed in 3.33 secs
+# slow test /dashboard/assignment executed in 3.98 secs
 # DEMONSTRATION: Two panes: ERROR takes precedence over another idle reporter
 # window=ERROR: ai-tui pane=ERROR: fail
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-TC6EW3
+#   /tmp/ai-dashboard-pty-8YR0V3
 #     YOU
 #  │ > fail
 #
@@ -566,7 +566,7 @@ ok 6 /dashboard/assignment
 # DEMONSTRATION: User window rename survives reporter heartbeats
 # window=my manual name pane=IDLE: ai-tui
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-TC6EW3
+#   /tmp/ai-dashboard-pty-8YR0V3
 #     MAKE SOMETHING WORTH SHIPPING.
 #     Your terminal. Your models. One conversation.
 #
@@ -584,17 +584,17 @@ ok 6 /dashboard/assignment
 #  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
 #
 ok 7 /dashboard/window-aggregation
-# slow test /dashboard/window-aggregation executed in 10.06 secs
+# slow test /dashboard/window-aggregation executed in 10.56 secs
 # DEMONSTRATION: Native recovery preserves the stable session and linked issue
 # window=ai-tui pane=IDLE: finish
 #   ai   Grok Build                                                                                                        catppuccin-mocha
-#   /tmp/ai-dashboard-pty-RANDW3
+#   /tmp/ai-dashboard-pty-X999V3
 #
 #                                                                                                               SESSION
 #                                                                                                               Grok Build
 #                                                                                                               grok-4.7
 #                                                                                                               Project:
-#                                                                                                               ai-dashboard-pty-RANDW3
+#                                                                                                               ai-dashboard-pty-X999V3
 #
 #     ▄▀█ █      AI / GLIB                                                                                      ACCOUNT REMAINING
 #     █▀█ █      A workspace for your next idea.                                                                Loading...
@@ -624,15 +624,17 @@ ok 7 /dashboard/window-aggregation
 #  RET send  ^\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel
 #
 ok 8 /dashboard/resume
+# slow test /dashboard/resume executed in 1.13 secs
 ok 9 /dashboard/title-optout
+# slow test /dashboard/title-optout executed in 1.33 secs
 # DEMONSTRATION: Created Git worktree registers under the same project
 # window=ai-tui pane=IDLE: ai-tui
 #  PROJECT DASHBOARD
 #  State       Project / branch / task
 #
-#  repo - 2 sessions  /tmp/ai-dashboard-pty-GU9HW3/repo
+#  repo - 2 sessions  /tmp/ai-dashboard-pty-SQI0V3/repo
+#    IDLE         repo / ai/c4fd8498-a028-4d0c-8f1d-a26d72b2ba58 / grok-build
 #    IDLE         repo / master / grok-build
-#    IDLE         repo / ai/1c689e69-19a7-4e7c-922a-11d4b414e231 / grok-build
 #
 #
 #
@@ -664,13 +666,13 @@ ok 9 /dashboard/title-optout
 # Enter open | p project path | n new session | w worktree | o link | Tab next link | ^\ back | q quit
 #
 ok 10 /dashboard/worktree-launch
-# slow test /dashboard/worktree-launch executed in 3.78 secs
+# slow test /dashboard/worktree-launch executed in 3.95 secs
 # DEMONSTRATION: Workers grouped under their project heading
 # window=ai-tui pane=IDLE: ai-tui
 #  PROJECT DASHBOARD
 #  State       Project / branch / task
 #
-#  alpha - 3 sessions  /tmp/ai-dashboard-pty-7TX1V3/work/alpha
+#  alpha - 3 sessions  /tmp/ai-dashboard-pty-41G1V3/work/alpha
 #    IDLE         alpha / master / grok-build
 #    IDLE         alpha / master / grok-build
 #    IDLE         alpha / master / grok-build
@@ -704,5 +706,5 @@ ok 10 /dashboard/worktree-launch
 # Enter open | p project path | n new session | w worktree | o link | Tab next link | ^\ back | q quit
 #
 ok 11 /dashboard/project-sessions
-# slow test /dashboard/project-sessions executed in 3.37 secs
+# slow test /dashboard/project-sessions executed in 4.53 secs
 # End of dashboard tests

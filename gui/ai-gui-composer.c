@@ -870,7 +870,7 @@ on_key_pressed(
 	 * unconditionally would swallow every ordinary paste while the read
 	 * was in flight.
 	 */
-	if (keyval == GDK_KEY_F6) {
+	if (keyval == GDK_KEY_q && (state & GDK_ALT_MASK) && !control && !shift) {
 		gtk_widget_activate_action(GTK_WIDGET(self), "win.queue", NULL); return TRUE;
 	}
 	if (control && !shift && keyval == GDK_KEY_v)
