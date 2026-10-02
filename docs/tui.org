@@ -953,3 +953,16 @@ leak and lifetime coverage, build the two first test binaries with
 ** Typed decisions
 See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
 including question syntax, request files, cancellation and server configuration.
+
+* Project and queue controls
+
+The project dashboard (=Ctrl+backslash=) offers =p= to open a path and =n= to
+create a worker in the selected project's tmux session, even from startup.
+Recent projects stay openable after dead session rows are removed. See
+[[file:dashboard.org][Project dashboard]] for lifecycle and recovery details.
+
+=F6= opens all queued messages. Select with Up/Down; Enter edits the full
+text, =d= removes, Escape resumes sending. While editing, Enter saves and
+Escape cancels the edit. The active turn may finish, but pending messages stay
+put until you close the queue. Your unsent draft and its attachments survive.
+See [[file:message-queue.org][Queued follow-ups and side questions]].

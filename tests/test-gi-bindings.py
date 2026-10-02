@@ -373,6 +373,18 @@ def main():
     except Exception:
         pass
 
+    queue.props.paused = True
+    assert queue.get_paused() is True
+    held = queue.pop()
+    assert held[0] is None if isinstance(held, tuple) else held is None
+    assert queue.replace(0, "edited", True)
+    entry = queue.get(0)
+    assert (entry[0] if isinstance(entry, tuple) else entry) == "edited"
+    assert queue.remove(0) is True
+    assert queue.remove(0) is False
+    queue.set_paused(False)
+    assert queue.props.paused is False
+
     other = AiGlib.GrokBuildClient.new()
     side = conversation.fork(other)
     assert side is not None

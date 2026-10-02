@@ -870,6 +870,9 @@ on_key_pressed(
 	 * unconditionally would swallow every ordinary paste while the read
 	 * was in flight.
 	 */
+	if (keyval == GDK_KEY_F6) {
+		gtk_widget_activate_action(GTK_WIDGET(self), "win.queue", NULL); return TRUE;
+	}
 	if (control && !shift && keyval == GDK_KEY_v)
 	{
 		GdkClipboard *clipboard = gtk_widget_get_clipboard(GTK_WIDGET(self));

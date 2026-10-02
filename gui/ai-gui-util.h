@@ -63,6 +63,9 @@ typedef struct
 AiGuiOptions *
 ai_gui_options_copy(const AiGuiOptions *self);
 
+/* Copy defaults for a fresh conversation, excluding native resume identity. */
+AiGuiOptions *ai_gui_options_new_conversation(const AiGuiOptions *self);
+
 void
 ai_gui_options_free(AiGuiOptions *self);
 

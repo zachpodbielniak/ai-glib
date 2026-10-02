@@ -173,10 +173,11 @@ why it is a fallback rather than a blank.
 
 The resolved answer is saved with the session, so a reopened window
 groups correctly on the first frame instead of after one pair of
-subprocesses per restored row. A =/cwd= re-runs the registration: the row
-moves to the new directory immediately and to the new *project* when git
-answers, and the dashboard record moves with it rather than a second
-identity appearing beside it.
+subprocesses per restored row. Opening another directory selects or creates a
+conversation there; the previous project's history, draft and queued work stay
+with its conversation. New conversations inherit provider preferences but clear
+native resume/continue/fork flags, preventing accidental reuse of another
+conversation's provider session.
 
 ** Attachments
 
@@ -457,20 +458,20 @@ so this window lists terminal sessions as well as its own — and can put
 one in front of you. See [[file:dashboard.org][the dashboard]] for what a record contains and
 how it expires.
 
-Rows are ordered by attention: INPUT, ERROR, WORK, DONE, STOPPED, IDLE,
-then DISCONNECTED, and grouped under the project they belong to. That
-ordering is reimplemented here to the letter rather than approximated,
-because two dashboards reading one registry must not disagree about
-which row is first. There is no percentage: a finished model turn does
+Projects are ordered by their most urgent conversation; each project appears
+once with its conversations ordered INPUT, ERROR, WORK, DONE, STOPPED, IDLE.
+Both dashboards use the same library projection. Disconnected records are
+removed safely and leave a recent project that can be opened again. There is no percentage: a finished model turn does
 not prove an issue is resolved.
 
 | Action | What it does |
 |--------+--------------|
 | Open | This window's own session: switch to it. Anything else: focus its tmux pane |
 | Worktree | Branch =ai/<uuid>= into an adjacent =.ai-worktrees/= checkout and open a session there |
-| Resume | Start a session on a disconnected record's native provider session, adopting the record |
+| Project header | Open that project, reusing a loaded conversation for its directory |
 | Link | Open a linked issue or PR with =xdg-open= |
-| Open project… | Start a conversation in another directory |
+| Open project… | Choose a directory and load its project context |
+| Path entry | Type a directory (including =~/path=) and press Enter to open it |
 
 Four things are deliberate:
 
@@ -583,8 +584,9 @@ output somebody has to ask for twice.
 
 =/project <directory>= opens that folder as a project here, the way the
 built-in opens a tmux window in ai-tui; with no argument it opens the
-dashboard. =/cwd <directory>= moves the session you are in, and its row
-moves to the matching group.
+dashboard. =/cwd <directory>= also selects or opens a conversation for that
+directory, preserving the original conversation. Reopening the same directory
+reuses its loaded conversation.
 
 =/update status= prints the version and whether a newer ai-glib is
 available; =/update= builds and installs it (see *Updates* below).
@@ -620,3 +622,16 @@ session, starts the newly installed ai-gui, and closes this one. Closing the
 window instead cancels a run in progress and waits for its build to stop.
 The About box shows the build's provenance. See
 [[file:updating.org][Versions and self-update]].
+
+** Editing queued messages
+
+=/queue=, =F6=, the header's =Queue (n)= button, or the =Queued messages…= menu
+opens every pending submission in an editor. Sending pauses while the dialog
+is open; the active turn continues. Edit full multiline text, or check
+=Remove this message=. =Save and resume= validates all edits before applying
+any and resumes dispatch. =Cancel= discards edits and resumes the unchanged
+queue. Attachments stay with their message. The composer draft is untouched.
+See [[file:message-queue.org][Queued follow-ups]] for the shared queue contract.
+
+See [[file:demonstrations/project-workspace.org][the project and queue demonstrations]] for real
+GUI screenshots, terminal captures and reproducible integration checks.

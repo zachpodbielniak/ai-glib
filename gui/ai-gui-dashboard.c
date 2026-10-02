@@ -12,6 +12,7 @@
 #include "ai-gui-dashboard.h"
 #include "ai-gui-style.h"
 #include "ai-gui-work.h"
+#include "harness/ai-project-rows.h"
 
 /* Slower than a conversation redraw on purpose: these are files on disk,
  * and the registry's own heartbeat is three seconds. */
@@ -31,6 +32,7 @@ struct _AiGuiDashboard
 	GPtrArray         *rows;
 	gchar             *registry;
 	gchar             *selected_id;
+	gchar             *projection;
 	GSource           *tick;
 	GCancellable      *cancellable;
 	gboolean           polling;
@@ -114,7 +116,7 @@ dashboard_local_session(
 
 		if (theirs != NULL &&
 		    g_strcmp0(ai_work_session_get_id(theirs),
-		              ai_work_session_get_id(work)) == 0)
+		              ai_project_row_key(work)) == 0)
 		{
 			return session;
 		}
@@ -160,6 +162,9 @@ dashboard_activate(
 
 	dashboard_notify(self, NULL);
 
+	if (g_object_get_data(G_OBJECT(work), "ai-project-placeholder") != NULL) {
+		g_signal_emit(self, signals[SIGNAL_PROJECT], 0, row_field(work, "directory")); return;
+	}
 	if (local != NULL)
 	{
 		g_signal_emit(self, signals[SIGNAL_ACTIVATED], 0, local);
@@ -376,7 +381,8 @@ dashboard_build_row(
 		gtk_widget_set_tooltip_text(open, mine
 			? "Switch to this conversation"
 			: "Focus this session's tmux pane");
-		gtk_widget_set_sensitive(open, mine || ai_gui_work_is_live(work));
+		gtk_widget_set_sensitive(open, mine || ai_gui_work_is_live(work) ||
+			g_object_get_data(G_OBJECT(work), "ai-project-placeholder") != NULL);
 		g_object_set_data_full(G_OBJECT(open), "ai-work",
 		                       g_object_ref(work), g_object_unref);
 		g_signal_connect(open, "clicked", G_CALLBACK(on_open_clicked), self);
@@ -400,6 +406,7 @@ dashboard_build_row(
 		g_signal_connect(resume, "clicked", G_CALLBACK(on_resume_clicked),
 		                 self);
 
+		gtk_widget_set_visible(resume, ai_gui_work_can_resume(work));
 		gtk_box_append(GTK_BOX(outer), resume);
 		gtk_box_append(GTK_BOX(outer), worktree);
 		gtk_box_append(GTK_BOX(outer), open);
@@ -412,8 +419,14 @@ dashboard_build_row(
 	return row;
 }
 
+static void
+on_project_button(GtkButton *button, gpointer data)
+{
+	g_signal_emit(data, signals[SIGNAL_PROJECT], 0, g_object_get_data(G_OBJECT(button), "ai-project-path"));
+}
+
 static GtkWidget *
-dashboard_build_header(const gchar *project)
+dashboard_build_header(AiGuiDashboard *self, const gchar *project)
 {
 	GtkWidget *row = gtk_list_box_row_new();
 	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -433,13 +446,24 @@ dashboard_build_header(const gchar *project)
 	gtk_widget_add_css_class(name, "heading");
 	gtk_box_append(GTK_BOX(box), name);
 
-	path = gtk_label_new(project);
+	{
+		g_autofree gchar *root = g_str_has_suffix(project, "/.git") ? g_path_get_dirname(project) : g_strdup(project);
+		path = gtk_label_new(root);
+	}
 	gtk_label_set_xalign(GTK_LABEL(path), 0.0f);
 	gtk_label_set_ellipsize(GTK_LABEL(path), PANGO_ELLIPSIZE_MIDDLE);
 	gtk_widget_add_css_class(path, "dim-label");
 	gtk_widget_add_css_class(path, "ai-session-subtitle");
 	gtk_box_append(GTK_BOX(box), path);
 
+	{
+		g_autofree gchar *root = g_str_has_suffix(project, "/.git") ? g_path_get_dirname(project) : g_strdup(project);
+		GtkWidget *open = gtk_button_new_with_label("Open project");
+		gtk_widget_set_halign(open, GTK_ALIGN_START);
+		g_object_set_data_full(G_OBJECT(open), "ai-project-path", g_strdup(root), g_free);
+		g_signal_connect(open, "clicked", G_CALLBACK(on_project_button), self);
+		gtk_box_append(GTK_BOX(box), open);
+	}
 	gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
 	gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
 	gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -452,6 +476,7 @@ dashboard_rebuild(AiGuiDashboard *self)
 {
 	GtkWidget *child;
 	const gchar *project = NULL;
+	g_autofree gchar *selected = g_strdup(self->selected_id);
 	guint i;
 
 	while ((child = gtk_widget_get_first_child(self->list)) != NULL)
@@ -468,27 +493,51 @@ dashboard_rebuild(AiGuiDashboard *self)
 		AiWorkSession *work = g_ptr_array_index(self->rows, i);
 		GtkWidget *row;
 
-		/*
-		 * A header whenever the project changes. The list is already
-		 * sorted by attention first, so a project can appear more than
-		 * once -- which is right: "what needs me" outranks "what is it
-		 * part of", and repeating the heading is how the grouping stays
-		 * readable without reordering the rows.
-		 */
+		/* The shared project projection keeps every project's rows together,
+		 * ordered by that project's most urgent conversation. */
 		if (g_strcmp0(project, row_field(work, "project")) != 0)
 		{
 			project = row_field(work, "project");
 			gtk_list_box_append(GTK_LIST_BOX(self->list),
-			                    dashboard_build_header(project));
+			                    dashboard_build_header(self, project));
 		}
 
 		row = dashboard_build_row(self, work);
 		gtk_list_box_append(GTK_LIST_BOX(self->list), row);
 
-		if (g_strcmp0(self->selected_id, ai_work_session_get_id(work)) == 0)
+		if (g_strcmp0(selected, ai_project_row_key(work)) == 0)
 			gtk_list_box_select_row(GTK_LIST_BOX(self->list),
 			                        GTK_LIST_BOX_ROW(row));
 	}
+}
+
+/* Do not replace focused buttons/rows on every heartbeat. Only a visible
+ * change rebuilds the list; identity, links and schedule summaries count. */
+static gchar *
+dashboard_projection(GPtrArray *rows)
+{
+	g_autoptr(GString) result = g_string_new("");
+	const gchar *fields[] = {"project", "directory", "branch", "title", "provider", "model",
+		"provider-session", "socket", "pane", "activity", "status", "loop-owner", NULL};
+	guint i, j;
+	for (i = 0; i < rows->len; i++) {
+		AiWorkSession *row = g_ptr_array_index(rows, i);
+		g_auto(GStrv) links = ai_work_session_dup_links(row);
+		const gchar *owner = row_field(row, "loop-owner");
+		g_autofree gchar *loops = *owner ? ai_loop_store_dup_summary(NULL, owner, g_get_real_time()) : NULL;
+		g_string_append_printf(result, "%s\n", ai_project_row_key(row));
+		for (j = 0; fields[j] != NULL; j++) {
+			const gchar *value = row_field(row, fields[j]);
+			g_string_append_printf(result, "%zu:%s", strlen(value), value);
+		}
+		for (j = 0; links[j] != NULL; j++) {
+			const gchar *title = ai_work_session_get_link_title(row, links[j]);
+			const gchar *state = ai_work_session_get_link_state(row, links[j]);
+			g_string_append_printf(result, "\n%s\n%s\n%s", links[j], title != NULL ? title : "", state != NULL ? state : "");
+		}
+		g_string_append_printf(result, "\n%s\n", loops != NULL ? loops : "");
+	}
+	return g_string_free(g_steal_pointer(&result), FALSE);
 }
 
 void
@@ -496,6 +545,7 @@ ai_gui_dashboard_refresh(AiGuiDashboard *self)
 {
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GPtrArray) rows = NULL;
+	g_autofree gchar *projection = NULL;
 
 	g_return_if_fail(AI_GUI_IS_DASHBOARD(self));
 
@@ -508,6 +558,10 @@ ai_gui_dashboard_refresh(AiGuiDashboard *self)
 		return;
 	}
 
+	projection = dashboard_projection(rows);
+	if (g_strcmp0(self->projection, projection) == 0) return;
+	g_free(self->projection);
+	self->projection = g_steal_pointer(&projection);
 	g_clear_pointer(&self->rows, g_ptr_array_unref);
 	self->rows = g_steal_pointer(&rows);
 	dashboard_rebuild(self);
@@ -605,7 +659,7 @@ on_row_selected(
 	g_clear_pointer(&self->selected_id, g_free);
 
 	if (work != NULL)
-		self->selected_id = g_strdup(ai_work_session_get_id(work));
+		self->selected_id = g_strdup(ai_project_row_key(work));
 }
 
 static void
@@ -651,6 +705,19 @@ on_open_project(
 	gtk_file_dialog_select_folder(dialog,
 		GTK_IS_WINDOW(root) ? GTK_WINDOW(root) : NULL, NULL,
 		on_project_chosen, g_object_ref(self));
+}
+
+static void
+on_path_activate(GtkEntry *entry, gpointer data)
+{
+	AiGuiDashboard *self = data;
+	const gchar *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+	g_autofree gchar *path = g_str_has_prefix(text, "~/")
+		? g_build_filename(g_get_home_dir(), text + 2, NULL) : g_canonicalize_filename(text, NULL);
+	if (!*text || !g_file_test(path, G_FILE_TEST_IS_DIR)) {
+		dashboard_notify(self, "Choose an existing project directory."); return;
+	}
+	g_signal_emit(self, signals[SIGNAL_PROJECT], 0, path);
 }
 
 static void
@@ -702,6 +769,7 @@ ai_gui_dashboard_finalize(GObject *object)
 	g_clear_pointer(&self->rows, g_ptr_array_unref);
 	g_free(self->registry);
 	g_free(self->selected_id);
+	g_free(self->projection);
 
 	G_OBJECT_CLASS(ai_gui_dashboard_parent_class)->finalize(object);
 }
@@ -782,7 +850,7 @@ ai_gui_dashboard_init(AiGuiDashboard *self)
 	gtk_widget_set_margin_bottom(toolbar, 8);
 
 	{
-		GtkWidget *heading = gtk_label_new("Sessions on this machine");
+		GtkWidget *heading = gtk_label_new("Projects");
 
 		gtk_widget_add_css_class(heading, "title-4");
 		gtk_label_set_xalign(GTK_LABEL(heading), 0.0f);
@@ -816,6 +884,14 @@ ai_gui_dashboard_init(AiGuiDashboard *self)
 	}
 
 	gtk_box_append(GTK_BOX(self->box), toolbar);
+	{
+		GtkWidget *entry = gtk_entry_new();
+		gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "Open project by path — type a directory and press Enter");
+		gtk_widget_set_margin_start(entry, 12);
+		gtk_widget_set_margin_end(entry, 12);
+		g_signal_connect(entry, "activate", G_CALLBACK(on_path_activate), self);
+		gtk_box_append(GTK_BOX(self->box), entry);
+	}
 
 	self->notice = adw_banner_new("");
 	gtk_widget_set_visible(self->notice, FALSE);

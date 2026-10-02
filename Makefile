@@ -495,6 +495,13 @@ $(OUTDIR)/tests/test-ai-gui-update: $(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai
 		$(TESTDIR)/test-ai-gui-update.c $(GUIDIR)/ai-gui-update.c -o $@ \
 		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
 
+ifeq ($(HAVE_GTK),1)
+$(OUTDIR)/tests/test-ai-gui-workspace-ui: $(TESTDIR)/test-ai-gui-workspace-ui.c $(filter-out $(OBJDIR)/gui/main.o,$(GUI_OBJECTS)) $(GUI_HEADERS) $(LIB_SHARED) | $(OUTDIR)/tests
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) -DAI_TEST_GTK $(DEPFLAGS) -MF $@.d -I$(SRCDIR) -I$(GUIDIR) \
+		$(TESTDIR)/test-ai-gui-workspace-ui.c $(filter-out $(OBJDIR)/gui/main.o,$(GUI_OBJECTS)) -o $@ \
+		-L$(OUTDIR) -l$(PROJECT_NAME)-1.0 $(GTK_LIBS) $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/..'
+endif
+
 $(OUTDIR)/tests/test-openai-compatible: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-antigravity-image: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)

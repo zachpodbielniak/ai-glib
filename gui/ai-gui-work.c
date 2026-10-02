@@ -16,6 +16,7 @@
 #include "core/ai-subprocess-util.h"
 
 #include "ai-gui-work.h"
+#include "harness/ai-project-rows.h"
 
 /* Every subprocess here is a local git or tmux call that should answer
  * immediately. The bound is what stops a wedged one from pinning a
@@ -54,31 +55,7 @@ ai_gui_work_list(
 	const gchar  *directory,
 	GError      **error
 ){
-	g_autofree gchar *fallback = NULL;
-	g_autoptr(GPtrArray) rows = NULL;
-	GList *list;
-	GList *iter;
-
-	if (directory == NULL)
-	{
-		fallback = ai_work_session_default_directory();
-		directory = fallback;
-	}
-
-	list = ai_work_session_list(directory, error);
-
-	if (list == NULL && error != NULL && *error != NULL)
-		return NULL;
-
-	rows = g_ptr_array_new_with_free_func(g_object_unref);
-
-	for (iter = list; iter != NULL; iter = iter->next)
-		g_ptr_array_add(rows, iter->data);
-
-	g_list_free(list);
-	g_ptr_array_sort(rows, ai_gui_work_compare);
-
-	return g_steal_pointer(&rows);
+	return ai_project_rows(directory, error);
 }
 
 gboolean
@@ -86,7 +63,8 @@ ai_gui_work_is_live(AiWorkSession *session)
 {
 	g_return_val_if_fail(AI_IS_WORK_SESSION(session), FALSE);
 
-	return !g_str_equal(work_field(session, "status"), "DISCONNECTED");
+	return !g_str_equal(work_field(session, "status"), "DISCONNECTED") &&
+	       !g_str_equal(work_field(session, "status"), "PROJECT");
 }
 
 gboolean

@@ -2,6 +2,9 @@
 #include "ai-glib.h"
 #include <glib/gstdio.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 static void
 remove_tree(const gchar *path)
@@ -259,6 +262,15 @@ test_project_identity(void)
 	const gchar *worktree[] = {"worktree", "add", "-b", "task", tree, NULL};
 	run_git(dir, init); run_git(repo, commit); run_git(repo, worktree);
 	first = ai_work_session_new(repo); second = ai_work_session_new(tree);
+	{
+		g_autofree gchar *alias = g_build_filename(dir, "alias", NULL);
+		g_autoptr(AiWorkSession) linked = NULL;
+		g_assert_cmpint(symlink(repo, alias), ==, 0);
+		linked = ai_work_session_new(alias);
+		g_assert_cmpstr(ai_work_session_get_field(linked, "project"), ==, ai_work_session_get_field(first, "project"));
+		g_assert_cmpstr(ai_work_session_get_field(linked, "directory"), ==, ai_work_session_get_field(first, "directory"));
+		g_unlink(alias);
+	}
 	g_assert_cmpstr(ai_work_session_get_field(first, "project"), ==, ai_work_session_get_field(second, "project"));
 	g_assert_cmpstr(ai_work_session_get_field(first, "directory"), !=, ai_work_session_get_field(second, "directory"));
 	g_assert_cmpstr(ai_work_session_get_field(second, "branch"), ==, "task");
@@ -283,10 +295,43 @@ test_failed_write(void)
 	remove_tree(dir);
 }
 
+static void
+test_prune(void)
+{
+	g_autofree gchar *dir = g_dir_make_tmp("ai-prune-XXXXXX", NULL);
+	g_autoptr(AiWorkSession) row = ai_work_session_new(dir);
+	g_autofree gchar *path = g_build_filename(dir, ai_work_session_get_id(row), NULL);
+	g_autofree gchar *lock = g_strconcat(path, ".lock", NULL);
+	g_autoptr(GError) error = NULL;
+	g_autolist(AiProject) projects = NULL;
+	gint fd = g_open(lock, O_CREAT | O_RDWR, 0600);
+	g_assert_cmpint(fd, >=, 0);
+	g_assert_cmpint(flock(fd, LOCK_EX | LOCK_NB), ==, 0);
+	g_assert_true(ai_work_session_save(row, dir, FALSE, &error));
+	g_assert_cmpuint(ai_work_session_prune(dir, &error), ==, 0);
+	g_assert_true(g_file_test(path, G_FILE_TEST_EXISTS));
+	close(fd);
+	g_assert_true(ai_work_session_save(row, dir, TRUE, &error));
+	g_assert_cmpuint(ai_work_session_prune(dir, &error), ==, 0);
+	g_assert_true(ai_work_session_save(row, dir, FALSE, &error));
+	g_assert_cmpuint(ai_work_session_prune(dir, &error), ==, 1);
+	g_assert_no_error(error);
+	g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+	projects = ai_project_list(dir, &error);
+	g_assert_no_error(error);
+	g_assert_cmpuint(g_list_length(projects), ==, 1);
+	g_assert_cmpstr(ai_project_get_root(projects->data), ==, dir);
+	g_assert_cmpuint(ai_project_get_session_count(projects->data), ==, 0);
+	g_assert_cmpstr(ai_project_get_status(projects->data), ==, "IDLE");
+	g_assert_cmpuint(ai_work_session_prune(dir, &error), ==, 0);
+	remove_tree(dir);
+}
+
 int
 main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/work-session/prune", test_prune);
 	g_test_add_func("/work-session/states", test_states);
 	g_test_add_func("/work-session/project-identity", test_project_identity);
 	g_test_add_func("/work-session/failed-write", test_failed_write);

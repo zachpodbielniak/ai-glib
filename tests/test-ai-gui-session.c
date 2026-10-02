@@ -590,12 +590,28 @@ test_linked_work_round_trip(Fixture *fixture, gconstpointer data)
 	g_setenv("PATH", old_path, TRUE);
 }
 
+static void
+test_new_conversation_options(void)
+{
+	g_autoptr(AiGuiOptions) original = g_new0(AiGuiOptions, 1);
+	g_autoptr(AiGuiOptions) next = NULL;
+	original->continue_session = TRUE;
+	original->sets = g_strsplit("session-id=other-project;continue-session;fork_session=true;effort-level=high", ";", -1);
+	next = ai_gui_options_new_conversation(original);
+	g_assert_false(next->continue_session);
+	g_assert_cmpuint(g_strv_length(next->sets), ==, 1);
+	g_assert_cmpstr(next->sets[0], ==, "effort-level=high");
+	g_assert_true(original->continue_session);
+	g_assert_cmpuint(g_strv_length(original->sets), ==, 4);
+}
+
 gint
 main(
 	gint   argc,
 	gchar *argv[]
 ){
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/ai-gui/session/new-conversation-options", test_new_conversation_options);
 	g_test_add("/ai-gui/session/linked-work-round-trip", Fixture, NULL,
 		fixture_set_up, test_linked_work_round_trip, fixture_tear_down);
 

@@ -9,8 +9,7 @@
  * The registry an #AiWorkSession writes is shared by every ai-glib
  * front-end on this machine, so ai-gui's dashboard lists ai-tui's
  * sessions and ai-tui's lists ai-gui's. That is why the ordering and the
- * project grouping are reimplemented here to the letter rather than
- * approximated: two dashboards that sorted the same records differently
+ * project grouping come from the shared project projection: two dashboards that sorted the same records differently
  * would be two answers to "what needs me next".
  *
  * No GTK. Everything here is a file read, a subprocess or a comparison,
@@ -47,7 +46,7 @@ ai_gui_work_compare(
  * @error: (out) (optional): where a read failure goes
  *
  * Returns: (transfer full) (element-type AiWorkSession) (nullable): every
- *   recorded session, already sorted
+ *   active session and recent-project placeholder, grouped by project
  */
 GPtrArray *
 ai_gui_work_list(
@@ -84,7 +83,7 @@ ai_gui_work_new_finish(
  * ai_gui_work_is_live:
  * @session: a record read back from the registry
  *
- * Returns: %TRUE unless the record says DISCONNECTED
+ * Returns: %TRUE for an active conversation, not a recent project placeholder
  */
 gboolean
 ai_gui_work_is_live(AiWorkSession *session);

@@ -1,12 +1,11 @@
 #+title: Projects
 
 A project is the repository, or the plain directory, that a piece of work
-happens in. ai-glib does not keep a list of projects. It works them out
-from the work registry that ai-tui and ai-gui write to (see
-[[file:dashboard.org][the dashboard]]): every =AiWorkSession= record has a
-=project= field, and the records that share one are a project. A project
-therefore exists exactly as long as something in the registry mentions it,
-and there is no second store to fall out of step.
+happens in. Active work is grouped by its canonical =project= identity.
+Both dashboards discard disconnected work records whose ownership lock is free,
+and retain the project identity under =sessions/projects/= for quick reopening.
+A recent project with no running conversations is still a project; it shows
+=Open project= rather than an unusable disconnected session.
 
 * Identity
 

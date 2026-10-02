@@ -29,6 +29,25 @@ clear an editable draft, discard pending submissions, then quit. Reset and
 exit discard the queue. Provider errors are displayed and draining continues;
 the failed submission is not automatically retried.
 
+* Viewing and editing the queue
+
+Both frontends use =F6= or =/queue= to inspect pending submissions. Dispatch pauses
+while an editor is open, so completing a turn cannot shift the selected entry.
+The active turn continues. Attachments and FIFO order are preserved; nothing
+in the unsent composer is submitted by opening the queue.
+
+- *TUI:* Up/Down selects a message, Enter edits its full text using the normal
+  composer (including multiline editing and =Ctrl+G= for your editor). Enter
+  saves; Escape cancels that edit. =d= removes the selected entry. Escape from
+  the list resumes sending. Your earlier draft and cursor are restored.
+- *GUI:* Use =F6= or =Queue (n)= in the header. Each message has a multiline
+  editor and a removal checkbox. =Save and resume= validates the whole edit
+  before changing the queue. =Cancel= resumes without applying edits.
+
+An empty queue has an explicit empty state. Empty text is rejected unless
+that message has images. Queue entries are memory-only and are lost on exit;
+this editor does not change the active request or already sent history.
+
 * Side questions with =/btw=
 
 #+begin_example
@@ -162,3 +181,6 @@ cleared. Explicit reset, quit and draft clearing retain their discard behavior.
 The =queued-command-image=, =queued-resolution-error-image= and
 =queued-command-full-draft= cases in =test-tui-images= cover these ownership
 transfers, including recovery into an already full composer.
+
+See [[file:demonstrations/project-workspace.org][the project and queue demonstrations]] for real
+GUI screenshots, terminal captures and reproducible integration checks.

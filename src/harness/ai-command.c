@@ -58,7 +58,8 @@ typedef struct
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
     { "decide", "Classify text with a separately managed Laya server", "--question QUESTION TEXT | --request FILE", TRUE },
     { "work", "Load linked issue or PR as an assignment", "<URL>", FALSE },
-    { "project", "Open a project in a tmux window", "[directory]", FALSE },
+    { "queue", "View and edit pending messages (F6)", NULL, FALSE },
+    { "project", "Open a project in its own session", "[directory]", FALSE },
     { "dashboard", "Toggle project dashboard", NULL, FALSE },
     { "links", "List linked issues and pull requests", NULL, TRUE },
     { "issue", "Link or unlink an issue", "<link|unlink> <URL>", FALSE },

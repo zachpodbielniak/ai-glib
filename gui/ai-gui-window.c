@@ -8,6 +8,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "ai-gui.h"
 #include "ai-gui-agents.h"
@@ -15,6 +16,7 @@
 #include "ai-gui-approval.h"
 #include "ai-gui-chat.h"
 #include "ai-gui-commands.h"
+#include "ai-gui-queue.h"
 #include "ai-gui-dashboard.h"
 #include "ai-gui-composer.h"
 #include "ai-gui-prefs.h"
@@ -42,6 +44,7 @@ struct _AiGuiWindow
 	GtkWidget *dashboard;
 	GtkWidget *chat;
 	GtkWidget *composer;
+	GtkWidget *queue_button;
 	GtkWidget *title;
 	GtkWidget *search_bar;
 	GtkWidget *search_entry;
@@ -166,6 +169,17 @@ on_agent_finished(
 static void window_update_refresh(AiGuiWindow *self);
 
 static void
+on_queue_changed(GObject *object, GParamSpec *pspec, gpointer data)
+{
+	AiGuiWindow *self = data;
+	guint count = self->session != NULL ? ai_gui_session_get_queued(self->session) : 0;
+	g_autofree gchar *label = g_strdup_printf("Queue (%u)", count);
+	if (self->queue_button == NULL) return;
+	gtk_button_set_label(GTK_BUTTON(self->queue_button), label);
+	gtk_widget_set_sensitive(self->queue_button, self->session != NULL);
+}
+
+static void
 on_busy_changed(
 	GObject    *object,
 	GParamSpec *pspec,
@@ -207,6 +221,7 @@ window_disconnect_session(AiGuiWindow *self)
 	g_clear_signal_handler(&self->agent_id, self->session);
 	g_clear_signal_handler(&self->busy_id, self->session);
 	g_clear_signal_handler(&self->builtin_id, self->session);
+	g_signal_handlers_disconnect_by_func(self->session, G_CALLBACK(on_queue_changed), self);
 	g_signal_handlers_disconnect_by_func(self->session,
 		G_CALLBACK(on_title_changed), self);
 	/* Provider, model and project all redraw the subtitle; a session left
@@ -265,6 +280,7 @@ window_set_session(
 			G_CALLBACK(on_approval_requested), self);
 		self->agent_id = g_signal_connect(session, "agent-finished",
 			G_CALLBACK(on_agent_finished), self);
+		g_signal_connect(session, "notify::queued", G_CALLBACK(on_queue_changed), self);
 		self->busy_id = g_signal_connect(session, "notify::busy",
 			G_CALLBACK(on_busy_changed), self);
 		self->builtin_id = g_signal_connect(session, "builtin-command",
@@ -283,6 +299,7 @@ window_set_session(
 		ai_gui_sidebar_select(AI_GUI_SIDEBAR(self->sidebar), session);
 	}
 
+	on_queue_changed(NULL, NULL, self);
 	ai_gui_window_refresh_links(self);
 
 	if (self->quota != NULL)
@@ -294,7 +311,8 @@ window_set_session(
 static AiGuiSession *
 window_new_session(AiGuiWindow *self)
 {
-	g_autoptr(AiGuiOptions) options = ai_gui_options_copy(self->options);
+	g_autoptr(AiGuiOptions) options = self->session != NULL
+		? ai_gui_options_new_conversation(self->options) : ai_gui_options_copy(self->options);
 	g_autoptr(GError) error = NULL;
 	AiGuiSession *session;
 
@@ -436,6 +454,14 @@ on_composer_submit(
 
 	if (self->session == NULL && window_new_session(self) == NULL)
 		return;
+
+	{
+		g_autofree gchar *draft = ai_gui_composer_get_text(composer);
+		if (g_strcmp0(g_strstrip(draft), "/queue") == 0) {
+			ai_gui_composer_set_text(composer, "");
+			ai_gui_queue_present(GTK_WIDGET(self), self->session); return;
+		}
+	}
 
 	if (!window_apply_selection(self))
 		return;
@@ -590,7 +616,7 @@ window_open_session(
 	const gchar   *native_session,
 	AiWorkSession *adopt
 ){
-	g_autoptr(AiGuiOptions) options = ai_gui_options_copy(self->options);
+	g_autoptr(AiGuiOptions) options = ai_gui_options_new_conversation(self->options);
 	g_autoptr(GError) error = NULL;
 	AiGuiSession *session;
 
@@ -673,7 +699,25 @@ ai_gui_window_open_project(
 ){
 	g_return_if_fail(AI_GUI_IS_WINDOW(self));
 
-	window_open_session(self, directory, NULL, NULL, NULL, NULL);
+	if (!g_file_test(directory, G_FILE_TEST_IS_DIR)) {
+		ai_gui_window_toast(self, "Project directory does not exist: %s", directory); return;
+	}
+	/* Quick open reuses a conversation already loaded for this directory. */
+	{
+		g_autofree gchar *canonical = realpath(directory, NULL);
+		if (canonical == NULL) canonical = g_canonicalize_filename(directory, NULL);
+		guint i;
+		for (i = 0; i < ai_gui_session_store_get_n_sessions(self->store); i++) {
+			AiGuiSession *session = ai_gui_session_store_get(self->store, i);
+			const gchar *stored = ai_gui_session_get_working_directory(session);
+			g_autofree gchar *physical = realpath(stored, NULL);
+			if (g_strcmp0(physical != NULL ? physical : stored, canonical) == 0) {
+				window_set_session(self, session);
+				ai_gui_window_show_dashboard(self, FALSE); return;
+			}
+		}
+		window_open_session(self, canonical, NULL, NULL, NULL, NULL);
+	}
 }
 
 static void
@@ -1091,6 +1135,13 @@ action_agents(
 }
 
 static void
+action_queue(GtkWidget *widget, const gchar *name, GVariant *parameter)
+{
+	AiGuiWindow *self = AI_GUI_WINDOW(widget);
+	if (self->session != NULL) ai_gui_queue_present(widget, self->session);
+}
+
+static void
 action_loops(
 	GtkWidget   *widget,
 	const gchar *name,
@@ -1390,6 +1441,7 @@ typedef struct
 } AiGuiShortcut;
 
 static const AiGuiShortcut SHORTCUTS[] = {
+	{ "Conversation", "F6",           "View and edit queued messages" },
 	{ "Conversation", "Enter",            "Send, or queue a follow-up while a turn runs" },
 	{ "Conversation", "Shift+Enter",      "New line" },
 	{ "Conversation", "Esc",              "Stop the turn in flight" },
@@ -1733,6 +1785,7 @@ window_build_menu(void)
 	g_menu_append(view, "Expand everything", "win.expand-all");
 	g_menu_append(view, "Collapse everything", "win.collapse-all");
 	g_menu_append(view, "Background agents…", "win.agents");
+	g_menu_append(view, "Queued messages…", "win.queue");
 	g_menu_append(view, "Loops and goals…", "win.loops");
 	g_menu_append_section(menu, NULL, G_MENU_MODEL(view));
 
@@ -1871,6 +1924,11 @@ window_build_content(AiGuiWindow *self)
 	 * always-visible strip, and the indicator hides itself when the
 	 * provider has no account report to give.
 	 */
+	self->queue_button = gtk_button_new_with_label("Queue (0)");
+	gtk_widget_set_tooltip_text(self->queue_button, "View and edit queued messages (F6)");
+	gtk_actionable_set_action_name(GTK_ACTIONABLE(self->queue_button), "win.queue");
+	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->queue_button);
+
 	self->quota = ai_gui_quota_new();
 	adw_header_bar_pack_end(ADW_HEADER_BAR(header), self->quota);
 
@@ -2088,6 +2146,7 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 	                                action_preferences);
 	gtk_widget_class_install_action(widget_class, "win.agents", NULL,
 	                                action_agents);
+	gtk_widget_class_install_action(widget_class, "win.queue", NULL, action_queue);
 	gtk_widget_class_install_action(widget_class, "win.loops", NULL,
 	                                action_loops);
 	gtk_widget_class_install_action(widget_class, "win.clear", NULL,
@@ -2116,6 +2175,7 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.open-project", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_f,
 		GDK_CONTROL_MASK, "win.search", NULL);
+
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_l,
 		GDK_CONTROL_MASK, "win.focus-composer", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_comma,
@@ -2133,6 +2193,8 @@ ai_gui_window_class_init(AiGuiWindowClass *klass)
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.export", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_g,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.agents", NULL);
+	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_F6,
+		0, "win.queue", NULL);
 	gtk_widget_class_add_binding_action(widget_class, GDK_KEY_l,
 		GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.loops", NULL);
 }
