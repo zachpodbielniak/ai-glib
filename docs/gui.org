@@ -95,6 +95,7 @@ Sessions on the left, the conversation on the right, an
 |-----+--------|
 | =Enter= | Send. During a turn, queue a follow-up. |
 | =Shift+Enter= | Newline |
+| =F6= | View, edit or remove queued messages (also =/queue=) |
 | =Tab= | Complete the =/= or =@= at the cursor |
 | =Esc= | Stop the turn in flight |
 | =Ctrl+Up= / =Ctrl+Down= | Walk the prompts you have sent |
