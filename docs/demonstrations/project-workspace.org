@@ -1,7 +1,8 @@
 #+title: Project workspaces and queued-message editing
 
 These artifacts come from the built C frontends, using isolated directories,
-private tmux servers and scripted providers. They are not mockups. GTK captures
+private tmux servers and scripted providers. Trailing whitespace is trimmed from
+the terminal log. These are not mockups. GTK captures
 use a headless Wayland compositor; no real model request is submitted. The GTK
 fixture sets its model explicitly and points Ollama discovery at a closed local
 port. Tests assert the resulting session identities and submitted messages,
