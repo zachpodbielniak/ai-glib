@@ -929,12 +929,11 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 		ai_event_get_kind(event) == AI_EVENT_TOOL_FINISHED)
 		report_tool(self, event);
 	if (kind == AI_VOICE_MAIL_AGENT) {
+		/* A finished agent becomes a turn for the model, queued behind any turn
+		 * under way, so it fetches the result and says it unprompted. */
 		if (!g_hash_table_contains(self->notices, text)) {
-			Line *notice = g_new0(Line, 1);
-			notice->text = g_strdup(text);
-			notice->notice = TRUE;
 			g_hash_table_add(self->notices, g_strdup(text));
-			g_queue_push_tail(&self->pending_notices, notice);
+			g_queue_push_tail(&self->turns, g_strdup(text));
 		}
 	} else if (kind == AI_VOICE_MAIL_DONE) {
 		if (generation == self->provider_generation) {
@@ -993,7 +992,12 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 			update_hold(self);
 		} else if (k == AI_EVENT_TOOL_FINISHED) {
 			AiToolResult *result = ai_event_get_tool_result(event);
-			if (result != NULL && ai_tool_result_get_is_error(result)) {
+			AiToolUse *use = ai_event_get_tool_use(event);
+			const gchar *tool = use != NULL ? ai_tool_use_get_name(use) : NULL;
+			/* Checking on an agent too early ("still running") is the model's
+			 * business; it is never read to the caller. */
+			if (result != NULL && ai_tool_result_get_is_error(result) &&
+				g_strcmp0(tool, "agent_result") != 0 && g_strcmp0(tool, "agent_status") != 0) {
 				g_autofree gchar *line =
 					g_strdup_printf("The tool reported an error: %.512s",
 									ai_tool_result_get_content(result));

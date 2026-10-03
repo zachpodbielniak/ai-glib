@@ -120,11 +120,19 @@ static void
 on_agent(AiConversation *conversation, const gchar *id, gint state, gpointer data)
 {
 	AiVoiceWorker *w = data;
+	/* Not spoken: a turn for the model, which fetches the result and says it,
+	 * so the caller never has to ask for it. */
 	g_autofree gchar *line =
-		g_strdup_printf("Background agent %s %s. You can ask for its result.", id,
-						state == AI_AGENT_STATE_DONE		? "finished"
-						: state == AI_AGENT_STATE_CANCELLED ? "was cancelled"
-															: "failed");
+		state == AI_AGENT_STATE_DONE
+			? g_strdup_printf("[Note]: Background agent %s finished. Call agent_result "
+							  "for %s now and tell the caller what it found, in one or "
+							  "two plain spoken sentences.",
+							  id, id)
+			: g_strdup_printf("[Note]: Background agent %s %s. Tell the caller in one "
+							  "plain sentence; call agent_result for %s if you need "
+							  "the reason.",
+							  id, state == AI_AGENT_STATE_CANCELLED ? "was cancelled" : "failed",
+							  id);
 	post(w, AI_VOICE_MAIL_AGENT, NULL, line, NULL);
 	maybe_quit(w);
 }

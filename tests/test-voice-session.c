@@ -954,35 +954,60 @@ command_needs_whole_utterance(Fixture *f, gconstpointer data)
 	g_assert_cmpstr(g_ptr_array_index(commands, 1), ==, "hangup");
 	g_assert_cmpstr(g_ptr_array_index(commands, 2), ==, "stop");
 }
+static gboolean
+heard_note(Fixture *f, const gchar *needle)
+{
+	GList *l;
+	for (l = ai_mock_provider_get_last_messages(f->provider); l != NULL; l = l->next) {
+		g_autofree gchar *text = ai_message_get_text(l->data);
+		if (ai_message_get_role(l->data) == AI_ROLE_USER && text != NULL &&
+			strstr(text, needle) != NULL)
+			return TRUE;
+	}
+	return FALSE;
+}
+/* A finished agent is not announced with a canned line: the model is told,
+ * fetches the result itself and says it, with nobody having to ask. */
 static void
 background(Fixture *f, gconstpointer data)
 {
 	g_autoptr(AiBrigade) brigade = ai_brigade_new();
 	g_autoptr(GObject) worker = g_object_new(test_agent_worker_get_type(), NULL);
-	guint i, notices = 0;
+	guint i;
 	ai_brigade_set_worker(brigade, AI_AGENT_WORKER(worker));
 	ai_conversation_set_brigade(f->conversation, brigade);
 	ai_mock_provider_push_tool_use(f->provider, "agent_spawn",
 								   "{\"prompt\":\"read background fixture\"}");
 	ai_mock_provider_push_text(f->provider, "I started it.");
-	utterance(f, "caller");
-	wait_replies(f, 2);
-	for (i = 0; i < f->tts->texts->len; i++)
-		if (strstr(g_ptr_array_index(f->tts->texts, i),
-				   "Background agent agent-1 finished") != NULL)
-			notices++;
-	g_assert_cmpuint(notices, ==, 1);
-	g_assert_nonnull(ai_brigade_get(brigade, "agent-1"));
 	ai_mock_provider_push_tool_use(f->provider, "agent_result",
 								   "{\"agent_id\":\"agent-1\"}");
 	ai_mock_provider_push_text(f->provider, "The background fixture result");
 	utterance(f, "caller");
-	wait_replies(f, 3);
+	wait_replies(f, 2);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_assert_null(strstr(g_ptr_array_index(f->tts->texts, i), "ask for its result"));
+	g_assert_true(heard_note(f, "Background agent agent-1 finished"));
 	g_assert_true(contains_tool_result(f, "The background fixture result"));
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, f->tts->texts->len - 1), ==,
+					"The background fixture result");
 	g_assert_null(ai_brigade_get(brigade, "agent-1"));
 }
-/* "Stop" during a background agent's notice ends it; it is not replayed the
- * moment it is cut off, as it would be after an ordinary barge-in. */
+/* Asking for a result too early is the model's business, not the caller's:
+ * "still running" is never read out. */
+static void
+early_result_silent(Fixture *f, gconstpointer data)
+{
+	guint i;
+	ai_mock_provider_push_tool_use(f->provider, "agent_result",
+								   "{\"agent_id\":\"agent-9\"}");
+	ai_mock_provider_push_text(f->provider, "Still checking.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	for (i = 0; i < f->tts->texts->len; i++)
+		g_assert_null(strstr(g_ptr_array_index(f->tts->texts, i), "tool reported an error"));
+}
+/* "Stop" while a finished agent's result is being said ends it; it is not
+ * replayed the moment it is cut off, as it would be after a barge-in. */
 static void
 stop_during_notice(Fixture *f, gconstpointer data)
 {
@@ -996,6 +1021,9 @@ stop_during_notice(Fixture *f, gconstpointer data)
 	ai_mock_provider_push_tool_use(f->provider, "agent_spawn",
 								   "{\"prompt\":\"read background fixture\"}");
 	ai_mock_provider_push_text(f->provider, "I started it.");
+	ai_mock_provider_push_tool_use(f->provider, "agent_result",
+								   "{\"agent_id\":\"agent-1\"}");
+	ai_mock_provider_push_text(f->provider, "The agent found the fixture.");
 	f->tts->hold_after = 2;
 	utterance(f, "caller");
 	while (f->tts->held == NULL && g_get_monotonic_time() < limit) {
@@ -1008,8 +1036,8 @@ stop_during_notice(Fixture *f, gconstpointer data)
 	g_clear_object(&f->tts->held);
 	settle(f);
 	for (i = 0; i < f->tts->texts->len; i++)
-		if (strstr(g_ptr_array_index(f->tts->texts, i),
-				   "Background agent agent-1 finished") != NULL)
+		if (strstr(g_ptr_array_index(f->tts->texts, i), "The agent found the fixture.") !=
+			NULL)
 			notices++;
 	g_assert_cmpuint(notices, ==, 1);
 }
@@ -1767,5 +1795,7 @@ main(int argc, char **argv)
 			   teardown);
 	g_test_add("/voice/session/background-agent", Fixture, NULL, setup, background,
 			   teardown);
+	g_test_add("/voice/session/early-result-silent", Fixture, NULL, setup,
+			   early_result_silent, teardown);
 	return g_test_run();
 }
