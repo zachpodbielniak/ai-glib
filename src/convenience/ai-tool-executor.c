@@ -306,6 +306,16 @@ struct _RunContext
 
     SteerSlot      *steer;         /* owned ref; NULL until the run starts */
     gboolean        in_flight;     /* a model request is outstanding */
+
+    /* Asynchronous mode only. One reference is the run's own, dropped when
+     * it finishes; each outstanding provider call and each pending cancel
+     * idle holds another, so a reply that arrives after the run gave up
+     * still has a context to land on. */
+    gatomicrefcount refs;
+    GMainContext   *context;
+    gulong          cancel_id;
+    gboolean        waiting;       /* a provider call is outstanding */
+    gboolean        finished;      /* the task has been returned */
 };
 
 typedef struct
@@ -449,6 +459,31 @@ run_context_take_new_messages (RunContext *ctx)
 /* End the run.  In synchronous mode the blocked caller resumes and does
  * its own teardown; in asynchronous mode nobody is waiting on the stack,
  * so the context owns itself and must clean up here. */
+static RunContext *
+run_context_ref (RunContext *ctx)
+{
+    g_atomic_ref_count_inc (&ctx->refs);
+    return ctx;
+}
+
+static void
+run_context_unref (RunContext *ctx)
+{
+    if (!g_atomic_ref_count_dec (&ctx->refs))
+        return;
+
+    g_clear_object (&ctx->task);
+    g_clear_object (&ctx->executor);
+    g_clear_object (&ctx->provider);
+    g_clear_object (&ctx->cancellable);
+    g_clear_pointer (&ctx->context, g_main_context_unref);
+    g_list_free_full (ctx->messages, g_object_unref);
+    g_free (ctx->system_prompt);
+    g_free (ctx->result);
+    g_clear_error (&ctx->error);
+    g_free (ctx);
+}
+
 static void
 run_context_finish (RunContext *ctx)
 {
@@ -458,6 +493,13 @@ run_context_finish (RunContext *ctx)
     {
         g_main_loop_quit (ctx->loop);
         return;
+    }
+
+    ctx->finished = TRUE;
+    if (ctx->cancel_id != 0)
+    {
+        g_cancellable_disconnect (ctx->cancellable, ctx->cancel_id);
+        ctx->cancel_id = 0;
     }
 
     if (ctx->error != NULL)
@@ -477,14 +519,73 @@ run_context_finish (RunContext *ctx)
 
     /* g_task_return_* does not consume the reference from g_task_new. */
     g_clear_object (&ctx->task);
-    g_clear_object (&ctx->executor);
-    g_clear_object (&ctx->provider);
-    g_clear_object (&ctx->cancellable);
-    g_list_free_full (ctx->messages, g_object_unref);
-    g_free (ctx->system_prompt);
-    g_free (ctx->result);
-    g_clear_error (&ctx->error);
-    g_free (ctx);
+    run_context_unref (ctx);
+}
+
+/*
+ * A cancelled run ends now, not when the provider gets round to noticing.
+ *
+ * A provider is asked to stop through the cancellable, and most do; one
+ * that does not would otherwise hold the run -- and the conversation that
+ * owns it, which refuses a second turn while one is in flight -- until its
+ * reply finally arrives, however late that is. Only a run waiting on the
+ * provider is abandoned here: inside a tool the run is on the stack, and it
+ * notices the cancellation itself before sending again.
+ */
+static gboolean
+run_context_cancelled_idle (gpointer data)
+{
+    RunContext *ctx = data;
+
+    if (!ctx->finished && ctx->waiting)
+    {
+        g_debug ("ToolExecutor: run cancelled while waiting on the provider; "
+                 "not waiting for its reply");
+        /* Stop forwarding the abandoned request's stream events now: they
+         * belong to a turn that is over, and must not reach whoever runs
+         * the executor next. */
+        executor_unwatch_provider (ctx->executor);
+        ctx->error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                          "Operation was cancelled");
+        run_context_finish (ctx);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* Any thread: whoever cancelled. Only hands the decision to the run's own
+ * context. */
+static void
+run_context_on_cancelled (GCancellable *cancellable, gpointer data)
+{
+    RunContext *ctx = data;
+    GSource *source = g_idle_source_new ();
+
+    (void)cancellable;
+    g_source_set_callback (source, run_context_cancelled_idle,
+                           run_context_ref (ctx),
+                           (GDestroyNotify)run_context_unref);
+    g_source_attach (source, ctx->context);
+    g_source_unref (source);
+}
+
+/* A provider reply has arrived. FALSE when the run already ended without
+ * it, in which case the reply is dropped. Consumes the call's reference
+ * either way, so the caller must not touch @ctx after a FALSE. */
+static gboolean
+run_context_reply_arrived (RunContext *ctx)
+{
+    if (ctx->loop != NULL)
+        return TRUE;
+
+    ctx->waiting = FALSE;
+    if (ctx->finished)
+    {
+        run_context_unref (ctx);
+        return FALSE;
+    }
+    /* The run's own reference keeps it alive from here. */
+    run_context_unref (ctx);
+    return TRUE;
 }
 
 /*
@@ -619,6 +720,9 @@ on_run_response (
 
     ctx->in_flight = FALSE;
     response = ai_provider_chat_finish (AI_PROVIDER (source), async_result, &err);
+
+    if (!run_context_reply_arrived (ctx))
+        return;
 
     if (err != NULL)
     {
@@ -910,6 +1014,9 @@ on_run_stream_done (
     response = ai_streamable_chat_stream_finish (AI_STREAMABLE (source),
                                                  result, &error);
 
+    if (!run_context_reply_arrived (ctx))
+        return;
+
     if (response == NULL)
     {
         ctx->error = error != NULL
@@ -934,6 +1041,13 @@ run_context_send (RunContext *ctx)
      * never both. The property defaults to FALSE, so every existing caller
      * takes exactly the path it took before.
      */
+    if (ctx->loop == NULL)
+    {
+        ctx->waiting = TRUE;
+        run_context_ref (ctx);   /* the call's */
+        run_context_ref (ctx);   /* ours, across the call */
+    }
+
     if (ctx->executor->stream && AI_IS_STREAMABLE (ctx->provider))
     {
         ai_streamable_chat_stream_async (
@@ -946,19 +1060,30 @@ run_context_send (RunContext *ctx)
             on_run_stream_done,
             ctx
         );
-        return;
+    }
+    else
+    {
+        ai_provider_chat_async (
+            ctx->provider,
+            ctx->messages,
+            ctx->system_prompt,
+            ctx->max_tokens,
+            ctx->executor->tools,
+            ctx->cancellable,
+            on_run_response,
+            ctx
+        );
     }
 
-    ai_provider_chat_async (
-        ctx->provider,
-        ctx->messages,
-        ctx->system_prompt,
-        ctx->max_tokens,
-        ctx->executor->tools,
-        ctx->cancellable,
-        on_run_response,
-        ctx
-    );
+    if (ctx->loop != NULL)
+        return;
+
+    /* Cancelled before this call went out -- during a tool, most often,
+     * when the cancel idle could not run. Do not wait on the reply. */
+    if (!ctx->finished && ctx->waiting &&
+        g_cancellable_is_cancelled (ctx->cancellable))
+        run_context_cancelled_idle (ctx);
+    run_context_unref (ctx);
 }
 
 /* ================================================================
@@ -5783,7 +5908,14 @@ ai_tool_executor_run_async_internal (
         ctx->n_input++;
     }
 
+    g_atomic_ref_count_init (&ctx->refs);
+    ctx->context = g_main_context_ref_thread_default ();
     run_context_open_steering (ctx);
+    if (ctx->cancellable != NULL)
+        ctx->cancel_id = g_cancellable_connect (ctx->cancellable,
+                                                G_CALLBACK (run_context_on_cancelled),
+                                                ctx, NULL);
+
     run_context_send (ctx);
 }
 
