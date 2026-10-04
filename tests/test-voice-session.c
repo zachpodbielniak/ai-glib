@@ -235,6 +235,39 @@ timeout_turn(Fixture *f, gconstpointer data)
 	wait_replies(f, 1);
 	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Custom deadline fallback");
 }
+/* After the deadline the call must keep answering, even while the cancelled
+ * provider or tool is still unwinding. */
+static void
+deadline_then_answers(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "turn-deadline-ms", 30, "deadline-message",
+				 "Custom deadline fallback", NULL);
+	ai_mock_provider_set_delay_ms(f->provider, 5000);
+	ai_mock_provider_push_text(f->provider, "Too late.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Custom deadline fallback");
+	ai_mock_provider_set_delay_ms(f->provider, 0);
+	ai_mock_provider_push_text(f->provider, "Still here.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "Still here.");
+}
+static void
+deadline_in_tool_then_answers(Fixture *f, gconstpointer data)
+{
+	g_object_set(f->session, "turn-deadline-ms", 100, "deadline-message",
+				 "Custom deadline fallback", NULL);
+	ai_mock_provider_push_tool_use(f->provider, "bash", "{\"command\":\"sleep 5\"}");
+	ai_mock_provider_push_text(f->provider, "Too late.");
+	utterance(f, "caller");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Custom deadline fallback");
+	ai_mock_provider_push_text(f->provider, "Still here.");
+	utterance(f, "caller");
+	wait_replies(f, 2);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 1), ==, "Still here.");
+}
 static void
 settle(Fixture *f);
 /* A tool that runs until its turn is cancelled, as a search of a whole home
@@ -1790,6 +1823,10 @@ main(int argc, char **argv)
 			   room_chime_superseded, teardown);
 	g_test_add("/voice/session/deadline-in-tool", Fixture, NULL, setup, deadline_in_tool,
 			   teardown);
+	g_test_add("/voice/session/deadline-then-answers", Fixture, NULL, setup,
+			   deadline_then_answers, teardown);
+	g_test_add("/voice/session/deadline-in-tool-then-answers", Fixture, NULL, setup,
+			   deadline_in_tool_then_answers, teardown);
 	g_test_add("/voice/session/tool-error", Fixture, NULL, setup, tools, teardown);
 	g_test_add("/voice/session/read-fixture", Fixture, NULL, setup, read_fixture,
 			   teardown);
