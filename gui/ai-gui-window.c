@@ -698,6 +698,7 @@ ai_gui_window_open_project(
 	const gchar *directory
 ){
 	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+	g_return_if_fail(directory != NULL);
 
 	if (!g_file_test(directory, G_FILE_TEST_IS_DIR)) {
 		ai_gui_window_toast(self, "Project directory does not exist: %s", directory); return;
@@ -705,12 +706,15 @@ ai_gui_window_open_project(
 	/* Quick open reuses a conversation already loaded for this directory. */
 	{
 		g_autofree gchar *canonical = realpath(directory, NULL);
-		if (canonical == NULL) canonical = g_canonicalize_filename(directory, NULL);
 		guint i;
+		if (canonical == NULL) canonical = g_canonicalize_filename(directory, NULL);
 		for (i = 0; i < ai_gui_session_store_get_n_sessions(self->store); i++) {
 			AiGuiSession *session = ai_gui_session_store_get(self->store, i);
 			const gchar *stored = ai_gui_session_get_working_directory(session);
-			g_autofree gchar *physical = realpath(stored, NULL);
+			g_autofree gchar *physical = NULL;
+			if (stored == NULL || stored[0] == '\0')
+				continue;
+			physical = realpath(stored, NULL);
 			if (g_strcmp0(physical != NULL ? physical : stored, canonical) == 0) {
 				window_set_session(self, session);
 				ai_gui_window_show_dashboard(self, FALSE); return;

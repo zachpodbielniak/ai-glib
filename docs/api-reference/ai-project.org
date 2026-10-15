@@ -40,8 +40,11 @@ gint        ai_project_compare_paths (const gchar *a, const gchar *b);
   not exist is =NULL= with no error. A corrupt record is skipped, exactly
   as =ai_work_session_list()= skips it. Directory errors propagate.
 - =ai_project_find()= resolves a name (case-insensitive) or a path inside
-  a project (deepest match wins, whole path components only, no disk
-  access). Returns =(transfer full)=, or =NULL= with =AI_ERROR_INVALID_REQUEST=
+  a project (deepest match wins, whole path components only). A path is
+  canonicalised against the current directory, and an existing path is
+  resolved through symlinks, so it matches the identity stored on the
+  session. The registry is not read again. Returns =(transfer full)=, or
+  =NULL= with =AI_ERROR_INVALID_REQUEST=
   when nothing matches or when two projects share the name; that message
   lists both roots.
 - =ai_project_dup_sessions()= returns =(transfer container)

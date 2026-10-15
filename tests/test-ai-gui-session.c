@@ -590,6 +590,28 @@ test_linked_work_round_trip(Fixture *fixture, gconstpointer data)
 	g_setenv("PATH", old_path, TRUE);
 }
 
+/* A turn that ends while the queue editor is open calls the same pump as
+ * resume. Pausing has to keep the submission where the editor indexed it. */
+static void
+test_paused_send_stays_queued(Fixture *fixture, gconstpointer data)
+{
+	g_autoptr(AiGuiOptions) options = fixture_options(fixture);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiGuiSession) session = ai_gui_session_new(options, "ollama", NULL, &error);
+	AiPromptQueue *queue;
+
+	g_assert_no_error(error);
+	g_assert_nonnull(session);
+	queue = ai_gui_session_get_queue(session);
+	ai_prompt_queue_set_paused(queue, TRUE);
+	g_assert_true(ai_gui_session_send(session, "stay queued", NULL, &error));
+	g_assert_no_error(error);
+	g_assert_false(ai_gui_session_get_busy(session));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 1);
+	g_assert_cmpstr(ai_prompt_queue_get(queue, 0, NULL), ==, "stay queued");
+	g_assert_cmpuint(ai_gui_session_get_queued(session), ==, 1);
+}
+
 static void
 test_new_conversation_options(void)
 {
@@ -611,6 +633,8 @@ main(
 	gchar *argv[]
 ){
 	g_test_init(&argc, &argv, NULL);
+	g_test_add("/ai-gui/session/paused-send-stays-queued", Fixture, NULL,
+		fixture_set_up, test_paused_send_stays_queued, fixture_tear_down);
 	g_test_add_func("/ai-gui/session/new-conversation-options", test_new_conversation_options);
 	g_test_add("/ai-gui/session/linked-work-round-trip", Fixture, NULL,
 		fixture_set_up, test_linked_work_round_trip, fixture_tear_down);

@@ -1551,7 +1551,11 @@ session_pump_queue(AiGuiSession *self)
 	if (self->sending || ai_conversation_get_busy(self->conversation))
 		return;
 
-	if (ai_prompt_queue_get_length(self->queue) == 0)
+	/* Pop returns NULL while paused and leaves the entry in place. Do not
+	 * call it anyway: a turn that ends during an edit must not dispatch,
+	 * and unpausing is what starts the queue again. */
+	if (ai_prompt_queue_get_paused(self->queue) ||
+	    ai_prompt_queue_get_length(self->queue) == 0)
 		return;
 
 	text = ai_prompt_queue_pop(self->queue, &images);
