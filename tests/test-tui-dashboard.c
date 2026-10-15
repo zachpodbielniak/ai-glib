@@ -194,7 +194,11 @@ test_startup(void)
 	g_assert_true(wait_text("configured", "PROJECT DASHBOARD"));
 	demonstrate("configured", "Bare launch obeys open-dashboard-on-load config");
 	key("configured", "n");
-	g_assert_true(wait_text("configured", "COMPOSE"));
+	{
+		g_autofree gchar *project = g_path_get_basename(sandbox);
+		g_assert_true(wait_text(project, "COMPOSE"));
+		g_assert_true(wait_text("configured", "PROJECT DASHBOARD"));
+	}
 	start("override", "--no-dashboard");
 	g_assert_true(wait_text("override", "COMPOSE"));
 	start("prompt", "explicit prompt");
@@ -293,6 +297,8 @@ test_resume(void)
 	gint64 deadline;
 	setup(); start("original", "--no-dashboard");
 	g_assert_true(wait_text("original", "COMPOSE"));
+	/* Resuming tests the record, not racing tmux's last-session shutdown. */
+	out = tmux("set-option", "-g", "exit-empty", "off", NULL);
 	send("original", "/issue link https://example.invalid/team/repo/issues/18"); key("original", "Enter");
 	g_assert_true(wait_text("original", "#18"));
 	send("original", "finish"); key("original", "Enter");
@@ -481,7 +487,8 @@ test_project_sessions(void)
 	start_at("dash2", "--no-dashboard", other);
 	g_assert_true(wait_text("dash2", "COMPOSE"));
 	key("dash2", "C-\\"); g_assert_true(wait_text("dash2", "PROJECT DASHBOARD"));
-	key("dash2", "n");
+	key("dash2", "p");
+	send("dash2", other); key("dash2", "Enter");
 	g_assert_true(wait_session("alpha-2"));
 	g_clear_pointer(&value, g_free);
 	value = project_option("alpha-2");
@@ -493,6 +500,118 @@ test_project_sessions(void)
 		g_auto(GStrv) names = g_strsplit(g_strchomp(all), "\n", -1);
 		g_assert_cmpuint(g_strv_length(names), ==, 4);
 	}
+	teardown();
+}
+
+static void
+test_project_path_and_rename(void)
+{
+	g_autofree gchar *repo = NULL;
+	g_autofree gchar *out = NULL;
+	gint64 deadline;
+	setup();
+	repo = g_build_filename(sandbox, "path with spaces", "alpha", NULL);
+	make_repo(repo);
+	start("picker", "--dashboard");
+	g_assert_true(wait_text("picker", "PROJECT DASHBOARD"));
+	key("picker", "p");
+	g_assert_true(wait_text("picker", "OPEN PROJECT"));
+	demonstrate("picker", "Project path entry on the startup dashboard");
+	send("picker", repo); key("picker", "Enter");
+	g_assert_true(wait_text("alpha", "COMPOSE"));
+	g_assert_true(wait_text("alpha", "Grok Build"));
+	/* /cwd across projects opens its own session, leaving this one intact. */
+	{
+		g_autofree gchar *other = g_build_filename(sandbox, "beta", NULL);
+		g_autofree gchar *command = g_strdup_printf("/cwd %s", other);
+		g_autofree gchar *identity = NULL;
+		make_repo(other);
+		send("alpha", command); key("alpha", "Enter");
+		g_assert_true(wait_text("beta", "COMPOSE"));
+		identity = project_option("alpha");
+		g_assert_true(g_str_has_prefix(identity, repo));
+		demonstrate("beta", "Cross-project cwd opens a separate project conversation");
+	}
+	out = tmux("rename-session", "-t", "=alpha:", "renamed", NULL);
+	key("picker", "p"); send("picker", repo); key("picker", "Enter");
+	deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	while (window_count("renamed") < 2 && g_get_monotonic_time() < deadline) g_usleep(50000);
+	g_assert_cmpuint(window_count("renamed"), ==, 2);
+	demonstrate("picker", "Renamed project session reused; two windows in one project session");
+	g_clear_pointer(&out, g_free);
+	out = tmux("list-sessions", "-F", "#{session_name}", NULL);
+	g_assert_null(strstr(out, "alpha"));
+	teardown();
+}
+
+static void
+test_queue_editor(void)
+{
+	g_autofree gchar *input = NULL;
+	g_autofree gchar *path = NULL;
+	setup(); write_file("delay", "yes");
+	start("queue", "--no-dashboard");
+	g_assert_true(wait_text("queue", "COMPOSE"));
+	send("queue", "first"); key("queue", "Enter");
+	g_assert_true(wait_text("queue", "waiting for turn"));
+	send("queue", "queued original"); key("queue", "Enter");
+	g_assert_true(wait_text("queue", "QUEUED 1"));
+	send("queue", "remove this queued message"); key("queue", "Enter");
+	g_assert_true(wait_text("queue", "QUEUED 2"));
+	send("queue", "unsent draft"); key("queue", "M-q");
+	g_assert_true(wait_text("queue", "QUEUED MESSAGES"));
+	g_assert_true(wait_text("queue", "queued original"));
+	demonstrate("queue", "Full pending-message list while the active turn finishes");
+	/* Finish the active turn while the queue is held. */
+	g_usleep(2500000);
+	path = g_build_filename(sandbox, "input", NULL);
+	g_assert_true(g_file_get_contents(path, &input, NULL, NULL));
+	g_assert_nonnull(strstr(input, "first"));
+	g_assert_null(strstr(input, "queued original"));
+	key("queue", "Down"); key("queue", "d");
+	key("queue", "Enter");
+	g_assert_true(wait_text("queue", "EDIT QUEUED MESSAGE"));
+	demonstrate("queue", "Selected queued message in the normal composer");
+	key("queue", "C-u"); send("queue", "edited followup"); key("queue", "Enter");
+	g_assert_true(wait_text("queue", "QUEUED MESSAGES"));
+	g_assert_true(wait_text("queue", "edited followup"));
+	key("queue", "Escape");
+	g_assert_true(wait_text("queue", "unsent draft"));
+	demonstrate("queue", "Original composer draft restored after queue edit");
+	g_usleep(2500000);
+	g_clear_pointer(&input, g_free);
+	g_assert_true(g_file_get_contents(path, &input, NULL, NULL));
+	g_assert_nonnull(strstr(input, "edited followup"));
+	g_assert_null(strstr(input, "queued original"));
+	g_assert_null(strstr(input, "unsent draft"));
+	g_assert_null(strstr(input, "remove this queued message"));
+	teardown();
+}
+
+static void
+test_title_repair(void)
+{
+	g_autofree gchar *out = NULL;
+	g_autofree gchar *name = NULL;
+	gint64 deadline;
+	setup();
+	/* Seed the inherited base with the failure the user sees. */
+	out = tmux("new-session", "-d", "-s", "seed", "sleep", "60", NULL);
+	g_clear_pointer(&out, g_free);
+	out = tmux("set-option", "-gw", "@ai_base", "WORK: DONE: WORK: project", NULL);
+	start("repair", "--no-dashboard");
+	g_assert_true(wait_text("repair", "COMPOSE"));
+	send("repair", "complete"); key("repair", "Enter");
+	g_assert_true(wait_text("repair", "Dashboard test complete"));
+	deadline = g_get_monotonic_time() + 8 * G_USEC_PER_SEC;
+	do {
+		g_clear_pointer(&name, g_free);
+		name = tmux("display-message", "-p", "-t", "repair", "#{window_name}", NULL);
+		if (g_strcmp0(g_strchomp(name), "DONE: project") == 0) break;
+		g_usleep(50000);
+	} while (g_get_monotonic_time() < deadline);
+	g_assert_cmpstr(name, ==, "DONE: project");
+	demonstrate("repair", "One status prefix after repairing WORK: DONE: WORK: project");
 	teardown();
 }
 
@@ -522,6 +641,9 @@ main(int argc, char **argv)
 	}
 	g_test_add_func("/dashboard/toggle-links-running", test_toggle);
 	g_test_add_func("/dashboard/startup", test_startup);
+	g_test_add_func("/dashboard/project-path-rename", test_project_path_and_rename);
+	g_test_add_func("/dashboard/queue-editor", test_queue_editor);
+	g_test_add_func("/dashboard/title-repair", test_title_repair);
 	g_test_add_func("/dashboard/assignment", test_assignment);
 	g_test_add_func("/dashboard/window-aggregation", test_window_aggregation);
 	g_test_add_func("/dashboard/resume", test_resume);

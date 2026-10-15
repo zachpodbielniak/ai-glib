@@ -254,6 +254,26 @@ ai_gui_options_copy(const AiGuiOptions *self)
 	return copy;
 }
 
+AiGuiOptions *
+ai_gui_options_new_conversation(const AiGuiOptions *self)
+{
+	g_autoptr(AiGuiOptions) copy = ai_gui_options_copy(self);
+	g_autoptr(GPtrArray) sets = g_ptr_array_new_with_free_func(g_free);
+	guint i;
+	copy->continue_session = FALSE;
+	for (i = 0; copy->sets != NULL && copy->sets[i] != NULL; i++) {
+		g_autofree gchar *name = g_strndup(copy->sets[i], strcspn(copy->sets[i], "="));
+		g_strdelimit(name, "_", '-');
+		if (g_str_equal(name, "session-id") || g_str_equal(name, "continue-session") ||
+		    g_str_equal(name, "fork-session")) continue;
+		g_ptr_array_add(sets, g_strdup(copy->sets[i]));
+	}
+	g_ptr_array_add(sets, NULL);
+	g_strfreev(copy->sets);
+	copy->sets = (gchar **)g_ptr_array_free(g_steal_pointer(&sets), FALSE);
+	return g_steal_pointer(&copy);
+}
+
 void
 ai_gui_options_free(AiGuiOptions *self)
 {

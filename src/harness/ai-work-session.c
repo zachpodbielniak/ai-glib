@@ -8,6 +8,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/file.h>
 
 /* "loop-owner" names the schedule file (ai-loop.h) this session runs, so a
  * dashboard can show its loops and goals without being that process. */
@@ -141,9 +144,14 @@ ai_work_session_new(const gchar *directory)
 	g_autofree gchar *project = NULL;
 	g_autofree gchar *branch = NULL;
 	g_return_val_if_fail(directory != NULL, NULL);
-	cwd = g_canonicalize_filename(directory, NULL);
+	cwd = realpath(directory, NULL);
+	if (cwd == NULL) cwd = g_canonicalize_filename(directory, NULL);
 	common = git_field(cwd, "--git-common-dir");
 	project = common != NULL ? g_canonicalize_filename(common, cwd) : g_strdup(cwd);
+	{
+		g_autofree gchar *physical = realpath(project, NULL);
+		if (physical != NULL) { g_free(project); project = g_steal_pointer(&physical); }
+	}
 	branch = git_field(cwd, "--abbrev-ref");
 	g_object_set(self, "directory", cwd, "project", project, "branch", branch,
 		"status", "IDLE", NULL);
@@ -836,4 +844,75 @@ ai_work_session_compare(AiWorkSession *a, AiWorkSession *b)
 	if (order != 0) return order;
 	order = g_strcmp0(ai_work_session_get_field(a, "project"), ai_work_session_get_field(b, "project"));
 	return order != 0 ? order : g_strcmp0(a->id, b->id);
+}
+
+/**
+ * ai_work_session_prune:
+ * @directory: session registry directory
+ * @error: return location for an error
+ *
+ * Removes released or expired dashboard records whose ownership lock is free.
+ * Rechecks liveness under that lock. Remembers project identities for quick
+ * reopening; transcripts, provider history and schedules are never removed.
+ * Lock files are retained to avoid replacing an inode another process holds.
+ * Returns: number of records removed before any error
+ */
+guint
+ai_work_session_prune(const gchar *directory, GError **error)
+{
+	g_autolist(AiWorkSession) rows = ai_work_session_list(directory, error);
+	GList *l;
+	guint removed = 0;
+	for (l = rows; l != NULL; l = l->next) {
+		AiWorkSession *row = l->data;
+		g_autofree gchar *path = NULL;
+		g_autofree gchar *lock = NULL;
+		g_autofree gchar *lock_name = NULL;
+		g_autoptr(GKeyFile) file = g_key_file_new();
+		gint fd;
+		GStatBuf st;
+		gint64 age;
+		if (g_strcmp0(ai_work_session_get_field(row, "status"), "DISCONNECTED") != 0) continue;
+		path = g_build_filename(directory, row->id, NULL);
+		lock_name = g_strconcat(row->id, ".lock", NULL);
+		lock = g_build_filename(directory, lock_name, NULL);
+		fd = g_open(lock, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+		if (fd < 0) continue;
+		if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); continue; }
+		if (g_lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 512 * 1024 ||
+		    !g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL) ||
+		    g_key_file_get_integer(file, "session", "version", NULL) != 1) { close(fd); continue; }
+		age = g_get_real_time() - g_key_file_get_int64(file, "session", "heartbeat", NULL);
+		if (g_key_file_get_boolean(file, "session", "live", NULL) && age <= 15 * G_USEC_PER_SEC) {
+			close(fd); continue;
+		}
+		{
+			g_autofree gchar *project = g_key_file_get_string(file, "session", "project", NULL);
+			g_autofree gchar *catalog = g_build_filename(directory, "projects", NULL);
+			g_autofree gchar *key = NULL;
+			g_autofree gchar *dest = NULL;
+			if (project == NULL || !*project) {
+				g_free(project);
+				project = g_key_file_get_string(file, "session", "directory", NULL);
+			}
+			if (project == NULL || !g_path_is_absolute(project) || strlen(project) > 16384 || !g_utf8_validate(project, -1, NULL)) {
+				close(fd); continue;
+			}
+			key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, project, -1);
+			dest = g_build_filename(catalog, key, NULL);
+			if (g_mkdir_with_parents(catalog, 0700) != 0 ||
+			    !g_file_set_contents_full(dest, project, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, error)) {
+				if (error != NULL && *error == NULL)
+					g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Cannot remember project: %s", g_strerror(errno));
+				close(fd); return removed;
+			}
+		}
+		if (g_unlink(path) == 0) removed++;
+		else if (errno != ENOENT) {
+			g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Cannot remove disconnected session: %s", g_strerror(errno));
+			close(fd); return removed;
+		}
+		close(fd);
+	}
+	return removed;
 }

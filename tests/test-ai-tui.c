@@ -3127,6 +3127,7 @@ static const CommandCase COMMAND_CASES[] = {
 	{ "decide", "Never downloads weights" },
 	{ "dashboard", NULL },
 	{ "project", NULL },
+	{ "queue", NULL },
 	{ "links", "No links." },
 	{ "issue", "No links." },
 	{ "pr", "No links." },
@@ -3191,7 +3192,7 @@ test_builtin_enter(gconstpointer data)
 		: g_str_equal(test_case->name, "update")
 			? g_strdup("/update status")
 			: g_strconcat("/", test_case->name, NULL);
-	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project");
+	view_command = g_str_equal(test_case->name, "dashboard") || g_str_equal(test_case->name, "project") || g_str_equal(test_case->name, "queue");
 	clears = g_str_equal(test_case->name, "clear") || g_str_equal(test_case->name, "reset");
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 	tmux_command("/expand command-audit-sentinel", "Would send:");
@@ -3199,8 +3200,13 @@ test_builtin_enter(gconstpointer data)
 	tmux_send(TUI_SESSION, "Enter");
 	if (view_command)
 	{
-		g_assert_true(tmux_wait_for(TUI_SESSION, "PROJECT DASHBOARD"));
-		tmux_send(TUI_SESSION, "C-\\");
+		if (g_str_equal(test_case->name, "queue")) {
+			g_assert_true(tmux_wait_for(TUI_SESSION, "QUEUED MESSAGES"));
+			tmux_send(TUI_SESSION, "Escape");
+		} else {
+			g_assert_true(tmux_wait_for(TUI_SESSION, "PROJECT DASHBOARD"));
+			tmux_send(TUI_SESSION, "C-\\");
+		}
 	}
 	if (g_str_equal(test_case->name, "quit") ||
 	    g_str_equal(test_case->name, "exit"))
@@ -3548,6 +3554,14 @@ test_command_paths(void)
 	absolute_saved = g_build_filename(parent, "absolute.txt", NULL);
 	tilde_saved = g_build_filename(stub->dir, "tilde.txt", NULL);
 	g_assert_cmpint(g_mkdir_with_parents(child, 0700), ==, 0);
+	/* /cwd stays in this conversation inside one project. Crossing projects
+	 * launches a separate tmux session, covered by test-tui-dashboard. */
+	{
+		g_autoptr(GSubprocess) git = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+			G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL, "git", "init", "-q", stub->dir, NULL);
+		g_assert_nonnull(git);
+		g_assert_true(g_subprocess_wait_check(git, NULL, NULL));
+	}
 	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
 	tmux_send(TUI_SESSION, "hello");
 	tmux_send(TUI_SESSION, "Enter");

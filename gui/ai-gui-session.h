@@ -298,4 +298,10 @@ ai_gui_session_export(
 	AiExportFormat  format
 );
 
+AiPromptQueue *
+ai_gui_session_get_queue(AiGuiSession *self);
+
+void
+ai_gui_session_resume_queue(AiGuiSession *self);
+
 G_END_DECLS

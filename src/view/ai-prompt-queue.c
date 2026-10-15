@@ -15,9 +15,10 @@ struct _AiPromptQueue {
 	GQueue pending;
 	guint limit;
 	gboolean coalesce;
+	gboolean paused;
 };
 G_DEFINE_TYPE(AiPromptQueue, ai_prompt_queue, G_TYPE_OBJECT)
-enum { PROP_0, PROP_LENGTH, PROP_LIMIT, PROP_COALESCE, N_PROPS };
+enum { PROP_0, PROP_LENGTH, PROP_LIMIT, PROP_COALESCE, PROP_PAUSED, N_PROPS };
 static GParamSpec *properties[N_PROPS];
 
 static void
@@ -43,6 +44,7 @@ queue_get_property(GObject *object, guint id, GValue *value, GParamSpec *spec)
 	switch (id) {
 	case PROP_LENGTH: g_value_set_uint(value, self->pending.length); break;
 	case PROP_LIMIT: g_value_set_uint(value, self->limit); break;
+	case PROP_PAUSED: g_value_set_boolean(value, self->paused); break;
 	case PROP_COALESCE: g_value_set_boolean(value, self->coalesce); break;
 	default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, spec);
 	}
@@ -54,6 +56,7 @@ queue_set_property(GObject *object, guint id, const GValue *value, GParamSpec *s
 	AiPromptQueue *self = AI_PROMPT_QUEUE(object);
 	switch (id) {
 	case PROP_LIMIT: self->limit = g_value_get_uint(value); break;
+	case PROP_PAUSED: ai_prompt_queue_set_paused(self, g_value_get_boolean(value)); break;
 	case PROP_COALESCE: self->coalesce = g_value_get_boolean(value); break;
 	default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, spec);
 	}
@@ -75,6 +78,9 @@ ai_prompt_queue_class_init(AiPromptQueueClass *klass)
 	properties[PROP_COALESCE] = g_param_spec_boolean("coalesce", "Coalesce",
 		"Combine adjacent text-only prompts on pop", TRUE,
 		G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+	properties[PROP_PAUSED] = g_param_spec_boolean("paused", "Paused",
+		"Hold pending submissions while they are inspected or edited", FALSE,
+		G_PARAM_READWRITE | G_PARAM_EXPLICIT_NOTIFY | G_PARAM_STATIC_STRINGS);
 	g_object_class_install_properties(object_class, N_PROPS, properties);
 }
 
@@ -171,7 +177,7 @@ ai_prompt_queue_push(AiPromptQueue *self, const gchar *text, GList *images,
  *
  * Inspects the oldest submission without removing or coalescing it. Use this
  * to validate attachments before taking a batch. Borrowed values remain valid
- * until the queue is popped, cleared or destroyed; do not modify the list.
+ * until the entry is edited, removed, popped, cleared or destroyed; do not modify the list.
  *
  * Returns: (transfer none) (nullable): oldest text, or NULL if empty
  */
@@ -204,6 +210,7 @@ ai_prompt_queue_pop(AiPromptQueue *self, GList **images)
 	gboolean merge;
 	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), NULL);
 	if (images != NULL) *images = NULL;
+	if (self->paused) return NULL;
 	prompt = g_queue_pop_head(&self->pending);
 	if (prompt == NULL) return NULL;
 	text = g_string_new(prompt->text);
@@ -233,4 +240,104 @@ ai_prompt_queue_clear(AiPromptQueue *self)
 	if (g_queue_is_empty(&self->pending)) return;
 	g_queue_clear_full(&self->pending, prompt_free);
 	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_LENGTH]);
+}
+
+/**
+ * ai_prompt_queue_get:
+ * @self: a queue
+ * @index: zero-based submission index, before coalescing
+ * @images: (out) (optional) (element-type AiImageContent) (transfer none): attachments
+ *
+ * Borrowed data is valid until the entry is edited or removed. Pause the queue
+ * while presenting an editor so indices cannot shift as a turn completes.
+ * Returns: (transfer none) (nullable): text, or NULL for an invalid index
+ */
+const gchar *
+ai_prompt_queue_get(AiPromptQueue *self, guint index, GList **images)
+{
+	Prompt *prompt;
+	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), NULL);
+	prompt = g_queue_peek_nth(&self->pending, index);
+	if (images != NULL) *images = prompt != NULL ? prompt->images : NULL;
+	return prompt != NULL ? prompt->text : NULL;
+}
+
+/**
+ * ai_prompt_queue_replace:
+ * @self: a queue
+ * @index: zero-based submission index
+ * @text: replacement UTF-8 text
+ * @separate: whether this submission must remain a separate turn
+ * @error: return location for an error
+ *
+ * Replaces text in place, preserving attachments and order. Failure changes
+ * nothing. An image-only submission may have empty text.
+ * Returns: whether the entry was replaced
+ */
+gboolean
+ai_prompt_queue_replace(AiPromptQueue *self, guint index, const gchar *text,
+                        gboolean separate, GError **error)
+{
+	Prompt *prompt;
+	g_autoptr(AiPromptQueue) check = ai_prompt_queue_new();
+	g_autofree gchar *copy = NULL;
+	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), FALSE);
+	prompt = g_queue_peek_nth(&self->pending, index);
+	if (prompt == NULL) {
+		g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST, "Queued message no longer exists");
+		return FALSE;
+	}
+	if (!ai_prompt_queue_push(check, text, prompt->images, separate, error)) return FALSE;
+	copy = g_strdup(text);
+	g_free(prompt->text);
+	prompt->text = g_steal_pointer(&copy);
+	prompt->separate = separate || prompt->images != NULL;
+	return TRUE;
+}
+
+/**
+ * ai_prompt_queue_remove:
+ * @self: a queue
+ * @index: zero-based submission index
+ * Returns: whether an entry was removed, without coalescing its neighbours
+ */
+gboolean
+ai_prompt_queue_remove(AiPromptQueue *self, guint index)
+{
+	Prompt *prompt;
+	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), FALSE);
+	prompt = g_queue_pop_nth(&self->pending, index);
+	if (prompt == NULL) return FALSE;
+	prompt_free(prompt);
+	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_LENGTH]);
+	return TRUE;
+}
+
+/**
+ * ai_prompt_queue_get_paused:
+ * @self: a queue
+ * Returns: whether popping submissions is paused
+ */
+gboolean
+ai_prompt_queue_get_paused(AiPromptQueue *self)
+{
+	g_return_val_if_fail(AI_IS_PROMPT_QUEUE(self), FALSE);
+	return self->paused;
+}
+
+/**
+ * ai_prompt_queue_set_paused:
+ * @self: a queue
+ * @paused: whether to hold pending submissions
+ *
+ * Pausing does not cancel the active turn or reject new submissions. While
+ * paused, pop returns NULL. The host resumes dispatch after unpausing.
+ */
+void
+ai_prompt_queue_set_paused(AiPromptQueue *self, gboolean paused)
+{
+	g_return_if_fail(AI_IS_PROMPT_QUEUE(self));
+	if (self->paused == !!paused) return;
+	self->paused = !!paused;
+	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PAUSED]);
 }

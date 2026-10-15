@@ -4,6 +4,27 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.7.0 - 2026-10-02
+
+** Added
+- Project path entry in both dashboards; recent projects remain available after
+  disconnected work records are removed. GUI quick-open reuses an already loaded
+  conversation for the directory.
+- Queued-message editors in GUI and TUI (=Alt+Q=), with full text editing,
+  removal, attachment preservation, and paused dispatch while editing.
+
+** Fixed
+- Starting from the TUI dashboard creates a worker in the project's tmux session.
+  Renaming that session no longer causes duplicate project sessions.
+- GUI dashboard groups each project once, using the same projection as the TUI.
+- Disconnected dashboard records are pruned under their ownership locks, without
+  deleting saved conversations or provider transcripts.
+- Tmux window status prefixes are normalized, repairing stacked WORK/DONE names;
+  reporters on the same server share a lock across state-directory settings.
+- Changing to another project inside tmux opens that project's session instead
+  of mixing projects in one session. GUI =/cwd= selects or opens a conversation
+  for the directory; new GUI conversations clear inherited native resume flags.
+
 * 0.6.0 - 2026-10-01
 
 ** Added

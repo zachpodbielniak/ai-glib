@@ -42,3 +42,12 @@ for the grouping by project.
 
 See [[file:../dashboard.org][Dashboard and projects]] for configuration, CLI
 adapters, status semantics and persistence boundaries.
+
+* Removing disconnected records
+
+=ai_work_session_prune(directory, error)= removes released or expired records
+whose advisory ownership locks can be acquired. It rechecks liveness under the
+lock and remembers each removed record's project identity in =projects/=. It
+returns the count removed before any error. Both dashboards call this on refresh;
+=ai_work_session_list()= itself remains a read-only snapshot API. Native provider
+history, GUI transcripts and schedules are preserved. Lock files are retained.

@@ -14,7 +14,7 @@ All read-only.
 | =id= | string | Canonical identity: the Git common directory, or the directory itself |
 | =name= | string | =ai_project_label_for_path(id)= |
 | =root= | string | Main checkout: the parent of a =.git= identity, else the identity |
-| =status= | string | Most urgent session status; =DISCONNECTED= when there are none |
+| =status= | string | Most urgent session status; =IDLE= when there are none |
 | =session-count= | uint | Every recorded session, disconnected ones included |
 | =live-count= | uint | Sessions not DISCONNECTED |
 | =busy-count= | uint | Sessions in WORK |
@@ -34,14 +34,17 @@ gint        ai_project_compare_paths (const gchar *a, const gchar *b);
 #+end_src
 
 - =ai_project_list()= reads the registry at =directory= (usually
-  =ai_work_session_default_directory()=) and groups it. Returns
+  =ai_work_session_default_directory()=) and groups it together with remembered project identities under =projects/=. Returns
   =(transfer full) (element-type AiProject)=, most urgent project first;
   free with =g_list_free_full(list, g_object_unref)=. A registry that does
   not exist is =NULL= with no error. A corrupt record is skipped, exactly
   as =ai_work_session_list()= skips it. Directory errors propagate.
 - =ai_project_find()= resolves a name (case-insensitive) or a path inside
-  a project (deepest match wins, whole path components only, no disk
-  access). Returns =(transfer full)=, or =NULL= with =AI_ERROR_INVALID_REQUEST=
+  a project (deepest match wins, whole path components only). A path is
+  canonicalised against the current directory, and an existing path is
+  resolved through symlinks, so it matches the identity stored on the
+  session. The registry is not read again. Returns =(transfer full)=, or
+  =NULL= with =AI_ERROR_INVALID_REQUEST=
   when nothing matches or when two projects share the name; that message
   lists both roots.
 - =ai_project_dup_sessions()= returns =(transfer container)

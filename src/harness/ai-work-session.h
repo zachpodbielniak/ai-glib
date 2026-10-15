@@ -32,4 +32,6 @@ void ai_work_session_read_context_async(AiWorkSession *self, GCancellable *cance
 gchar *ai_work_session_read_context_finish(AiWorkSession *self, GAsyncResult *result, GError **error);
 gint ai_work_session_status_priority(const gchar *status);
 gint ai_work_session_compare(AiWorkSession *a, AiWorkSession *b);
+guint ai_work_session_prune(const gchar *directory, GError **error);
+
 G_END_DECLS

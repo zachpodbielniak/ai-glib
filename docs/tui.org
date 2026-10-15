@@ -476,7 +476,8 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/skills=           | Skills                                            |
 | =/agents=           | Agents                                            |
 | =/reload=           | Rescan the search paths                           |
-| =/cwd [PATH]=       | Show or change the working directory              |
+| =/cwd [PATH]=       | Show directory; switch within a project or open another project |
+| =/queue=            | View, edit or remove queued messages (also =Alt+Q=) |
 | =/todos=            | The current todo list                             |
 | =/running=          | Background agents, and what they are doing        |
 | =/kill ID\vert all=      | Stop a background agent, or every one             |
@@ -488,6 +489,10 @@ directories the other harnesses use. =/help= lists all of it with origins.
 | =/update [status]=  | Install the latest ai-glib, or check whether one is available |
 
 *** Command paths
+
+Inside tmux, =/cwd= across projects opens a worker in the destination project's
+session and follows it; the original conversation remains in its project. Within
+a project, or outside tmux, it changes the current conversation's directory.
 
 =/cwd=, =/save= and =/export= resolve relative paths against the conversation's current directory. Consecutive relative directory changes therefore build on one another, and subsequent saves land in the directory shown in the header. Absolute paths remain absolute; =~= and a leading =~/= expand to your home directory. Paths are literal: spaces need no quotes, and shell variables, wildcards and =~otheruser= are not expanded. =/export= accepts spaces or tabs between its format and path. An invalid directory leaves the current directory unchanged; failed writes report the error in the transcript. Saving to an existing file replaces its contents.
 
@@ -953,3 +958,16 @@ leak and lifetime coverage, build the two first test binaries with
 ** Typed decisions
 See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
 including question syntax, request files, cancellation and server configuration.
+
+* Project and queue controls
+
+The project dashboard (=Ctrl+backslash=) offers =p= to open a path and =n= to
+create a worker in the selected project's tmux session, even from startup.
+Recent projects stay openable after dead session rows are removed. See
+[[file:dashboard.org][Project dashboard]] for lifecycle and recovery details.
+
+=Alt+Q= opens all queued messages. Select with Up/Down; Enter edits the full
+text, =d= removes, Escape resumes sending. While editing, Enter saves and
+Escape cancels the edit. The active turn may finish, but pending messages stay
+put until you close the queue. Your unsent draft and its attachments survive.
+See [[file:message-queue.org][Queued follow-ups and side questions]].

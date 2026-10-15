@@ -183,7 +183,13 @@ test_liveness_and_resume(
 
 	row = g_ptr_array_index(rows, 0);
 	g_assert_false(ai_gui_work_is_live(row));
-	g_assert_true(ai_gui_work_can_resume(row));
+	g_assert_false(ai_gui_work_can_resume(row));
+	g_assert_cmpstr(ai_work_session_get_field(row, "status"), ==, "PROJECT");
+	g_assert_cmpstr(ai_work_session_get_field(row, "directory"), ==, fixture->root);
+	{
+		g_autolist(AiWorkSession) recorded = ai_work_session_list(fixture->registry, NULL);
+		g_assert_null(recorded);
+	}
 }
 
 static void
@@ -498,6 +504,23 @@ test_project_compare(void)
 		ai_project_compare_paths("/x/alpha/.git", "/x/beta"), <, 0);
 }
 
+/* Urgency orders projects, then conversations within each project. A global
+ * session sort would split A around B and produce duplicate project headings. */
+static void
+test_grouped_urgency(Fixture *fixture, gconstpointer data)
+{
+	g_autofree gchar *a = g_build_filename(fixture->root, "a", NULL);
+	g_autofree gchar *b = g_build_filename(fixture->root, "b", NULL);
+	g_autoptr(AiWorkSession) waiting = fixture_record(fixture, a, "INPUT", TRUE, NULL);
+	g_autoptr(AiWorkSession) idle = fixture_record(fixture, a, "IDLE", TRUE, NULL);
+	g_autoptr(AiWorkSession) busy = fixture_record(fixture, b, "WORK", TRUE, NULL);
+	g_autoptr(GPtrArray) rows = ai_gui_work_list(fixture->registry, NULL);
+	g_assert_cmpuint(rows->len, ==, 3);
+	g_assert_cmpstr(ai_work_session_get_id(g_ptr_array_index(rows, 0)), ==, ai_work_session_get_id(waiting));
+	g_assert_cmpstr(ai_work_session_get_id(g_ptr_array_index(rows, 1)), ==, ai_work_session_get_id(idle));
+	g_assert_cmpstr(ai_work_session_get_id(g_ptr_array_index(rows, 2)), ==, ai_work_session_get_id(busy));
+}
+
 gint
 main(
 	gint   argc,
@@ -511,6 +534,7 @@ main(
 
 	g_test_add("/ai-gui/work/compare-is-total", Fixture, NULL,
 	           fixture_set_up, test_compare_is_total, fixture_tear_down);
+	g_test_add("/ai-gui/work/grouped-urgency", Fixture, NULL, fixture_set_up, test_grouped_urgency, fixture_tear_down);
 	g_test_add("/ai-gui/work/list-is-sorted", Fixture, NULL,
 	           fixture_set_up, test_list_is_sorted, fixture_tear_down);
 	g_test_add("/ai-gui/work/liveness-and-resume", Fixture, NULL,

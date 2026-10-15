@@ -16,9 +16,10 @@ AiPromptQueue *ai_prompt_queue_new (void);
 |---------------+---------+---------+-----------------------------------------------|
 | =length=      | uint    | 0       | read-only; pending submissions before coalescing |
 | =max-length=  | uint    | 32      | capacity; lowering does not discard existing entries |
+| =paused= | boolean | =FALSE= | hold submissions; =pop()= returns NULL |
 | =coalesce=    | boolean | =TRUE=  | join adjacent text-only entries on pop        |
 
-=notify::length= fires after a successful push, pop or clear.
+=notify::length= fires after a successful push, pop, removal or clear.
 
 ** Push, peek, pop
 #+begin_src C
@@ -41,8 +42,7 @@ only with attachments. Mark slash commands =separate=; attachments always
 form their own batch. A full queue reports =AI_ERROR_INVALID_REQUEST=.
 
 =peek()= inspects the oldest submission without coalescing or removing it.
-The text and attachment list are borrowed until the next pop, clear or
-destruction.
+The text and attachment list are borrowed until the entry is edited, removed, popped, cleared or destroyed.
 
 =pop()= takes the oldest batch. With =coalesce= enabled, adjacent text-only
 entries are joined with two newlines, up to 1 MiB. A separate entry is a
@@ -56,3 +56,17 @@ turn.
 ** See also
 [[file:ai-conversation.org][AiConversation]] ·
 [[file:../message-queue.org][Queued follow-ups and side questions]]
+
+** Inspect and edit
+
+=ai_prompt_queue_get(queue, index, &images)= reads any zero-based entry before
+coalescing. Text and images are borrowed. =ai_prompt_queue_replace(queue, index,
+text, separate, &error)= validates and replaces text without moving the entry or
+changing its attachments. Failure changes nothing. =ai_prompt_queue_remove()=
+removes exactly one entry. Invalid indices return NULL/FALSE.
+
+=ai_prompt_queue_set_paused()= and =ai_prompt_queue_get_paused()= control dispatch
+holds. Pausing does not reject new submissions or cancel an active turn. Hosts
+must explicitly restart dispatch on unpause and keep scheduled work idle while
+editing. Pause before presenting indices and prevent other removals during the
+edit; appended entries do not change existing indices.

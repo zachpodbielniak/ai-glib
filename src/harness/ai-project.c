@@ -6,12 +6,9 @@
  *
  * This file is part of ai-glib.
  *
- * A project has no record of its own. It is what the #AiWorkSession
- * records in the registry have in common: their `project` field, the
- * canonical Git common directory (or the directory itself outside Git).
- * Deriving it on every read, instead of keeping a second store, means
- * there is nothing to fall out of step --- a project exists for exactly
- * as long as something in the registry says it does.
+ * Projects group live work records by canonical identity. Recent identities
+ * are retained in the registry's projects/ directory when disconnected work
+ * records are pruned, so a project can be reopened without a dead session row.
  *
  * The label, the grouping and the urgency order live here so ai-tui,
  * ai-gui and `ai project` give one answer. There were two copies of the
@@ -20,6 +17,9 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
+#include <glib/gstdio.h>
+#include <sys/stat.h>
 
 #include "harness/ai-project.h"
 #include "harness/ai-work-session.h"
@@ -410,6 +410,30 @@ ai_project_list(
 
 	g_list_free_full(sessions, g_object_unref);
 
+	/* Recent project identities outlive disposable dashboard sessions. */
+	{
+		g_autofree gchar *catalog = g_build_filename(directory, "projects", NULL);
+		g_autoptr(GDir) dir = g_dir_open(catalog, 0, NULL);
+		const gchar *name;
+		while (dir != NULL && (name = g_dir_read_name(dir)) != NULL) {
+			g_autofree gchar *path = g_build_filename(catalog, name, NULL);
+			g_autofree gchar *id = NULL;
+			g_autofree gchar *digest = NULL;
+			GStatBuf st;
+			AiProject *project;
+			if (g_lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 16384 ||
+			    !g_file_get_contents(path, &id, NULL, NULL) || !g_utf8_validate(id, -1, NULL) ||
+			    !g_path_is_absolute(id)) continue;
+			digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, id, -1);
+			if (!g_str_equal(digest, name) || g_hash_table_contains(by_id, id)) continue;
+			project = g_object_new(AI_TYPE_PROJECT, NULL);
+			project->id = g_steal_pointer(&id);
+			project->name = ai_project_label_for_path(project->id);
+			project->root = root_for(project->id);
+			g_hash_table_insert(by_id, project->id, project);
+		}
+	}
+
 	g_hash_table_iter_init(&iter, by_id);
 
 	while (g_hash_table_iter_next(&iter, NULL, &value))
@@ -522,7 +546,8 @@ ai_project_find(
 	if (strchr(query, G_DIR_SEPARATOR) != NULL ||
 	    g_str_equal(query, ".") || g_str_equal(query, ".."))
 	{
-		g_autofree gchar *path = g_canonicalize_filename(query, NULL);
+		g_autofree gchar *path = realpath(query, NULL);
+		if (path == NULL) path = g_canonicalize_filename(query, NULL);
 
 		for (l = projects; l != NULL; l = l->next)
 		{
@@ -627,7 +652,7 @@ ai_project_get_root(AiProject *self)
  * ai_project_get_status:
  * @self: a project
  *
- * Returns: (transfer none): see #AiProject:status; "DISCONNECTED" for a
+ * Returns: (transfer none): see #AiProject:status; "IDLE" for a
  *   project with no sessions
  */
 const gchar *
@@ -637,7 +662,7 @@ ai_project_get_status(AiProject *self)
 
 	/* Sessions are kept sorted, so the first is the most urgent. */
 	if (self->sessions->len == 0)
-		return "DISCONNECTED";
+		return "IDLE";
 
 	return ai_work_session_get_field(g_ptr_array_index(self->sessions, 0), "status");
 }

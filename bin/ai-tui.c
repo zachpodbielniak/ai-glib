@@ -326,6 +326,7 @@ attr_for_tag(AiStyleTag tag)
 #define KEY_PASTE_START (KEY_MAX + 2)
 #define KEY_PASTE_END (KEY_MAX + 3)
 #define KEY_CTRL_C (KEY_MAX + 4)
+#define KEY_ALT_Q (KEY_MAX + 5)
 
 /*
  * How long a first ^C stays armed, in milliseconds.
@@ -383,6 +384,14 @@ typedef struct
 	gboolean pasting;
 	GList *images;                 /* AiImageContent references in the draft */
 	AiPromptQueue *send_queue;     /* Pending submissions, coalesced at turn boundaries */
+	gboolean queue_view;
+	gboolean queue_edit;
+	guint queue_selected;
+	gchar *queue_draft;
+	GList *queue_draft_images;
+	guint queue_draft_cursor;
+	gint queue_draft_history;
+	GString *project_input;
 	gboolean queue_blocked;       /* Oldest image requires a compatible provider */
 	GPtrArray *side_questions;     /* AiConversation; async completion owns callbacks */
 	GCancellable *clipboard_cancel;
@@ -509,8 +518,12 @@ on_usage_changed(gpointer data)
 }
 
 static gboolean app_flush_send_queue(App *app);
+static void queue_draw(App *app);
+static void queue_key(App *app, gint ch);
+static void queue_edit_done(App *app, gboolean save);
 static void chrome_text(gint y, gint x, gint width, const gchar *text, attr_t attr);
 #include <termios.h>
+static void say(App *app, const gchar *format, ...) G_GNUC_PRINTF(2, 3);
 #include "ai-tui-workspace.h"
 
 
@@ -1547,12 +1560,14 @@ draw_input(App *app)
 		g_autofree gchar *title = NULL;
 		gint title_cols;
 
-		if (busy && queued > 0)
-			label = g_strdup_printf(" QUEUED %u / waiting for turn ", queued);
+		if (app->queue_edit)
+			label = g_strdup(" EDIT QUEUED MESSAGE · Enter save · Esc cancel ");
+		else if (busy && queued > 0)
+			label = g_strdup_printf(" QUEUED %u / Alt-Q edit / waiting for turn ", queued);
 		else if (busy)
 			label = g_strdup(" DRAFT / waiting for turn ");
 		else if (queued > 0)
-			label = g_strdup_printf(" QUEUED %u ", queued);
+			label = g_strdup_printf(" QUEUED %u / Alt-Q edit ", queued);
 		else if (awaiting)
 			label = g_strdup(" YOUR TURN ");
 		else
@@ -1689,7 +1704,7 @@ draw_chrome(App *app)
 		app->searching ? "RET next | <up> / S-RET previous | C-u clear | ESC close" :
 		app->candidates != NULL ? "TAB / arrows choose | RET accept | ESC dismiss | C-o help" :
 		COLS < 65 ? "RET send  ^\\ dashboard  C-c stop" :
-		COLS < 100 ? "RET send | ^\\ dashboard | C-f find | C-o help | C-p panel" :
+		COLS < 100 ? "RET send | Alt-Q queue | ^\\ dashboard | C-f find | C-o help | C-p panel" :
 		"RET send  ^\\ dashboard  ^] links  C-g editor  C-f search  C-o help  C-t theme  C-p panel",
 		attr_for_tag(AI_STYLE_DIM));
 	if (app->content_width == COLS) return;
@@ -1832,7 +1847,8 @@ app_redraw(App *app)
     /* The input decides how much room is left, so its height is settled
      * before anything is measured against the transcript window. */
     app_layout(app);
-    if (app->dashboard && !app->tiny) { work_draw(app); return; }
+    if (app->queue_view && !app->tiny) { queue_draw(app); return; }
+	if (app->dashboard && !app->queue_edit && !app->tiny) { work_draw(app); return; }
     curs_set(1);
 	bkgd(' ' | attr_for_tag(AI_STYLE_DEFAULT));
 	erase();
@@ -2977,6 +2993,13 @@ change_directory(App *app, const gchar *path)
         return;
     }
 
+	if (app->work != NULL && *work_field(app->work, "socket")) {
+		g_autoptr(AiWorkSession) location = ai_work_session_new(resolved);
+		if (g_strcmp0(work_field(location, "project"), work_field(app->work, "project")) != 0) {
+			work_launch(app, location, FALSE);
+			say(app, "Opening this directory in its own project session."); return;
+		}
+	}
     ai_conversation_set_working_directory(app->conversation, resolved);
     if (app->loops != NULL)
         ai_loop_runner_set_working_directory(app->loops, resolved);
@@ -3210,7 +3233,7 @@ loop_should_wait(AiLoopRunner *runner, gpointer user_data)
 	       app->approval_prompt != NULL ||
 	       app->decision_pending ||
 	       app->clipboard_pending ||
-	       app->dashboard ||
+	       app->dashboard || app->queue_view || app->queue_edit ||
 	       app->searching ||
 	       app->picker_models != NULL ||
 	       app->launch_pending > 0;
@@ -3521,11 +3544,16 @@ handle_builtin(App *app, AiCommandResult *result)
             g_autofree gchar *path = resolve_command_path(app, arguments);
             if (g_file_test(path, G_FILE_TEST_IS_DIR))
             {
-                g_autoptr(AiWorkSession) project = ai_work_session_new(path);
+                g_autoptr(AiWorkSession) project = g_object_new(AI_TYPE_WORK_SESSION, "directory", path, NULL);
                 work_launch(app, project, FALSE);
             }
             else say(app, "Project directory does not exist.");
         }
+    }
+    else if (g_strcmp0(name, "queue") == 0)
+    {
+        if (opt_dump) say(app, "Queue editing requires an interactive session.");
+        else { completion_close(app); app->queue_view = TRUE; ai_prompt_queue_set_paused(app->send_queue, TRUE); }
     }
     else if (g_strcmp0(name, "dashboard") == 0)
     {
@@ -4012,6 +4040,9 @@ interrupt_arm(App *app)
 static gboolean
 handle_interrupt(App *app)
 {
+	if (app->queue_edit) { queue_edit_done(app, FALSE); return FALSE; }
+	if (app->queue_view) { queue_key(app, 27); return FALSE; }
+	if (app->project_input != NULL) { work_key(app, 27); return FALSE; }
 	if (app->decision_pending)
 	{
 		g_cancellable_cancel(app->decision_cancel);
@@ -4256,7 +4287,7 @@ handle_mouse(
 	gint col = 0;
 	gboolean over;
 
-    if (app->dashboard) return;
+    if (app->dashboard || app->queue_view) return;
     if (!app->pasting && app->work != NULL && event->x >= app->content_width + 2 &&
         event->y >= app->link_first_row && event->y < app->link_last_row)
     {
@@ -4367,15 +4398,30 @@ drain_keys(App *app)
 				(!g_unichar_iscntrl((gunichar)value) || ch == '\n' || ch == '\r' || ch == '\t'))
 			{
 				g_unichar_to_utf8(ch == '\r' ? '\n' : (gunichar)value, utf8);
+				if (app->project_input != NULL && app->project_input->len < 4096 && ch != '\n' && ch != '\r')
+					g_string_append(app->project_input, utf8);
 				/* Ignore pasted approval answers; require a deliberate key. */
-				if (!app->dashboard && app->approval_prompt == NULL && !app->searching && !app->tiny)
+				if ((!app->dashboard || app->queue_edit) && !app->queue_view && app->approval_prompt == NULL && !app->searching && !app->tiny)
 					input_insert(app, utf8);
 			}
 			app_schedule_redraw(app);
 			continue;
 		}
-        if (kind == OK && ch == 28) { work_toggle(app); continue; }
-        if (app->dashboard) { work_key(app, ch); continue; }
+        if (app->queue_edit && kind == OK && ch == 27) { queue_edit_done(app, FALSE); continue; }
+		if (app->queue_view) { queue_key(app, ch); continue; }
+		if (kind == KEY_CODE_YES && ch == KEY_ALT_Q && !app->queue_edit && !app->clipboard_pending && app->project_input == NULL && app->approval_prompt == NULL) {
+			completion_close(app);
+			app->queue_view = TRUE;
+			ai_prompt_queue_set_paused(app->send_queue, TRUE);
+			app_schedule_redraw(app); continue;
+		}
+		if (kind == OK && ch == 28 && !app->queue_edit && app->project_input == NULL) { work_toggle(app); continue; }
+        if (app->dashboard && !app->queue_edit) {
+			/* Function/arrow key codes overlap valid Unicode codepoints. */
+			if (app->project_input == NULL || kind == OK || ch == KEY_BACKSPACE || ch == KEY_ENTER)
+				work_key(app, ch);
+			continue;
+		}
         if (kind == OK && ch == 29 && app->work != NULL)
         {
             g_auto(GStrv) links = ai_work_session_dup_links(app->work);
@@ -4486,6 +4532,7 @@ drain_keys(App *app)
         switch (ch)
         {
 			case 22: /* ^V: attach the clipboard image */
+				if (app->queue_edit) { ui_feedback(app, "Queued attachments are preserved; edit text here", AI_STYLE_STATUS); break; }
 				paste_image(app);
 				break;
 			case KEY_RESIZE:
@@ -5628,6 +5675,81 @@ app_side_question(App *app, const gchar *question)
 }
 
 static void
+queue_edit_done(App *app, gboolean save)
+{
+	g_autoptr(GError) error = NULL;
+	if (save && !ai_prompt_queue_replace(app->send_queue, app->queue_selected,
+		app->input->str, app->input->str[0] == '/', &error)) {
+		ui_feedback(app, error->message, AI_STYLE_ERROR); return;
+	}
+	g_string_assign(app->input, app->queue_draft);
+	g_clear_pointer(&app->queue_draft, g_free);
+	g_clear_list(&app->images, g_object_unref);
+	app->images = g_steal_pointer(&app->queue_draft_images);
+	app->cursor = app->queue_draft_cursor;
+	app->history_pos = app->queue_draft_history;
+	app->queue_edit = FALSE;
+	app->queue_view = TRUE;
+	app_schedule_redraw(app);
+}
+
+static void
+queue_key(App *app, gint ch)
+{
+	guint n = ai_prompt_queue_get_length(app->send_queue);
+	if (ch == KEY_UP && app->queue_selected > 0) app->queue_selected--;
+	else if (ch == KEY_DOWN && app->queue_selected + 1 < n) app->queue_selected++;
+	else if (ch == 'd' && app->queue_selected < n) {
+		ai_prompt_queue_remove(app->send_queue, app->queue_selected);
+		if (app->queue_selected > 0 && app->queue_selected >= n - 1) app->queue_selected--;
+	}
+	else if ((ch == 'e' || ch == '\n' || ch == '\r' || ch == KEY_ENTER) && app->queue_selected < n) {
+		completion_close(app);
+		app->queue_draft = g_strdup(app->input->str);
+		app->queue_draft_cursor = app->cursor;
+		app->queue_draft_history = app->history_pos;
+		app->history_pos = -1;
+		app->queue_draft_images = g_steal_pointer(&app->images);
+		g_string_assign(app->input, ai_prompt_queue_get(app->send_queue, app->queue_selected, NULL));
+		app->cursor = app->input->len;
+		app->queue_view = FALSE;
+		app->queue_edit = TRUE;
+		ui_feedback(app, "Editing queued message: Enter saves, Esc cancels; attachments are preserved", AI_STYLE_STATUS);
+	}
+	else if (ch == 27 || ch == 'q' || ch == KEY_ALT_Q) {
+		app->queue_view = FALSE;
+		ai_prompt_queue_set_paused(app->send_queue, FALSE);
+		app_flush_send_queue(app);
+		clearok(curscr, TRUE);
+	}
+	app_schedule_redraw(app);
+}
+
+static void
+queue_draw(App *app)
+{
+	guint n = ai_prompt_queue_get_length(app->send_queue), i;
+	guint first;
+	gint y = 3;
+	app->queue_selected = MIN(app->queue_selected, n > 0 ? n - 1 : 0);
+	first = app->queue_selected > (guint)MAX(1, LINES - 6) ? app->queue_selected - MAX(1, LINES - 6) : 0;
+	erase();
+	chrome_text(0, 1, COLS - 2, "QUEUED MESSAGES — sending paused", A_BOLD);
+	chrome_text(1, 1, COLS - 2, "Enter opens the full message in the editor. Your unsent draft is preserved.", A_DIM);
+	for (i = first; i < n && y < LINES - 2; i++, y++) {
+		GList *images = NULL;
+		const gchar *text = ai_prompt_queue_get(app->send_queue, i, &images);
+		g_autofree gchar *line = g_strdup_printf("%u. %s%s", i + 1, images != NULL ? "[images] " : "", text);
+		g_strdelimit(line, "\n\r\t", ' ');
+		chrome_text(y, 1, COLS - 2, line, i == app->queue_selected ? A_REVERSE : A_NORMAL);
+	}
+	if (n == 0) chrome_text(3, 1, COLS - 2, "No queued messages.", A_NORMAL);
+	chrome_text(LINES - 1, 0, COLS, "Up/Down select | Enter edit | d remove | Esc resume sending", A_DIM);
+	curs_set(0);
+	refresh();
+}
+
+static void
 app_enqueue_draft(App *app, const gchar *line)
 {
 	g_autoptr(GError) error = NULL;
@@ -5652,10 +5774,18 @@ app_send_from_composer(
 ){
     g_autofree gchar *line = NULL;
 	gboolean recovery_command;
+	if (app->queue_edit) { queue_edit_done(app, TRUE); return; }
 
 	/* A pending clipboard read belongs to the unsent draft, not this batch. */
 	if (record_history && app->clipboard_pending)
 		return;
+	if (!opt_no_expand && g_strcmp0(app->input->str, "/queue") == 0) {
+		g_string_truncate(app->input, 0); app->cursor = 0;
+		completion_close(app);
+		app->queue_view = TRUE;
+		ai_prompt_queue_set_paused(app->send_queue, TRUE);
+		app_schedule_redraw(app); return;
+	}
 	if (image_draft_is_rejected(app))
 		return;
 
@@ -5756,7 +5886,8 @@ app_flush_send_queue(App *app)
 	gint history_pos;
 
 	if (app->sending || ai_conversation_get_busy(app->conversation) ||
-		ai_prompt_queue_get_length(app->send_queue) == 0)
+		ai_prompt_queue_get_length(app->send_queue) == 0 ||
+		ai_prompt_queue_get_paused(app->send_queue))
 		return FALSE;
 
 	/* A queued turn never consumes the unsent composer or its attachments. */
@@ -6879,6 +7010,9 @@ main(int argc, char *argv[])
      * Alt+Enter needs none of this and works everywhere, which is why it
      * is the binding the documentation leads with.
      */
+    define_key("\033q", KEY_ALT_Q);
+	define_key("\033[113;3u", KEY_ALT_Q);
+	define_key("\033[27;3;113~", KEY_ALT_Q);
     define_key("\033[13;2u", KEY_SHIFT_ENTER);
     define_key("\033[27;2;13~", KEY_SHIFT_ENTER);
 	/* gst's negotiated keyboard protocol and xterm modifyOtherKeys send
@@ -7047,6 +7181,9 @@ main(int argc, char *argv[])
     g_clear_object(&app.cancellable);
     g_object_unref(app.conversation);
     g_object_unref(provider);
+    if (app.project_input != NULL) g_string_free(app.project_input, TRUE);
+    g_clear_pointer(&app.queue_draft, g_free);
+    g_clear_list(&app.queue_draft_images, g_object_unref);
     g_clear_object(&app.send_queue);
 	g_ptr_array_unref(app.side_questions);
     g_string_free(app.input, TRUE);

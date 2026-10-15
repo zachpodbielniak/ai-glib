@@ -502,8 +502,9 @@ ai_gui_commands_handle(
 		}
 		else
 		{
-			ai_gui_session_set_working_directory(session, path);
-			ai_gui_commands_say(session, "Working directory: %s", path);
+			/* A directory switch selects a project conversation. Its history,
+			 * queue and provider identity cannot migrate into another project. */
+			ai_gui_window_open_project(window, path);
 		}
 	}
 	else if (g_strcmp0(name, "context") == 0)
@@ -586,6 +587,10 @@ ai_gui_commands_handle(
 			ai_gui_commands_say(session,
 				"Loading the assignment; your draft is preserved.");
 		}
+	}
+	else if (g_strcmp0(name, "queue") == 0)
+	{
+		gtk_widget_activate_action(GTK_WIDGET(window), "win.queue", NULL);
 	}
 	else if (g_strcmp0(name, "dashboard") == 0)
 	{

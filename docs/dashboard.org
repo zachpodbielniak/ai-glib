@@ -22,7 +22,7 @@ the project's name, its session count and its main checkout, e.g.
 repository's heading, because a project is identified by its Git common
 directory; a non-Git directory is a project of its own. The project that
 needs you most comes first, then each project's rows by attention: INPUT,
-ERROR, WORK, DONE, STOPPED, IDLE, then DISCONNECTED. Both orders and the
+ERROR, WORK, DONE, STOPPED, IDLE, with recent projects available for reopening. Both orders and the
 name are the library's (=AiProject=, see [[file:projects.org][projects]]), so
 ai-gui and =ai project= agree with this list. The current
 activity and links belong to the selected row. There is no estimated percentage:
@@ -32,13 +32,20 @@ a finished model turn does not prove an issue is resolved or a PR is merged.
 |-----+--------|
 | Up / Down | Select a session |
 | Enter | Focus its tmux pane, or return to this conversation |
-| n | Start here from the initial dashboard, otherwise open another worker in the selected row's project session |
+| n | Open a new worker in the selected project's tmux session, including from the startup dashboard |
+| p | Open a project by directory path; Enter opens, Escape cancels |
 | w | Create an isolated Git worktree and open ai-tui there |
-| r | Resume a disconnected session with a native provider session ID |
+
 | o | Open the selected linked issue or PR |
 | Tab | Select the next link |
 | Ctrl+\ | Return to the current conversation |
 | q | Exit this ai-tui, cancelling its foreground turn |
+
+The =p= path entry accepts spaces, relative paths, and =~/path=. Opening a project
+starts its provider and loads its commands, skills, agents and configuration.
+The unsent draft in the dashboard's original conversation is preserved.
+Inside tmux, =/cwd= to another project opens that project's session; changes
+within the same project keep the current conversation.
 
 =/project /path/to/repository= opens a worker in that project's tmux
 session. With no argument, =/project= opens the dashboard. Existing windows
@@ -54,7 +61,7 @@ subprocess waits, so creation does not block the dashboard.
 
 * One tmux session per project
 
-A worker launched from the dashboard (=n=, =w=, =r= or =/project DIR=)
+A worker launched from the dashboard (=n=, =p=, =w= or =/project DIR=)
 opens as a new window in its project's own tmux session: one session per
 project, one window (and one pane) per worker. The session is named after
 the project, so =prefix s= lists each project with its workers beneath it,
@@ -66,7 +73,8 @@ The client then switches to the new worker, as a new window used to do.
 - A session is claimed by setting the tmux user option =@ai_project= to the
   project identity when it is created. A session with that name that belongs
   to another project, or that a person created by hand, is never used:
-  the launch takes the next free name, =alpha-2=, =alpha-3= and so on. Two
+  the launch takes the next free name, =alpha-2=, =alpha-3= and so on. Existing
+  claims are found by identity even after a user renames the tmux session. Two
   repositories both called =alpha= therefore get two sessions.
 - Names keep letters, digits, =-= and =_=; anything else becomes =-=, since
   tmux reserves =.= and =:= in targets. Targets are always the exact form
@@ -168,8 +176,9 @@ metadata. Other terminal hosts, including herdr, keep their existing reporting.
 
 An abrupt kill cannot run restoration. Live reporters ignore another pane's
 expired state after fifteen seconds; a window with no live reporter may retain
-its last prefix until renamed or another ai-tui starts there. The dashboard
-still marks that session disconnected. Nested ai-tui processes sharing the
+its last prefix until renamed or another ai-tui starts there. A new reporter
+normalizes repeated status prefixes in the base name. Dashboard refresh removes
+disconnected session records when their ownership locks are free. Nested ai-tui processes sharing the
 same physical pane are not an aggregation boundary; use separate panes.
 
 * Persistence and recovery
@@ -181,14 +190,21 @@ branch, task title, provider/model/native resume ID, tmux target, activity,
 links and cached titles/states. They do not contain the transcript or issue body.
 Each process owns one UUID; an advisory lock prevents two ai-tui processes from
 resuming the same dashboard record. Heartbeats refresh every three seconds and
-expire after fifteen. Normal exit preserves metadata and releases liveness.
+expire after fifteen. Normal exit releases liveness. On dashboard refresh, disconnected records whose
+ownership locks are free are removed after rechecking the heartbeat under the
+lock. A held lock protects a live process even when its heartbeat is late.
+Recent project identities survive separately in =sessions/projects/=, in private
+files named by the SHA-256 of the identity. Provider histories, saved GUI
+conversations and loop schedules are never deleted by dashboard cleanup. Lock
+files remain to preserve exclusion with processes already holding that inode.
 
 The registry is local to this machine and user. Multiple tmux servers are
 identified by socket path and pane ID. The dashboard does not aggregate remote
 machines. Detached tmux sessions continue reporting while their processes run.
 The native provider's existing history reader handles resumed conversations;
 HTTP-provider transcript recovery is not added by this dashboard. Disconnected
-records without a native resume ID remain visible but cannot be resumed with =r=.
+records disappear from the dashboard; use the provider's own history/continue
+facilities or saved GUI conversations for recovery.
 
 * Validation
 
@@ -215,3 +231,6 @@ A reproducible verbatim terminal demonstration is in
 binary against stub provider/forge CLIs in isolated tmux servers. The C/GTest
 suite additionally exercises returned-list ownership, retained object lifetime,
 properties and independently owned link strings.
+
+See [[file:demonstrations/project-workspace.org][the project and queue demonstrations]] for real
+GUI screenshots, terminal captures and reproducible integration checks.

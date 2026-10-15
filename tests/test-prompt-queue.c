@@ -239,6 +239,48 @@ fork_cancel_side(void)
 	g_assert_cmpuint(ai_mock_provider_get_call_count(main_provider), ==, 1);
 }
 
+static void
+edit_paused_queue(void)
+{
+	g_autoptr(AiPromptQueue) queue = ai_prompt_queue_new();
+	g_autoptr(GBytes) bytes = g_bytes_new_static("image", 5);
+	g_autoptr(AiImageContent) image = ai_image_content_new_from_bytes(bytes, "image/png");
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *text = NULL;
+	GList *images = g_list_append(NULL, image), *actual = NULL;
+	ai_prompt_queue_push(queue, "first", NULL, FALSE, NULL);
+	ai_prompt_queue_push(queue, "picture", images, FALSE, NULL);
+	ai_prompt_queue_push(queue, "last", NULL, FALSE, NULL);
+	g_list_free(images);
+	ai_prompt_queue_set_paused(queue, TRUE);
+	g_assert_null(ai_prompt_queue_pop(queue, NULL));
+	g_assert_cmpuint(ai_prompt_queue_get_length(queue), ==, 3);
+	g_assert_cmpstr(ai_prompt_queue_get(queue, 2, NULL), ==, "last");
+	g_assert_true(ai_prompt_queue_replace(queue, 1, "new picture", FALSE, &error));
+	g_assert_cmpstr(ai_prompt_queue_get(queue, 1, &actual), ==, "new picture");
+	g_assert_true(actual->data == image);
+	g_assert_false(ai_prompt_queue_replace(queue, 0, "", FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	g_assert_cmpstr(ai_prompt_queue_get(queue, 0, NULL), ==, "first");
+	g_assert_true(ai_prompt_queue_remove(queue, 0));
+	g_assert_false(ai_prompt_queue_remove(queue, 99));
+	g_assert_false(ai_prompt_queue_replace(queue, 99, "bad", FALSE, &error));
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_assert_null(ai_prompt_queue_get(queue, 99, NULL));
+	ai_prompt_queue_set_paused(queue, FALSE);
+	text = ai_prompt_queue_pop(queue, &actual);
+	g_assert_cmpstr(text, ==, "new picture");
+	g_assert_true(actual->data == image);
+	g_list_free_full(actual, g_object_unref);
+	g_clear_pointer(&text, g_free);
+	g_assert_true(ai_prompt_queue_replace(queue, 0, "/help", TRUE, NULL));
+	ai_prompt_queue_push(queue, "after", NULL, FALSE, NULL);
+	text = ai_prompt_queue_pop(queue, NULL);
+	g_assert_cmpstr(text, ==, "/help");
+	g_assert_cmpstr(ai_prompt_queue_peek(queue, NULL), ==, "after");
+}
+
 int main(int argc, char **argv)
 {
 	sandbox = g_dir_make_tmp("ai-prompt-queue-XXXXXX", NULL);
@@ -246,6 +288,7 @@ int main(int argc, char **argv)
 	g_setenv("XDG_CONFIG_HOME", sandbox, TRUE);
 	g_setenv("XDG_STATE_HOME", sandbox, TRUE);
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/queue/edit-paused", edit_paused_queue);
 	g_test_add_func("/queue/batch", batch);
 	g_test_add_func("/queue/images", images);
 	g_test_add_func("/queue/validation", validation);

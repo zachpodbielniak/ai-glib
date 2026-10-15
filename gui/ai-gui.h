@@ -75,7 +75,7 @@ ai_gui_window_get_dashboard(AiGuiWindow *self);
  * @self: a window
  * @directory: an existing directory
  *
- * Starts a conversation there and switches to it.
+ * Selects an existing conversation for the directory, or starts one there.
  *
  * ai-tui opens a tmux window because it is a terminal program; a session
  * in this window is the desktop equivalent, and it keeps every open

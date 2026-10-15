@@ -52,4 +52,35 @@ ai_prompt_queue_pop(
 void
 ai_prompt_queue_clear(AiPromptQueue *self);
 
+const gchar *
+ai_prompt_queue_get(
+    AiPromptQueue  *self,
+    guint           index,
+    GList         **images
+);
+
+gboolean
+ai_prompt_queue_replace(
+    AiPromptQueue  *self,
+    guint           index,
+    const gchar    *text,
+    gboolean        separate,
+    GError        **error
+);
+
+gboolean
+ai_prompt_queue_remove(
+    AiPromptQueue *self,
+    guint          index
+);
+
+gboolean
+ai_prompt_queue_get_paused(AiPromptQueue *self);
+
+void
+ai_prompt_queue_set_paused(
+    AiPromptQueue *self,
+    gboolean       paused
+);
+
 G_END_DECLS

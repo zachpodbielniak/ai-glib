@@ -768,7 +768,7 @@ on_loops_should_wait(AiLoopRunner *runner, gpointer user_data)
 	AiGuiSession *self = user_data;
 
 	return self->sending || ai_conversation_get_busy(self->conversation) ||
-	       ai_prompt_queue_get_length(self->queue) != 0 || self->awaiting_approval;
+	       ai_prompt_queue_get_length(self->queue) != 0 || ai_prompt_queue_get_paused(self->queue) || self->awaiting_approval;
 }
 
 static gboolean
@@ -1551,7 +1551,11 @@ session_pump_queue(AiGuiSession *self)
 	if (self->sending || ai_conversation_get_busy(self->conversation))
 		return;
 
-	if (ai_prompt_queue_get_length(self->queue) == 0)
+	/* Pop returns NULL while paused and leaves the entry in place. Do not
+	 * call it anyway: a turn that ends during an edit must not dispatch,
+	 * and unpausing is what starts the queue again. */
+	if (ai_prompt_queue_get_paused(self->queue) ||
+	    ai_prompt_queue_get_length(self->queue) == 0)
 		return;
 
 	text = ai_prompt_queue_pop(self->queue, &images);
@@ -1573,12 +1577,14 @@ ai_gui_session_send(
 	g_return_val_if_fail(AI_GUI_IS_SESSION(self), FALSE);
 	g_return_val_if_fail(text != NULL, FALSE);
 
-	if (self->sending || ai_conversation_get_busy(self->conversation))
+	if (self->sending || ai_conversation_get_busy(self->conversation) ||
+	    ai_prompt_queue_get_paused(self->queue) || ai_prompt_queue_get_length(self->queue) > 0)
 	{
-		if (!ai_prompt_queue_push(self->queue, text, images, FALSE, error))
+		if (!ai_prompt_queue_push(self->queue, text, images, text[0] == '/', error))
 			return FALSE;
 
 		g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_QUEUED]);
+		session_pump_queue(self);
 		return TRUE;
 	}
 
@@ -2170,4 +2176,20 @@ ai_gui_session_init(AiGuiSession *self)
 	g_signal_connect(self->loops, "fire", G_CALLBACK(on_loops_fire), self);
 	g_signal_connect(self->loops, "notice", G_CALLBACK(on_loops_notice), self);
 	g_signal_connect(self->loops, "changed", G_CALLBACK(on_loops_changed), self);
+}
+
+AiPromptQueue *
+ai_gui_session_get_queue(AiGuiSession *self)
+{
+	g_return_val_if_fail(AI_GUI_IS_SESSION(self), NULL);
+	return self->queue;
+}
+
+void
+ai_gui_session_resume_queue(AiGuiSession *self)
+{
+	g_return_if_fail(AI_GUI_IS_SESSION(self));
+	ai_prompt_queue_set_paused(self->queue, FALSE);
+	g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_QUEUED]);
+	session_pump_queue(self);
 }
