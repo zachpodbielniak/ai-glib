@@ -27,14 +27,22 @@ CFLAGS_BASE = $(CSTD) $(WARNINGS) -fPIC
 # pkg-config dependencies
 PKG_DEPS = glib-2.0 gobject-2.0 gio-2.0 libsoup-3.0 json-glib-1.0 libxml-2.0 gio-unix-2.0 libdex-1 gstreamer-1.0 gstreamer-app-1.0
 
+# A Homebrew pkg-config earlier on PATH sees its own GTK and misses the
+# system json-glib that the public headers include. Searching both trees
+# lets one invocation resolve every .pc file, so a GUI object is not
+# compiled with toolkit flags and without -I/usr/include/json-glib-1.0.
+PKG_CONFIG ?= pkg-config
+PKG_CONFIG_PATH := $(shell $(PKG_CONFIG) --variable=pc_path $(PKG_CONFIG)):/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$(PKG_CONFIG_PATH)
+export PKG_CONFIG_PATH
+
 # Get flags from pkg-config
-PKG_CFLAGS := $(shell pkg-config --cflags $(PKG_DEPS))
+PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKG_DEPS))
 # -lm is explicit rather than from pkg-config: nothing in PKG_DEPS pulls it,
 # and ai_embedding_cosine() needs sqrt(). Linking the shared library happened
 # to succeed without it -- an unresolved symbol in a .so is only a problem at
 # load time -- and the failure surfaced instead as ai-tui failing to link,
 # which points nowhere near the cause.
-PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS)) -lm
+PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKG_DEPS)) -lm
 
 # yaml-glib (bundled under deps/yaml-glib, built as static lib).
 # Always built with its own conventions; not affected by parent DEBUG.
@@ -48,13 +56,13 @@ PKG_LIBS := $(shell pkg-config --libs $(PKG_DEPS)) -lm
 # missing, ai-tui is dropped from the binaries with a notice rather than
 # failing the build.
 NCURSES_DEPS = ncursesw
-HAVE_NCURSES := $(shell pkg-config --exists $(NCURSES_DEPS) && echo 1 || echo 0)
+HAVE_NCURSES := $(shell $(PKG_CONFIG) --exists $(NCURSES_DEPS) && echo 1 || echo 0)
 
 ifeq ($(HAVE_NCURSES),1)
-NCURSES_CFLAGS := $(shell pkg-config --cflags $(NCURSES_DEPS)) \
-                  $(shell pkg-config --cflags gio-unix-2.0)
-NCURSES_LIBS := $(shell pkg-config --libs $(NCURSES_DEPS)) \
-                $(shell pkg-config --libs gio-unix-2.0)
+NCURSES_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(NCURSES_DEPS)) \
+                  $(shell $(PKG_CONFIG) --cflags gio-unix-2.0)
+NCURSES_LIBS := $(shell $(PKG_CONFIG) --libs $(NCURSES_DEPS)) \
+                $(shell $(PKG_CONFIG) --libs gio-unix-2.0)
 endif
 
 # gtk4 + libadwaita, for the `ai-gui` desktop client only.
@@ -66,11 +74,11 @@ endif
 # keeping the toolkit out of libai-glib is what lets a daemon, an Emacs
 # module or a server embed the library.
 GTK_PKG_DEPS = gtk4 libadwaita-1
-HAVE_GTK := $(shell pkg-config --exists $(GTK_PKG_DEPS) && echo 1 || echo 0)
+HAVE_GTK := $(shell $(PKG_CONFIG) --exists $(GTK_PKG_DEPS) && echo 1 || echo 0)
 
 ifeq ($(HAVE_GTK),1)
-GTK_CFLAGS := $(shell pkg-config --cflags $(GTK_PKG_DEPS))
-GTK_LIBS   := $(shell pkg-config --libs $(GTK_PKG_DEPS))
+GTK_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(GTK_PKG_DEPS))
+GTK_LIBS   := $(shell $(PKG_CONFIG) --libs $(GTK_PKG_DEPS))
 endif
 
 MCP_GLIB_DIR = deps/mcp-glib
@@ -80,7 +88,7 @@ MCP_GLIB_CFLAGS = -I$(MCP_GLIB_DIR)/src
 YAML_GLIB_DIR = deps/yaml-glib
 YAML_GLIB_STATIC = $(YAML_GLIB_DIR)/build/release/libyaml-glib-1.0.a
 YAML_GLIB_CFLAGS = -I$(YAML_GLIB_DIR)/src
-YAML_GLIB_LIBS = $(YAML_GLIB_STATIC) $(shell pkg-config --libs yaml-0.1)
+YAML_GLIB_LIBS = $(YAML_GLIB_STATIC) $(shell $(PKG_CONFIG) --libs yaml-0.1)
 
 # ---- Build directories ----
 

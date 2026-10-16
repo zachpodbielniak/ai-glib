@@ -30,6 +30,12 @@ make
 make test
 #+end_src
 
+=make= searches the system =pkg-config= directories as well as whatever
+=pkg-config= is first on =PATH=. A Homebrew =pkg-config= finds its own
+GTK and misses the system =json-glib= the public headers include, and
+that combination compiles =gui/= without
+=-I/usr/include/json-glib-1.0=. An explicit =PKG_CONFIG= still wins.
+
 ** Code Style
 *** C Standard
 - Use =gnu89= exclusively

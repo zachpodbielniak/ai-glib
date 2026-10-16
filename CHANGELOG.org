@@ -7,6 +7,10 @@ release may change the API.
 * 0.7.2 - 2026-10-16
 
 ** Fixed
+- =make= searches system =pkg-config= directories as well as the
+  =pkg-config= first on =PATH=. A Homebrew =pkg-config= that sees GTK
+  and misses system =json-glib= otherwise compiles =gui/= without the
+  header the public includes need.
 - Accepting a directory from the =ai-tui= =@= menu keeps the path
   completer open on the entries inside it.
 - Accepting a command or skill inserts a trailing space, so the next
