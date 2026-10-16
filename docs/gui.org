@@ -271,6 +271,13 @@ make                    # everything, including the client when GTK is present
 make install            # installs ai-gui and its .desktop file
 #+end_src
 
+The launcher is =data/org.copyleft.AiGlib.Gui.desktop=. Its name is
+the application id (=AI_GUI_APP_ID=), and =StartupWMClass=ai-gui=
+matches the window title and =g_get_prgname()=. =make install= copies
+it to =$(PREFIX)/share/applications/= whenever =build/<type>/bin/ai-gui=
+exists, so a later install that can no longer see gtk4 on
+=pkg-config= still ships the launcher next to the binary.
+
 Fedora packages: =gtk4-devel=, =libadwaita-devel=. On an immutable host these
 belong in the image build rather than in a transient overlay.
 

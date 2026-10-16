@@ -687,7 +687,15 @@ install: all install-gir pkgconfig
 		echo "  install $$b"; \
 		install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/; \
 	done
-ifeq ($(HAVE_GTK),1)
+#
+# The desktop file follows the binary, not whatever pkg-config can
+# see at install time. HAVE_GTK is a shell probe of the machine that
+# happens to be running make, so an install of a tree already built
+# with gtk4 -- the immutablue-deps container, a DESTDIR stage, a
+# second make that lost the devel packages -- would ship ai-gui and
+# leave it out of every launcher. The built binary is the fact.
+#
+ifneq ($(wildcard $(OUTDIR)/bin/ai-gui),)
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	install -m 644 $(DATADIR)/org.copyleft.AiGlib.Gui.desktop \
 		$(DESTDIR)$(PREFIX)/share/applications/

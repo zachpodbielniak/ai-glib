@@ -4,6 +4,14 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.7.1 - 2026-10-15
+
+** Fixed
+- =make install= always installs =ai-gui='s desktop file when the
+  client was built, including a later install that does not see
+  gtk4 on =pkg-config=. The file is =org.copyleft.AiGlib.Gui.desktop=,
+  matching =AI_GUI_APP_ID=, with =StartupWMClass=ai-gui=.
+
 * 0.7.0 - 2026-10-02
 
 ** Added
