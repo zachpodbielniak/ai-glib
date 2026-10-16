@@ -761,21 +761,24 @@ vars:
 endif # ifndef __MIXED
 
 # Matrix-only configuration stays outside the library and its GIR.
+# Order-only deps on config.h and ai-version.h: these objects include
+# ai-glib.h, and under `make -j all` they otherwise race the header
+# generation (same guard as the pattern rules in rules.mk).
 CALL_CONFIG_OBJECT = $(OBJDIR)/bin/ai-call-config.o
-$(CALL_CONFIG_OBJECT): bin/call/ai-call-config.c bin/call/ai-call-config.h
+$(CALL_CONFIG_OBJECT): bin/call/ai-call-config.c bin/call/ai-call-config.h | $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: EXTRA_LINK_OBJECTS = $(CALL_CONFIG_OBJECT)
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-config: $(CALL_CONFIG_OBJECT)
 CALL_SPEECH_CACHE_OBJECT = $(OBJDIR)/bin/ai-call-speech-cache.o
-$(CALL_SPEECH_CACHE_OBJECT): bin/call/ai-call-speech-cache.c bin/call/ai-call-speech-cache.h
+$(CALL_SPEECH_CACHE_OBJECT): bin/call/ai-call-speech-cache.c bin/call/ai-call-speech-cache.h | $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_SPEECH_CACHE_OBJECT)
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix $(OUTDIR)/tests/test-call-speech-cache: $(CALL_SPEECH_CACHE_OBJECT)
 $(OUTDIR)/tests/test-call-speech-cache: EXTRA_LINK_OBJECTS = $(CALL_SPEECH_CACHE_OBJECT)
 CALL_TRANSCRIPT_OBJECT = $(OBJDIR)/bin/ai-call-transcript.o
-$(CALL_TRANSCRIPT_OBJECT): bin/call/ai-call-transcript.c bin/call/ai-call-transcript.h
+$(CALL_TRANSCRIPT_OBJECT): bin/call/ai-call-transcript.c bin/call/ai-call-transcript.h | $(OUTDIR)/config.h $(OUTDIR)/ai-version.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(OUTDIR)/bin/ai-call $(OUTDIR)/tests/test-voice-matrix: EXTRA_LINK_OBJECTS += $(CALL_TRANSCRIPT_OBJECT)
