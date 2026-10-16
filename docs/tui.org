@@ -430,7 +430,7 @@ to the input history and the transcript when it is not --- one key, two
 jobs, decided by what is on screen. Press =Escape= first if you want the
 history back with a half-typed command still on the line.
 
-A fully typed command such as =/model=, =/provider= or =/effort= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider=, leaving it in the composer so you can add an argument. =Tab= always completes without submitting. Path completions also remain in the composer.
+A fully typed command such as =/model=, =/provider= or =/effort= runs on the first =Enter= when the highlighted completion already matches the entire command. Partial names still complete first: =/prov= followed by =Enter= fills in =/provider =, with a trailing space, so the next character is an argument rather than part of the name. =Tab= does the same and never submits. Accepting a file closes the menu and leaves the cursor after the name. Accepting a directory leaves the menu open on the entries inside it, so the next =Enter= walks further in.
 
 =Home= / =C-a= and =End= / =C-e= refresh completion at the new cursor position, just like the arrow keys. Before the initial slash there is no token to complete, so =Tab= leaves the draft unchanged. Terminal tests exercise every registered built-in with one =Enter=, including missing-argument feedback, and check that these local commands never invoke the provider.
 

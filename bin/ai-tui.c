@@ -5207,6 +5207,8 @@ completion_accept(App *app)
     const gchar *text = NULL;
     guint        start;
     guint        end;
+    gboolean     is_directory = FALSE;
+    AiCompletionKind kind;
 
     if (app->candidates == NULL)
     {
@@ -5215,12 +5217,13 @@ completion_accept(App *app)
 
     if (!ai_completion_result_get_item_fields(app->candidates,
                                               app->candidate_index, &text,
-                                              NULL, NULL, NULL, NULL))
+                                              NULL, NULL, NULL, &is_directory))
     {
         completion_close(app);
         return;
     }
 
+    kind = ai_completion_result_get_kind(app->candidates);
     start = ai_completion_result_get_start(app->candidates);
     end = ai_completion_result_get_end(app->candidates);
 
@@ -5229,6 +5232,28 @@ completion_accept(App *app)
     g_string_erase(app->input, (gssize)start, (gssize)(end - start));
     g_string_insert(app->input, (gssize)start, text);
     app->cursor = start + (guint)strlen(text);
+
+    /*
+     * A directory is a step into the tree, not a finished mention. The
+     * library already put a trailing slash on it; leaving the menu open
+     * is what lets the next Enter walk further without deleting that
+     * slash and typing it again.
+     *
+     * A command or skill is finished. A trailing space keeps the next
+     * character from becoming part of the name.
+     */
+    if (is_directory)
+    {
+        app->completion_dismissed = FALSE;
+        completion_refresh(app);
+        return;
+    }
+
+    if (kind == AI_COMPLETION_COMMAND)
+    {
+        g_string_insert_c(app->input, (gssize)app->cursor, ' ');
+        app->cursor++;
+    }
 
     completion_close(app);
 }

@@ -1828,6 +1828,68 @@ test_switch_command_enter(gconstpointer data)
 	stub_free(stub);
 }
 
+/*
+ * Accepting a directory keeps the file menu open on what is inside it.
+ * A file closes it. A skill gets a trailing space so the next character
+ * is an argument.
+ */
+static void
+test_completion_keeps_walking(void)
+{
+	Stub *stub;
+	g_autofree gchar *pane = NULL;
+
+	if (!tmux_available()) { g_test_skip("tmux is not installed"); return; }
+	stub = stub_new(STUB_REPLY);
+	{
+		g_autofree gchar *inner = g_build_filename(stub->dir, "walk", "inner", NULL);
+		g_autofree gchar *leaf = g_build_filename(inner, "leaf.txt", NULL);
+
+		g_assert_cmpint(g_mkdir_with_parents(inner, 0700), ==, 0);
+		g_assert_true(g_file_set_contents(leaf, "leaf", -1, NULL));
+	}
+	sandbox_write(stub->dir, ".agents/skills/walkskill/SKILL.md",
+		"---\nname: walkskill\ndescription: walk the tree\n---\nbody\n");
+
+	tmux_start_tui(TUI_SESSION, stub->dir, NULL);
+	tmux_send(TUI_SESSION, "@walk");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "FILES"));
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "@walk/"));
+	/* The menu shows the entry name; the slash is on the inserted text. */
+	g_assert_true(tmux_wait_for(TUI_SESSION, "inner"));
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_nonnull(strstr(pane, "FILES"));
+
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "@walk/inner/"));
+	g_assert_true(tmux_wait_for(TUI_SESSION, "leaf.txt"));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_nonnull(strstr(pane, "FILES"));
+
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "@walk/inner/leaf.txt"));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "FILES"));
+	/* The box pads with spaces; the input itself ends at the name. */
+	g_assert_nonnull(strstr(pane, "@walk/inner/leaf.txt      "));
+
+	tmux_send(TUI_SESSION, "C-u");
+	tmux_send(TUI_SESSION, "/wal");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "COMMANDS"));
+	tmux_send(TUI_SESSION, "Enter");
+	g_assert_true(tmux_wait_for(TUI_SESSION, "/walkskill "));
+	g_clear_pointer(&pane, g_free);
+	pane = tmux_capture(TUI_SESSION);
+	g_assert_null(strstr(pane, "COMMANDS"));
+	g_assert_null(strstr(pane, "Would send:"));
+
+	tmux_kill(TUI_SESSION);
+	stub_free(stub);
+}
+
 /**
  * test_switch_context_delivery:
  * @data: whether to enable the MCP host during migration
@@ -4231,6 +4293,8 @@ main(int argc, char *argv[])
 	                     test_switch_command_enter);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/effort-enter", "/effort",
 	                     test_switch_command_enter);
+	g_test_add_func("/ai-glib/ai-tui/keys/completion-keeps-walking",
+	                test_completion_keeps_walking);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/switch-context", GINT_TO_POINTER(FALSE),
 	                     test_switch_context_delivery);
 	g_test_add_data_func("/ai-glib/ai-tui/keys/switch-context-mcp", GINT_TO_POINTER(TRUE),
