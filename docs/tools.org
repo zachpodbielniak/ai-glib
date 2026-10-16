@@ -141,6 +141,48 @@ disk can take minutes. They stop at the next entry once the turn is
 cancelled and return =G_IO_ERROR_CANCELLED=, so a stop button or a voice
 call's turn deadline ends the turn instead of waiting for the walk.
 
+*** Where a walk stops
+
+A walk with no =path= starts in the working directory, and a host that never
+set one (see =ai_tool_executor_set_working_directory()=) is wherever its
+process happens to be -- for an editor, usually =$HOME=. A home directory
+holds network mounts. A =getdents()= on sshfs or NFS can sleep
+uninterruptibly in the kernel, where neither the cancellable nor =SIGKILL=
+reaches the thread until the server answers; one =glob= of =**/*AGENTS*=
+from =$HOME= read 1.8 GB of directory entries from a NAS and froze the
+editor that ran it.
+
+So both tools bound the walk:
+
+| Limit          | Value    | What the result says                                  |
+|----------------+----------+-------------------------------------------------------|
+| Mount points   | not entered | =[not searched: N mount points below ROOT ...]= and up to 8 =[mount point: PATH]= lines |
+| Depth          | 64 levels | =[not searched: directories more than 64 levels below ROOT]= |
+| Entries read   | 200 000  | =[stopped after reading 200000 directory entries under ROOT; pass a narrower path]= |
+
+A mount point is recognised from =/proc/self/mountinfo= before anything
+touches it: it is never opened and never =stat()=ed, because the stat itself
+would go to the network filesystem. The walk compares canonical paths, so a
+root spelled through a symlink (=/home= on an ostree system is a link to
+=/var/home=) still matches the table. Where no mount table can be read, a
+change of =st_dev= is taken as the boundary instead; the table is preferred
+because a btrfs subvolume changes =st_dev= without being a mount.
+
+The root itself is always searched, mount point or not: passing a mount as
+=path= is how the model searches it on purpose, and the note names each
+skipped mount so it can. =AI_GLIB_MOUNTINFO= names a different mount table,
+which is how the tests describe a mount without root.
+
+*** Running the built-ins off the host's thread
+
+=ai_tool_executor_is_builtin()= says whether a call by name would run a
+built-in rather than a callback registered with
+=ai_tool_executor_register_callback()= (a callback with a built-in's name
+overrides it). The built-ins touch only the filesystem, subprocesses and the
+network, so a host can run them on a worker thread; a registered callback
+may need the host's own thread. cmacs uses it to run =glob=, =grep= and
+=bash= off the editor's command loop.
+
 ** ls
 | Parameter | Type   | Required | Default           |
 |-----------+--------+----------+-------------------|

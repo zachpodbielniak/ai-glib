@@ -306,6 +306,14 @@ ai_tool_executor_execute (
     GError         **error
 );
 
+/* Whether a call to @name runs a built-in tool rather than a registered
+ * callback; documented in ai-tool-executor.c. */
+gboolean
+ai_tool_executor_is_builtin (
+    AiToolExecutor *self,
+    const gchar    *name
+);
+
 /**
  * ai_tool_executor_register_callback:
  * @self: an #AiToolExecutor

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1066,49 +1067,297 @@ tool_edit (
     return g_strdup ("OK");
 }
 
-/* ---- glob helpers ---- */
+/* ---- tree walk shared by glob and grep ---- */
+
+/* How many directories below the root a walk descends. */
+#define WALK_MAX_DEPTH (64)
+
+/* How many directory entries a walk reads before it gives up. */
+#define WALK_MAX_ENTRIES (200000)
+
+/* How many skipped mount points a result names before it only counts. */
+#define WALK_MAX_LISTED_MOUNTS (8)
 
 /*
- * The walks below check the turn's cancellable at every entry. They can cover
- * a whole home directory, and on a slow disk that takes minutes; a caller that
- * cancels -- a voice call's turn deadline, a user pressing stop -- waits for
- * the turn to end, and would otherwise wait for the whole walk.
+ * State for one glob or grep walk.
+ *
+ * A walk with no path starts in the working directory, which for an editor
+ * that was never given one is $HOME. A home directory holds network mounts
+ * (sshfs, NFS), and a getdents() on one of those can sleep uninterruptibly in
+ * the kernel: neither the cancellable nor SIGKILL reaches the thread until the
+ * server answers. One walk of a NAS under ~/data froze an editor for as long
+ * as it took to read 1.8 GB of directory entries over ssh.
+ *
+ * So a walk stays on the filesystem it started on, the way `find -xdev` does.
+ * A mount point below the root is never opened, never stat()ed -- the stat
+ * itself would go to the network filesystem -- only named in the result, so
+ * the model can pass it as `path` when it really meant to search there.
+ * Depth and the number of entries read are bounded as well, and every entry
+ * checks the turn's cancellable, so a stop button or a voice call's turn
+ * deadline ends the walk at the next entry.
+ */
+typedef struct
+{
+    GCancellable *cancellable;
+    GHashTable   *mounts;      /* canonical mount points below the root, or NULL */
+    dev_t         root_dev;    /* used only when mounts is NULL */
+    GPtrArray    *skipped;     /* display paths of mount points not entered */
+    guint         n_skipped;
+    guint         n_entries;
+    gboolean      hit_depth;
+    gboolean      hit_entries;
+} WalkState;
+
+/* Called for each non-directory entry a walk meets. */
+typedef void (*WalkVisitFunc) (const gchar *path,
+                               const gchar *name,
+                               gpointer     user_data);
+
+/*
+ * Undo the octal escapes the kernel puts in /proc/self/mountinfo: a space in
+ * a mount point is written "\040", a tab "\011", a backslash "\134".
+ */
+static gchar *
+walk_unescape_mount (const gchar *field)
+{
+    GString     *out;
+    const gchar *p;
+
+    out = g_string_sized_new (strlen (field));
+    for (p = field; *p != '\0'; p++)
+    {
+        if (p[0] == '\\'
+            && p[1] >= '0' && p[1] <= '3'
+            && p[2] >= '0' && p[2] <= '7'
+            && p[3] >= '0' && p[3] <= '7')
+        {
+            g_string_append_c (out, (gchar) (((p[1] - '0') << 6)
+                                             | ((p[2] - '0') << 3)
+                                             | (p[3] - '0')));
+            p += 3;
+        }
+        else
+            g_string_append_c (out, *p);
+    }
+    return g_string_free (out, FALSE);
+}
+
+/*
+ * The mount points strictly below REAL_ROOT, from the mount table, or NULL
+ * when the table cannot be read (not Linux, no /proc). The fifth field of a
+ * mountinfo line is the mount point. AI_GLIB_MOUNTINFO names a different
+ * table, which is how the tests describe a mount without needing root.
+ */
+static GHashTable *
+walk_load_mounts (const gchar *real_root)
+{
+    g_autofree gchar  *contents = NULL;
+    g_autofree gchar  *prefix   = NULL;
+    g_auto(GStrv)      lines    = NULL;
+    const gchar       *table;
+    GHashTable        *mounts;
+    gint               i;
+
+    table = g_getenv ("AI_GLIB_MOUNTINFO");
+    if (table == NULL || *table == '\0')
+        table = "/proc/self/mountinfo";
+    if (!g_file_get_contents (table, &contents, NULL, NULL))
+        return NULL;
+
+    prefix = g_str_has_suffix (real_root, "/")
+        ? g_strdup (real_root) : g_strconcat (real_root, "/", NULL);
+    mounts = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    lines  = g_strsplit (contents, "\n", -1);
+
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        g_auto(GStrv) fields = g_strsplit (lines[i], " ", 6);
+        gchar        *point;
+
+        if (g_strv_length (fields) < 5)
+            continue;
+        point = walk_unescape_mount (fields[4]);
+        if (g_str_has_prefix (point, prefix))
+            g_hash_table_add (mounts, point);
+        else
+            g_free (point);
+    }
+    return mounts;
+}
+
+/* Remember a mount point the walk did not enter, for the result's note. */
+static void
+walk_note_mount (
+    WalkState   *state,
+    const gchar *path
+){
+    state->n_skipped++;
+    if (state->skipped->len < WALK_MAX_LISTED_MOUNTS)
+        g_ptr_array_add (state->skipped, g_strdup (path));
+}
+
+/*
+ * Walk DISPLAY (the path as the caller spelled it, used in results) whose
+ * canonical spelling is REAL (used against the mount table: /home is a
+ * symlink to /var/home on some systems, and mountinfo names only the
+ * latter). Neither is followed through symlinks below the root -- a
+ * directory link can lead back to an ancestor -- so REAL stays canonical
+ * by plain concatenation.
  */
 static void
-glob_collect (
-    const gchar  *base_dir,
-    GPatternSpec *pattern,
-    GString      *output,
-    GCancellable *cancellable
+walk_dir (
+    WalkState     *state,
+    const gchar   *display,
+    const gchar   *real,
+    guint          depth,
+    WalkVisitFunc  visit,
+    gpointer       user_data
 ){
     g_autoptr(GError) dir_err = NULL;
     GDir        *dir;
     const gchar *name;
 
-    dir = g_dir_open (base_dir, 0, &dir_err);
+    dir = g_dir_open (display, 0, &dir_err);
     if (dir == NULL)
         return;
 
-    while (!g_cancellable_is_cancelled (cancellable)
+    while (!g_cancellable_is_cancelled (state->cancellable)
+           && !state->hit_entries
            && (name = g_dir_read_name (dir)) != NULL)
     {
-        g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
+        g_autofree gchar *full      = g_build_filename (display, name, NULL);
+        g_autofree gchar *real_full = g_build_filename (real, name, NULL);
+        struct stat       st;
 
-        if (g_file_test (full, G_FILE_TEST_IS_DIR))
+        if (++state->n_entries > WALK_MAX_ENTRIES)
         {
-            /* Follow an explicitly requested root, but not directory links
-             * encountered during traversal: they can lead back to an ancestor. */
-            if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                glob_collect (full, pattern, output, cancellable);
+            state->hit_entries = TRUE;
+            break;
         }
-        else if (g_pattern_spec_match_string (pattern, name))
+
+        /* A mount point is decided before anything touches it. */
+        if (state->mounts != NULL
+            && g_hash_table_contains (state->mounts, real_full))
         {
-            g_string_append (output, full);
-            g_string_append_c (output, '\n');
+            walk_note_mount (state, full);
+            continue;
         }
+
+        if (lstat (full, &st) != 0)
+            continue;
+
+        if (S_ISLNK (st.st_mode))
+        {
+            /* A link to a file is searched; a link to a directory is not. */
+            if (g_file_test (full, G_FILE_TEST_IS_DIR))
+                continue;
+            visit (full, name, user_data);
+            continue;
+        }
+
+        if (!S_ISDIR (st.st_mode))
+        {
+            visit (full, name, user_data);
+            continue;
+        }
+
+        /* Without a mount table, a device change is the mount boundary. */
+        if (state->mounts == NULL && st.st_dev != state->root_dev)
+        {
+            walk_note_mount (state, full);
+            continue;
+        }
+
+        if (depth + 1 >= WALK_MAX_DEPTH)
+        {
+            state->hit_depth = TRUE;
+            continue;
+        }
+
+        walk_dir (state, full, real_full, depth + 1, visit, user_data);
     }
 
     g_dir_close (dir);
+}
+
+/*
+ * Walk the tree under ROOT, calling VISIT for every file, and append a note
+ * to OUTPUT for anything the limits left out. The root is followed even when
+ * it is a symlink or a mount point: the caller asked for it by name.
+ */
+static void
+walk_tree (
+    const gchar   *root,
+    GCancellable  *cancellable,
+    WalkVisitFunc  visit,
+    gpointer       user_data,
+    GString       *output
+){
+    WalkState         state;
+    g_autofree gchar *real = NULL;
+    struct stat       st;
+    guint             i;
+
+    memset (&state, 0, sizeof (state));
+    state.cancellable = cancellable;
+    state.skipped     = g_ptr_array_new_with_free_func (g_free);
+
+    real = realpath (root, NULL);
+    if (real == NULL)
+        real = g_strdup (root);
+    state.mounts = walk_load_mounts (real);
+    if (stat (root, &st) == 0)
+        state.root_dev = st.st_dev;
+
+    walk_dir (&state, root, real, 0, visit, user_data);
+
+    if (!g_cancellable_is_cancelled (cancellable))
+    {
+        if (state.n_skipped > 0)
+        {
+            g_string_append_printf (output,
+                "[not searched: %u mount point%s below %s, which may be "
+                "network filesystems; pass one as path to search it]\n",
+                state.n_skipped, state.n_skipped == 1 ? "" : "s", root);
+            for (i = 0; i < state.skipped->len; i++)
+                g_string_append_printf (output, "[mount point: %s]\n",
+                                        (const gchar *) state.skipped->pdata[i]);
+        }
+        if (state.hit_depth)
+            g_string_append_printf (output,
+                "[not searched: directories more than %d levels below %s]\n",
+                WALK_MAX_DEPTH, root);
+        if (state.hit_entries)
+            g_string_append_printf (output,
+                "[stopped after reading %d directory entries under %s; "
+                "pass a narrower path]\n", WALK_MAX_ENTRIES, root);
+    }
+
+    g_clear_pointer (&state.mounts, g_hash_table_unref);
+    g_ptr_array_unref (state.skipped);
+}
+
+/* ---- glob helpers ---- */
+
+typedef struct
+{
+    GPatternSpec *pattern;
+    GString      *output;
+} GlobVisit;
+
+static void
+glob_visit (
+    const gchar *path,
+    const gchar *name,
+    gpointer     user_data
+){
+    GlobVisit *g = user_data;
+
+    if (g_pattern_spec_match_string (g->pattern, name))
+    {
+        g_string_append (g->output, path);
+        g_string_append_c (g->output, '\n');
+    }
 }
 
 static gchar *
@@ -1139,7 +1388,15 @@ tool_glob (
     pattern = g_pattern_spec_new (pattern_str);
     output  = g_string_new (NULL);
 
-    glob_collect (path, pattern, output, cancellable);
+    {
+        g_autoptr(GString) notes = g_string_new (NULL);
+        GlobVisit          visit;
+
+        visit.pattern = pattern;
+        visit.output  = output;
+        walk_tree (path, cancellable, glob_visit, &visit, notes);
+        g_string_append_len (output, notes->str, (gssize) notes->len);
+    }
 
     if (g_cancellable_set_error_if_cancelled (cancellable, error))
     {
@@ -1228,40 +1485,24 @@ grep_one_file (
     g_strfreev (lines);
 }
 
+typedef struct
+{
+    GPatternSpec *file_pattern; /* nullable -- match all files */
+    GRegex       *regex;
+    GString      *output;
+} GrepVisit;
+
 static void
-grep_dir_recurse (
-    const gchar  *base_dir,
-    GPatternSpec *file_pattern, /* nullable — match all files */
-    GRegex       *regex,
-    GString      *output,
-    GCancellable *cancellable
+grep_visit (
+    const gchar *path,
+    const gchar *name,
+    gpointer     user_data
 ){
-    g_autoptr(GError) dir_err = NULL;
-    GDir        *dir;
-    const gchar *name;
+    GrepVisit *g = user_data;
 
-    dir = g_dir_open (base_dir, 0, &dir_err);
-    if (dir == NULL)
-        return;
-
-    while (!g_cancellable_is_cancelled (cancellable)
-           && (name = g_dir_read_name (dir)) != NULL)
-    {
-        g_autofree gchar *full = g_build_filename (base_dir, name, NULL);
-
-        if (g_file_test (full, G_FILE_TEST_IS_DIR))
-        {
-            if (!g_file_test (full, G_FILE_TEST_IS_SYMLINK))
-                grep_dir_recurse (full, file_pattern, regex, output, cancellable);
-        }
-        else if (file_pattern == NULL
-                 || g_pattern_spec_match_string (file_pattern, name))
-        {
-            grep_one_file (full, regex, output);
-        }
-    }
-
-    g_dir_close (dir);
+    if (g->file_pattern == NULL
+        || g_pattern_spec_match_string (g->file_pattern, name))
+        grep_one_file (path, g->regex, g->output);
 }
 
 static gchar *
@@ -1303,7 +1544,16 @@ tool_grep (
     output = g_string_new (NULL);
 
     if (g_file_test (path, G_FILE_TEST_IS_DIR))
-        grep_dir_recurse (path, file_pattern, regex, output, cancellable);
+    {
+        g_autoptr(GString) notes = g_string_new (NULL);
+        GrepVisit          visit;
+
+        visit.file_pattern = file_pattern;
+        visit.regex        = regex;
+        visit.output       = output;
+        walk_tree (path, cancellable, grep_visit, &visit, notes);
+        g_string_append_len (output, notes->str, (gssize) notes->len);
+    }
     else if (!g_cancellable_is_cancelled (cancellable))
         grep_one_file (path, regex, output);
 
@@ -4720,6 +4970,41 @@ executor_offers_tool (
             return TRUE;
     }
 
+    return FALSE;
+}
+
+/**
+ * ai_tool_executor_is_builtin:
+ * @self: an #AiToolExecutor
+ * @name: a tool name
+ *
+ * Whether a call to @name would run one of the executor's own built-in
+ * tools: the executor advertises it, and no callback registered with
+ * ai_tool_executor_register_callback() overrides it.
+ *
+ * A host uses this to decide where a call may run. The built-ins touch
+ * only the filesystem, subprocesses and the network, so they are safe on
+ * a worker thread; a registered callback may need the host's own thread.
+ *
+ * Returns: %TRUE when @name runs a built-in tool
+ */
+gboolean
+ai_tool_executor_is_builtin (
+    AiToolExecutor *self,
+    const gchar    *name
+){
+    const ToolEntry *entry;
+
+    g_return_val_if_fail (AI_IS_TOOL_EXECUTOR (self), FALSE);
+
+    if (name == NULL || g_hash_table_contains (self->callbacks, name))
+        return FALSE;
+
+    for (entry = BUILTIN_TOOLS; entry->name != NULL; entry++)
+    {
+        if (g_strcmp0 (entry->name, name) == 0)
+            return executor_offers_tool (self, name);
+    }
     return FALSE;
 }
 

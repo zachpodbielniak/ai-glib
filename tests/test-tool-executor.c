@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <glib.h>
@@ -1018,6 +1019,156 @@ test_search_directory_loop (gconstpointer data)
     g_rmdir (dir);
 }
 
+/*
+ * A walk must not descend into a mount point below its root. With no path
+ * the walk starts in the working directory, which in an editor is $HOME, and
+ * an sshfs mount there blocked the thread in the kernel where neither the
+ * cancellable nor SIGKILL could reach it. The mount table is faked through
+ * AI_GLIB_MOUNTINFO so the test needs no root. Naming the mount point as the
+ * path still searches it: the boundary is for walks, not for requests.
+ */
+static void
+test_search_skips_mounts (gconstpointer data)
+{
+    const gchar *tool = data;
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *dir = g_dir_make_tmp ("ai-search-mount-XXXXXX", &error);
+    g_autofree gchar *real = NULL;
+    g_autofree gchar *mnt = NULL;
+    g_autofree gchar *real_mnt = NULL;
+    g_autofree gchar *table = NULL;
+    g_autofree gchar *table_text = NULL;
+    g_autofree gchar *outside = NULL;
+    g_autofree gchar *inside = NULL;
+    g_autofree gchar *json = NULL;
+    g_autofree gchar *result = NULL;
+    g_autofree gchar *note = NULL;
+    g_autoptr(AiToolUse) use = NULL;
+    const gchar *pattern;
+
+    g_assert_no_error (error);
+    pattern = g_str_equal (tool, "glob") ? "*.txt" : "needle";
+    real     = realpath (dir, NULL);
+    mnt      = g_build_filename (dir, "nas mount", NULL);
+    real_mnt = g_build_filename (real, "nas\\040mount", NULL);
+    table    = g_build_filename (dir, "mountinfo", NULL);
+    outside  = g_build_filename (dir, "here.txt", NULL);
+    inside   = g_build_filename (mnt, "there.txt", NULL);
+    g_assert_cmpint (g_mkdir (mnt, 0700), ==, 0);
+    g_assert_true (g_file_set_contents (outside, "needle\n", -1, NULL));
+    g_assert_true (g_file_set_contents (inside, "needle\n", -1, NULL));
+    table_text = g_strdup_printf (
+        "22 1 0:21 / / rw - btrfs /dev/root rw\n"
+        "90 22 0:77 / %s rw,nosuid - fuse.sshfs nas:/ rw\n", real_mnt);
+    g_assert_true (g_file_set_contents (table, table_text, -1, NULL));
+    g_setenv ("AI_GLIB_MOUNTINFO", table, TRUE);
+
+    /* The walk from the root finds the file beside the mount, not in it,
+     * and says which mount it left out. */
+    json = g_strdup_printf ("{\"path\":\"%s\",\"pattern\":\"%s\"}", dir, pattern);
+    use = make_tool_use (tool, json);
+    result = ai_tool_executor_execute (executor, use, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (strstr (result, "here.txt"));
+    g_assert_null (strstr (result, "there.txt"));
+    note = g_strdup_printf ("[mount point: %s]", mnt);
+    g_assert_nonnull (strstr (result, note));
+
+    /* Asked for by name, the mount is searched. */
+    g_clear_pointer (&json, g_free);
+    g_clear_pointer (&result, g_free);
+    g_clear_object (&use);
+    json = g_strdup_printf ("{\"path\":\"%s\",\"pattern\":\"%s\"}", mnt, pattern);
+    use = make_tool_use (tool, json);
+    result = ai_tool_executor_execute (executor, use, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (strstr (result, "there.txt"));
+    g_assert_null (strstr (result, "[mount point:"));
+
+    g_unsetenv ("AI_GLIB_MOUNTINFO");
+    g_unlink (inside);
+    g_unlink (outside);
+    g_unlink (table);
+    g_rmdir (mnt);
+    g_rmdir (dir);
+}
+
+/* A walk stops descending at a fixed depth and says so, instead of
+ * following a pathological tree all the way down. */
+static void
+test_search_depth_limit (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *dir = g_dir_make_tmp ("ai-search-deep-XXXXXX", &error);
+    g_autoptr(GPtrArray) levels = g_ptr_array_new_with_free_func (g_free);
+    g_autofree gchar *shallow = NULL;
+    g_autofree gchar *deep = NULL;
+    g_autofree gchar *json = NULL;
+    g_autofree gchar *result = NULL;
+    g_autoptr(AiToolUse) use = NULL;
+    gchar *cur;
+    gint i;
+
+    g_assert_no_error (error);
+    cur = g_strdup (dir);
+    for (i = 0; i < 70; i++)
+    {
+        gchar *next = g_build_filename (cur, "d", NULL);
+
+        g_assert_cmpint (g_mkdir (next, 0700), ==, 0);
+        g_ptr_array_add (levels, cur);
+        cur = next;
+        if (i == 2)
+            shallow = g_build_filename (cur, "shallow.txt", NULL);
+    }
+    g_ptr_array_add (levels, cur);
+    deep = g_build_filename (cur, "deep.txt", NULL);
+    g_assert_true (g_file_set_contents (shallow, "x", -1, NULL));
+    g_assert_true (g_file_set_contents (deep, "x", -1, NULL));
+
+    json = g_strdup_printf ("{\"path\":\"%s\",\"pattern\":\"*.txt\"}", dir);
+    use = make_tool_use ("glob", json);
+    result = ai_tool_executor_execute (executor, use, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (strstr (result, "shallow.txt"));
+    g_assert_null (strstr (result, "deep.txt"));
+    g_assert_nonnull (strstr (result, "levels below"));
+
+    g_unlink (deep);
+    g_unlink (shallow);
+    for (i = (gint) levels->len - 1; i >= 0; i--)
+        g_rmdir (levels->pdata[i]);
+}
+
+/* is_builtin is what lets a host run a call off its own thread: true for an
+ * advertised built-in, false once a callback overrides it, false for a
+ * name the executor does not offer. */
+static gchar *
+override_glob (AiToolUse *use, GCancellable *cancellable,
+               GError **error, gpointer user_data)
+{
+    return g_strdup ("overridden");
+}
+
+static void
+test_is_builtin (void)
+{
+    g_autoptr(AiToolExecutor) executor = ai_tool_executor_new ();
+    g_autoptr(AiToolExecutor) empty = ai_tool_executor_new_empty ();
+    g_autoptr(AiTool) tool = ai_tool_new ("glob", "overridden glob");
+
+    g_assert_true (ai_tool_executor_is_builtin (executor, "glob"));
+    g_assert_true (ai_tool_executor_is_builtin (executor, "bash"));
+    g_assert_false (ai_tool_executor_is_builtin (executor, "no_such_tool"));
+    g_assert_false (ai_tool_executor_is_builtin (executor, NULL));
+    g_assert_false (ai_tool_executor_is_builtin (empty, "glob"));
+
+    ai_tool_executor_register_callback (executor, tool, override_glob, NULL, NULL);
+    g_assert_false (ai_tool_executor_is_builtin (executor, "glob"));
+}
+
 typedef struct
 {
     GCancellable *cancellable;
@@ -1099,6 +1250,10 @@ main (
     g_test_add_func ("/ai-glib/tool-executor/edit-embedded-nul", test_edit_embedded_nul);
     g_test_add_data_func ("/ai-glib/tool-executor/glob-directory-loop", "glob", test_search_directory_loop);
     g_test_add_data_func ("/ai-glib/tool-executor/grep-directory-loop", "grep", test_search_directory_loop);
+    g_test_add_data_func ("/ai-glib/tool-executor/glob-skips-mounts", "glob", test_search_skips_mounts);
+    g_test_add_data_func ("/ai-glib/tool-executor/grep-skips-mounts", "grep", test_search_skips_mounts);
+    g_test_add_func ("/ai-glib/tool-executor/search-depth-limit", test_search_depth_limit);
+    g_test_add_func ("/ai-glib/tool-executor/is-builtin", test_is_builtin);
 
     g_test_add_func ("/ai-glib/tool-executor/new",
                      test_executor_new);

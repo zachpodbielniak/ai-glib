@@ -4,6 +4,20 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* Unreleased
+
+** Added
+- =ai_tool_executor_is_builtin()=: whether a call by name runs a built-in
+  rather than a registered callback, so a host can run built-ins on a
+  worker thread and keep its callbacks on its own.
+
+** Fixed
+- =glob= and =grep= do not descend into mount points below their root.
+  A walk with no =path= from =$HOME= entered an sshfs mount and slept in
+  =getdents()= where neither the cancellable nor =SIGKILL= could reach it.
+  Skipped mounts are named in the result. Walks also stop at 64 levels
+  and 200 000 entries, and say so.
+
 * 0.7.2 - 2026-10-16
 
 ** Fixed
