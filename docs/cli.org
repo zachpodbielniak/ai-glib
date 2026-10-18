@@ -643,13 +643,13 @@ local tools and background agents. Built by =make= and installed by
 #+begin_example
 ai-call --config /path/to/config.yaml --identity /path/to/identity.md
 ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
-ai-call --config /path/to/config.yaml --local
+ai-call --config /path/to/config.yaml --identity /path/to/identity.md --local
 #+end_example
 
 | Option | Purpose |
 |--------+---------|
 | =--config PATH= | Load an additional ai-glib YAML configuration |
-| =--identity PATH= | Read the identity/system prompt from a file |
+| =--identity PATH= | Read the identity/system prompt from a file; required unless =voice.identity_file= is configured, =--local= included |
 | =--call-set PROPERTY=VALUE= | Override a validated call property (repeatable) |
 | =--list-call-settings= | List call property names, types and defaults |
 | =--credentials PATH= | Matrix JSON containing =userId=, =accessToken=, =homeserver= |
