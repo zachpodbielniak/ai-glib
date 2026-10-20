@@ -35,7 +35,7 @@ Every applicable headless =run= option is available as a GObject property. Scala
 | =pure= | =--pure= | Disables external plugins |
 | =log-level= | =--log-level= | =DEBUG=, =INFO=, =WARN= or =ERROR=; invalid values are reported and omitted |
 | =print-logs= | =--print-logs= | OpenCode diagnostics on stderr |
-| =process-timeout-ms= | Library deadline | Per subprocess, including async retries and model discovery; 30 minutes by default; zero disables |
+| =process-timeout-ms= | Library deadline | Per subprocess, including async retries and model discovery; 0 by default (disabled); a positive value bounds the run |
 
 =--format json= is owned by the transport. =--interactive= and the hidden interactive/replay/demo options are deliberately excluded: they require terminal UI and conflict with the JSON protocol. =--help= and =--version= are inspection commands, not model turns. Hidden =--yolo= and =--dangerously-skip-permissions= aliases are represented by the canonical =skip-permissions= / =--auto= mapping.
 

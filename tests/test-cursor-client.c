@@ -155,7 +155,7 @@ test_cursor_client_process_timeout(void)
 
 	g_assert_cmpint(
 		ai_cli_client_get_process_timeout_ms(AI_CLI_CLIENT(client)),
-		==, 1800000);
+		==, 0);
 }
 
 static void

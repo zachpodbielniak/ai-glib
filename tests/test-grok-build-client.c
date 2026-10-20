@@ -153,8 +153,8 @@ test_grok_build_client_executable_path(void)
 }
 
 /*
- * The inherited process-timeout-ms knob. The default MUST be non-zero:
- * 0 means an unbounded g_subprocess_communicate wait.
+ * The inherited process-timeout-ms knob. The default is 0: a multi-hour
+ * turn is not a hung child. A positive value still bounds the wait.
  */
 static void
 test_grok_build_client_process_timeout(void)
@@ -163,7 +163,7 @@ test_grok_build_client_process_timeout(void)
 
 	g_assert_cmpint(
 		ai_cli_client_get_process_timeout_ms(AI_CLI_CLIENT(client)),
-		==, 1800000);
+		==, 0);
 }
 
 static void

@@ -609,10 +609,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_CLI_CLIENT(provider))
 	{
 		AiCliClient *c = AI_CLI_CLIENT(provider);
-		/* Media operations retain a bounded default; chat turns may run
-		 * indefinitely. --set remains the explicit client override. */
-		if (!opt_image_gen && !opt_video_gen)
-			ai_cli_client_set_process_timeout_ms(c, 0);
+		/* Chat and media both run until the child exits. --set
+		 * process-timeout-ms is applied later and is the opt-in bound. */
+		ai_cli_client_set_process_timeout_ms(c, 0);
 		if (opt_model != NULL &&
 		    !(AI_IS_GROK_BUILD_CLIENT(provider) && (opt_image_gen || opt_video_gen)))
 			ai_cli_client_set_model(c, opt_model);

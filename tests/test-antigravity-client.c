@@ -153,7 +153,7 @@ test_antigravity_client_process_timeout(void)
 
 	g_assert_cmpint(
 		ai_cli_client_get_process_timeout_ms(AI_CLI_CLIENT(client)),
-		==, 1800000);
+		==, 0);
 }
 
 static void
@@ -217,7 +217,7 @@ test_antigravity_argv_basic(void)
 			==, "stream-json");
 	g_assert_cmpstr(argv_value_after(argv, "--model"),
 			==, AI_ANTIGRAVITY_DEFAULT_MODEL);
-	g_assert_cmpstr(argv_value_after(argv, "--print-timeout"), ==, "30m");
+	g_assert_cmpstr(argv_value_after(argv, "--print-timeout"), ==, "168h");
 	g_assert_cmpint(argv_index_of(argv, "--disable-slash-commands"), >, 0);
 	g_assert_cmpint(argv_index_of(argv, "--print"), ==, -1);
 	g_assert_cmpint(argv_index_of(argv, "hi"), ==, -1);

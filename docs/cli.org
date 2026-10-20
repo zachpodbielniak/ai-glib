@@ -181,7 +181,7 @@ registry cannot be read, 2 for a usage error. A prompt that is literally
 "project" still works as =ai -- project=.
 
 ** CLI Process Deadline
-CLI chat runs default to =process-timeout-ms=0= in =ai=: the wrapper does not terminate a turn after thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline, or explicitly use =--set process-timeout-ms=0= to disable it. This applies to synchronous and shared streaming subprocess runs; cancellation remains available. The library default remains 1800000 ms. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls.
+CLI chat and media runs default to =process-timeout-ms=0= in =ai= and in the library: nothing terminates a turn at thirty minutes. Set a positive number of milliseconds with =--set process-timeout-ms=600000= to impose a ten-minute deadline. Cancellation remains available. HTTP timeouts, native CLI limits, tmux-specific timeouts and usage/history report deadlines are separate controls. Antigravity emits =--print-timeout 168h= while the deadline is disabled, because =agy= otherwise stops at five minutes.
 
 ** Defaults Setup
 Run =ai --setup= to display current defaults and update one scope. Run it again to update another. It writes =~/.config/ai-glib/config.yaml= (or =$XDG_CONFIG_HOME/ai-glib/config.yaml=) only after confirmation. Existing provider settings and other scopes remain intact. Wizard prompts are on stdout; save errors are on stderr.
@@ -300,7 +300,7 @@ $ ai -p grok-build -m grok-4.7 --effort low --dry-run "hi"
 /path/to/grok --prompt-file /dev/stdin --output-format json --model grok-4.7 --verbatim --reasoning-effort low
 
 $ ai -p agy --dry-run "hi"
-/path/to/agy --input-format stream-json --output-format stream-json --print-timeout 30m --model gemini-3.7-flash-high --disable-slash-commands --effort medium
+/path/to/agy --input-format stream-json --output-format stream-json --print-timeout 168h --model gemini-3.7-flash-high --disable-slash-commands --effort medium
 
 $ ai -p cursor --dry-run "hi"
 /path/to/cursor-agent --print --output-format json --model auto

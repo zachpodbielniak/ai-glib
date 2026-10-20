@@ -97,7 +97,7 @@ Inherited from [[../api-reference/ai-cli-client.org][=AiCliClient=]]:
 | =session-id=          | string  | NULL                       | Captured from =conversation_id=; sent as =--conversation= |
 | =session-persistence= | boolean | TRUE                       | Whether to capture and resume conversations at all      |
 | =effort-level=        | string  | =medium=                   | =--effort= (low, medium, high)                          |
-| =process-timeout-ms=  | int     | 1800000                    | Bounds synchronous and shared streaming calls; also drives =--print-timeout= |
+| =process-timeout-ms=  | int     | 0                          | Bounds synchronous and shared streaming calls; also drives =--print-timeout= |
 
 Added by =AiAntigravityClient=:
 
@@ -119,9 +119,10 @@ Added by =AiAntigravityClient=:
 Every one is a real GObject property, so bindings get native syntax and
 =notify::= signals; =ai --set= reaches them with no extra plumbing.
 
-agy's own =--print-timeout= defaults to 5 minutes, which is shorter than
-the library's 30-minute process bound. The client therefore always emits
-the flag, formatted from =process-timeout-ms= (1800000 → =30m=) unless
+agy's own =--print-timeout= defaults to 5 minutes, and agy has no
+unlimited value. The client therefore always emits the flag. A disabled
+=process-timeout-ms= (0) is formatted as =168h=. A positive value is
+formatted from that number of milliseconds (1800000 → =30m=) unless
 =print-timeout= is set explicitly.
 
 ** Signals

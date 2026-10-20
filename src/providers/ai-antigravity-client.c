@@ -320,10 +320,10 @@ emit_repeated_flag(GPtrArray *args, const gchar *flag, const gchar *csv)
 
 /*
  * agy's own --print-timeout, as distinct from the library's
- * process-timeout-ms (which kills the child). agy defaults to 5m, which
- * is shorter than the library's 30-minute default, so this is always
- * emitted: otherwise a 30-minute bound on our side would still die at
- * five minutes inside agy.
+ * process-timeout-ms (which kills the child). agy defaults to 5m and
+ * has no unlimited value, so this is always emitted. A disabled
+ * library deadline (0) becomes 168h, which covers a multi-hour run
+ * without leaving agy's five-minute default in place.
  */
 static void
 emit_print_timeout(AiAntigravityClient *self, GPtrArray *args,
@@ -1194,8 +1194,8 @@ ai_antigravity_client_class_init(AiAntigravityClientClass *klass)
 	 *
 	 * Override `--print-timeout` with a Go duration (for example
 	 * "15m"). When unset, the library formats
-	 * #AiCliClient:process-timeout-ms instead, so agy's 5-minute
-	 * default does not cut a run the library would still wait for.
+	 * #AiCliClient:process-timeout-ms. A disabled deadline (0) is
+	 * emitted as 168h, because agy's own default is five minutes.
 	 */
 	properties[PROP_PRINT_TIMEOUT] =
 		g_param_spec_string("print-timeout",

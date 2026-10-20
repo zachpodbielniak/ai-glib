@@ -4,6 +4,14 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.7.3 - 2026-10-20
+
+** Fixed
+- =AiCliClient:process-timeout-ms= defaults to 0. A CLI subprocess is no
+  longer killed at thirty minutes. A positive value is the opt-in
+  deadline. Antigravity still emits =--print-timeout 168h= when the
+  deadline is disabled, because =agy= otherwise stops at five minutes.
+
 * Unreleased
 
 ** Added

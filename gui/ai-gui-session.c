@@ -249,11 +249,7 @@ session_build_provider(
 	{
 		AiCliClient *client = AI_CLI_CLIENT(provider);
 
-		/*
-		 * A desktop window has no deadline of its own, so the library's
-		 * 30-minute process bound is the wrong one to keep: a long
-		 * agentic run that is still printing is not a hung child.
-		 */
+		/* A long agentic run that is still printing is not a hung child. */
 		ai_cli_client_set_process_timeout_ms(client, 0);
 
 		if (resolved_model != NULL && *resolved_model != '\0')

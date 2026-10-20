@@ -6335,7 +6335,7 @@ build_provider_named(
     {
         AiCliClient *c = AI_CLI_CLIENT(provider);
 
-		/* Also disable the library deadline after runtime provider switches.
+		/* Keep the deadline off across runtime provider switches.
 		 * Startup --set overrides are applied below. */
 		ai_cli_client_set_process_timeout_ms(c, 0);
 		if (resolved_model != NULL)

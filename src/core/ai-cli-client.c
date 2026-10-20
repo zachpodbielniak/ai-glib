@@ -650,9 +650,9 @@ ai_cli_client_class_init(AiCliClientClass *klass)
      *
      * Wall-clock deadline for one synchronous or shared streaming CLI subprocess run.
      * On expiry the child is killed and the call fails with
-     * %AI_ERROR_TIMEOUT, so a wedged CLI (for example a half-open
-     * network connection the child is blocked on) can never pin the
-     * calling thread forever.  0 disables the deadline.
+     * %AI_ERROR_TIMEOUT.  The default is 0, which disables the deadline:
+     * a turn that runs for hours is still working.  Set a positive value
+     * to bound a wedged child.  A #GCancellable still stops the run.
      *
      * Since: 0.23.3
      */
@@ -699,7 +699,7 @@ ai_cli_client_class_init(AiCliClientClass *klass)
                          "Process Timeout (ms)",
                          "Wall-clock deadline for one CLI subprocess "
                          "run (0 disables)",
-                         0, G_MAXINT, 1800000,
+                         0, G_MAXINT, 0,
                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     g_object_class_install_properties(object_class, N_PROPS, properties);
@@ -779,7 +779,7 @@ ai_cli_client_init(AiCliClient *self)
     priv->executable_path = NULL;
     priv->session_id = NULL;
     priv->max_tokens = 4096;
-    priv->process_timeout_ms = 1800000;   /* 30 min */
+    priv->process_timeout_ms = 0;
     priv->session_persistence = TRUE;
     priv->working_directory = NULL;
     priv->effort_level = g_strdup("medium");
@@ -1241,7 +1241,7 @@ ai_cli_client_set_effort_level(
  * @self: an #AiCliClient
  *
  * Returns: the wall-clock deadline (in ms) applied to one synchronous or shared streaming
- *   CLI subprocess run, or 0 when disabled.  Default 1800000 (30 min).
+ *   CLI subprocess run, or 0 when disabled.  The default is 0.
  *
  * Since: 0.23.3
  */

@@ -359,10 +359,10 @@ about it are load-bearing:
    The prompt is piped as one `--input-format stream-json` user event;
    `--output-format stream-json` is required alongside it. That is also
    what keeps long conversations under `MAX_ARG_STRLEN`.
-2. **`--print-timeout` must be emitted.** agy defaults to 5m, which is
-   shorter than the library's 30-minute process bound. Format
-   `process-timeout-ms` (1800000 → `30m`) unless the `print-timeout`
-   property is set.
+2. **`--print-timeout` must be emitted.** agy defaults to 5m and has no
+   unlimited value. A disabled `process-timeout-ms` (the default, 0)
+   is emitted as `168h`. A positive value is formatted from that
+   duration (1800000 → `30m`) unless the `print-timeout` property is set.
 3. **`status != SUCCESS` is an error even when the process exits 0.**
    Parse stdout first. Session resume is `--conversation <id>`;
    `--continue` only when there is no id. Effort is `low|medium|high`;
