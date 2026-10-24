@@ -70,6 +70,19 @@ G_DECLARE_FINAL_TYPE(AiOllamaClient, ai_ollama_client, AI, OLLAMA_CLIENT, AiClie
  */
 #define AI_OLLAMA_MODEL_NOMIC_EMBED         "nomic-embed-text:v1.5"
 
+/*
+ * Decision models, served at /v1/systemone rather than /api/chat.
+ * AiOllamaClient implements AiDecider with these. The chat `model`
+ * property is not reused: a conversation on llama3.2 still judges with
+ * tev1 unless `decision-model` says otherwise. Any pulled decision model
+ * id is accepted; the server is what rejects a chat model.
+ */
+#define AI_OLLAMA_MODEL_TEV1                "tev1"
+#define AI_OLLAMA_MODEL_TEV1_0_8B           "tev1:0.8b"
+#define AI_OLLAMA_MODEL_NIMBLE              "nimble"
+#define AI_OLLAMA_MODEL_CLEF                "clef"
+#define AI_OLLAMA_MODEL_CLEF_FLASH          "clef-flash"
+
 /* Custom / Local Models */
 #define AI_OLLAMA_MODEL_GPT_OSS_20B         "gpt-oss:20b"
 #define AI_OLLAMA_MODEL_NEURALDAREDEVIL     "tarruda/neuraldaredevil-8b-abliterated:fp16"

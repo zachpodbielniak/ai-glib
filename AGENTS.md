@@ -251,6 +251,8 @@ ai-glib/
 | Gemini   | `GEMINI_API_KEY` |
 | Grok     | `XAI_API_KEY`, `GROK_API_KEY` |
 | Ollama   | `OLLAMA_HOST` (default: `http://localhost:11434`), `OLLAMA_API_KEY` (optional) |
+| TypeSafe | `TYPESAFE_API_KEY` (required for Jev), `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` |
+| Laya     | `LAYA_BASE_URL`, `LAYA_API_KEY` (optional). Read by `ai decide` / `/decide`, not by `AiLayaClient`. |
 | Claude Code | `CLAUDE_CODE_PATH` (override `claude` path), `OLLAMA_PATH` (override `ollama` launcher for `ollama/` models) |
 | Claude Code (tmux) | `CLAUDE_CODE_PATH`, `TMUX_PATH`, `OLLAMA_PATH` |
 | OpenCode | `OPENCODE_PATH` (override `opencode` path) |
@@ -259,6 +261,12 @@ ai-glib/
 | Cursor | `CURSOR_AGENT_PATH` then `CURSOR_PATH` (override `cursor-agent` path), `CURSOR_API_KEY` (optional) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
 | Self-update | `AI_GLIB_SOURCE_DIR` (checkout), `AI_GLIB_NO_UPDATE_CHECK` (no background check), `AI_GLIB_UPDATE_MAKE` (make program) |
+
+## Decisions (`AiDecider`)
+
+Typed questions go through `AiDecider`, not through chat. `AiTypesafeClient`, `AiOllamaClient` and `AiLayaClient` share `src/providers/ai-systemone.c` (`POST /v1/systemone`). A new backend implements the interface and, if it speaks that wire, adds a profile there. `AiOllamaClient`'s chat `model` and `decision-model` are different properties. Request validation is the union; each profile refuses what its server rejects before any HTTP. Do not whitelist Jev or Ollama model ids. Confidence is exposed and is not an action gate. See `docs/decisions.org`.
+
+`ai decide` and `/decide` (ai-tui and ai-gui) share `bin/ai-decide-options.h`. Explicit `-p` wins (`typesafe`, `jev`, `ollama`, `laya`). Otherwise `TYPESAFE_API_KEY` selects TypeSafe, `LAYA_BASE_URL` selects Laya, and the remaining case is local Ollama. The chat provider does not select the decision provider. A decision note is not a chat message. Tests must unset `TYPESAFE_*` and `OLLAMA_*` and talk only to `TServer`.
 
 ## CLI provider options
 

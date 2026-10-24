@@ -6,8 +6,8 @@
 # Project information
 PROJECT_NAME = ai-glib
 VERSION_MAJOR = 0
-VERSION_MINOR = 7
-VERSION_MICRO = 3
+VERSION_MINOR = 8
+VERSION_MICRO = 0
 VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_MICRO)
 PACKAGE_BUGREPORT = https://gitlab.com/zachpodbielniak/ai-glib/-/issues
 

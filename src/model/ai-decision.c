@@ -62,18 +62,111 @@ number(JsonObject *object, const gchar *key, gdouble max, gdouble *out)
 	return TRUE;
 }
 
+/*
+ * State is the System One shape: a nonempty string, or a JSON object or
+ * array. A provider that only accepts text rejects the other two at send
+ * time. The character budget is on the string, or on the serialized form
+ * of an object or array, so one huge document cannot sneak past as structure.
+ */
+static gboolean
+state_ok(JsonObject *root)
+{
+	JsonNode *node = ai_json_get_node(root, "state");
+	g_autofree gchar *serial = NULL;
+	const gchar *text;
+
+	if (node == NULL)
+		return FALSE;
+	if (JSON_NODE_HOLDS_VALUE(node))
+	{
+		text = ai_json_get_string(root, "state", NULL);
+		return valid_text(text) && g_utf8_strlen(text, -1) <= 50000;
+	}
+	if (!JSON_NODE_HOLDS_OBJECT(node) && !JSON_NODE_HOLDS_ARRAY(node))
+		return FALSE;
+	serial = json_to_string(node, FALSE);
+	return serial != NULL && strlen(serial) <= 50000;
+}
+
+/* Instructions are a string, or structured JSON a provider's prompt builder understands. */
+static gboolean
+instructions_ok(JsonObject *q)
+{
+	JsonNode *node = ai_json_get_node(q, "instructions");
+
+	if (node == NULL)
+		return FALSE;
+	if (JSON_NODE_HOLDS_OBJECT(node) || JSON_NODE_HOLDS_ARRAY(node))
+		return TRUE;
+	return valid_text(ai_json_get_string(q, "instructions", NULL));
+}
+
+/*
+ * Noul criteria are optional and only name the two outcomes. Absent and
+ * JSON null both mean "the model supplies its own". A string here is a
+ * different type, not an omitted description.
+ */
+static gboolean
+noul_criteria_ok(JsonObject *q)
+{
+	JsonNode *node = ai_json_get_node(q, "criteria");
+	JsonObject *criteria;
+	g_autoptr(GList) names = NULL;
+	GList *iter;
+
+	if (node == NULL)
+		return TRUE;
+	if (!JSON_NODE_HOLDS_OBJECT(node))
+		return FALSE;
+	criteria = json_node_get_object(node);
+	names = json_object_get_members(criteria);
+	for (iter = names; iter != NULL; iter = iter->next)
+	{
+		if (g_strcmp0(iter->data, "true") != 0 && g_strcmp0(iter->data, "false") != 0)
+			return FALSE;
+		if (ai_json_get_node(criteria, iter->data) != NULL &&
+			!valid_text(ai_json_get_string(criteria, iter->data, NULL)))
+			return FALSE;
+	}
+	return TRUE;
+}
+
+static gboolean
+images_ok(JsonObject *root)
+{
+	JsonNode *node = ai_json_get_node(root, "images");
+	JsonArray *images;
+	guint i, count;
+
+	if (node == NULL)
+		return TRUE;
+	if (!JSON_NODE_HOLDS_ARRAY(node))
+		return FALSE;
+	images = json_node_get_array(node);
+	count = json_array_get_length(images);
+	if (count == 0 || count > 4)
+		return FALSE;
+	for (i = 0; i < count; i++)
+		if (!valid_text(ai_json_array_get_string(images, i, NULL)))
+			return FALSE;
+	return TRUE;
+}
+
 static gboolean
 validate_request(JsonObject *root, GError **error)
 {
 	JsonObject *questions = ai_json_get_object(root, "questions");
+	JsonNode *assets = ai_json_get_node(root, "assets");
 	g_autoptr(GList) names = NULL;
 	GList *iter;
-	const gchar *state = ai_json_get_string(root, "state", NULL);
 	guint total = 0;
-	if (!valid_text(state) || g_utf8_strlen(state, -1) > 50000 || questions == NULL ||
+
+	if (root == NULL || !state_ok(root) || !images_ok(root) || questions == NULL ||
 		json_object_get_size(questions) == 0 || json_object_get_size(questions) > 64)
-		return invalid(error, AI_ERROR_INVALID_REQUEST, "A decision needs text (up to 50000 characters) and 1 to 64 questions");
-	if (json_object_has_member(root, "model") && !valid_text(ai_json_get_string(root, "model", NULL)))
+		return invalid(error, AI_ERROR_INVALID_REQUEST, "A decision needs a state (text, object or array, up to 50000 characters) and 1 to 64 questions");
+	if (assets != NULL && !JSON_NODE_HOLDS_OBJECT(assets))
+		return invalid(error, AI_ERROR_INVALID_REQUEST, "assets must be an object");
+	if (ai_json_get_node(root, "model") != NULL && !valid_text(ai_json_get_string(root, "model", NULL)))
 		return invalid(error, AI_ERROR_INVALID_REQUEST, "model must be a nonempty string");
 	names = json_object_get_members(questions);
 	for (iter = names; iter != NULL; iter = iter->next)
@@ -83,37 +176,57 @@ validate_request(JsonObject *root, GError **error)
 		JsonObject *choices = ai_json_get_object(q, "criteria");
 		JsonArray *levels = ai_json_get_array(q, "criteria");
 		guint count = 0, i;
-		if (!valid_text(iter->data) || !valid_text(ai_json_get_string(q, "instructions", NULL)))
+
+		if (!valid_text(iter->data) || !instructions_ok(q))
 			return invalid(error, AI_ERROR_INVALID_REQUEST, "Questions need an identifier and instructions");
 		if (g_str_equal(kind, "noul"))
 		{
-			if (json_object_has_member(q, "criteria"))
-				return invalid(error, AI_ERROR_INVALID_REQUEST, "Boolean questions do not take criteria");
+			if (!noul_criteria_ok(q))
+				goto bad_criteria;
 			count = 2;
 		}
 		else if (g_str_equal(kind, "choice") && choices != NULL)
 		{
 			g_autoptr(GList) labels = json_object_get_members(choices);
 			GList *label;
+
 			count = json_object_get_size(choices);
-			if (count == 0 || count > 100) goto bad_criteria;
+			if (count == 0 || count > 255)
+				goto bad_criteria;
 			for (label = labels; label != NULL; label = label->next)
-				if (!valid_text(label->data) || !valid_text(ai_json_get_string(choices, label->data, NULL))) goto bad_criteria;
+			{
+				JsonNode *description = ai_json_get_node(choices, label->data);
+
+				if (!valid_text(label->data))
+					goto bad_criteria;
+				if (description != NULL && !valid_text(ai_json_get_string(choices, label->data, NULL)))
+					goto bad_criteria;
+			}
 		}
 		else if (g_str_equal(kind, "score") && levels != NULL)
 		{
 			count = json_array_get_length(levels);
-			if (count < 2 || count > 32) goto bad_criteria;
+			if (count < 2 || count > 32)
+				goto bad_criteria;
 			for (i = 0; i < count; i++)
-				if (!valid_text(ai_json_array_get_string(levels, i, NULL))) goto bad_criteria;
+				if (!valid_text(ai_json_array_get_string(levels, i, NULL)))
+					goto bad_criteria;
 		}
-		else goto bad_criteria;
+		else if (g_str_equal(kind, "box"))
+		{
+			if (ai_json_get_node(q, "criteria") != NULL)
+				goto bad_criteria;
+			count = 0;
+		}
+		else
+			goto bad_criteria;
 		total += count;
 	}
-	if (total > 512) return invalid(error, AI_ERROR_INVALID_REQUEST, "Too many total decision criteria (maximum 512)");
+	if (total > 512)
+		return invalid(error, AI_ERROR_INVALID_REQUEST, "Too many total decision criteria (maximum 512)");
 	return TRUE;
 bad_criteria:
-	return invalid(error, AI_ERROR_INVALID_REQUEST, "Expected noul, choice with labelled criteria, or score with 2 to 32 ordered levels");
+	return invalid(error, AI_ERROR_INVALID_REQUEST, "Expected noul, choice with labelled criteria, score with 2 to 32 ordered levels, or box");
 }
 
 /**
@@ -204,6 +317,41 @@ ai_decision_request_add_boolean(AiDecisionRequest *self, const gchar *id, const 
 }
 
 /**
+ * ai_decision_request_add_noul:
+ * @self: a request
+ * @id: unique question identifier
+ * @question: the yes/no question or statement
+ * @true_description: (nullable): what counts as yes
+ * @false_description: (nullable): what counts as no
+ * @error: return location for an error
+ *
+ * A noul with no descriptions is the same question as
+ * ai_decision_request_add_boolean(). Descriptions are sent as criteria
+ * `true` and `false`. Laya rejects a noul that has criteria; TypeSafe and
+ * Ollama accept them.
+ *
+ * Returns: whether the question was added
+ */
+gboolean
+ai_decision_request_add_noul(AiDecisionRequest *self, const gchar *id, const gchar *question,
+	const gchar *true_description, const gchar *false_description, GError **error)
+{
+	g_autoptr(JsonNode) criteria = NULL;
+	JsonObject *object;
+
+	if (true_description == NULL && false_description == NULL)
+		return add_question(self, id, question, "noul", NULL, error);
+	criteria = json_node_new(JSON_NODE_OBJECT);
+	object = json_object_new();
+	json_node_take_object(criteria, object);
+	if (true_description != NULL)
+		json_object_set_string_member(object, "true", true_description);
+	if (false_description != NULL)
+		json_object_set_string_member(object, "false", false_description);
+	return add_question(self, id, question, "noul", criteria, error);
+}
+
+/**
  * ai_decision_request_add_choice:
  * @self: a request
  * @id: unique question identifier
@@ -254,6 +402,71 @@ ai_decision_request_add_score(AiDecisionRequest *self, const gchar *id, const gc
 }
 
 /**
+ * ai_decision_request_add_box:
+ * @self: a request
+ * @id: unique question identifier
+ * @question: what to locate in the image
+ * @error: return location for an error
+ *
+ * A box question locates something in an image. TypeSafe answers it.
+ * Ollama and Laya do not, and refuse the request before any bytes are sent.
+ * The image itself travels in `assets` (TypeSafe) on a request built from
+ * JSON. This helper only adds the question.
+ *
+ * Returns: whether the question was added
+ */
+gboolean
+ai_decision_request_add_box(AiDecisionRequest *self, const gchar *id, const gchar *question, GError **error)
+{
+	return add_question(self, id, question, "box", NULL, error);
+}
+
+/**
+ * ai_decision_request_add_image:
+ * @self: a request
+ * @base64_data: base64-encoded image bytes, with no data-URL prefix
+ * @error: return location for an error
+ *
+ * Appends one image to the Ollama `images` array. At most four. TypeSafe
+ * does not use this field; a TypeSafe request carries images under `assets`.
+ *
+ * Returns: whether the image was added
+ */
+gboolean
+ai_decision_request_add_image(AiDecisionRequest *self, const gchar *base64_data, GError **error)
+{
+	JsonObject *root, *candidate;
+	JsonArray *images;
+	g_autofree gchar *json = NULL;
+	g_autoptr(JsonParser) parser = json_parser_new();
+
+	g_return_val_if_fail(AI_IS_DECISION_REQUEST(self), FALSE);
+	if (!valid_text(base64_data))
+		return invalid(error, AI_ERROR_INVALID_REQUEST, "An image must be nonempty base64 text");
+	json = json_to_string(self->root, FALSE);
+	json_parser_load_from_data(parser, json, -1, NULL);
+	candidate = ai_json_root_object(parser);
+	images = ai_json_get_array(candidate, "images");
+	if (images == NULL)
+	{
+		images = json_array_new();
+		json_object_set_array_member(candidate, "images", images);
+	}
+	json_array_add_string_element(images, base64_data);
+	if (!validate_request(candidate, error))
+		return FALSE;
+	root = json_node_get_object(self->root);
+	images = ai_json_get_array(root, "images");
+	if (images == NULL)
+	{
+		images = json_array_new();
+		json_object_set_array_member(root, "images", images);
+	}
+	json_array_add_string_element(images, base64_data);
+	return TRUE;
+}
+
+/**
  * ai_decision_request_dup_json:
  * @self: a request
  * Returns: (transfer full): request JSON
@@ -278,12 +491,26 @@ validate_answer(JsonObject *q, JsonObject *answer)
 	gdouble sum = 0, value;
 	if (g_strcmp0(kind, ai_json_get_string(answer, "type", NULL)) != 0) return FALSE;
 	if (g_str_equal(kind, "noul")) return number(answer, "noul", 1, NULL);
+	if (g_str_equal(kind, "box"))
+	{
+		JsonObject *box = ai_json_get_object(answer, "box");
+		JsonNode *confidence = ai_json_get_node(answer, "confidence");
+
+		if (box == NULL)
+			return FALSE;
+		if (!number(box, "top", 1, NULL) || !number(box, "bottom", 1, NULL) ||
+			!number(box, "left", 1, NULL) || !number(box, "right", 1, NULL))
+			return FALSE;
+		return confidence == NULL || number(answer, "confidence", 1, NULL);
+	}
 	count = choices != NULL ? json_object_get_size(choices) : json_array_get_length(levels);
 	if (probabilities == NULL || json_object_get_size(probabilities) != count) return FALSE;
+	if (ai_json_get_node(answer, "confidence") != NULL && !number(answer, "confidence", 1, NULL))
+		return FALSE;
 	if (choices != NULL)
 	{
 		const gchar *selected = ai_json_get_string(answer, "choice", NULL);
-		if (selected == NULL || !json_object_has_member(choices, selected)) return FALSE;
+		if (selected == NULL || json_object_get_member(choices, selected) == NULL) return FALSE;
 		labels = json_object_get_members(choices);
 		for (iter = labels; iter != NULL; iter = iter->next)
 		{
@@ -428,6 +655,102 @@ gdouble ai_decision_response_get_elapsed_ms(AiDecisionResponse *self)
 	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), 0);
 	return self->elapsed_ms;
 }
+
+/**
+ * ai_decision_response_get_confidence:
+ * @self: a response
+ * @id: question identifier
+ *
+ * Confidence is how concentrated the distribution is, not the probability
+ * that the top answer is correct. Noul answers do not carry it.
+ *
+ * Returns: confidence from 0 to 1, or -1 when this answer has none
+ */
+gdouble
+ai_decision_response_get_confidence(AiDecisionResponse *self, const gchar *id)
+{
+	JsonObject *answer;
+	gdouble value;
+
+	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), -1);
+	answer = answer_for(self, id);
+	if (ai_json_get_node(answer, "confidence") == NULL)
+		return -1;
+	return number(answer, "confidence", 1, &value) ? value : -1;
+}
+
+/**
+ * ai_decision_response_get_box:
+ * @self: a response
+ * @id: question identifier
+ * @top: (out) (optional): top edge, fraction of image height
+ * @bottom: (out) (optional): bottom edge, fraction of image height
+ * @left: (out) (optional): left edge, fraction of image width
+ * @right: (out) (optional): right edge, fraction of image width
+ *
+ * Edges are fractions of the image, measured from the top and from the left.
+ *
+ * Returns: whether @id is a box answer
+ */
+gboolean
+ai_decision_response_get_box(AiDecisionResponse *self, const gchar *id,
+	gdouble *top, gdouble *bottom, gdouble *left, gdouble *right)
+{
+	JsonObject *answer, *box;
+
+	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), FALSE);
+	answer = answer_for(self, id);
+	if (g_strcmp0(ai_json_get_string(answer, "type", NULL), "box") != 0)
+		return FALSE;
+	box = ai_json_get_object(answer, "box");
+	if (box == NULL)
+		return FALSE;
+	if (top != NULL)
+		*top = ai_json_get_double(box, "top", -1);
+	if (bottom != NULL)
+		*bottom = ai_json_get_double(box, "bottom", -1);
+	if (left != NULL)
+		*left = ai_json_get_double(box, "left", -1);
+	if (right != NULL)
+		*right = ai_json_get_double(box, "right", -1);
+	return TRUE;
+}
+
+static gint64
+usage_tokens(AiDecisionResponse *self, const gchar *member)
+{
+	JsonObject *usage = ai_json_get_object(json_node_get_object(self->root), "usage");
+
+	if (usage == NULL || ai_json_get_node(usage, member) == NULL)
+		return -1;
+	return ai_json_get_int(usage, member, -1);
+}
+
+/**
+ * ai_decision_response_get_input_tokens:
+ * @self: a response
+ *
+ * Returns: billable input tokens, or -1 when the response did not report usage
+ */
+gint64
+ai_decision_response_get_input_tokens(AiDecisionResponse *self)
+{
+	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), -1);
+	return usage_tokens(self, "input_tokens");
+}
+
+/**
+ * ai_decision_response_get_output_tokens:
+ * @self: a response
+ *
+ * Returns: output tokens, or -1 when the response did not report usage
+ */
+gint64
+ai_decision_response_get_output_tokens(AiDecisionResponse *self)
+{
+	g_return_val_if_fail(AI_IS_DECISION_RESPONSE(self), -1);
+	return usage_tokens(self, "output_tokens");
+}
 /**
  * ai_decision_response_dup_json:
  * @self: a response
@@ -456,10 +779,15 @@ gchar *ai_decision_response_format(AiDecisionResponse *self)
 	{
 		JsonObject *answer = ai_json_get_object(answers, iter->data);
 		const gchar *kind = ai_json_get_string(answer, "type", "");
-		JsonObject *probabilities = g_str_equal(kind, "noul") ? NULL : ai_json_get_object(answer, "probabilities");
+		JsonObject *probabilities = g_str_equal(kind, "noul") || g_str_equal(kind, "box")
+			? NULL : ai_json_get_object(answer, "probabilities");
 		const gchar *choice = ai_decision_response_get_choice(self, iter->data);
-		gdouble value;
-		if (choice != NULL) g_string_append_printf(text, "%s: %s\n", (gchar *)iter->data, choice);
+		gdouble value, top, bottom, left, right;
+		if (g_str_equal(kind, "box") &&
+			ai_decision_response_get_box(self, iter->data, &top, &bottom, &left, &right))
+			g_string_append_printf(text, "%s: box top=%.4f bottom=%.4f left=%.4f right=%.4f\n",
+				(gchar *)iter->data, top, bottom, left, right);
+		else if (choice != NULL) g_string_append_printf(text, "%s: %s\n", (gchar *)iter->data, choice);
 		else
 		{
 			number(answer, g_str_equal(ai_json_get_string(answer, "type", ""), "noul") ? "noul" : "score", G_MAXDOUBLE, &value);

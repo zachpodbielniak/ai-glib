@@ -48,6 +48,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-decider.h \
 	$(SRCDIR)/model/ai-decision.h \
 	$(SRCDIR)/providers/ai-laya-client.h \
+	$(SRCDIR)/providers/ai-typesafe-client.h \
 	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
 	$(SRCDIR)/harness/ai-project.h \
@@ -144,6 +145,8 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-decider.c \
 	$(SRCDIR)/model/ai-decision.c \
 	$(SRCDIR)/providers/ai-laya-client.c \
+	$(SRCDIR)/providers/ai-typesafe-client.c \
+	$(SRCDIR)/providers/ai-systemone.c \
 	$(SRCDIR)/agent/ai-mock-decider.c \
 	$(SRCDIR)/harness/ai-work-session.c \
 	$(SRCDIR)/harness/ai-project.c \

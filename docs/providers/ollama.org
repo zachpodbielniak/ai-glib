@@ -66,6 +66,41 @@ Models depend on what you have pulled locally. Common models:
 |-------------------------------+-----------------------+-----------------|
 | =AI_OLLAMA_MODEL_NOMIC_EMBED= | nomic-embed-text:v1.5 | Text embeddings |
 
+*** Decision models
+Ollama 0.35 and later answers typed questions at =POST /v1/systemone=.
+=AiOllamaClient= implements =AiDecider= for that endpoint. The decision model
+is the =decision-model= property, default =tev1=, and it is not the chat
+model. These ids are the ones Ollama documents; any other id you have pulled
+is a valid property value.
+
+| Define                         | Model ID     | Notes                          |
+|--------------------------------+--------------+--------------------------------|
+| =AI_OLLAMA_MODEL_TEV1=         | tev1         | Default decision model         |
+| =AI_OLLAMA_MODEL_TEV1_0_8B=    | tev1:0.8b    | Smaller tev1 checkpoint        |
+| =AI_OLLAMA_MODEL_NIMBLE=       | nimble       |                                |
+| =AI_OLLAMA_MODEL_CLEF=         | clef         |                                |
+| =AI_OLLAMA_MODEL_CLEF_FLASH=   | clef-flash   |                                |
+
+A text request is limited to 64 KiB. With an =images= array of up to four
+base64 PNG, JPEG or WebP strings the cap is 32 MiB. Choice questions take 2
+to 26 options. Score questions take 2 to 10 levels. Noul criteria and object
+or array state are sent. Box questions and TypeSafe =assets= are refused
+before the request leaves the process. =OLLAMA_API_KEY= is an optional bearer
+token. See [[file:../decisions.org][Typed decisions]].
+
+#+begin_src C
+g_autoptr(AiOllamaClient) client = ai_ollama_client_new();
+g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Please refund the duplicate charge.");
+g_autoptr(AiDecisionResponse) response = NULL;
+g_autoptr(GError) error = NULL;
+
+ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_LLAMA3_2);
+g_object_set(client, "decision-model", AI_OLLAMA_MODEL_TEV1, NULL);
+ai_decision_request_add_noul(request, "refund", "Is a refund requested?",
+    "asks for money back", "does not ask", &error);
+response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+#+end_src
+
 *** Setting the Model
 #+begin_src C
 g_autoptr(AiOllamaClient) client = ai_ollama_client_new();

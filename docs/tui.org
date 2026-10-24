@@ -956,8 +956,8 @@ leak and lifetime coverage, build the two first test binaries with
 =ASAN_OPTIONS=detect_leaks=1=.
 
 ** Typed decisions
-See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
-including question syntax, request files, cancellation and server configuration.
+See [[file:decisions.org][Typed decisions]] for =ai decide= and =/decide=:
+TypeSafe Jev, Ollama decision models and Laya, question syntax, request files and cancellation.
 
 * Project and queue controls
 

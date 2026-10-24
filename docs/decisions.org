@@ -1,0 +1,131 @@
+#+TITLE: Typed decisions
+#+DESCRIPTION: TypeSafe Jev, Ollama decision models and Laya through AiDecider
+
+* What this is
+A decision model answers a typed question about state your code supplies. The answer comes back as data: a probability, a selected option, a score, or a box in an image. Code decides what to do with those answers. The model does not pick the action.
+
+=AiDecider= is the interface. Three clients implement it today, all over =POST /v1/systemone=:
+
+| Client | When |
+|--------+------|
+| =AiTypesafeClient= | TypeSafe Jev. Needs =TYPESAFE_API_KEY=. |
+| =AiOllamaClient= | A local Ollama that has a decision model pulled, such as =tev1=. Also a chat client. |
+| =AiLayaClient= | An existing Laya server. Not a chat client. |
+
+=AiMockDecider= returns a fixture or an error for tests. Building any of these downloads no weights. A failed call is an error. It is not a probability of zero.
+
+* Judgments and decisions
+Ask for one thing a person could point at. "Is a refund requested?" is a judgment. "Should this ticket be escalated?" is a decision, and it belongs in code as a truth table over judgments.
+
+A Noul above 0.7 is a reasonable starting "yes", below 0.3 a starting "no", and the band between means the state did not settle it. Give that band its own row. Confidence measures how concentrated a choice or score distribution is. It is not the probability that the top answer is correct, and it is a poor gate. =ai_decision_response_get_confidence()= returns -1 when the answer has none. Noul answers do not carry it.
+
+Questions in one request cannot see each other. Context a question needs belongs in the state or in that question. Bundle questions that share state. Ask a follow-up in the same request when code can ignore it, for example "which item is being returned?" beside "is this a return?".
+
+* State and questions
+=state= is the text, object or array the questions are about. A string is at most 50000 characters. An object or array serializes to at most 50000 bytes. Put facts the code already knows into named fields. Leave out fields no question uses.
+
+| Type | Add with | Answer |
+|------+----------+--------|
+| Noul | =ai_decision_request_add_boolean()= or =add_noul()= | probability the statement is true, 0 to 1 |
+| Choice | =add_choice()= | one option name, plus a probability per option |
+| Score | =add_score()= | a position on levels you describe, plus a probability per level |
+| Box | =add_box()= | =top=, =bottom=, =left=, =right= as fractions of the image |
+
+=add_noul()= takes a true description and a false description. Pass NULL for both and it is the same question as =add_boolean()=. Describe the false case as a situation, such as "the package arrived on time". Option names are sent to the model. Names that say what the option is (=refund_request=) work. Names that only say where it sits (=option_1=) do not.
+
+A choice always picks an option, and a box always returns a rectangle. Pair either one with a Noul that asks whether anything fits, and let code discard the location when that Noul is no.
+
+=ai_decision_request_add_image()= appends one base64 string to the Ollama =images= array, at most four. TypeSafe images travel in an =assets= object on the JSON request, not in that array. The library passes =assets= through and, when a question is a box or =assets= is present, sends =TypeSafe-Danger-Zone-Images: true=.
+
+* Provider limits
+The request validator accepts the union of the three servers. Each client then refuses what its server does not implement, before any bytes are sent.
+
+| | TypeSafe | Ollama | Laya |
+|-+----------+--------+------|
+| Model | required, default =jev-latest=; any id | required, default =tev1=; any id | optional; =english=, =multilingual=, =typed-decisions= only |
+| API key | =TYPESAFE_API_KEY= required | =OLLAMA_API_KEY= optional | =LAYA_API_KEY= optional |
+| State | string, object or array | string, object or array | string only |
+| Noul criteria | yes | yes | no |
+| Choice options | 1 to 255 | 2 to 26 | at most 100 |
+| Score levels | 2 to 10 | 2 to 10 | 2 to 32 |
+| Box | yes | refused | refused |
+| Images | =assets=, plus the images header | top-level =images=, up to 4 | refused |
+| Body | 8 MiB local cap | 64 KiB of text, or 32 MiB with images | 2 MiB |
+| Extra header | =TypeSafe-Danger-Zone-Long-Context: true= when =long-context= is set | | |
+
+Aliases, not a whitelist: =jev-latest= and =jev-preview= track the current Jev release. =jev-1.14.0= and =jev-1.13.0= are pinned ids. =AI_TYPESAFE_MODEL_*= names the ones documented at the time this was written. =AI_OLLAMA_MODEL_TEV1=, =TEV1_0_8B=, =NIMBLE=, =CLEF= and =CLEF_FLASH= are the same kind of convenience for Ollama. Another id you have pulled is a property value, not a code change.
+
+There are no retries and no redirects. The deadline is =timeout-ms= (TypeSafe and Laya) or =decision-timeout-ms= (Ollama), default 30000. A response larger than 4 MiB, or one that is not UTF-8, is an error. Usage, when the server sends it, is =ai_decision_response_get_input_tokens()= and =get_output_tokens()=. Either is -1 when that field is absent.
+
+* Environment
+| Variable | Read by | Meaning |
+|----------+---------+---------|
+| =TYPESAFE_API_KEY= | =ai_typesafe_client_new()= | Bearer token. Required before a request is sent. |
+| =TYPESAFE_BASE_URL= | =ai_typesafe_client_new()= | Origin. Default =https://api.typesafe.ai=. |
+| =TYPESAFE_DEFAULT_MODEL= | =ai_typesafe_client_new()= | Initial model. Default =jev-latest=. |
+| =OLLAMA_HOST= | =AiOllamaClient=, via =AiConfig= | Same host as chat. Default =http://localhost:11434=. |
+| =OLLAMA_API_KEY= | =AiOllamaClient=, via =AiConfig= | Optional bearer token. |
+| =LAYA_BASE_URL= | =ai decide= and =/decide= only | =AiLayaClient= does not read this. Its property default is =http://127.0.0.1:8000=. |
+| =LAYA_API_KEY= | =ai decide= and =/decide= only | Optional bearer token. |
+
+A later =g_object_set()= replaces what the constructor read.
+
+* Calling it
+#+begin_src C
+#include <ai-glib.h>
+
+g_autoptr(AiTypesafeClient) client = ai_typesafe_client_new();
+g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Please refund the duplicate charge.");
+g_autoptr(AiDecisionResponse) response = NULL;
+g_autoptr(GError) error = NULL;
+gdouble p;
+
+if (!ai_decision_request_add_noul(request, "refund", "Is a refund requested?",
+        "asks for money back", "does not ask", &error))
+    return;
+response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+if (response == NULL)
+    return; /* error is a failure, not a "no" */
+p = ai_decision_response_get_probability(response, "refund", NULL);
+#+end_src
+
+=ai_decider_decide()= blocks on a private main context. =ai_decider_decide_async()= snapshots the request, so a question added afterwards is not sent. The callback runs on the thread-default context that started the call.
+
+Ollama keeps the chat model. Set =decision-model= for the decision, and =ai_client_set_model()= for chat. They do not overwrite each other.
+
+* ai, ai-tui and ai-gui
+One parser, =bin/ai-decide-options.h=, builds the client for all three.
+
+#+begin_src sh
+ai decide -p typesafe -q 'Is a refund requested?' 'Please refund the duplicate charge.'
+ai decide -p ollama -m tev1 -q 'Is this spam?' 'Win a prize'
+ai decide -p laya -m english -q 'Is this spam?' 'Win a prize'
+cat message.txt | ai decide -q 'Is this spam?' --json
+ai decide --request triage.json
+#+end_src
+
+=-p= accepts =typesafe=, =jev= (the same client), =ollama= or =laya=. With no =-p=, a set =TYPESAFE_API_KEY= selects TypeSafe, =LAYA_BASE_URL= selects Laya, and otherwise the decision runs on local Ollama. The chat provider is not consulted. =-p laya= with no URL uses the Laya client's own default.
+
+=--question= builds one boolean question. The id is =answer= unless =--id= is set. =--request FILE= is a full JSON request and cannot be combined with =--question=. =--request -= reads that JSON from stdin in =ai decide= only. =--json= prints the validated response. =--long-context= is TypeSafe only. =--timeout-ms= is the deadline. Exit 0 means the server answered. Exit 2 is a bad command. Exit 1 is a failed call or a response the library refused. Errors go to stderr.
+
+ai-tui and ai-gui take the same options as a slash command:
+
+#+begin_example
+/decide -p ollama -m tev1 -q "Is this spam?" "Win a prize"
+/decide --request triage.json
+/decide
+#+end_example
+
+=/decide= with no arguments shows usage. Request paths resolve against the conversation's working directory. Neither frontend reads decision text from stdin. The result is a transcript note. It is not sent to the chat model. One decision runs at a time. In ai-tui, Ctrl+C cancels it. In ai-gui, Stop cancels it. Clear, reset and, in ai-gui, switching sessions cancel it and drop a late result.
+
+#+begin_src sh
+ai-tui -p ollama --dump '/decide -q "Is this spam?" "Win a prize"'
+#+end_src
+
+That dump keeps the chat provider on Ollama. With =LAYA_BASE_URL= set and no =TYPESAFE_API_KEY=, the decision still goes to Laya.
+
+* What the code should keep doing
+- Log the request you sent when a result looks wrong. Check the payload, then the state, then whether the right answer was among the options, then whether the question is one judgment, and only then the wording.
+- Do not fit a threshold to a handful of cases, and do not assert an exact probability in a test. Tests here check the wire, the profile refusal, and that a parsed answer survives. They talk to a loopback server.
+- Do not quietly replace an answer the model gave. If a question is the wrong layer, split it or move the rule into code.
+- Keep the API key on the machine that sends the request. =--api-key= exists for a local process. Do not put it in a transcript.

@@ -472,8 +472,13 @@ ai_gui_commands_handle(
 		commands_running(session);
 	else if (g_strcmp0(name, "kill") == 0)
 		commands_kill(session, arguments);
+	else if (g_strcmp0(name, "decide") == 0)
+	{
+		ai_gui_window_run_decision(window, session, arguments);
+	}
 	else if (g_strcmp0(name, "clear") == 0 || g_strcmp0(name, "reset") == 0)
 	{
+		ai_gui_window_cancel_decision(window);
 		ai_gui_session_clear(session);
 		ai_gui_commands_say(session, "Conversation cleared.");
 	}

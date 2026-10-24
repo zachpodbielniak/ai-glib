@@ -29,6 +29,11 @@ run(const gchar *binary, const gchar *const *args, const gchar *input,
 	g_subprocess_launcher_setenv(launcher, "XDG_CACHE_HOME", home_dir, TRUE);
 	g_subprocess_launcher_setenv(launcher, "LAYA_BASE_URL", url, TRUE);
 	g_subprocess_launcher_unsetenv(launcher, "LAYA_API_KEY");
+	g_subprocess_launcher_unsetenv(launcher, "TYPESAFE_API_KEY");
+	g_subprocess_launcher_unsetenv(launcher, "TYPESAFE_BASE_URL");
+	g_subprocess_launcher_unsetenv(launcher, "TYPESAFE_DEFAULT_MODEL");
+	g_subprocess_launcher_unsetenv(launcher, "OLLAMA_HOST");
+	g_subprocess_launcher_unsetenv(launcher, "OLLAMA_API_KEY");
 	g_subprocess_launcher_unsetenv(launcher, "AI_PROVIDER");
 	g_subprocess_launcher_unsetenv(launcher, "AI_GLIB_DEFAULT_PROVIDER");
 	process = g_subprocess_launcher_spawnv(launcher, (const gchar *const *)argv->pdata, &error);
@@ -103,6 +108,44 @@ test_tui_dump(void)
 	output = run(tui_binary, args, NULL, server->base_url, 0);
 	g_assert_nonnull(strstr(output, "Decision result:"));
 	g_assert_nonnull(strstr(output, "answer: 0.9300"));
+	g_assert_nonnull(strstr(output, "Requesting decision from Laya"));
+	g_assert_null(strstr(server->last_body, "tev1"));
+	g_assert_null(strstr(server->last_body, "jev-latest"));
+	g_assert_cmpuint(server->hits, ==, 1);
+	tserver_free(server);
+}
+static void
+test_cli_typesafe(void)
+{
+	TServer *server = tserver_new();
+	const gchar *args[] = { "decide", "-p", "jev", "--base-url", server->base_url,
+		"--api-key", "test-key", "--question", "Is this spam?", "--json", "A free prize", NULL };
+	g_autofree gchar *output = NULL;
+	tserver_set_response(server, 200, "{\"model\":\"jev-1.14.0\",\"answers\":{\"answer\":{\"type\":\"noul\",\"noul\":0.81}}}");
+	output = run(ai_binary, args, NULL, "http://127.0.0.1:9", 0);
+	g_assert_nonnull(strstr(output, "0.81"));
+	g_assert_cmpstr(server->last_path, ==, "/v1/systemone");
+	g_assert_cmpstr(g_hash_table_lookup(server->last_headers, "authorization"), ==, "Bearer test-key");
+	g_assert_nonnull(strstr(server->last_body, "jev-latest"));
+	g_assert_cmpuint(server->hits, ==, 1);
+	tserver_free(server);
+}
+static void
+test_cli_ollama(void)
+{
+	TServer *server = tserver_new();
+	const gchar *args[] = { "decide", "-p", "ollama", "-m", "tev1", "--base-url", server->base_url,
+		"--question", "Is this spam?", "A free prize", NULL };
+	const gchar *bad[] = { "decide", "-p", "ollama", "--long-context", "--question", "Spam?", "text", NULL };
+	g_autofree gchar *output = NULL;
+	tserver_set_response(server, 200, response_json);
+	output = run(ai_binary, args, NULL, "http://127.0.0.1:9", 0);
+	g_assert_nonnull(strstr(output, "answer: 0.9300"));
+	g_assert_nonnull(strstr(server->last_body, "\"model\":\"tev1\""));
+	g_assert_null(g_hash_table_lookup(server->last_headers, "authorization"));
+	g_assert_cmpuint(server->hits, ==, 1);
+	g_clear_pointer(&output, g_free);
+	output = run(ai_binary, bad, NULL, server->base_url, 2);
 	g_assert_cmpuint(server->hits, ==, 1);
 	tserver_free(server);
 }
@@ -118,6 +161,8 @@ int main(int argc, char **argv)
 	g_test_add_func("/decision-cli/request", test_cli_request);
 	g_test_add_func("/decision-cli/errors", test_cli_errors);
 	g_test_add_func("/decision-cli/tui", test_tui_dump);
+	g_test_add_func("/decision-cli/typesafe", test_cli_typesafe);
+	g_test_add_func("/decision-cli/ollama", test_cli_ollama);
 	result = g_test_run();
 	g_free(ai_binary); g_free(tui_binary);
 	return result;

@@ -56,7 +56,7 @@ typedef struct
 } BuiltinCommand;
 
 static const BuiltinCommand BUILTIN_COMMANDS[] = {
-    { "decide", "Classify text with a separately managed Laya server", "--question QUESTION TEXT | --request FILE", TRUE },
+    { "decide", "Classify text with TypeSafe, Ollama or Laya", "--question QUESTION TEXT | --request FILE", TRUE },
     { "work", "Load linked issue or PR as an assignment", "<URL>", FALSE },
     { "queue", "View and edit pending messages (Alt+Q)", NULL, FALSE },
     { "project", "Open a project in its own session", "[directory]", FALSE },

@@ -27,6 +27,7 @@
 #include "ai-gui-style.h"
 #include "ai-gui-update.h"
 #include "ai-gui-work.h"
+#include "../bin/ai-decide-options.h"
 
 struct _AiGuiWindow
 {
@@ -63,11 +64,133 @@ struct _AiGuiWindow
 	gulong agent_id;
 	gulong busy_id;
 	gulong builtin_id;
+
+	GCancellable *decision_cancel;
+	gboolean decision_pending;
+	guint decision_generation;
 };
 
 G_DEFINE_FINAL_TYPE(AiGuiWindow, ai_gui_window, ADW_TYPE_APPLICATION_WINDOW)
 
 static void window_set_session(AiGuiWindow *self, AiGuiSession *session);
+
+/* One decision at a time. The generation is what a late callback checks,
+ * so clear, stop, a session switch and dispose all drop the result. */
+typedef struct
+{
+	AiGuiWindow *window;
+	AiGuiSession *session;
+	guint generation;
+	gboolean json;
+} GuiDecisionJob;
+
+static void
+decision_error(
+	AiGuiSession *session,
+	const gchar  *text
+){
+	g_autoptr(AiViewBlock) block = ai_view_status_block_new(AI_VIEW_STATUS_ERROR, text);
+
+	ai_view_block_set_complete(block, TRUE);
+	ai_transcript_append(ai_gui_session_get_transcript(session), block);
+}
+
+static void
+on_gui_decision_done(
+	GObject      *source,
+	GAsyncResult *result,
+	gpointer      user_data
+){
+	g_autofree GuiDecisionJob *job = user_data;
+	AiGuiWindow *self = job->window;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autofree gchar *text = NULL;
+
+	response = ai_decider_decide_finish(AI_DECIDER(source), result, &error);
+	if (job->generation == self->decision_generation)
+	{
+		self->decision_pending = FALSE;
+		g_clear_object(&self->decision_cancel);
+		if (response != NULL)
+		{
+			text = job->json
+				? ai_decision_response_dup_json(response)
+				: ai_decision_response_format(response);
+			ai_gui_commands_say(job->session, "Decision result:\n%s", text);
+		}
+		else
+		{
+			g_autofree gchar *message = g_strdup_printf("Decision failed: %s",
+				error != NULL ? error->message : "unknown error");
+
+			decision_error(job->session, message);
+		}
+	}
+	g_object_unref(job->session);
+	g_object_unref(job->window);
+}
+
+void
+ai_gui_window_cancel_decision(AiGuiWindow *self)
+{
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+
+	self->decision_generation++;
+	if (self->decision_cancel != NULL)
+		g_cancellable_cancel(self->decision_cancel);
+}
+
+void
+ai_gui_window_run_decision(
+	AiGuiWindow  *self,
+	AiGuiSession *session,
+	const gchar  *arguments
+){
+	DecideOptions options = { NULL, NULL, NULL, NULL, FALSE };
+	g_auto(GStrv) argv = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *line = NULL;
+	GuiDecisionJob *job;
+	gint argc = 0;
+
+	g_return_if_fail(AI_GUI_IS_WINDOW(self));
+	g_return_if_fail(AI_GUI_IS_SESSION(session));
+
+	if (self->decision_pending)
+	{
+		ai_gui_commands_say(session, "A decision is running. Stop cancels it.");
+		return;
+	}
+
+	line = g_strconcat("decide ", arguments != NULL ? arguments : "", NULL);
+	if (!g_shell_parse_argv(line, &argc, &argv, &error) ||
+		!decide_options_parse(&options, argv, FALSE,
+			ai_gui_session_get_working_directory(session), &error))
+	{
+		decision_error(session, error != NULL ? error->message : "Could not parse /decide");
+		decide_options_clear(&options);
+		return;
+	}
+	if (options.help != NULL)
+	{
+		ai_gui_commands_say(session, "%s", options.help);
+		decide_options_clear(&options);
+		return;
+	}
+
+	job = g_new0(GuiDecisionJob, 1);
+	job->window = g_object_ref(self);
+	job->session = g_object_ref(session);
+	job->generation = ++self->decision_generation;
+	job->json = options.json;
+	self->decision_cancel = g_cancellable_new();
+	self->decision_pending = TRUE;
+	ai_gui_commands_say(session, "Requesting decision from %s...", options.provider_label);
+	ai_decider_decide_async(AI_DECIDER(options.client), options.request,
+		self->decision_cancel, on_gui_decision_done, job);
+	decide_options_clear(&options);
+}
 
 /* ================================================================
  * Toasts
@@ -266,6 +389,7 @@ window_set_session(
 	if (self->session == session)
 		return;
 
+	ai_gui_window_cancel_decision(self);
 	window_disconnect_session(self);
 	g_set_object(&self->session, session);
 
@@ -498,6 +622,7 @@ on_composer_stop(
 ){
 	AiGuiWindow *self = user_data;
 
+	ai_gui_window_cancel_decision(self);
 	if (self->session != NULL)
 		ai_gui_session_cancel(self->session);
 }
@@ -1026,6 +1151,7 @@ action_stop(
 ){
 	AiGuiWindow *self = AI_GUI_WINDOW(widget);
 
+	ai_gui_window_cancel_decision(self);
 	if (self->session != NULL)
 		ai_gui_session_cancel(self->session);
 }
@@ -1168,6 +1294,7 @@ action_clear(
 	if (self->session == NULL)
 		return;
 
+	ai_gui_window_cancel_decision(self);
 	ai_gui_session_clear(self->session);
 	ai_gui_window_toast(self, "Conversation cleared");
 }
@@ -2102,6 +2229,9 @@ ai_gui_window_dispose(GObject *object)
 {
 	AiGuiWindow *self = AI_GUI_WINDOW(object);
 
+	ai_gui_window_cancel_decision(self);
+	g_clear_object(&self->decision_cancel);
+	self->decision_pending = FALSE;
 	ai_gui_style_remove_changed(on_appearance_changed, self);
 	if (self->update != NULL)
 	{

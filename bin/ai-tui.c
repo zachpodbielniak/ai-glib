@@ -3408,7 +3408,7 @@ on_decision_done(GObject *source, GAsyncResult *result, gpointer user_data)
 static void
 start_decision(App *app, const gchar *arguments)
 {
-	DecideOptions options = { NULL, NULL, NULL, FALSE };
+	DecideOptions options = { NULL, NULL, NULL, NULL, FALSE };
 	g_auto(GStrv) argv = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autofree gchar *line = g_strconcat("decide ", arguments != NULL ? arguments : "", NULL);
@@ -3432,7 +3432,7 @@ start_decision(App *app, const gchar *arguments)
 	job->app = app; job->generation = ++app->decision_generation; job->json = options.json;
 	app->decision_cancel = g_cancellable_new();
 	app->decision_pending = TRUE;
-	say(app, "Requesting decision from Laya...");
+	say(app, "Requesting decision from %s...", options.provider_label);
 	ai_decider_decide_async(AI_DECIDER(options.client), options.request,
 		app->decision_cancel, on_decision_done, job);
 	decide_options_clear(&options);

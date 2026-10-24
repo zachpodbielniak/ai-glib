@@ -630,8 +630,8 @@ Grok Build calls run in an isolated session with only the necessary tools enable
 HTTP video generation submits once, then polls to completion with retry handling for polling requests. The library rejects unknown or malformed status replies, reports expired jobs and moderation errors, and honors cancellation and timeout while waiting or receiving data. The CLI streams the final artifact to disk without buffering the entire video. URLs expire, so save them promptly. See [[file:api-reference/ai-video-generator.org][the public video API]], [[file:providers/grok.org][Imagine HTTP]], [[file:providers/grok-build.org][Grok Build]], and [[file:specs/xai-imagine-provenance.org][the downloaded specification and provenance]].
 
 ** Typed decisions
-See [[file:laya-integration.org][Laya decisions]] for =ai decide= and =/decide=,
-including question syntax, request files, cancellation and server configuration.
+See [[file:decisions.org][Typed decisions]] for =ai decide= and =/decide=:
+TypeSafe Jev, Ollama decision models and Laya, question syntax, request files and cancellation.
 
 * ai-call
 

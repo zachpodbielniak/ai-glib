@@ -584,7 +584,8 @@ without a display.
 Built-ins resolve in the library and are run here: =/help=, =/commands=,
 =/skills=, =/agents=, =/tools=, =/todos=, =/running=, =/kill=, =/clear=,
 =/reset=, =/reload=, =/cwd=, =/context=, =/expand=, =/save=, =/export=,
-=/links=, =/issue=, =/pr=, =/work=, =/project=, =/dashboard=, =/quit=.
+=/links=, =/issue=, =/pr=, =/work=, =/project=, =/dashboard=, =/decide=,
+=/quit=.
 
 Their output goes into the transcript rather than a toast: =/help= and
 =/links= are output, and output that disappears after three seconds is
@@ -598,6 +599,13 @@ reuses its loaded conversation.
 
 =/update status= prints the version and whether a newer ai-glib is
 available; =/update= builds and installs it (see *Updates* below).
+
+=/decide= classifies text with TypeSafe, Ollama or Laya and writes the
+answers into the transcript. It does not send them to the chat model, and
+the menus under the message box do not choose the decision provider. The
+options are the same as =ai decide= (see [[file:decisions.org][Typed decisions]]). One
+decision runs at a time. Stop, =/clear=, =/reset= and switching sessions
+cancel it and drop a late result. =/decide= with no arguments shows usage.
 
 =/model=, =/provider= and =/effort= report where the controls are instead
 of reimplementing a list you would then have to type an exact id into —

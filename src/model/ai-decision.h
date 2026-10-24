@@ -26,6 +26,15 @@ ai_decision_request_add_boolean(
 	GError **error
 );
 gboolean
+ai_decision_request_add_noul(
+	AiDecisionRequest *self,
+	const gchar *id,
+	const gchar *question,
+	const gchar *true_description,
+	const gchar *false_description,
+	GError **error
+);
+gboolean
 ai_decision_request_add_choice(
 	AiDecisionRequest *self,
 	const gchar *id,
@@ -40,6 +49,19 @@ ai_decision_request_add_score(
 	const gchar *id,
 	const gchar *question,
 	const gchar *const *levels,
+	GError **error
+);
+gboolean
+ai_decision_request_add_box(
+	AiDecisionRequest *self,
+	const gchar *id,
+	const gchar *question,
+	GError **error
+);
+gboolean
+ai_decision_request_add_image(
+	AiDecisionRequest *self,
+	const gchar *base64_data,
 	GError **error
 );
 gchar *
@@ -79,6 +101,28 @@ ai_decision_response_get_score(
 );
 gdouble
 ai_decision_response_get_elapsed_ms(
+	AiDecisionResponse *self
+);
+gdouble
+ai_decision_response_get_confidence(
+	AiDecisionResponse *self,
+	const gchar *id
+);
+gboolean
+ai_decision_response_get_box(
+	AiDecisionResponse *self,
+	const gchar *id,
+	gdouble *top,
+	gdouble *bottom,
+	gdouble *left,
+	gdouble *right
+);
+gint64
+ai_decision_response_get_input_tokens(
+	AiDecisionResponse *self
+);
+gint64
+ai_decision_response_get_output_tokens(
 	AiDecisionResponse *self
 );
 gchar *

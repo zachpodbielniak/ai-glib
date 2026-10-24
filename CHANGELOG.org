@@ -4,6 +4,27 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.8.0 - 2026-10-24
+
+** Changed
+- With no =-p=, =ai decide= and =/decide= no longer assume a Laya server at
+  =http://127.0.0.1:8000=. Set =LAYA_BASE_URL= or pass =-p laya=.
+
+** Added
+- TypeSafe Jev as =AiTypesafeClient=, an =AiDecider= for =POST /v1/systemone=.
+  =TYPESAFE_API_KEY= is the bearer token. =TYPESAFE_BASE_URL= and
+  =TYPESAFE_DEFAULT_MODEL= set the initial endpoint and model
+  (=jev-latest=). =long-context= sends the long-context header.
+- Ollama decision models on the same endpoint. =AiOllamaClient= implements
+  =AiDecider= with =decision-model= (default =tev1=), separate from the
+  chat model. =OLLAMA_HOST= and =OLLAMA_API_KEY= are the ones chat already
+  uses. Noul criteria, object state and an =images= array are accepted.
+  Box questions and TypeSafe assets are refused before the request is sent.
+- =ai decide -p typesafe|jev|ollama|laya=, the same selection for =/decide=
+  in ai-tui and ai-gui. With no =-p=, a set =TYPESAFE_API_KEY= selects
+  TypeSafe, =LAYA_BASE_URL= still selects Laya, and otherwise the decision
+  runs on local Ollama.
+
 * 0.7.3 - 2026-10-20
 
 ** Fixed

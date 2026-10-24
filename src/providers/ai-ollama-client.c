@@ -19,8 +19,10 @@
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
 #include "core/ai-embedder.h"
+#include "core/ai-decider.h"
 #include "providers/ai-embedding-shared.h"
 #include "providers/ai-image-shared.h"
+#include "providers/ai-systemone.h"
 
 #define OLLAMA_CHAT_ENDPOINT "/api/chat"
 #define OLLAMA_TAGS_ENDPOINT "/api/tags"
@@ -32,11 +34,14 @@
 struct _AiOllamaClient
 {
     AiClient parent_instance;
+    gchar *decision_model;
+    guint decision_timeout_ms;
 };
 
 static void ai_ollama_client_provider_init(AiProviderInterface *iface);
 static void ai_ollama_client_streamable_init(AiStreamableInterface *iface);
 static void ai_ollama_client_embedder_init(AiEmbedderInterface *iface);
+static void ai_ollama_client_decider_init(AiDeciderInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiOllamaClient, ai_ollama_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
@@ -44,7 +49,15 @@ G_DEFINE_TYPE_WITH_CODE(AiOllamaClient, ai_ollama_client, AI_TYPE_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
                                               ai_ollama_client_streamable_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_EMBEDDER,
-                                              ai_ollama_client_embedder_init))
+                                              ai_ollama_client_embedder_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_DECIDER,
+                                              ai_ollama_client_decider_init))
+
+enum
+{
+    PROP_DECISION_MODEL = 1,
+    PROP_DECISION_TIMEOUT_MS
+};
 
 /*
  * Build Ollama API request.
@@ -294,21 +307,122 @@ ai_ollama_client_add_auth_headers(
 }
 
 static void
+ai_ollama_client_finalize(GObject *object)
+{
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(object);
+
+    g_free(self->decision_model);
+    G_OBJECT_CLASS(ai_ollama_client_parent_class)->finalize(object);
+}
+
+static void
+ai_ollama_client_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *pspec)
+{
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(object);
+
+    switch (prop_id)
+    {
+        case PROP_DECISION_MODEL:
+            g_value_set_string(value, self->decision_model);
+            break;
+        case PROP_DECISION_TIMEOUT_MS:
+            g_value_set_uint(value, self->decision_timeout_ms);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+            break;
+    }
+}
+
+static void
+ai_ollama_client_set_property(GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec)
+{
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(object);
+
+    switch (prop_id)
+    {
+        case PROP_DECISION_MODEL:
+            g_free(self->decision_model);
+            self->decision_model = g_value_dup_string(value);
+            break;
+        case PROP_DECISION_TIMEOUT_MS:
+            self->decision_timeout_ms = g_value_get_uint(value);
+            break;
+        default:
+            G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+            break;
+    }
+}
+
+static void
 ai_ollama_client_class_init(AiOllamaClientClass *klass)
 {
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
     AiClientClass *client_class = AI_CLIENT_CLASS(klass);
 
+    object_class->finalize = ai_ollama_client_finalize;
+    object_class->get_property = ai_ollama_client_get_property;
+    object_class->set_property = ai_ollama_client_set_property;
     client_class->build_request = ai_ollama_client_build_request;
     client_class->parse_response = ai_ollama_client_parse_response;
     client_class->get_endpoint_url = ai_ollama_client_get_endpoint_url;
     client_class->add_auth_headers = ai_ollama_client_add_auth_headers;
+
+    /**
+     * AiOllamaClient:decision-model:
+     *
+     * Model for AiDecider. Independent of the chat model. Defaults to tev1.
+     */
+    g_object_class_install_property(object_class, PROP_DECISION_MODEL,
+        g_param_spec_string("decision-model", NULL, NULL,
+            AI_OLLAMA_MODEL_TEV1, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+    /**
+     * AiOllamaClient:decision-timeout-ms:
+     *
+     * Whole-operation deadline for a decision, in milliseconds.
+     */
+    g_object_class_install_property(object_class, PROP_DECISION_TIMEOUT_MS,
+        g_param_spec_uint("decision-timeout-ms", NULL, NULL,
+            1, G_MAXUINT, 30000, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
 ai_ollama_client_init(AiOllamaClient *self)
 {
-    (void)self;
+    self->decision_model = g_strdup(AI_OLLAMA_MODEL_TEV1);
+    self->decision_timeout_ms = 30000;
     ai_client_set_model(AI_CLIENT(self), AI_OLLAMA_DEFAULT_MODEL);
+}
+
+static void
+ollama_decide_async(AiDecider *decider, AiDecisionRequest *request,
+    GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+{
+    AiOllamaClient *self = AI_OLLAMA_CLIENT(decider);
+    AiConfig *config = ai_client_get_config(AI_CLIENT(self));
+    AiSystemOneTarget target;
+
+    target.kind = AI_SYSTEMONE_OLLAMA;
+    target.base_url = ai_config_get_base_url(config, AI_PROVIDER_OLLAMA);
+    target.model = self->decision_model;
+    target.api_key = ai_config_get_api_key(config, AI_PROVIDER_OLLAMA);
+    target.timeout_ms = self->decision_timeout_ms;
+    target.long_context = FALSE;
+    ai_systemone_decide_async(G_OBJECT(self), &target, request, cancellable,
+        callback, user_data, ollama_decide_async);
+}
+
+static AiDecisionResponse *
+ollama_decide_finish(AiDecider *self, GAsyncResult *result, GError **error)
+{
+    return ai_systemone_decide_finish(G_OBJECT(self), result, ollama_decide_async, error);
+}
+
+static void
+ai_ollama_client_decider_init(AiDeciderInterface *iface)
+{
+    iface->decide_async = ollama_decide_async;
+    iface->decide_finish = ollama_decide_finish;
 }
 
 /*

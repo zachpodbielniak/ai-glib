@@ -177,4 +177,33 @@ ai_gui_window_update(
 	const gchar *arguments
 );
 
+/* Completed by G_DECLARE_FINAL_TYPE in ai-gui-session.h. */
+typedef struct _AiGuiSession AiGuiSession;
+
+/**
+ * ai_gui_window_run_decision:
+ * @self: a window
+ * @session: the session whose transcript receives the result
+ * @arguments: (nullable): the text after `/decide`
+ *
+ * Parses @arguments with the same options as `ai decide` and runs one
+ * decision. The chat provider is left alone. Help and errors are status
+ * lines. A result is a transcript note, not a message sent to the model.
+ */
+void
+ai_gui_window_run_decision(
+	AiGuiWindow  *self,
+	AiGuiSession *session,
+	const gchar  *arguments
+);
+
+/**
+ * ai_gui_window_cancel_decision:
+ * @self: a window
+ *
+ * Cancels a decision in flight and drops a late result.
+ */
+void
+ai_gui_window_cancel_decision(AiGuiWindow *self);
+
 G_END_DECLS

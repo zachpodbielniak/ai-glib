@@ -35,6 +35,7 @@
 #include "core/ai-decider.h"
 #include "model/ai-decision.h"
 #include "providers/ai-laya-client.h"
+#include "providers/ai-typesafe-client.h"
 #include "agent/ai-mock-decider.h"
 #include "core/ai-image-generator.h"
 #include "core/ai-video-generator.h"

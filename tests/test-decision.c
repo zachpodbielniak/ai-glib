@@ -367,8 +367,205 @@ test_typed_metadata(void)
 	g_assert_nonnull(strstr(encoded, "injected"));
 }
 
+static void
+test_structured_request(void)
+{
+	const gchar *json =
+		"{\"state\":{\"subject\":\"duplicate charge\"},\"questions\":{"
+		"\"refund\":{\"type\":\"noul\",\"instructions\":\"Is a refund requested?\","
+		"\"criteria\":{\"true\":\"asks for money back\",\"false\":\"does not ask\"}}}}";
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiDecisionRequest) request = ai_decision_request_new_from_json(json, &error);
+	g_autofree gchar *encoded = NULL;
+
+	g_assert_no_error(error);
+	g_assert_nonnull(request);
+	encoded = ai_decision_request_dup_json(request);
+	g_assert_nonnull(strstr(encoded, "duplicate charge"));
+	g_assert_nonnull(strstr(encoded, "asks for money back"));
+}
+
+static void
+test_box_response(void)
+{
+	const gchar *json =
+		"{\"model\":\"jev-1.14.0\",\"usage\":{\"input_tokens\":12,\"output_tokens\":3},"
+		"\"answers\":{\"mug\":{\"type\":\"box\",\"confidence\":0.8,"
+		"\"box\":{\"top\":0.1,\"bottom\":0.4,\"left\":0.2,\"right\":0.5}}}}";
+	const gchar *bare = "{\"model\":\"jev-1.14.0\",\"answers\":{\"mug\":{\"type\":\"box\","
+		"\"box\":{\"top\":0.1,\"bottom\":0.4,\"left\":0.2,\"right\":0.5}}}}";
+	g_autoptr(AiDecisionRequest) request = ai_decision_request_new("photo");
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *text = NULL;
+	gdouble top = -1, bottom = -1, left = -1, right = -1;
+
+	g_assert_true(ai_decision_request_add_box(request, "mug", "Where is the coffee mug?", &error));
+	g_assert_no_error(error);
+	response = ai_decision_response_new_from_json(request, json, 4, &error);
+	g_assert_no_error(error);
+	g_assert_true(ai_decision_response_get_box(response, "mug", &top, &bottom, &left, &right));
+	g_assert_cmpfloat(top, ==, 0.1);
+	g_assert_cmpfloat(bottom, ==, 0.4);
+	g_assert_cmpfloat(left, ==, 0.2);
+	g_assert_cmpfloat(right, ==, 0.5);
+	g_assert_cmpfloat(ai_decision_response_get_confidence(response, "mug"), ==, 0.8);
+	g_assert_cmpint(ai_decision_response_get_input_tokens(response), ==, 12);
+	g_assert_cmpint(ai_decision_response_get_output_tokens(response), ==, 3);
+	text = ai_decision_response_format(response);
+	g_assert_nonnull(strstr(text, "mug: box top=0.1000 bottom=0.4000 left=0.2000 right=0.5000"));
+	g_clear_object(&response);
+	g_clear_pointer(&text, g_free);
+	response = ai_decision_response_new_from_json(request, bare, 1, &error);
+	g_assert_no_error(error);
+	g_assert_cmpfloat(ai_decision_response_get_confidence(response, "mug"), ==, -1);
+	g_assert_cmpint(ai_decision_response_get_input_tokens(response), ==, -1);
+	g_assert_cmpint(ai_decision_response_get_output_tokens(response), ==, -1);
+}
+
+static const gchar *jev_reply =
+	"{\"model\":\"jev-1.14.0\",\"answers\":{\"spam\":{\"type\":\"noul\",\"noul\":0.91}}}";
+
+static void
+test_typesafe_wire(void)
+{
+	TServer *server = tserver_new();
+	g_autoptr(AiTypesafeClient) client = NULL;
+	g_autoptr(AiDecisionRequest) request = request_new();
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+
+	client = ai_typesafe_client_new();
+	tserver_set_response(server, 200, jev_reply);
+	g_object_set(client, "base-url", server->base_url, "api-key", "test-key", NULL);
+	response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpfloat(ai_decision_response_get_probability(response, "spam", NULL), ==, 0.91);
+	g_assert_cmpstr(server->last_path, ==, "/v1/systemone");
+	g_assert_cmpstr(g_hash_table_lookup(server->last_headers, "authorization"), ==, "Bearer test-key");
+	g_assert_null(g_hash_table_lookup(server->last_headers, "typesafe-danger-zone-images"));
+	g_assert_null(g_hash_table_lookup(server->last_headers, "typesafe-danger-zone-long-context"));
+	g_assert_nonnull(strstr(server->last_body, "\"model\":\"jev-latest\""));
+	tserver_free(server);
+}
+
+static void
+test_typesafe_headers_and_key(void)
+{
+	TServer *server = tserver_new();
+	g_autoptr(AiTypesafeClient) client = NULL;
+	g_autoptr(AiDecisionRequest) request = ai_decision_request_new("photo");
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	const gchar *box_reply =
+		"{\"model\":\"jev-1.14.0\",\"answers\":{\"mug\":{\"type\":\"box\","
+		"\"box\":{\"top\":0.1,\"bottom\":0.4,\"left\":0.2,\"right\":0.5}}}}";
+
+	client = ai_typesafe_client_new();
+	g_object_set(client, "base-url", server->base_url, NULL);
+	g_assert_true(ai_decision_request_add_boolean(request, "spam", "Is this spam?", &error));
+	response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_API_KEY);
+	g_assert_cmpuint(server->hits, ==, 0);
+	g_clear_error(&error);
+	g_clear_object(&request);
+	request = ai_decision_request_new("photo");
+	g_assert_true(ai_decision_request_add_box(request, "mug", "Where is the coffee mug?", &error));
+	g_object_set(client, "api-key", "test-key", "long-context", TRUE, NULL);
+	tserver_set_response(server, 200, box_reply);
+	response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpstr(g_hash_table_lookup(server->last_headers, "typesafe-danger-zone-images"), ==, "true");
+	g_assert_cmpstr(g_hash_table_lookup(server->last_headers, "typesafe-danger-zone-long-context"), ==, "true");
+	g_assert_cmpuint(server->hits, ==, 1);
+	tserver_free(server);
+}
+
+static void
+test_ollama_wire(void)
+{
+	TServer *server = tserver_new();
+	g_autoptr(AiOllamaClient) client = ai_ollama_client_new_with_host(server->base_url);
+	g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Please refund the duplicate charge");
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *decision_model = NULL;
+	const gchar *refund_reply =
+		"{\"model\":\"tev1\",\"answers\":{\"refund\":{\"type\":\"noul\",\"noul\":0.91}}}";
+
+	g_assert_true(ai_decision_request_add_noul(request, "refund", "Is a refund requested?",
+		"asks for money back", "does not ask", &error));
+	ai_client_set_model(AI_CLIENT(client), AI_OLLAMA_MODEL_LLAMA3_2);
+	g_object_get(client, "decision-model", &decision_model, NULL);
+	g_assert_cmpstr(decision_model, ==, AI_OLLAMA_MODEL_TEV1);
+	g_assert_cmpstr(ai_client_get_model(AI_CLIENT(client)), ==, AI_OLLAMA_MODEL_LLAMA3_2);
+	tserver_set_response(server, 200, refund_reply);
+	response = ai_decider_decide(AI_DECIDER(client), request, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_cmpstr(server->last_path, ==, "/v1/systemone");
+	g_assert_null(g_hash_table_lookup(server->last_headers, "authorization"));
+	g_assert_nonnull(strstr(server->last_body, "\"model\":\"tev1\""));
+	g_assert_null(strstr(server->last_body, "gpt-oss"));
+	g_assert_nonnull(strstr(server->last_body, "asks for money back"));
+	tserver_free(server);
+}
+
+static void
+test_profile_refusals(void)
+{
+	TServer *server = tserver_new();
+	g_autoptr(AiLayaClient) laya = ai_laya_client_new();
+	g_autoptr(AiOllamaClient) ollama = ai_ollama_client_new_with_host(server->base_url);
+	g_autoptr(AiDecisionRequest) criteria = NULL;
+	g_autoptr(AiDecisionRequest) object_state = NULL;
+	g_autoptr(AiDecisionRequest) boxed = ai_decision_request_new("photo");
+	g_autoptr(AiDecisionRequest) huge = NULL;
+	g_autoptr(AiDecisionResponse) response = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GString) state = g_string_sized_new(22000 * 3);
+	guint i;
+
+	criteria = ai_decision_request_new_from_json(
+		"{\"state\":\"text\",\"questions\":{\"q\":{\"type\":\"noul\",\"instructions\":\"Spam?\","
+		"\"criteria\":{\"true\":\"yes\",\"false\":\"no\"}}}}", &error);
+	g_assert_no_error(error);
+	object_state = ai_decision_request_new_from_json(
+		"{\"state\":{\"note\":\"x\"},\"questions\":{\"q\":{\"type\":\"noul\",\"instructions\":\"Spam?\"}}}",
+		&error);
+	g_assert_no_error(error);
+	g_object_set(laya, "base-url", server->base_url, NULL);
+	response = ai_decider_decide(AI_DECIDER(laya), criteria, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	response = ai_decider_decide(AI_DECIDER(laya), object_state, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	g_assert_true(ai_decision_request_add_box(boxed, "mug", "Where is the coffee mug?", &error));
+	response = ai_decider_decide(AI_DECIDER(ollama), boxed, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_clear_error(&error);
+	for (i = 0; i < 22000; i++)
+		g_string_append(state, "你");
+	huge = ai_decision_request_new(state->str);
+	g_assert_true(ai_decision_request_add_boolean(huge, "q", "Is this long?", &error));
+	response = ai_decider_decide(AI_DECIDER(ollama), huge, NULL, &error);
+	g_assert_null(response);
+	g_assert_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(server->hits, ==, 0);
+	tserver_free(server);
+}
+
 int main(int argc, char **argv)
 {
+	/* Before g_test_init and any TServer thread. A key here would be sent to loopback. */
+	g_unsetenv("TYPESAFE_API_KEY");
+	g_unsetenv("TYPESAFE_BASE_URL");
+	g_unsetenv("TYPESAFE_DEFAULT_MODEL");
+	g_unsetenv("OLLAMA_API_KEY");
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/decision/typed-metadata", test_typed_metadata);
 	g_test_add_func("/decision/wire", test_wire);
@@ -385,5 +582,11 @@ int main(int argc, char **argv)
 	g_test_add_func("/decision/timeout", test_timeout);
 	g_test_add_func("/decision/service-down", test_service_down);
 	g_test_add_func("/decision/mock", test_mock);
+	g_test_add_func("/decision/structured-request", test_structured_request);
+	g_test_add_func("/decision/box-response", test_box_response);
+	g_test_add_func("/decision/typesafe-wire", test_typesafe_wire);
+	g_test_add_func("/decision/typesafe-headers", test_typesafe_headers_and_key);
+	g_test_add_func("/decision/ollama-wire", test_ollama_wire);
+	g_test_add_func("/decision/profile-refusals", test_profile_refusals);
 	return g_test_run();
 }

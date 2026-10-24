@@ -96,6 +96,14 @@ By default, =ai_config_new()= reads API keys from environment variables. Multipl
 | Grok     | =XAI_API_KEY=, =GROK_API_KEY=                  |
 | Ollama   | =OLLAMA_API_KEY= (optional)                    |
 
+Decision clients read their own variables. They are not =AiConfig= provider keys:
+
+| Client   | Variables                                                                 |
+|----------+---------------------------------------------------------------------------|
+| TypeSafe | =TYPESAFE_API_KEY= (required), =TYPESAFE_BASE_URL=, =TYPESAFE_DEFAULT_MODEL= |
+| Laya     | =LAYA_BASE_URL=, =LAYA_API_KEY= (optional). The library object does not read these; =ai decide= and =/decide= do. |
+| Ollama   | =OLLAMA_HOST=, =OLLAMA_API_KEY= (optional), shared with chat              |
+
 **** CLI Wrapper Providers
 CLI providers (=AiClaudeCodeClient=, =AiClaudeTmuxClient=, =AiOpenCodeClient=, =AiGrokBuildClient=) do not use API keys directly --- they delegate authentication to their respective CLI tools. Optional environment variables:
 

@@ -1,20 +1,24 @@
 #+TITLE: AiDecider
 
-=AiDecider= is the decision capability interface. =AiLayaClient= implements it
-using HTTP and =AiMockDecider= implements it with fixtures. It does not require
-or imply =AiProvider= chat support.
+=AiDecider= is the decision capability interface. =AiTypesafeClient=,
+=AiOllamaClient= and =AiLayaClient= implement it over =POST /v1/systemone=.
+=AiMockDecider= implements it with fixtures. The interface does not require
+=AiProvider= chat support. =AiOllamaClient= implements both: its chat =model=
+and its =decision-model= are different properties.
 
-See [[file:../laya-integration.org][Typed decisions with Laya]] for the request schema, properties,
-return values, cancellation, ownership, CLI/TUI usage and offline deployment.
+See [[file:../decisions.org][Typed decisions]] for the request schema, provider limits,
+properties, cancellation, ownership and the =ai= / ai-tui / ai-gui front-ends.
 
 - =ai_decider_decide_async()= snapshots and validates an =AiDecisionRequest=.
 - =ai_decider_decide_finish()= returns an owned =AiDecisionResponse= or an error.
 - =ai_decider_decide()= blocks on a private thread-default context.
-- =ai_decision_request_add_boolean()=, =add_choice()= and =add_score()= add
-  typed questions with unique identifiers. Failed additions leave the request
-  unchanged.
-- Response getters borrow strings and return probabilities unchanged. The
-  caller owns strings from =dup_json()= and =format()=.
+- =ai_decision_request_add_boolean()=, =add_noul()=, =add_choice()=, =add_score()=,
+  =add_box()= and =add_image()= add typed questions or image payloads. Failed
+  additions leave the request unchanged.
+- =ai_decision_response_get_probability()=, =get_choice()=, =get_score()=,
+  =get_confidence()= and =get_box()= read one answer. Confidence is how
+  concentrated a distribution is. A missing confidence or a missing usage
+  field reads as -1. The caller owns strings from =dup_json()= and =format()=.
 
 All four object types support =g_autoptr()=. Callback delivery follows the
 calling thread's main context. Mutating a client or request concurrently from
