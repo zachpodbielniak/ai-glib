@@ -1,0 +1,70 @@
+#+TITLE: AiBenchmarkTarget
+
+=AiBenchmarkTarget= is what a benchmark measures: a provider, a model and property assignments. It is a recipe, not a client. =ai_benchmark_target_build()= turns it into the client the runner calls, so a suite can be validated without calling anything and one benchmark can run twice against fresh clients. It is a final =GObject=.
+
+* AiBenchmarkKind
+| Value | Nick | Interface the client must implement |
+|-------+------+-------------------------------------|
+| =AI_BENCHMARK_KIND_CHAT= | =chat= | =AiProvider=; also =AiStreamable= when the target streams |
+| =AI_BENCHMARK_KIND_DECISION= | =decision= | =AiDecider= |
+| =AI_BENCHMARK_KIND_EMBEDDING= | =embedding= | =AiEmbedder= |
+| =AI_BENCHMARK_KIND_IMAGE= | =image= | =AiImageGenerator= |
+
+=ai_benchmark_kind_to_string()= returns the nick, (transfer none). =ai_benchmark_kind_from_string(name, &kind)= parses one and returns FALSE for anything else. The nicks are the suite file's vocabulary.
+
+* Construction
+| Function | Notes |
+|----------+-------|
+| =ai_benchmark_target_new(label, kind, provider, model)= | (transfer full). =model= is nullable (the provider's default). Nothing is built or checked yet. |
+| =ai_benchmark_target_new_for_object(label, kind, object)= | (transfer full). Wraps a client you configured. The same object is used for every run, and the model and property assignments are applied to it at build time --- so one object cannot back two targets, and =ai_benchmark_add_target()= refuses the second. =get_provider()= returns its type name; =get_object()= returns the object, (transfer none) (nullable). |
+
+=provider= is resolved by the same factories as =ai= and =ai decide=:
+
+- chat, embedding, image: =ai_provider_factory_new_from_string()= --- every name =ai -p= accepts.
+- decision: =ai_provider_factory_new_decider()= --- =typesafe=, =jev= (the same client), =ollama=, =laya=.
+
+* Accessors
+| Function | Returns |
+|----------+---------|
+| =get_label(self)= | (transfer none) |
+| =get_kind(self)= | =AiBenchmarkKind= |
+| =get_provider(self)= | (transfer none) |
+| =get_model(self)= | (transfer none) (nullable) |
+| =get_stream(self)= / =set_stream(self, stream)= | Chat only: stream and record time to first token. |
+
+* Properties of the client
+| Function | Notes |
+|----------+-------|
+| =gboolean ai_benchmark_target_add_property(self, assignment, error)= | Queues =NAME=VALUE=, or a bare =NAME= meaning =NAME=true=. Only the shape is checked here (a non-empty name). |
+| =const gchar *const *ai_benchmark_target_get_properties(self)= | (transfer none) (array zero-terminated=1). |
+| =gboolean ai_benchmark_target_has_property(self, name)= | Whether an assignment for =name= is queued. |
+
+The grammar is =ai --set='s, parsed by the same private helper (=src/core/ai-property-util.h=): values are read as the property's type --- string, boolean (=true=, =yes=, =on=, =1= and their opposites), the four integer types, double, float, or an enum by nick or name. A number that does not fit the C type, a sign on an unsigned property, a non-finite double, or a value outside the property's own range is refused rather than wrapped or clamped.
+
+* Building
+#+begin_src c
+GObject *ai_benchmark_target_build(AiBenchmarkTarget *self, AiConfig *config, GError **error);
+#+end_src
+
+(transfer full) (nullable). In order:
+
+1. Construct the client, or take a reference on the wrapped one. =config= (nullable) goes to the factory.
+2. Refuse a client that cannot do the kind's work, before any call: "target 'x': provider 'claude' cannot run embedding (it does not implement AiEmbedder)". A non-streaming client asked to stream is refused the same way.
+3. Set the model. Chat: =ai_client_set_model()= or =ai_cli_client_set_model()=. Decision: the =model= property, or =decision-model= on Ollama, so its chat model is untouched. Embedding and image take the model per call, so nothing is set.
+4. Apply every queued assignment, after the model, so an assignment can override it. An unknown name (the message lists the writable ones), a read-only or construct-only property, or an unparseable value is an error naming the target.
+
+Errors are =AI_ERROR_INVALID_REQUEST=.
+
+* Example
+#+begin_src c
+g_autoptr(AiBenchmarkTarget) jev = ai_benchmark_target_new("jev", AI_BENCHMARK_KIND_DECISION,
+                                                           "typesafe", "jev-1.14.0");
+g_autoptr(GObject) client = NULL;
+g_autoptr(GError) error = NULL;
+
+ai_benchmark_target_add_property(jev, "timeout-ms=10000", NULL);
+ai_benchmark_target_add_property(jev, "long-context", NULL);
+client = ai_benchmark_target_build(jev, NULL, &error);
+#+end_src
+
+See [[file:ai-benchmark.org][AiBenchmark]] and [[file:../benchmark.org][Benchmarks]].

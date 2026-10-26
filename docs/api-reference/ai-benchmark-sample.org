@@ -1,0 +1,45 @@
+#+TITLE: AiBenchmarkSample
+
+=AiBenchmarkSample= is one measured call of one case on one target. It is a final =GObject=. The runner creates one per measured call and emits it on =AiBenchmark::sample=. The constructor and setters are public so a binding can feed measurements taken elsewhere into =AiBenchmarkSummary= and get the same statistics.
+
+Every "not available" is -1, never 0. A provider that reports no usage has not reported zero tokens, and a call that streamed no text has no time to first token rather than an instant one.
+
+* AiBenchmarkOutcome
+| Value | Nick | Meaning |
+|-------+------+---------|
+| =AI_BENCHMARK_OUTCOME_UNSCORED= | =unscored= | The call succeeded and the case has no expectation. |
+| =AI_BENCHMARK_OUTCOME_PASS= | =pass= | The call succeeded and met every expectation. |
+| =AI_BENCHMARK_OUTCOME_FAIL= | =fail= | The call succeeded and missed an expectation. |
+| =AI_BENCHMARK_OUTCOME_ERROR= | =error= | The call failed or timed out. Never a "no". |
+
+=ai_benchmark_outcome_to_string()= returns the nick, (transfer none).
+
+* Construction
+#+begin_src c
+AiBenchmarkSample *ai_benchmark_sample_new(const gchar *target, const gchar *case_id,
+                                           guint iteration, gint64 elapsed_us);
+#+end_src
+
+(transfer full). Unscored, with no tokens and no time to first token. A negative =elapsed_us= is stored as 0. =iteration= is zero-based among measured calls; warmup calls are not samples.
+
+* Fields
+| Getter | Setter | Absent |
+|--------+--------+--------|
+| =get_target()= (transfer none) | constructor | |
+| =get_case_id()= (transfer none) | constructor | |
+| =get_iteration()= | constructor | |
+| =get_elapsed_us()= | constructor | |
+| =get_ttft_us()= | =set_ttft_us(ttft_us)= | -1 |
+| =get_input_tokens()=, =get_output_tokens()= | =set_tokens(in, out)= | -1 each |
+| =get_outcome()= | =set_outcome(outcome, brier, log_loss, detail)= | =UNSCORED= |
+| =get_brier()=, =get_log_loss()= | =set_outcome()= | -1 |
+| =get_detail()= (transfer none) (nullable) | =set_outcome()= | NULL |
+| =get_error()= (transfer none) (nullable) | =set_error(message)= | NULL |
+| =get_model()= (transfer none) (nullable) | =set_model(model)= | NULL |
+
+- =elapsed_us= is wall time from immediately before the call to its completion callback, on =g_get_monotonic_time()=. An errored call has one too; it is excluded from latency statistics.
+- =set_error()= sets the outcome to =ERROR= and drops any Brier and log-loss.
+- Negative values passed to =set_ttft_us()=, =set_tokens()= and the scores in =set_outcome()= are stored as -1.
+- =model= is what the response reported answered, which can differ from what was asked: =jev-latest= resolves to a release.
+
+See [[file:ai-benchmark-summary.org][AiBenchmarkSummary]] and [[file:../benchmark.org][Benchmarks]].

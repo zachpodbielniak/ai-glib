@@ -4,6 +4,36 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.9.0 - 2026-10-26
+
+** Added
+- =ai benchmark=: run the same work against several providers or models and
+  compare latency (nearest-rank p50/p95), accuracy against labelled answers,
+  calibration (Brier score, log-loss), error rate and token use. Covers chat
+  (optionally streamed, with time to first token), typed decisions (TypeSafe
+  Jev, Ollama decision models, Laya), embeddings and image generation.
+  Suites are YAML (or JSON); quick mode builds one case from flags. Output as
+  a table, YAML, JSON or CSV. =--dry-run= validates a suite and prints the
+  call count without calling anything. See =docs/benchmark.org=.
+- =AiBenchmark=, =AiBenchmarkTarget=, =AiBenchmarkCase=, =AiBenchmarkSample=
+  and =AiBenchmarkSummary= in =src/bench/=, fully introspectable, so ai-tui,
+  ai-gui and Emacs can drive the same runner and print the same output.
+- =ai_provider_factory_new_decider()=: builds =typesafe=, =jev=, =ollama= or
+  =laya= by name. =ai decide= and =/decide= now construct their client
+  through it.
+- Example suites in =docs/examples/benchmark-*.yaml=.
+
+** Changed
+- =ai --set= parses values through a shared private helper
+  (=src/core/ai-property-util.h=) that benchmark suites use too, so the two
+  cannot drift.
+
+** Fixed
+- =ai --set= refuses a number that does not fit the property: =-1= for an
+  unsigned property used to wrap to 4294967295, and a value outside the
+  property's range made GLib warn (fatal under =G_DEBUG=fatal-warnings=) and
+  leave the property unset. Both are now "cannot read ... as a value".
+
 * 0.8.0 - 2026-10-24
 
 ** Changed

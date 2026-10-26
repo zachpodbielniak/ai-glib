@@ -22,6 +22,15 @@ Complete API documentation for ai-glib.
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface             |
 | [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface                   |
 
+** Benchmarks
+| Class                                                   | Description                                         |
+|---------------------------------------------------------+-----------------------------------------------------|
+| [[file:ai-benchmark.org][AiBenchmark]]                   | Runs cases against targets; table, YAML, JSON, CSV  |
+| [[file:ai-benchmark-target.org][AiBenchmarkTarget]]      | A provider, model and properties to measure         |
+| [[file:ai-benchmark-case.org][AiBenchmarkCase]]          | One workload, its expectations and scoring rules    |
+| [[file:ai-benchmark-sample.org][AiBenchmarkSample]]      | One measured call                                   |
+| [[file:ai-benchmark-summary.org][AiBenchmarkSummary]]    | Latency, accuracy, calibration and token statistics |
+
 ** Events
 | Class                              | Description                                  |
 |------------------------------------+----------------------------------------------|

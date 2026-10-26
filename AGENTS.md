@@ -215,6 +215,11 @@ ai-glib/
 │   │   ├── ai-completion.h/.c # The range + candidates an editor wants
 │   │   ├── ai-loop.h/.c       # /loop and /goal: schedule, rules, vocabulary, store
 │   │   └── ai-loop-runner.h/.c # The one scheduler every frontend drives
+│   ├── bench/                 # AiBenchmark: compare providers, models, features
+│   │   ├── ai-benchmark.h/.c  # The runner (+ -suite.c loader, -output.c formats)
+│   │   ├── ai-benchmark-target.h/.c  # provider + model + properties recipe
+│   │   ├── ai-benchmark-case.h/.c    # workload, expectations, scoring
+│   │   └── ai-benchmark-sample/summary.h/.c  # one call / the statistics
 │   └── providers/             # Provider implementations
 │       ├── ai-claude-client.h/.c
 │       ├── ai-openai-client.h/.c
@@ -267,6 +272,54 @@ ai-glib/
 Typed questions go through `AiDecider`, not through chat. `AiTypesafeClient`, `AiOllamaClient` and `AiLayaClient` share `src/providers/ai-systemone.c` (`POST /v1/systemone`). A new backend implements the interface and, if it speaks that wire, adds a profile there. `AiOllamaClient`'s chat `model` and `decision-model` are different properties. Request validation is the union; each profile refuses what its server rejects before any HTTP. Do not whitelist Jev or Ollama model ids. Confidence is exposed and is not an action gate. See `docs/decisions.org`.
 
 `ai decide` and `/decide` (ai-tui and ai-gui) share `bin/ai-decide-options.h`. Explicit `-p` wins (`typesafe`, `jev`, `ollama`, `laya`). Otherwise `TYPESAFE_API_KEY` selects TypeSafe, `LAYA_BASE_URL` selects Laya, and the remaining case is local Ollama. The chat provider does not select the decision provider. A decision note is not a chat message. Tests must unset `TYPESAFE_*` and `OLLAMA_*` and talk only to `TServer`.
+
+## Benchmarks (`src/bench/`, `ai benchmark`)
+
+`AiBenchmark` runs cases against targets and records one `AiBenchmarkSample`
+per measured call; `ai benchmark` (`bin/ai-benchmark-cli.h`) is a thin frontend.
+Every number and every output format (table, YAML, JSON, CSV) comes from the
+library so ai-tui, ai-gui and Emacs print the same thing. See
+`docs/benchmark.org`.
+
+Rules that are load-bearing, each with a test named after it in
+`tests/test-benchmark.c`:
+
+- **Sequential, round-robin, warmup unrecorded.** One call in flight; per case
+  and iteration every target runs once before the next iteration; each target
+  makes `warmup` calls of its first case first, emitting no `::sample`.
+- **One clock.** Latency is `g_get_monotonic_time()` around the call, taken by
+  the runner -- never a provider's own elapsed figure.
+- **An error is never a "no".** A failed call is an `ERROR` sample, excluded
+  from latency and accuracy. Absent values are -1 in the API and `-` / null /
+  empty in output, never 0 and never `nan`.
+- **Timeouts and cancels are held `GSource`s / per-call cancellables** on the
+  run's context (the main-context rules above). A user cancel drops the
+  in-flight sample and keeps the rest.
+- **Targets are recipes.** `ai_benchmark_target_build()` goes through
+  `ai_provider_factory_new_from_string()` or `ai_provider_factory_new_decider()`
+  -- the same factories as `ai` and `ai decide` -- and refuses a client that
+  lacks the kind's interface before any call. Properties use
+  `src/core/ai-property-util.h`, the same parser as `ai --set`; do not add a
+  third copy (ai-tui and ai-gui still carry their own older ones).
+- **The suite loader walks `YamlNode` itself.** yaml-glib types a scalar by
+  its text whatever its quoting (`"no"` becomes a boolean), so
+  `yaml_node_to_json_node()` must not be used on suite content. Every key is
+  checked; errors start `benchmark suite:` and name the key. Size, depth and
+  node count are bounded.
+- **Nothing the plan indexes changes mid-run.** `add_target`, `add_case`,
+  `select_targets` and `prepare` refuse while running; a user cancel is
+  relayed to the call through an idle on the run's context, never inline
+  from the cancellable's (possibly foreign-thread) emission.
+- **Untrusted files are opened, checked on the fd, then read** (regular,
+  <= 4 MiB): suite and `request-file` alike. Iterations and warmup are
+  bounded so a suite cannot plan an unbounded run.
+- **`ai_benchmark_dup_summaries()` returns a `GList`.** A `(transfer full)`
+  `GPtrArray` with an element free function is released twice by PyGObject;
+  `make test-gi` crashed on it.
+
+A new kind is: an enum value, an interface check in `object_can()`, a
+dispatch branch in `start_job()` and a result branch in `record_result()`,
+a scorer on `AiBenchmarkCase`, and a loader in `ai-benchmark-suite.c`.
 
 ## CLI provider options
 

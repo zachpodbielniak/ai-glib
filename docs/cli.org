@@ -633,6 +633,36 @@ HTTP video generation submits once, then polls to completion with retry handling
 See [[file:decisions.org][Typed decisions]] for =ai decide= and =/decide=:
 TypeSafe Jev, Ollama decision models and Laya, question syntax, request files and cancellation.
 
+** Benchmarks (=ai benchmark=)
+Runs the same work against several providers or models and compares latency, accuracy against labelled answers, calibration (Brier, log-loss), error rate and token use. Chat (optionally streamed, for time to first token), decisions (Jev, Ollama decision models, Laya), embeddings and image generation. The full guide, the suite file reference and the metric definitions are in [[file:benchmark.org][Benchmarks]].
+
+#+begin_example
+ai benchmark SUITE.yaml [-n N] [--warmup N] [--timeout-ms MS] [-t LABEL]...
+             [--format table|yaml|json|csv] [-o FILE] [--per-case] [--dry-run]
+ai benchmark --kind KIND -T PROVIDER[:MODEL]... [-q QUESTION] [--expect ANSWER]
+             [--stream] [--set NAME=VALUE]... INPUT...
+ai benchmark --list-kinds
+#+end_example
+
+#+begin_src sh
+# Jev against two local decision models, from a labelled suite
+ai benchmark docs/examples/benchmark-decisions.yaml
+# what that will call, without calling it
+ai benchmark docs/examples/benchmark-decisions.yaml --dry-run
+# one question, no suite
+ai benchmark --kind decision -T typesafe:jev-latest -T ollama:tev1 \
+    -q 'Is this spam?' --expect true 'Win a free prize now'
+# streamed chat, time to first token
+ai benchmark --kind chat --stream -T ollama:llama3.2 -T claude:claude-haiku-5-5 'Say hi'
+#+end_src
+
+- *Calls run one at a time, round-robin across targets*, after =--warmup= unrecorded calls per target. It is a comparison, not a load test.
+- *Progress goes to stderr, the result to stdout* (or =-o FILE=), so =--format csv > out.csv= captures only data. =--quiet= drops the progress.
+- *=--set= applies to every target*, with the grammar of =ai --set=. In a suite, per-target =properties:= use the same parser.
+- *A target that cannot do the work is refused before any call* (=claude= cannot embed) and listed under the table with the reason; the others still run.
+- *Ctrl+C prints what was measured* and exits 130.
+- Exit status: 0 the run completed (individual calls may still have failed --- see =err=), 1 nothing could run or every measured call failed, 2 a bad command line or suite.
+
 * ai-call
 
 =ai-call= is the MatrixRTC voice frontend. It embeds =AiVoiceSession= with

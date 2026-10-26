@@ -64,6 +64,20 @@ the tool installed (in =$PATH=, or named via =OPENCODE_PATH= / =GROK_PATH= /
 | =image-gen-grok.c=   | Grok Image         | =XAI_API_KEY=    |
 | =image-gen-gemini.c= | Gemini Nano Banana | =GEMINI_API_KEY= |
 
+** Benchmark Suites
+Runnable =ai benchmark= suites. =tests/test-benchmark-suite.c= loads each one, so they stay valid. See [[file:../benchmark.org][Benchmarks]].
+
+| File                       | Compares                                              | Requires                                    |
+|----------------------------+-------------------------------------------------------+---------------------------------------------|
+| =benchmark-decisions.yaml= | TypeSafe Jev vs Ollama =tev1= and =clef= on support triage | =TYPESAFE_API_KEY=; the models pulled in Ollama |
+| =benchmark-chat.yaml=      | Claude Haiku, local Llama and Claude Code on short facts | =ANTHROPIC_API_KEY=; =llama3.2=; =claude= on PATH |
+| =benchmark-embedding.yaml= | Two local embedding models on similarity ranking       | =nomic-embed-text=, =mxbai-embed-large= pulled |
+
+#+begin_src sh
+ai benchmark docs/examples/benchmark-decisions.yaml --dry-run
+ai benchmark docs/examples/benchmark-decisions.yaml -t tev1 -t clef --per-case
+#+end_src
+
 ** Common Patterns
 *** Async Chat Request
 #+begin_src C

@@ -656,6 +656,47 @@ def main():
     cfg2.props.update_upstream = "origin/main"
     assert cfg2.props.update_upstream == "origin/main"
 
+    # Benchmarks: the whole loop from a binding -- build targets and a
+    # labelled case, run, read samples and summaries back, render. This is
+    # the standing check that Emacs/libreclaw can drive AiBenchmark.
+    good = AiGlib.MockDecider.new(
+        '{"model":"good","answers":{"q":{"type":"noul","noul":0.9}}}')
+    bad = AiGlib.MockDecider.new(
+        '{"model":"bad","answers":{"q":{"type":"noul","noul":0.2}}}')
+    bench = AiGlib.Benchmark.new()
+    bench.props.iterations = 2
+    bench.props.warmup = 0
+    assert bench.add_target(AiGlib.BenchmarkTarget.new_for_object(
+        "good", AiGlib.BenchmarkKind.DECISION, good))
+    assert bench.add_target(AiGlib.BenchmarkTarget.new_for_object(
+        "bad", AiGlib.BenchmarkKind.DECISION, bad))
+    request = AiGlib.DecisionRequest.new("Please refund me.")
+    assert request.add_boolean("q", "Is a refund requested?")
+    bench_case = AiGlib.BenchmarkCase.new_decision("refund", request)
+    assert bench_case.expect_answer("q", "true")
+    assert bench.add_case(bench_case)
+    seen = []
+    bench.connect("sample", lambda b, s: seen.append(s.get_target()))
+    assert bench.run(None)
+    assert seen == ["good", "bad", "good", "bad"]
+    samples = bench.get_samples()
+    assert len(samples) == 4
+    assert samples[0].get_outcome() == AiGlib.BenchmarkOutcome.PASS
+    assert samples[1].get_outcome() == AiGlib.BenchmarkOutcome.FAIL
+    assert abs(samples[1].get_brier() - 0.64) < 1e-9
+    summaries = bench.dup_summaries(False)
+    assert [s.get_target() for s in summaries] == ["good", "bad"]
+    assert summaries[0].get_accuracy() == 1.0
+    assert summaries[1].get_accuracy() == 0.0
+    assert bench.dup_csv().startswith("target,case,iteration,outcome,")
+    assert '"summaries"' in bench.dup_json()
+    assert AiGlib.benchmark_kind_to_string(AiGlib.BenchmarkKind.EMBEDDING) == "embedding"
+    try:
+        AiGlib.Benchmark.new_from_data(b"iteration: 3\n", None)
+        raise AssertionError("an unknown suite key must raise")
+    except GLib.Error as e:
+        assert "unknown key 'iteration'" in e.message
+
     print("PASS: all GI binding smoke checks succeeded")
     print(f"  PyGObject {gi.__version__}, AiGlib 1.0 loaded from"
           f" {AiGlib.__path__ if hasattr(AiGlib, '__path__') else '(typelib)'}")

@@ -24,6 +24,8 @@
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-cursor-client.h"
 #include "providers/ai-codex-cli-client.h"
+#include "providers/ai-typesafe-client.h"
+#include "providers/ai-laya-client.h"
 
 /**
  * ai_provider_factory_resolve_defaults:
@@ -236,4 +238,55 @@ ai_provider_factory_new_from_string(
     }
 
     return ai_provider_factory_new(type, config, error);
+}
+
+/**
+ * ai_provider_factory_new_decider:
+ * @name: `typesafe`, `jev` (the same client), `ollama` or `laya`
+ * @config: (nullable): configuration for Ollama, or %NULL for the default
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Builds a decision provider from its name. This is the one place that
+ * knows `jev` is the TypeSafe client, so `ai decide`, `/decide` and
+ * #AiBenchmark cannot disagree about it.
+ *
+ * Nothing here reads `LAYA_BASE_URL`: that variable belongs to the
+ * frontends, exactly as before. TypeSafe reads its own `TYPESAFE_*`
+ * variables in its constructor, and Ollama takes its host and key from
+ * @config.
+ *
+ * Returns: (transfer full) (nullable): an object implementing #AiDecider,
+ *   or %NULL on error
+ */
+GObject *
+ai_provider_factory_new_decider(
+    const gchar  *name,
+    AiConfig     *config,
+    GError      **error
+){
+    g_autoptr(AiConfig) owned_config = NULL;
+
+    if (name == NULL)
+        name = "";
+
+    if (g_str_equal(name, "typesafe") || g_str_equal(name, "jev"))
+        return G_OBJECT(ai_typesafe_client_new());
+
+    if (g_str_equal(name, "laya"))
+        return G_OBJECT(ai_laya_client_new());
+
+    if (g_str_equal(name, "ollama"))
+    {
+        if (config == NULL)
+        {
+            owned_config = ai_config_new();
+            config = owned_config;
+        }
+        return G_OBJECT(ai_ollama_client_new_with_config(config));
+    }
+
+    g_set_error(error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
+                "unknown decision provider '%s' (typesafe, jev, ollama or laya)",
+                name);
+    return NULL;
 }

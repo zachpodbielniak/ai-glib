@@ -1,0 +1,47 @@
+# Chat latency, time to first token and correctness across an HTTP API,
+# a local model and a CLI wrapper.
+#
+#   ai benchmark docs/examples/benchmark-chat.yaml --dry-run
+#   ai benchmark docs/examples/benchmark-chat.yaml --per-case
+#
+# claude needs ANTHROPIC_API_KEY; llama needs `ollama pull llama3.2`;
+# claude-code needs the `claude` CLI on PATH. A CLI wrapper's latency
+# includes starting its process, which is part of what you pay for.
+
+name: Short factual answers
+kind: chat
+iterations: 3
+warmup: 1
+
+targets:
+  - label: haiku
+    provider: claude
+    model: claude-haiku-5-5
+    stream: true
+  - label: llama
+    provider: ollama
+    model: llama3.2
+    stream: true
+  - label: claude-code
+    provider: claude-code
+    model: haiku
+    properties:
+      - effort-level=low
+
+cases:
+  - id: capital
+    prompt: What is the capital of France? Answer in one word.
+    expect:
+      contains: paris
+
+  - id: arithmetic
+    system: Reply with the number only.
+    prompt: What is 17 * 23?
+    max-tokens: 16
+    expect:
+      equals: "391"
+
+  - id: year
+    prompt: In which year did Apollo 11 land on the Moon?
+    expect:
+      regex: '\b1969\b'

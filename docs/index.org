@@ -32,6 +32,7 @@ see their provider pages.
 ** Documentation
 *** Getting Started
 - [[file:decisions.org][Typed decisions]] - TypeSafe Jev, Ollama decision models and Laya, through =AiDecider=
+- [[file:benchmark.org][Benchmarks]] - Compare providers, models and decision models: latency, accuracy, calibration, tokens (=ai benchmark=, =AiBenchmark=)
 - [[file:getting-started.org][Getting Started]] - Quick start guide and installation
 - [[file:configuration.org][Configuration]] - Environment variables and configuration options
 - [[file:architecture.org][Architecture]] - Design overview and class hierarchy
@@ -101,6 +102,7 @@ see their provider pages.
 - [[file:api-reference/ai-tool-call.org][AiToolCall]] - Tool calls and how they read
 - [[file:api-reference/ai-conversation.org][AiConversation]] - Drives a provider into a transcript
 - [[file:api-reference/ai-prompt-queue.org][AiPromptQueue]] - Bounded FIFO of follow-up submissions
+- [[file:api-reference/ai-benchmark.org][AiBenchmark]] - Run cases against targets and compare them
 
 *** Examples
 - [[file:examples/index.org][Examples Index]] - All examples

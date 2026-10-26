@@ -45,4 +45,11 @@ ai_provider_factory_new_from_string(
     GError      **error
 );
 
+GObject *
+ai_provider_factory_new_decider(
+    const gchar  *name,
+    AiConfig     *config,
+    GError      **error
+);
+
 G_END_DECLS

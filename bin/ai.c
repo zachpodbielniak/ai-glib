@@ -37,6 +37,7 @@
 #include "ai-cli-update.h"
 #include "ai-loop-cli.h"
 #include "ai-project-cli.h"
+#include "ai-benchmark-cli.h"
 
 /*
  * Private seam. Only the tmux provider needs one: it drives claude through
@@ -46,6 +47,7 @@
  */
 #include "providers/ai-claude-tmux-client-internal.h"
 #include "providers/ai-claude-launch.h"
+#include "core/ai-property-util.h"
 
 /* ---------------------------------------------------------------- */
 /* Options                                                           */
@@ -359,98 +361,6 @@ print_settable_properties(GObject *provider)
 }
 
 /*
- * Parse @text into @value according to @pspec's type.
- *
- * Deliberately strict: a mistyped value silently becoming 0 or FALSE is a
- * worse outcome than an error, because the run still happens and the knob
- * the user asked for just is not there.
- */
-static gboolean
-value_from_string(GValue *value, GParamSpec *pspec, const gchar *text)
-{
-	GType type = G_PARAM_SPEC_VALUE_TYPE(pspec);
-	gchar *end = NULL;
-
-	g_value_init(value, type);
-
-	if (type == G_TYPE_STRING)
-	{
-		g_value_set_string(value, text);
-		return TRUE;
-	}
-
-	if (type == G_TYPE_BOOLEAN)
-	{
-		if (g_ascii_strcasecmp(text, "true") == 0 ||
-		    g_ascii_strcasecmp(text, "yes") == 0 ||
-		    g_ascii_strcasecmp(text, "on") == 0 ||
-		    g_strcmp0(text, "1") == 0)
-		{
-			g_value_set_boolean(value, TRUE);
-			return TRUE;
-		}
-		if (g_ascii_strcasecmp(text, "false") == 0 ||
-		    g_ascii_strcasecmp(text, "no") == 0 ||
-		    g_ascii_strcasecmp(text, "off") == 0 ||
-		    g_strcmp0(text, "0") == 0)
-		{
-			g_value_set_boolean(value, FALSE);
-			return TRUE;
-		}
-		return FALSE;
-	}
-
-	if (type == G_TYPE_INT || type == G_TYPE_UINT ||
-	    type == G_TYPE_INT64 || type == G_TYPE_UINT64)
-	{
-		gint64 parsed = g_ascii_strtoll(text, &end, 10);
-
-		if (end == text || *end != '\0')
-			return FALSE;
-
-		if (type == G_TYPE_INT)
-			g_value_set_int(value, (gint) parsed);
-		else if (type == G_TYPE_UINT)
-			g_value_set_uint(value, (guint) parsed);
-		else if (type == G_TYPE_INT64)
-			g_value_set_int64(value, parsed);
-		else
-			g_value_set_uint64(value, (guint64) parsed);
-		return TRUE;
-	}
-
-	if (type == G_TYPE_DOUBLE || type == G_TYPE_FLOAT)
-	{
-		gdouble parsed = g_ascii_strtod(text, &end);
-
-		if (end == text || *end != '\0')
-			return FALSE;
-
-		if (type == G_TYPE_DOUBLE)
-			g_value_set_double(value, parsed);
-		else
-			g_value_set_float(value, (gfloat) parsed);
-		return TRUE;
-	}
-
-	if (G_TYPE_IS_ENUM(type))
-	{
-		g_autoptr(GEnumClass) klass = g_type_class_ref(type);
-		GEnumValue *ev = g_enum_get_value_by_nick(klass, text);
-
-		if (ev == NULL)
-			ev = g_enum_get_value_by_name(klass, text);
-		if (ev == NULL)
-			return FALSE;
-
-		g_value_set_enum(value, ev->value);
-		return TRUE;
-	}
-
-	return FALSE;
-}
-
-/*
  * Apply every --set to @provider. Returns FALSE (having explained why) if
  * any of them names a property the provider does not have, one it will not
  * let us write, or a value that does not parse.
@@ -475,7 +385,7 @@ apply_property_overrides(GObject *provider)
 			if (g_str_equal(text, "enabled")) text = "true";
 			else if (g_str_equal(text, "disabled")) text = "false";
 		}
-		if (!value_from_string(&value, pspec, text))
+		if (!ai_property_value_from_string(&value, pspec, text))
 		{
 			g_printerr("Invalid sandbox value '%s'\n", opt_sandbox);
 			return FALSE;
@@ -524,7 +434,7 @@ apply_property_overrides(GObject *provider)
 			return FALSE;
 		}
 
-		if (!value_from_string(&value, pspec, text))
+		if (!ai_property_value_from_string(&value, pspec, text))
 		{
 			g_printerr("ai: cannot read '%s' as a value for '%s' (%s)\n",
 			           text, name,
@@ -1494,6 +1404,9 @@ main(int argc, char *argv[])
 	if (argc > 1 && g_str_equal(argv[1], "project"))
 		return project_cli_main(argc - 1, argv + 1);
 
+	if (argc > 1 && g_str_equal(argv[1], "benchmark"))
+		return benchmark_cli_main(argc - 1, argv + 1);
+
 	ctx = g_option_context_new("[PROMPT] - chat with an AI provider");
 	g_option_context_add_main_entries(ctx, option_entries, NULL);
 	g_option_context_add_main_entries(ctx, mcp_option_entries, NULL);
@@ -1501,6 +1414,7 @@ main(int argc, char *argv[])
 		ctx,
 		"Use ai decide --help for probability-based classification.\n"
 		"Use ai project --help to list and inspect projects.\n"
+		"Use ai benchmark --help to compare providers, models and decision models.\n"
 		"Send PROMPT (from the argument or stdin) to an AI provider and "
 		"print the reply to stdout.\n"
 		"With --image-gen, generate an image from PROMPT instead and write "
@@ -1543,6 +1457,14 @@ main(int argc, char *argv[])
 		"  ai \"why is the sky blue?\"\n"
 		"  git diff | ai -s \"Review this diff for bugs\"\n"
 		"  ai -p ollama -m llama3.2 --stream \"one-liner: rsync a directory\"\n"
+		"\n"
+		"Benchmark examples (ai benchmark --help for every option):\n"
+		"  ai benchmark docs/examples/benchmark-decisions.yaml --dry-run   # plan, no calls\n"
+		"  ai benchmark docs/examples/benchmark-decisions.yaml -t tev1 -t clef\n"
+		"  ai benchmark -k decision -T typesafe:jev-latest -T ollama:tev1 \\\n"
+		"               -q \"Is this spam?\" -e true \"WIN a free cruise\"\n"
+		"  ai benchmark -k chat --stream -T ollama:llama3.2 -T claude:claude-haiku-5-5 \"Say hi\"\n"
+		"  ai benchmark suite.yaml -n 10 -f csv -o results.csv\n"
 		"\n"
 		"Unsupported options are dropped for models that cannot honour them;\n"
 		"pass --strict to fail instead.  API keys come from the environment\n"

@@ -168,7 +168,8 @@ decide_options_parse(DecideOptions *options, gchar **arguments, gboolean allow_s
 	}
 	if (g_str_equal(resolved, "typesafe"))
 	{
-		options->client = G_OBJECT(ai_typesafe_client_new());
+		options->client = ai_provider_factory_new_decider("typesafe", NULL, error);
+		if (options->client == NULL) return FALSE;
 		options->provider_label = g_strdup("TypeSafe");
 		if (endpoint != NULL)
 			g_object_set(options->client, "base-url", endpoint, NULL);
@@ -187,7 +188,8 @@ decide_options_parse(DecideOptions *options, gchar **arguments, gboolean allow_s
 			ai_config_set_base_url(config, AI_PROVIDER_OLLAMA, endpoint);
 		if (key != NULL && *key != '\0')
 			ai_config_set_api_key(config, AI_PROVIDER_OLLAMA, key);
-		options->client = G_OBJECT(ai_ollama_client_new_with_config(config));
+		options->client = ai_provider_factory_new_decider("ollama", config, error);
+		if (options->client == NULL) return FALSE;
 		options->provider_label = g_strdup("Ollama");
 		if (model != NULL)
 			g_object_set(options->client, "decision-model", model, NULL);
@@ -197,7 +199,8 @@ decide_options_parse(DecideOptions *options, gchar **arguments, gboolean allow_s
 	{
 		const gchar *key = api_key != NULL ? api_key : g_getenv("LAYA_API_KEY");
 
-		options->client = G_OBJECT(ai_laya_client_new());
+		options->client = ai_provider_factory_new_decider("laya", NULL, error);
+		if (options->client == NULL) return FALSE;
 		options->provider_label = g_strdup("Laya");
 		if (endpoint == NULL)
 			endpoint = g_strdup(g_getenv("LAYA_BASE_URL"));

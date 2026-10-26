@@ -138,7 +138,13 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/harness/ai-command.h \
 	$(SRCDIR)/harness/ai-completion.h \
 	$(SRCDIR)/harness/ai-loop.h \
-	$(SRCDIR)/harness/ai-loop-runner.h
+	$(SRCDIR)/harness/ai-loop-runner.h \
+	$(SRCDIR)/bench/ai-benchmark-enums.h \
+	$(SRCDIR)/bench/ai-benchmark-sample.h \
+	$(SRCDIR)/bench/ai-benchmark-summary.h \
+	$(SRCDIR)/bench/ai-benchmark-target.h \
+	$(SRCDIR)/bench/ai-benchmark-case.h \
+	$(SRCDIR)/bench/ai-benchmark.h
 
 # Library source files
 LIB_SOURCES = \
@@ -252,7 +258,15 @@ LIB_SOURCES = \
 	$(SRCDIR)/harness/ai-command.c \
 	$(SRCDIR)/harness/ai-completion.c \
 	$(SRCDIR)/harness/ai-loop.c \
-	$(SRCDIR)/harness/ai-loop-runner.c
+	$(SRCDIR)/harness/ai-loop-runner.c \
+	$(SRCDIR)/bench/ai-benchmark-enums.c \
+	$(SRCDIR)/bench/ai-benchmark-sample.c \
+	$(SRCDIR)/bench/ai-benchmark-summary.c \
+	$(SRCDIR)/bench/ai-benchmark-target.c \
+	$(SRCDIR)/bench/ai-benchmark-case.c \
+	$(SRCDIR)/bench/ai-benchmark.c \
+	$(SRCDIR)/bench/ai-benchmark-suite.c \
+	$(SRCDIR)/bench/ai-benchmark-output.c
 
 PUBLIC_HEADERS += $(filter-out %-private.h,$(wildcard $(SRCDIR)/voice/*.h))
 LIB_SOURCES += $(wildcard $(SRCDIR)/voice/*.c)
@@ -511,6 +525,7 @@ $(OUTDIR)/tests/test-tui-dashboard: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-herdr: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-mcp-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-decision-cli: $(BIN_BINARIES)
+$(OUTDIR)/tests/test-benchmark-cli: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-linked-work-tui: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-cli-update: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-update: $(BIN_BINARIES)

@@ -129,6 +129,14 @@
 #include "harness/ai-loop.h"
 #include "harness/ai-loop-runner.h"
 
+/* Benchmarks - measure and compare providers, models and features */
+#include "bench/ai-benchmark-enums.h"
+#include "bench/ai-benchmark-sample.h"
+#include "bench/ai-benchmark-summary.h"
+#include "bench/ai-benchmark-target.h"
+#include "bench/ai-benchmark-case.h"
+#include "bench/ai-benchmark.h"
+
 #include "voice/ai-audio-transport.h"
 #include "voice/ai-speech-recognizer.h"
 #include "voice/ai-speech-synthesizer.h"

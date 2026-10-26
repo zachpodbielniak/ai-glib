@@ -1,0 +1,39 @@
+# Two local embedding models: latency, and whether each ranks a related
+# pair closer than an unrelated one.
+#
+#   ai benchmark docs/examples/benchmark-embedding.yaml
+#
+# Needs `ollama pull nomic-embed-text` and `ollama pull mxbai-embed-large`.
+# Similarity is a ranking, not a threshold: cosine scales differ between
+# models, so "0.8 is close" on one means nothing on the other.
+
+name: Local embedding models
+kind: embedding
+iterations: 5
+
+targets:
+  - label: nomic
+    provider: ollama
+    model: nomic-embed-text
+  - label: mxbai
+    provider: ollama
+    model: mxbai-embed-large
+
+cases:
+  - id: pets-vs-invoices
+    texts:
+      - The cat slept on the warm windowsill all afternoon.
+      - A kitten curled up in a patch of sunlight.
+      - Invoice 4411 is overdue; payment was due on the 1st.
+    expect:
+      similar: [0, 1]
+      dissimilar: [0, 2]
+
+  - id: refund-paraphrase
+    texts:
+      - I would like my money back for the duplicate charge.
+      - Please refund the second payment, I was billed twice.
+      - What time does the store open on Sundays?
+    expect:
+      similar: [0, 1]
+      dissimilar: [0, 2]

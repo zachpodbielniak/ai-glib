@@ -1,0 +1,487 @@
+#+TITLE: Benchmarks
+#+DESCRIPTION: Compare providers, models and features of ai-glib with AiBenchmark and ai benchmark
+
+* What this is
+=AiBenchmark= runs the same work against several targets and compares them: latency, accuracy against labelled answers, calibration, error rate and token use. A target is a provider, a model and its settings. The work is a list of cases: a chat prompt, a typed decision request, a batch of texts to embed, or an image prompt.
+
+The driving case is decision models. The same labelled questions go to TypeSafe Jev and to a decision model running on a local Ollama (=tev1=, =clef=, =nimble=), and the table says which is faster, which is right more often, and which is better calibrated. The same harness covers chat (including streamed time to first token and the CLI wrappers such as =claude-code= and =grok-build=), embeddings and image generation.
+
+=ai benchmark= is a thin command over the library type. ai-tui, ai-gui and an Emacs frontend can drive =AiBenchmark= directly and print exactly what the CLI prints, because every number and every output format comes from the library.
+
+** What it is not
+- *Not a load test.* Calls run one at a time. Concurrency would measure contention on your network or your GPU, not the model.
+- *Not a leaderboard.* Five labelled cases tell you about those five cases. Use a set that looks like your traffic.
+- *Not free.* Every measured call is a real call. =--dry-run= prints how many calls a suite will make before it makes any.
+
+* Quick start
+Validate a suite and see the call plan. Nothing is called:
+
+#+begin_src sh
+ai benchmark docs/examples/benchmark-decisions.yaml --dry-run
+#+end_src
+
+#+begin_example
+Support triage - Jev vs local decision models: 3 targets, 5 cases, 5 iterations, 1 warmup per target
+  jev                  decision  typesafe:jev-latest              ok
+  tev1                 decision  ollama:tev1                      ok
+  clef                 decision  ollama:clef                      ok
+78 calls (75 measured)
+#+end_example
+
+Compare one question across two decision backends, with no suite file:
+
+#+begin_src sh
+ai benchmark --kind decision -T typesafe:jev-latest -T ollama:tev1 \
+    -q 'Is this spam?' --expect true 'Win a free prize now'
+#+end_src
+
+A real run of the quick form against a local =tev1:4b=:
+
+#+begin_example
+$ ai benchmark --kind decision -T ollama:tev1:4b -q 'Is this spam?' --expect true -n 3 \
+      'CONGRATULATIONS!!! You have won a $1000 gift card. Click here to claim.'
+[1/3] ollama:tev1:4b / answer #1: 274.6 ms pass
+[2/3] ollama:tev1:4b / answer #2: 271.4 ms pass
+[3/3] ollama:tev1:4b / answer #3: 274.1 ms pass
+target          runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  tok/s   brier
+--------------  ----  ---  --------  ------  ------  -------  -------  -------------  -----  ------
+ollama:tev1:4b     3    0    100.0%   274.1   274.6    273.4        -          372/0    0.0  0.0222
+#+end_example
+
+Progress goes to stderr and the result to stdout, so =--format csv > out.csv= captures only the data.
+
+Chat latency and time to first token:
+
+#+begin_src sh
+ai benchmark --kind chat --stream -T ollama:llama3.2 -T claude:claude-haiku-5-5 'Say hi'
+#+end_src
+
+* Metrics
+Every column, exactly as computed. A value that is not available is =-= in the table, =null= in YAML and JSON and an empty field in CSV. It is never 0: a target whose every call failed has no latency, and printing 0 ms would make it the fastest row.
+
+| Column | Meaning |
+|--------+---------|
+| runs | Measured calls, errors included. Warmup calls are not counted. |
+| err | Calls that failed or timed out. |
+| error_rate | err / runs. |
+| accuracy | passed / scored. Only successful calls of cases with an expectation are scored. |
+| p50, p95 | Nearest-rank percentiles of the latency of successful calls, in milliseconds. |
+| min, mean, max | Of the same latencies. |
+| ttft | Mean time to the first streamed text, in milliseconds. Streamed chat only. |
+| tokens in/out | Sum of the input and output tokens the provider reported. |
+| tok/s | Output tokens divided by the wall time of the calls that reported them. |
+| brier | Mean Brier score of the scored probabilistic answers. 0 is perfect. |
+| log_loss | Mean log-loss of the same answers. Lower is better. |
+
+** Latency
+Latency is the runner's own clock, =g_get_monotonic_time()= taken immediately before the call and in its completion callback. It is never a provider's own figure, so every kind and every provider is measured the same way. It is wall time: network, queueing, model load, and for a CLI wrapper, starting its process. That is the time your code waits.
+
+Percentiles are nearest-rank: the smallest observed latency with at least p% of the observations at or below it. The rank is =ceil(p * n / 100)=, computed in integers. Nearest-rank never interpolates, so every reported latency is one a real call took. With five calls, p95 is the slowest call. That is the honest answer for five calls; run more iterations for a meaningful tail.
+
+Errors are excluded from latency. A timeout is not a slow answer. Folding it into p95 would make a flaky target look slow instead of making it look flaky. Errors have their own column.
+
+** Time to first token
+A chat target with =stream: true= runs through =AiStreamable=. The runner records the time of the first text delta, from =AiEventSource::event= (=AI_EVENT_TEXT_DELTA=) when the provider is an event source, otherwise from the =::delta= signal. A streamed call that produced no text has no time to first token. Tokens per second still uses the whole call's wall time, so it is end-to-end throughput, not decode speed.
+
+** Accuracy
+A case passes when every expectation it carries holds. Accuracy is passed / scored.
+
+- *An error is never a "no".* A call that failed counts against the error rate. It is not scored. A decision server that is down has not answered "false".
+- *Unscored is not wrong.* A case with no expectation measures latency only. Image cases are always unscored.
+- The rule for each kind is in "Kinds" below.
+
+** Calibration: Brier and log-loss
+Accuracy says whether the most likely answer was right. Calibration says whether the probabilities can be trusted. A model that says 0.51 for every spam message is as accurate as one that says 0.99, and much less useful as a gate.
+
+- *Noul:* Brier is =(p - y)^2=, where =p= is P(true) and =y= is 1 for a "true" label and 0 for a "false" one. Always answering 0.5 scores 0.25.
+- *Choice and score:* Brier is half the multi-class Brier, =sum_k (p_k - y_k)^2 / 2=. For two classes this is exactly the binary formula, so the column stays in 0..1 beside Noul answers.
+- *Log-loss* is =-ln(p)= of the probability given to the labelled answer. =p= is clamped to 1e-15, so a confident miss costs about 34.5 rather than infinity.
+- Boxes carry no distribution and have no Brier.
+- A sample's figure is the mean over its scored probabilistic questions; a summary's is the mean over samples.
+
+Decision confidence (=ai_decision_response_get_confidence()=) is not used. It measures how concentrated a distribution is, not whether the top answer is correct. See [[file:decisions.org][Typed decisions]].
+
+* Kinds
+A case runs only against targets of its own kind.
+
+** chat
+- *Target:* any provider =ai -p= accepts: =claude=, =openai=, =gemini=, =grok=, =ollama=, =openai-compatible=, =claude-code=, =claude-tmux=, =opencode=, =grok-build=, =antigravity=, =codex-cli=, =cursor=. The model is set with =ai_client_set_model()= or =ai_cli_client_set_model()=.
+- *Call:* one user message, the case's system prompt and =max-tokens= (default 1024), no tools. With =stream: true=, through =AiStreamable=; =claude-tmux= does not stream and is refused at build time.
+- *Scored:* =contains= is a case-insensitive substring match using Unicode case folding. =equals= compares the whole reply after trimming surrounding whitespace. =regex= is a GRegex search anywhere in the reply; use =(?i)= for case-insensitivity.
+- *Caveat:* a CLI wrapper's latency includes starting its process and whatever that CLI does before answering. That is part of what you pay for, so it is measured.
+
+** decision
+- *Target:* =typesafe=, =jev= (the same client), =ollama= or =laya=, built by =ai_provider_factory_new_decider()=, the same factory =ai decide= uses. The model goes to =model=, except on Ollama, where it goes to =decision-model= so the chat model is untouched.
+- *Call:* =ai_decider_decide_async()= with the case's request.
+- *Scored:* a Noul is "true" when P(true) is at least the case's =noul-threshold= (default 0.5). A choice is the selected option. A score is the most probable level, named or by zero-based index; the expected ordinal the server also returns is not what is compared. A box passes when its intersection over union with the labelled box reaches =box-iou= (default 0.5).
+- *Caveats:* the first call to a local Ollama model loads its weights; that is why warmup exists. A request a profile cannot serve is refused before any bytes are sent (Laya refuses boxes and images) and shows as an error sample. TypeSafe and Laya default to a 30000 ms deadline of their own, as does Ollama's =decision-timeout-ms=.
+
+** embedding
+- *Target:* any =AiEmbedder=: =ollama=, =openai=, =openai-compatible=. =claude= has no embeddings API and is refused at build time. The model is passed per call.
+- *Call:* one batch of the case's texts through =ai_embedder_embed_async()=.
+- *Scored:* =expect: { similar: [a, b], dissimilar: [c, d] }= passes when cos(a, b) > cos(c, d). It is a ranking, not a threshold: cosine scales differ between models, so "0.8 is close" on one model means nothing on another.
+
+** image
+- *Target:* any =AiImageGenerator=: =openai=, =gemini=, =grok=, =openai-compatible=, =grok-build=, =antigravity=. The model is passed per call.
+- *Call:* =ai_image_generator_generate_image_async()= with the case's prompt, =size= and =count=.
+- *Scored:* never. A call that returns no image is an error.
+- *Caveat:* image generation is slow and usually billed per image. Start with =-n 1 --warmup 0=.
+
+* Execution rules
+These are load-bearing. Each has a test in =tests/test-benchmark.c= named after it.
+
+- *Sequential.* One call is in flight at a time.
+- *Round-robin.* For each case and each iteration, every target of that kind runs once before the next iteration starts. Drift in a shared resource (a GPU warming up, a busy network) lands on every target equally instead of on whichever target ran last.
+- *Warmup first, unrecorded.* Each target makes =warmup= calls of its first case before anything is measured. They produce no sample and no =::sample= signal.
+- *One clock.* See "Latency".
+- *Timeouts are cancellations.* With =timeout-ms= set, a held =GSource= on the run's main context cancels the call when the deadline passes. The sample is an error reading "timed out after N ms". The runner still waits for the provider's callback, so nothing outlives the run.
+- *A target that fails to build is skipped.* Its reason is kept (=ai_benchmark_get_target_error()=), listed under the table and in YAML/JSON, and the other targets still run. A run where nothing can run fails with "nothing to run: ...".
+- *Cancelling keeps what was measured.* The call in flight is cancelled and not recorded (its latency would be an artefact of when you pressed Ctrl+C), the samples already taken are kept, and the run finishes with =G_IO_ERROR_CANCELLED=. =ai benchmark= prints the partial result and exits 130.
+- *A fresh client per run.* Targets are recipes. =ai_benchmark_run_async()= builds every client again, so one benchmark can be run twice.
+- *Nothing the plan depends on changes mid-run.* While running, =add_target()=, =add_case()=, =select_targets()= and =prepare()= are refused with an error, and =set_config()= is a programming error. A =::sample= handler can read anything but cannot reshape the run under itself.
+- *A user cancel reaches the call on the run's own context.* The cancel is relayed through an idle on that context, so cancelling from another thread never tears a provider down off its context.
+
+* Suite file reference
+A suite is YAML. JSON is YAML, so a JSON suite works too. Every key is checked: an unknown key is an error naming it and where it was, because =iteration: 10= silently running the default 3 would measure something other than what you asked.
+
+** Top level
+| Key | Type | Default | Meaning |
+|-----+------+---------+---------|
+| =name= | string | none | Title, printed above the table and in YAML/JSON. |
+| =kind= | kind | none | Default kind for every target and case that does not set one. |
+| =iterations= | integer 1..100000 | 3 | Measured calls of each case on each target. |
+| =warmup= | integer 0..1000 | 1 | Unrecorded calls per target before measuring. |
+| =timeout-ms= | integer >= 0 | 0 | Per-call deadline; 0 leaves it to the provider. |
+| =targets= | list | required | At least one. |
+| =cases= | list | required | At least one. Every case needs a target of its kind. |
+
+** Targets
+| Key | Type | Default | Meaning |
+|-----+------+---------+---------|
+| =provider= | string | required | A provider name; see "Kinds". |
+| =model= | string | provider default | The model id. |
+| =label= | string | =provider:model= | The name in every output. Unique. |
+| =kind= | kind | the top-level =kind= | =chat=, =decision=, =embedding= or =image=. |
+| =stream= | boolean | false | Chat only: stream and record time to first token. |
+| =properties= | list or mapping | none | Property assignments, applied after the model. |
+
+=properties= uses the grammar of =ai --set=, parsed by the same code: a list of =NAME=VALUE= strings, or a mapping of =NAME: VALUE=. A bare =NAME= in the list means =NAME=true=. Values are parsed as the property's type (string, boolean, integer, double, or an enum by nick or name). A value that does not parse, a number outside the C type or the property's own range (=-1= for an unsigned property is refused, never wrapped to 4294967295), an unknown name (the error lists the real ones) and a read-only property are build errors for that target.
+
+#+begin_src yaml
+targets:
+  - label: jev-pinned
+    kind: decision
+    provider: typesafe
+    model: jev-1.14.0
+    properties: [timeout-ms=10000, long-context]
+  - label: local
+    kind: decision
+    provider: ollama
+    model: tev1
+    properties: { decision-timeout-ms: 60000 }
+#+end_src
+
+** Cases: every kind
+| Key | Type | Meaning |
+|-----+------+---------|
+| =id= | string | Required. Unique. Names the case in every output. |
+| =kind= | kind | Defaults to the top-level =kind=. |
+
+** Cases: chat
+| Key | Type | Default | Meaning |
+|-----+------+---------+---------|
+| =prompt= | string | required | The user message. |
+| =system= | string | none | The system prompt. |
+| =max-tokens= | integer >= 1 | 1024 | Output cap passed to the provider. |
+| =expect= | mapping | none | Exactly one of =contains=, =equals=, =regex=. |
+
+** Cases: decision
+| Key | Type | Default | Meaning |
+|-----+------+---------+---------|
+| =request= | mapping | | The request, in the wire shape of [[file:decisions.org][Typed decisions]], written as YAML. |
+| =request-file= | path | | A JSON request file. Relative paths resolve against the suite's directory. |
+| =expect= | mapping | none | Question id to labelled answer. |
+| =noul-threshold= | number 0..1 | 0.5 | P(true) at or above which a Noul counts as "true". |
+| =box-iou= | number 0..1 | 0.5 | IoU at or above which a box passes. |
+
+Exactly one of =request= and =request-file=. The request is validated when the suite loads, and every expectation is checked against its question: an unknown question id, an option the choice does not have, a level the score does not have, or a malformed box is an error at load time, not a wall of failed runs.
+
+| Question type | Expected answer |
+|---------------+-----------------|
+| noul | =true= or =false= (=yes= and =no= work too) |
+| choice | the option name |
+| score | the level's text, or its zero-based index |
+| box | =[top, bottom, left, right]= as fractions of the image |
+
+#+begin_src yaml
+  - id: urgency-outage
+    kind: decision
+    request:
+      state: "Our whole team is locked out and we launch in an hour."
+      questions:
+        urgency:
+          type: score
+          instructions: How urgent is this ticket?
+          criteria: [can wait a week, should be handled today, needs attention within the hour]
+    expect:
+      urgency: 2
+#+end_src
+
+** Cases: embedding
+| Key | Type | Meaning |
+|-----+------+---------|
+| =texts= | list of strings | Required. Embedded as one batch. |
+| =expect= | mapping | =similar: [a, b]= and =dissimilar: [c, d]=, both required. Indices into =texts=. |
+
+** Cases: image
+| Key | Type | Default | Meaning |
+|-----+------+---------+---------|
+| =prompt= | string | required | The image prompt. |
+| =size= | string | =auto= | =auto=, =256x256=, =512x512=, =1024x1024=, =1024x1792= or =1792x1024=. |
+| =count= | integer 1..16 | 1 | Images per call. |
+
+=max-tokens= on a chat case is 1 to 2147483647.
+
+** Quoting
+YAML guesses types. The loader honours quoting so you can stop it guessing:
+
+- A quoted scalar is always a string.
+- Booleans are YAML 1.2's: only an unquoted =true= or =false=. =yes=, =no=, =on= and =off= are text, so =expect: { answer: no }= names a choice option called =no=, and =stream: yes= is an error rather than a guess.
+- An unquoted =42= is a number. Inside a decision request that is what the server receives, so =state: 42= is a number and =state: "42"= is text. =nan= and =inf= are text, never numbers.
+- Where the loader wants text (a prompt, a label, a property value), any scalar is read as its text: =prompt: yes= sends "yes".
+- An empty string and =null= are both null. A required key set to either is missing.
+
+** Limits
+The suite is not trusted input. A file over 4 MiB, nested deeper than 32 levels, or with more than 100000 nodes is refused, as is invalid UTF-8 or a NUL byte. The suite file and every =request-file= must be regular files: each is opened, checked on that descriptor, and only then read, so =/dev/zero= or a FIFO is an error rather than an exhausted machine or a hang. =iterations= is at most 100000 and =warmup= at most 1000, so a suite cannot plan an unbounded run. A UTF-8 byte order mark and CRLF line endings load. None of these can abort a run with =G_DEBUG=fatal-warnings=: a bad file is a =GError=.
+
+* Worked example: Jev against local decision models
+=docs/examples/benchmark-decisions.yaml= is five labelled support tickets (two Nouls, a spam Noul, a choice and a score) against =jev=, =tev1= and =clef=.
+
+1. Check it, and see what it will cost: =ai benchmark docs/examples/benchmark-decisions.yaml --dry-run=. 3 targets x 5 cases x 5 iterations is 75 measured calls, plus 3 warmups.
+2. Start local only: =ai benchmark docs/examples/benchmark-decisions.yaml -t tev1 -t clef=.
+3. Add Jev: export =TYPESAFE_API_KEY= and run it without =-t=.
+4. Look at the cases, not just the totals: =--per-case=.
+5. Keep the data: =--format csv -o triage.csv=, or =--format yaml=.
+
+A per-case run of the =tev1= target alone, against a local =tev1:4b= with one iteration:
+
+#+begin_example
+Support triage - Jev vs local decision models
+
+target                           runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  tok/s   brier
+-------------------------------  ----  ---  --------  ------  ------  -------  -------  -------------  -----  ------
+tev1 / refund-duplicate             1    0    100.0%   245.7   245.7    245.7        -          135/0    0.0  0.0001
+tev1 / refund-shipping-question     1    0    100.0%   300.2   300.2    300.2        -          134/0    0.0  0.0000
+tev1 / spam-prize                   1    0    100.0%   315.0   315.0    315.0        -          129/0    0.0  0.0091
+tev1 / intent-cancel                1    0    100.0%   386.5   386.5    386.5        -          169/0    0.0  0.0000
+tev1 / urgency-outage               1    0    100.0%   325.0   325.0    325.0        -          149/0    0.0  0.0001
+#+end_example
+
+How to read a comparison:
+
+- *Accuracy first, on your data.* A faster model that is wrong is not a cheaper one.
+- *Then Brier.* Two models at the same accuracy are not equal if one puts 0.55 on everything. If your code gates on a probability (the 0.7 / 0.3 bands in [[file:decisions.org][Typed decisions]]), the better-calibrated model is the one whose gates mean something.
+- *Then p95, not mean.* The tail is what a user waits for.
+- *err is a column, not a footnote.* A model that times out 2% of the time needs a fallback whatever its accuracy.
+- Decision models report their output as a distribution, not text, so they report 0 output tokens and 0 tok/s. Compare them on latency and input tokens.
+
+* Output formats
+=--format= picks one. All four come from the library, so a frontend calling =ai_benchmark_dup_table()= prints the same bytes.
+
+** table (default)
+One row per target, or per target and case with =--per-case=. Labels are aligned by terminal columns, so a UTF-8 label does not skew the table. Targets that could not be built are listed below it with the reason:
+
+#+begin_example
+skipped claude-embed: target 'claude-embed': provider 'claude' cannot run embedding (it does not implement AiEmbedder)
+#+end_example
+
+** yaml and json
+The same document in both:
+
+Every string is double-quoted in the YAML, so a label or model called =no= or =42= reads back as a string; the sketch below leaves the quotes out for space.
+
+#+begin_src yaml
+name: Support triage - Jev vs local decision models
+iterations: 5
+warmup: 1
+timeout_ms: 30000
+targets:         # what was asked for, and why any did not run
+  - { label: jev, kind: decision, provider: typesafe, model: jev-latest, stream: false, error: null }
+summaries:       # one per target
+  - { target: jev, runs: 25, errors: 0, error_rate: 0, scored: 25, passed: 24, accuracy: 0.96,
+      min_ms: ..., mean_ms: ..., p50_ms: ..., p95_ms: ..., max_ms: ..., mean_ttft_ms: null,
+      input_tokens: ..., output_tokens: ..., output_tokens_per_second: ...,
+      mean_brier: ..., mean_log_loss: ... }
+cases:           # one per (target, case), same fields plus "case"
+  - { target: jev, case: refund-duplicate, ... }
+samples:         # every measured call
+  - { target: jev, case: refund-duplicate, iteration: 0, outcome: pass, elapsed_ms: ...,
+      ttft_ms: null, input_tokens: ..., output_tokens: ..., brier: ..., log_loss: ...,
+      model: jev-1.14.0, detail: null, error: null }
+#+end_src
+
+=outcome= is one of =pass=, =fail=, =unscored=, =error=. =detail= says why a call failed its expectation, for example ="refund: expected true, P(true) was 0.3100"=. =model= is what the response said answered, which for an alias such as =jev-latest= is the release it resolved to.
+
+#+begin_src sh
+ai benchmark suite.yaml --format yaml --quiet | yq '.summaries[] | [.target, .accuracy, .p95_ms]'
+ai benchmark suite.yaml --format json --quiet | yq -p json '.cases[] | select(.accuracy < 1)'
+#+end_src
+
+** csv
+One row per measured call, RFC 4180 quoting, =,= separator, =.= decimals whatever the locale:
+
+#+begin_example
+target,case,iteration,outcome,elapsed_ms,ttft_ms,input_tokens,output_tokens,brier,log_loss,model,detail,error
+jev,refund,0,pass,100.000,,40,2,0.0100,0.1054,jev-1.14.0,,
+#+end_example
+
+#+begin_src python
+import pandas as pd
+
+df = pd.read_csv("triage.csv")
+ok = df[df.outcome != "error"]
+print(ok.groupby("target").elapsed_ms.describe(percentiles=[0.5, 0.95]))
+#+end_src
+
+* The =ai benchmark= command
+#+begin_example
+ai benchmark SUITE.yaml [-n N] [--warmup N] [--timeout-ms MS] [-t LABEL]...
+             [--format table|yaml|json|csv] [-o FILE] [--per-case] [--dry-run]
+ai benchmark --kind KIND -T PROVIDER[:MODEL]... [-q QUESTION] [--expect ANSWER]
+             [--stream] [--set NAME=VALUE]... INPUT...
+ai benchmark --list-kinds
+#+end_example
+
+| Option | Meaning |
+|--------+---------|
+| =-n=, =--iterations N= | Overrides the suite's =iterations=. |
+| =--warmup N= | Overrides the suite's =warmup=. |
+| =--timeout-ms MS= | Overrides the suite's =timeout-ms=. |
+| =-t=, =--target LABEL= | Suite mode: run only these targets. Repeatable. An unknown label is an error listing the real ones. |
+| =--set NAME=VALUE= | Applies to every target, after its own properties. Repeatable. |
+| =-f=, =--format FORMAT= | =table= (default), =yaml=, =json= or =csv=. |
+| =-o=, =--output FILE= | Write the result to FILE instead of stdout. |
+| =--per-case= | Table: one row per target and case. |
+| =--dry-run= | Load the suite, build every target, print the plan and the call count. Calls nothing. |
+| =--quiet= | No per-call progress on stderr. |
+| =--list-kinds= | Which providers can run which kinds, read from the objects themselves. |
+| =-k=, =--kind KIND= | Quick mode: the kind of the one case (default =chat=, or =decision= with =-q=). |
+| =-T=, =--add-target PROVIDER[:MODEL]= | Quick mode: a target, labelled by the argument itself. Repeatable. Everything after the first =:= is the model, so =ollama:tev1:4b= works. |
+| =-q=, =--question QUESTION= | Quick mode: a yes/no decision question about the input. |
+| =-e=, =--expect ANSWER= | Quick mode: =true= / =false= for a decision, text the reply must contain for chat. |
+| =-s=, =--system TEXT= | Quick mode: chat system prompt. |
+| =--max-tokens N= | Quick mode: chat output cap. |
+| =--stream= | Quick mode: stream chat and record time to first token. |
+
+=-n= is 1 to 100000, =--warmup= 0 to 1000, =--timeout-ms= 0 or more; anything else is a usage error. If =-t= leaves a case with no selected target of its kind, a note on stderr says that case will not run.
+
+Quick mode builds one case from the positional arguments: the prompt for chat and image, the text to decide about for a decision, and every argument as one batch for embedding. Its case ids are =prompt=, =answer=, =texts= and =image=.
+
+=LAYA_BASE_URL= and =LAYA_API_KEY= apply to a Laya target that does not set =base-url= / =api-key= itself, exactly as =ai decide= reads them; =AiLayaClient= does not read them. Every other provider reads its own environment as it does for =ai= (=TYPESAFE_API_KEY=, =OLLAMA_HOST=, =ANTHROPIC_API_KEY=, ...).
+
+Exit status: 0 when the run completed (individual calls may still have failed; see =err=), 1 when nothing could run or every measured call failed, 2 for a bad command line or suite file, 130 when interrupted with Ctrl+C (the partial result is still printed).
+
+* Using it from C
+#+begin_src c
+#include <ai-glib.h>
+
+static void
+on_sample(
+	AiBenchmark       *bench,
+	AiBenchmarkSample *sample,
+	gpointer           user_data
+){
+	g_print("%s: %.1f ms %s\n", ai_benchmark_sample_get_target(sample),
+	        (gdouble)ai_benchmark_sample_get_elapsed_us(sample) / 1000.0,
+	        ai_benchmark_outcome_to_string(ai_benchmark_sample_get_outcome(sample)));
+}
+
+int
+main(
+	void
+){
+	g_autoptr(AiBenchmark) bench = ai_benchmark_new();
+	g_autoptr(AiBenchmarkTarget) jev = ai_benchmark_target_new("jev", AI_BENCHMARK_KIND_DECISION,
+	                                                           "typesafe", "jev-latest");
+	g_autoptr(AiBenchmarkTarget) tev1 = ai_benchmark_target_new("tev1", AI_BENCHMARK_KIND_DECISION,
+	                                                            "ollama", "tev1");
+	g_autoptr(AiDecisionRequest) request = ai_decision_request_new("Please refund the duplicate charge.");
+	g_autoptr(AiBenchmarkCase) refund = NULL;
+	g_autolist(AiBenchmarkSummary) summaries = NULL;
+	g_autofree gchar *table = NULL;
+	g_autoptr(GError) error = NULL;
+
+	/* Targets and one labelled case. */
+	ai_benchmark_add_target(bench, jev, NULL);
+	ai_benchmark_add_target(bench, tev1, NULL);
+	ai_decision_request_add_boolean(request, "refund", "Is a refund requested?", NULL);
+	refund = ai_benchmark_case_new_decision("refund", request);
+	ai_benchmark_case_expect_answer(refund, "refund", "true", NULL);
+	ai_benchmark_add_case(bench, refund, NULL);
+	ai_benchmark_set_iterations(bench, 5);
+
+	/* Run; blocks on a private main context. */
+	g_signal_connect(bench, "sample", G_CALLBACK(on_sample), NULL);
+	if (!ai_benchmark_run(bench, NULL, &error))
+	{
+		g_printerr("benchmark: %s\n", error->message);
+		return 1;
+	}
+
+	/* The table ai benchmark prints, or the numbers themselves. */
+	table = ai_benchmark_dup_table(bench, FALSE);
+	g_print("%s", table);
+	summaries = ai_benchmark_dup_summaries(bench, FALSE);
+	g_print("tev1 accuracy %.2f\n",
+	        ai_benchmark_summary_get_accuracy((AiBenchmarkSummary *)g_list_nth_data(summaries, 1)));
+	return 0;
+}
+#+end_src
+
+- =ai_benchmark_run()= blocks on a private main context; every source a provider uses must attach to the thread-default context, as ai-glib's own do. A test server on your normal context must run on another thread. =ai_benchmark_run_async()= runs on the caller's thread-default context and is what a UI uses.
+- =ai_benchmark_target_new_for_object()= wraps a client you configured yourself, for anything the factories cannot express. Give each target its own object: building sets the model and properties on it, so two targets sharing one would measure whichever was configured last, and =add_target()= refuses the second.
+- =ai_benchmark_new_from_file()= loads a suite; =ai_benchmark_select_targets()= is =-t=; =ai_benchmark_prepare()= with =ai_benchmark_count_calls()= is =--dry-run=.
+- =ai_benchmark_dup_summaries()= returns a =GList= (=g_autolist(AiBenchmarkSummary)=), not a =GPtrArray=: PyGObject releases a transferred =GPtrArray= that carries its own free function twice.
+
+* Using it from Python
+#+begin_src python
+import gi
+gi.require_version("AiGlib", "1.0")
+from gi.repository import AiGlib
+
+bench = AiGlib.Benchmark.new_from_file("docs/examples/benchmark-decisions.yaml")
+bench.select_targets(["tev1", "clef"])
+bench.connect("sample", lambda b, s: print(s.get_target(), s.get_elapsed_us() / 1000))
+bench.run(None)
+for summary in bench.dup_summaries(False):
+    print(summary.get_target(), summary.get_accuracy(), summary.get_p95_ms(), summary.get_mean_brier())
+#+end_src
+
+=make test-gi= runs this shape against mock deciders on every =make test=. It is the standing check that an Emacs frontend can drive =AiBenchmark=.
+
+* Troubleshooting
+- *"nothing to run: target ..."*: every target failed to build. The message is the first reason; =--dry-run= lists each target's.
+- *A target is missing from the run but in the table with 0 runs*: it failed to build; the reason is below the table.
+- *Every call is an error reading "timed out after N ms"*: the suite's =timeout-ms= is shorter than the model needs. A local model's first call loads its weights; keep =warmup= at 1 or more.
+- *Jev errors immediately*: =TYPESAFE_API_KEY= is not set. TypeSafe checks for it before sending a request.
+- *Ollama "model not found" errors*: the model id must match what =ollama list= shows, including the tag (=tev1:4b=).
+- *=stream: yes= is an error*: booleans are YAML 1.2's; write =stream: true=.
+- *A request with =state: 42= fails validation*: an unquoted number is a number. Quote it.
+- *Percentiles look coarse*: nearest-rank with few samples. Raise =-n=.
+
+* Code
+| File | What |
+|------+------|
+| =src/bench/ai-benchmark.{h,c}= | The runner, its properties and the =::sample= signal |
+| =src/bench/ai-benchmark-target.{h,c}= | A provider + model + properties recipe |
+| =src/bench/ai-benchmark-case.{h,c}= | A workload, its expectations and the scoring rules |
+| =src/bench/ai-benchmark-sample.{h,c}= | One measured call |
+| =src/bench/ai-benchmark-summary.{h,c}= | Statistics over samples |
+| =src/bench/ai-benchmark-suite.c= | The YAML loader |
+| =src/bench/ai-benchmark-output.c= | Table, YAML, JSON, CSV |
+| =src/core/ai-property-util.h= | The =NAME=VALUE= parser shared with =ai --set= (private) |
+| =bin/ai-benchmark-cli.h= | =ai benchmark= |
+
+Tests: =tests/test-benchmark-stats.c= (the statistics), =test-benchmark-score.c= (every scoring rule), =test-benchmark.c= (the runner and its execution rules, Jev against Ollama over two sockets), =test-benchmark-suite.c= (the loader and its malformed-document table, and the shipped example suites), =test-benchmark-output.c= (all four formats), =test-benchmark-cli.c= (=ai benchmark= spawned for real, every exit status) and =test-gi-bindings.py=.
+
+API reference: [[file:api-reference/ai-benchmark.org][AiBenchmark]], [[file:api-reference/ai-benchmark-target.org][AiBenchmarkTarget]], [[file:api-reference/ai-benchmark-case.org][AiBenchmarkCase]], [[file:api-reference/ai-benchmark-sample.org][AiBenchmarkSample]], [[file:api-reference/ai-benchmark-summary.org][AiBenchmarkSummary]].

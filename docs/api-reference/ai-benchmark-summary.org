@@ -1,0 +1,38 @@
+#+TITLE: AiBenchmarkSummary
+
+=AiBenchmarkSummary= is the statistics over the samples of one target, or of one target and case. It is a final =GObject=, computed once at construction. Every number =ai benchmark= prints comes from here; =tests/test-benchmark-stats.c= asserts each against hand-computed values.
+
+* Construction
+#+begin_src c
+AiBenchmarkSummary *ai_benchmark_summary_new(const gchar *target, const gchar *case_id,
+                                             GPtrArray *samples);
+#+end_src
+
+(transfer full). =samples= is (element-type AiBenchmarkSample); samples for other targets, or other cases when =case_id= is not NULL, are ignored. =ai_benchmark_dup_summaries()= is the usual source.
+
+* Rules
+1. *Latency is over successful calls only.* A timeout is not a slow answer. Errors have their own count.
+2. *Accuracy is over scored calls only.* An error is never a "no"; an unscored call is neither right nor wrong.
+3. *"No data" is -1, never 0.* A target whose every call failed has no p50.
+
+Percentiles are nearest-rank: rank =ceil(p * n / 100)= in integer arithmetic, clamped to 1..n. They never interpolate, so every reported latency is one a real call took.
+
+* Getters
+| Getter | Meaning | Absent |
+|--------+---------+--------|
+| =get_target()= | (transfer none) | |
+| =get_case_id()= | (transfer none) (nullable): NULL for a whole-target summary | |
+| =get_runs()= | Measured calls, errors included | |
+| =get_errors()= | Failed or timed-out calls | |
+| =get_error_rate()= | errors / runs | -1 with no runs |
+| =get_scored()= | Successful calls checked against an expectation | |
+| =get_passed()= | Scored calls that met every expectation | |
+| =get_accuracy()= | passed / scored | -1 when nothing was scored |
+| =get_min_ms()=, =get_mean_ms()=, =get_max_ms()= | Of successful latencies | -1 |
+| =get_p50_ms()=, =get_p95_ms()= | Nearest-rank | -1 |
+| =get_mean_ttft_ms()= | Over calls that streamed text | -1 |
+| =get_input_tokens()=, =get_output_tokens()= | gint64 totals over calls that reported them | -1 |
+| =get_output_tokens_per_second()= | Output tokens over the wall time of the calls that reported them; 0 output tokens is 0, not absent | -1 |
+| =get_mean_brier()=, =get_mean_log_loss()= | Over calls with a probabilistic score | -1 |
+
+See [[file:ai-benchmark-sample.org][AiBenchmarkSample]] and [[file:../benchmark.org][Benchmarks]].

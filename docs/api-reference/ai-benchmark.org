@@ -1,0 +1,99 @@
+#+TITLE: AiBenchmark
+
+=AiBenchmark= runs cases against targets and records one =AiBenchmarkSample= per measured call. It is a final =GObject=. What it measures, the execution rules and the suite file are in [[file:../benchmark.org][Benchmarks]].
+
+* Construction
+| Function | Returns | Notes |
+|----------+---------+-------|
+| =ai_benchmark_new(void)= | (transfer full) | Empty: 3 iterations, 1 warmup, no timeout of its own. |
+| =ai_benchmark_new_from_file(path, error)= | (transfer full) (nullable) | Loads a YAML or JSON suite; relative =request-file= paths resolve against the file's directory. |
+| =ai_benchmark_new_from_data(data, length, base_dir, error)= | (transfer full) (nullable) | The same from memory. =length= -1 means NUL-terminated. =base_dir= (nullable) resolves =request-file=. |
+
+A suite that does not load returns NULL and an =AI_ERROR_INVALID_REQUEST= whose message starts =benchmark suite:= and names the key and where it was.
+
+* Properties
+| Property | Type | Default | Accessors |
+|----------+------+---------+-----------|
+| =name= | string, nullable | NULL | =ai_benchmark_get_name()=, =set_name()= |
+| =iterations= | guint 1..=AI_BENCHMARK_MAX_ITERATIONS= (100000) | 3 | =get_iterations()=, =set_iterations()= |
+| =warmup= | guint 0..=AI_BENCHMARK_MAX_WARMUP= (1000) | 1 | =get_warmup()=, =set_warmup()= |
+| =timeout-ms= | guint | 0 | =get_timeout_ms()=, =set_timeout_ms()= |
+| =config= | =AiConfig=, nullable | NULL | =get_config()= (transfer none), =set_config()= |
+
+=timeout-ms= 0 leaves the deadline to the provider. =config= is handed to the provider factories when targets are built; NULL builds each with a fresh default =AiConfig=. Setting it invalidates an earlier prepare. A value outside a property's range passed to a setter is a programming error (=g_return_if_fail=); frontends range-check user input first, as =ai benchmark= does.
+
+* Targets and cases
+| Function | Notes |
+|----------+-------|
+| =gboolean ai_benchmark_add_target(self, target, error)= | Takes a reference. Fails on a duplicate label, on a target wrapping a client another target already wraps, or while running. |
+| =gboolean ai_benchmark_add_case(self, bench_case, error)= | Takes a reference. Fails on a duplicate id or while running. |
+| =GPtrArray *ai_benchmark_get_targets(self)= | (transfer none) (element-type AiBenchmarkTarget), in round order. |
+| =GPtrArray *ai_benchmark_get_cases(self)= | (transfer none) (element-type AiBenchmarkCase), in run order. |
+| =AiBenchmarkTarget *ai_benchmark_find_target(self, label)= | (transfer none) (nullable). |
+| =gboolean ai_benchmark_select_targets(self, labels, error)= | Keeps only the targets named in the NULL-terminated =labels=, in their original order. An unknown label changes nothing and the error lists the real ones. Refused while running. |
+
+* Preparing
+| Function | Notes |
+|----------+-------|
+| =gboolean ai_benchmark_prepare(self, error)= | Builds every target's client and checks its capabilities. Makes no calls. FALSE (with the first reason) when no built target has a case of its kind, or while running. |
+| =const gchar *ai_benchmark_get_target_error(self, label)= | (transfer none) (nullable). Why a target did not build, from the last prepare or run. |
+| =guint ai_benchmark_count_calls(self, guint *measured)= | Total calls the run will make, warmups included; =measured= (out) (optional) is the recorded ones. Before a prepare, every target is assumed to build. |
+
+A run prepares by itself. Calling =prepare()= first is how a frontend validates a suite without calling anything (=ai benchmark --dry-run=).
+
+* Running
+| Function | Notes |
+|----------+-------|
+| =void ai_benchmark_run_async(self, cancellable, callback, user_data)= | Runs on the caller's thread-default main context. Earlier samples are discarded. |
+| =gboolean ai_benchmark_run_finish(self, result, error)= | TRUE when every planned call ran. |
+| =gboolean ai_benchmark_run(self, cancellable, error)= | Blocks on a private main context. |
+| =gboolean ai_benchmark_is_running(self)= | |
+
+=run_finish()= is FALSE with:
+
+- =AI_ERROR_INVALID_REQUEST= "nothing to run: ..." when no target could be built for any case, or "the benchmark is already running".
+- =G_IO_ERROR_CANCELLED= when =cancellable= was cancelled. The samples taken before are kept; the call in flight is not recorded.
+
+A failed call is not a failed run: it is a sample with outcome =AI_BENCHMARK_OUTCOME_ERROR=.
+
+The synchronous =ai_benchmark_run()= drives a private context, so every source a provider uses must attach to the thread-default context (ai-glib's own do). A test server on the caller's normal context must run on another thread, as =tests/test-server.h= does. =AiMockProvider='s delay is a global-default timeout and needs =run_async()= on the default context.
+
+* Signals
+** ::sample
+#+begin_src c
+void user_function (AiBenchmark *self, AiBenchmarkSample *sample, gpointer user_data);
+#+end_src
+Emitted once per measured call, in run order, on the context the run started from. Warmup calls emit nothing. The sample is already in =get_samples()=.
+
+* Results
+| Function | Returns |
+|----------+---------|
+| =GPtrArray *ai_benchmark_get_samples(self)= | (transfer none) (element-type AiBenchmarkSample), in run order. |
+| =GList *ai_benchmark_dup_summaries(self, per_case)= | (transfer full) (element-type AiBenchmarkSummary). One per target, or one per target and case of its kind. A target that did not build still has a zero-run summary. |
+| =gchar *ai_benchmark_dup_table(self, per_case)= | (transfer full). The aligned table =ai benchmark= prints, with skipped targets listed below it. |
+| =gchar *ai_benchmark_dup_yaml(self)= | (transfer full). Settings, targets, summaries, per-case summaries, samples. |
+| =gchar *ai_benchmark_dup_json(self)= | (transfer full). The same document as YAML. |
+| =gchar *ai_benchmark_dup_csv(self)= | (transfer full). One row per sample, RFC 4180. |
+
+=dup_summaries()= returns a =GList=, not a =GPtrArray=: a =GPtrArray= transferred with its own element free function is released twice by PyGObject. Free it with =g_list_free_full(list, g_object_unref)= or declare it =g_autolist(AiBenchmarkSummary)=.
+
+Absent values are =-= in the table, =null= in YAML and JSON, and empty in CSV. Never 0, never =nan=.
+
+* Example
+#+begin_src c
+g_autoptr(GError) error = NULL;
+g_autoptr(AiBenchmark) bench = ai_benchmark_new_from_file("triage.yaml", &error);
+const gchar *keep[] = { "jev", "tev1", NULL };
+g_autofree gchar *csv = NULL;
+
+if (bench == NULL || !ai_benchmark_select_targets(bench, keep, &error) ||
+    !ai_benchmark_run(bench, NULL, &error))
+{
+	g_printerr("%s\n", error->message);
+	return 1;
+}
+csv = ai_benchmark_dup_csv(bench);
+g_file_set_contents("triage.csv", csv, -1, NULL);
+#+end_src
+
+See also [[file:ai-benchmark-target.org][AiBenchmarkTarget]], [[file:ai-benchmark-case.org][AiBenchmarkCase]], [[file:ai-benchmark-sample.org][AiBenchmarkSample]], [[file:ai-benchmark-summary.org][AiBenchmarkSummary]].

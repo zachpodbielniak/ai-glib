@@ -124,6 +124,13 @@ ai-tui -p ollama --dump '/decide -q "Is this spam?" "Win a prize"'
 
 That dump keeps the chat provider on Ollama. With =LAYA_BASE_URL= set and no =TYPESAFE_API_KEY=, the decision still goes to Laya.
 
+* Comparing decision models
+=ai benchmark= runs the same labelled questions against TypeSafe Jev, local Ollama decision models and Laya, and reports latency, accuracy, Brier score and token use side by side. =docs/examples/benchmark-decisions.yaml= is a starting suite. See [[file:benchmark.org][Benchmarks]].
+
+#+begin_src sh
+ai benchmark --kind decision -T typesafe:jev-latest -T ollama:tev1 -q 'Is this spam?' --expect true 'Win a prize'
+#+end_src
+
 * What the code should keep doing
 - Log the request you sent when a result looks wrong. Check the payload, then the state, then whether the right answer was among the options, then whether the question is one judgment, and only then the wording.
 - Do not fit a threshold to a handful of cases, and do not assert an exact probability in a test. Tests here check the wire, the profile refusal, and that a parsed answer survives. They talk to a loopback server.

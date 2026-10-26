@@ -1,0 +1,97 @@
+# Jev against two local Ollama decision models on a small labelled
+# support-triage set.
+#
+#   ai benchmark docs/examples/benchmark-decisions.yaml --dry-run
+#   ai benchmark docs/examples/benchmark-decisions.yaml
+#   ai benchmark docs/examples/benchmark-decisions.yaml -t tev1 -t clef
+#
+# The jev target needs TYPESAFE_API_KEY. The Ollama targets need the
+# models pulled (`ollama pull tev1`, `ollama pull clef`). Drop a target
+# you do not have with -t, or it is skipped with the reason.
+#
+# Requests are the decision wire shape (docs/decisions.org) written as
+# YAML. Only an unquoted true or false is a boolean (yes and no are text),
+# and an unquoted 42 is a number; quote a number that must stay text.
+
+name: Support triage - Jev vs local decision models
+kind: decision
+iterations: 5
+warmup: 1
+timeout-ms: 30000
+
+targets:
+  - label: jev
+    provider: typesafe
+    model: jev-latest
+  - label: tev1
+    provider: ollama
+    model: tev1
+  - label: clef
+    provider: ollama
+    model: clef
+
+cases:
+  - id: refund-duplicate
+    request:
+      state: "Hi, I was charged twice for order 4411. Please refund the duplicate."
+      questions:
+        refund:
+          type: noul
+          instructions: Is the customer asking for money back?
+          criteria:
+            true: asks for a refund, chargeback or credit
+            false: asks for something else
+    expect:
+      refund: true
+
+  - id: refund-shipping-question
+    request:
+      state: "When will order 4411 arrive? Tracking has not updated in three days."
+      questions:
+        refund:
+          type: noul
+          instructions: Is the customer asking for money back?
+          criteria:
+            true: asks for a refund, chargeback or credit
+            false: asks for something else
+    expect:
+      refund: false
+
+  - id: spam-prize
+    request:
+      state: "CONGRATULATIONS!!! You have won a $1000 gift card. Click here to claim."
+      questions:
+        spam:
+          type: noul
+          instructions: Is this unsolicited bulk or scam email?
+    expect:
+      spam: true
+
+  - id: intent-cancel
+    request:
+      state: "Please cancel my subscription at the end of this billing period."
+      questions:
+        intent:
+          type: choice
+          instructions: What does the customer want?
+          criteria:
+            refund_request: wants money back
+            cancellation: wants to stop a subscription or order
+            delivery_status: asks where an order is
+            other: anything else
+    expect:
+      intent: cancellation
+
+  - id: urgency-outage
+    request:
+      state: "Our whole team is locked out of the dashboard and we have a launch in an hour."
+      questions:
+        urgency:
+          type: score
+          instructions: How urgent is this ticket?
+          criteria:
+            - can wait a week
+            - should be handled today
+            - needs attention within the hour
+    expect:
+      urgency: 2

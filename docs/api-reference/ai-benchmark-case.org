@@ -1,0 +1,89 @@
+#+TITLE: AiBenchmarkCase
+
+=AiBenchmarkCase= is one workload and, optionally, what a correct answer looks like. It is a final =GObject=. The score functions are pure --- no I/O, no main loop --- so every rule is testable without a provider; =tests/test-benchmark-score.c= covers each.
+
+A case runs only against targets of its own kind.
+
+* Construction
+| Function | Notes |
+|----------+-------|
+| =ai_benchmark_case_new_chat(id, prompt)= | One user message per run. |
+| =ai_benchmark_case_new_decision(id, request)= | Keeps its own snapshot of =request=, as =ai_decider_decide_async()= does; a question added to the caller's request afterwards is neither sent nor expectable. |
+| =ai_benchmark_case_new_embedding(id, texts)= | =texts= is NULL-terminated, at least one; embedded as one batch. |
+| =ai_benchmark_case_new_image(id, prompt)= | Never scored. |
+
+All return (transfer full). =id= must be unique within a benchmark.
+
+* Accessors
+| Function | Returns |
+|----------+---------|
+| =get_id(self)= | (transfer none) |
+| =get_kind(self)= | =AiBenchmarkKind= |
+| =get_prompt(self)= | (transfer none) (nullable): chat or image prompt |
+| =get_request(self)= | (transfer none) (nullable): the decision snapshot |
+| =get_texts(self)= | (transfer none) (array zero-terminated=1) (nullable) |
+| =has_expectation(self)= | Whether a successful run is scored |
+
+* Chat
+| Function | Notes |
+|----------+-------|
+| =set_system(self, system_prompt)= / =get_system()= | Nullable. |
+| =set_max_tokens(self, n)= / =get_max_tokens()= | Default 1024. |
+| =expect_contains(self, text)= | Case-insensitive substring, by Unicode case folding. |
+| =expect_equals(self, text)= | The whole reply after trimming surrounding whitespace. |
+| =gboolean expect_regex(self, pattern, error)= | A GRegex search; FALSE when the pattern does not compile, leaving the previous expectation in place. |
+
+The three replace one another: a chat case has at most one expectation.
+
+* Decision
+#+begin_src c
+gboolean ai_benchmark_case_expect_answer(AiBenchmarkCase *self, const gchar *question_id,
+                                         const gchar *expected, GError **error);
+#+end_src
+
+Checked against the request now, so a typo is an error when the suite loads:
+
+| Question | =expected= |
+|----------+------------|
+| noul | =true= / =false= (or =yes= / =no=) |
+| choice | an option name the question has |
+| score | a level's text, or a zero-based index in range |
+| box | ="top,bottom,left,right"=, fractions in 0..1 with top <= bottom and left <= right |
+
+| Function | Notes |
+|----------+-------|
+| =set_noul_threshold(self, t)= / =get_noul_threshold()= | P(true) at or above which a Noul is "true". Default 0.5. |
+| =set_box_iou(self, iou)= | IoU at or above which a box passes. Default 0.5. |
+
+* Embedding
+#+begin_src c
+gboolean ai_benchmark_case_expect_similarity(AiBenchmarkCase *self, guint similar_a, guint similar_b,
+                                             guint dissimilar_a, guint dissimilar_b, GError **error);
+#+end_src
+
+Passes when cos(=similar_a=, =similar_b=) > cos(=dissimilar_a=, =dissimilar_b=). A ranking, not a threshold: cosine scales differ between models. FALSE when an index is out of range.
+
+* Image
+| Function | Notes |
+|----------+-------|
+| =set_image_size(self, size)= / =get_image_size()= | =AiImageSize=, default =AI_IMAGE_SIZE_AUTO=. |
+| =set_image_count(self, n)= / =get_image_count()= | Images per call, default 1. |
+
+* Scoring
+| Function | Notes |
+|----------+-------|
+| =AiBenchmarkOutcome score_text(self, text, &detail)= | Chat. =text= nullable. |
+| =AiBenchmarkOutcome score_decision(self, response, &brier, &log_loss, &detail)= | |
+| =AiBenchmarkOutcome score_embedding(self, embedding, &detail)= | |
+
+Each returns =AI_BENCHMARK_OUTCOME_UNSCORED= when the case has no expectation, otherwise =PASS= or =FAIL=. Every out parameter is optional. =detail= is (transfer full) (nullable) and says why a run failed, for example ="refund: expected true, P(true) was 0.3100"= or ="urgency: expected low, got 2"=; several misses are joined with ="; "=.
+
+For decisions:
+
+- A case passes only when every expectation holds.
+- =brier= is the mean over the scored Noul, choice and score answers: =(p - y)^2= for a Noul, =sum_k (p_k - y_k)^2 / 2= for a choice or score. -1 when there were none.
+- =log_loss= is the mean of =-ln(p)= of the labelled answer's probability, with =p= clamped to 1e-15. -1 when there were none.
+- A choice is judged by the selected option; a score by its most probable level, not by the expected ordinal.
+- A box is judged by intersection over union. It has no Brier.
+
+See [[file:ai-benchmark.org][AiBenchmark]] and [[file:../benchmark.org][Benchmarks]].
