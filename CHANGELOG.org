@@ -14,7 +14,10 @@ release may change the API.
   Jev, Ollama decision models, Laya), embeddings and image generation.
   Suites are YAML (or JSON); quick mode builds one case from flags. Output as
   a table, YAML, JSON or CSV. =--dry-run= validates a suite and prints the
-  call count without calling anything. See =docs/benchmark.org=.
+  call count without calling anything. Throughput is reported for input and
+  output separately, so a local decision model (which generates no tokens)
+  is compared on input tokens per second rather than shown as 0 tok/s. See
+  =docs/benchmark.org=.
 - =AiBenchmark=, =AiBenchmarkTarget=, =AiBenchmarkCase=, =AiBenchmarkSample=
   and =AiBenchmarkSummary= in =src/bench/=, fully introspectable, so ai-tui,
   ai-gui and Emacs can drive the same runner and print the same output.

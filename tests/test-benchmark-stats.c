@@ -203,6 +203,8 @@ test_tokens(
 	g_assert_cmpint(ai_benchmark_summary_get_output_tokens(s), ==, 200);
 	/* 200 tokens over 2.0 s of the two reporting runs */
 	g_assert_cmpfloat_with_epsilon(ai_benchmark_summary_get_output_tokens_per_second(s), 100.0, EPS);
+	/* 30 input tokens over the same 2.0 s */
+	g_assert_cmpfloat_with_epsilon(ai_benchmark_summary_get_input_tokens_per_second(s), 15.0, EPS);
 
 	/* Only input reported: no output total and no throughput. */
 	{
@@ -216,9 +218,16 @@ test_tokens(
 		g_assert_cmpint(ai_benchmark_summary_get_input_tokens(t), ==, 7);
 		g_assert_cmpint(ai_benchmark_summary_get_output_tokens(t), ==, -1);
 		g_assert_cmpfloat(ai_benchmark_summary_get_output_tokens_per_second(t), ==, -1);
+		/* 7 tokens over 0.1 s */
+		g_assert_cmpfloat_with_epsilon(ai_benchmark_summary_get_input_tokens_per_second(t), 70.0, EPS);
 	}
 
-	/* Zero output tokens is a measurement: 0 tok/s, not absent. */
+	/*
+	 * Zero output tokens (a decision model scores, it does not generate):
+	 * the count is a measurement and stays 0, but there is nothing to rate,
+	 * so output throughput is absent rather than a 0 tok/s that reads as a
+	 * slow model. Input throughput is still there to compare on.
+	 */
 	{
 		g_autoptr(GPtrArray) zero = g_ptr_array_new_with_free_func(g_object_unref);
 		g_autoptr(AiBenchmarkSummary) t = NULL;
@@ -228,7 +237,8 @@ test_tokens(
 		g_ptr_array_add(zero, sample);
 		t = ai_benchmark_summary_new("t", NULL, zero);
 		g_assert_cmpint(ai_benchmark_summary_get_output_tokens(t), ==, 0);
-		g_assert_cmpfloat_with_epsilon(ai_benchmark_summary_get_output_tokens_per_second(t), 0, EPS);
+		g_assert_cmpfloat(ai_benchmark_summary_get_output_tokens_per_second(t), ==, -1);
+		g_assert_cmpfloat_with_epsilon(ai_benchmark_summary_get_input_tokens_per_second(t), 30.0, EPS);
 	}
 }
 

@@ -32,7 +32,8 @@ Percentiles are nearest-rank: rank =ceil(p * n / 100)= in integer arithmetic, cl
 | =get_p50_ms()=, =get_p95_ms()= | Nearest-rank | -1 |
 | =get_mean_ttft_ms()= | Over calls that streamed text | -1 |
 | =get_input_tokens()=, =get_output_tokens()= | gint64 totals over calls that reported them | -1 |
-| =get_output_tokens_per_second()= | Output tokens over the wall time of the calls that reported them; 0 output tokens is 0, not absent | -1 |
+| =get_input_tokens_per_second()= | Input tokens over the wall time of the calls that reported them | -1 |
+| =get_output_tokens_per_second()= | Output tokens over the wall time of the calls that reported them. Absent when every call reported 0 (a decision model generates nothing), so a non-generating model never reads as a slow one; =get_output_tokens()= still says 0 | -1 |
 | =get_mean_brier()=, =get_mean_log_loss()= | Over calls with a probabilistic score | -1 |
 
 See [[file:ai-benchmark-sample.org][AiBenchmarkSample]] and [[file:../benchmark.org][Benchmarks]].

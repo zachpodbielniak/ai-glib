@@ -48,6 +48,7 @@ struct _AiBenchmarkSummary
 	gint64   input_tokens;
 	gint64   output_tokens;
 	gdouble  tokens_per_second;
+	gdouble  input_tokens_per_second;
 	gdouble  mean_brier;
 	gdouble  mean_log_loss;
 };
@@ -86,6 +87,7 @@ ai_benchmark_summary_init(
 	self->input_tokens = -1;
 	self->output_tokens = -1;
 	self->tokens_per_second = -1;
+	self->input_tokens_per_second = -1;
 	self->mean_brier = -1;
 	self->mean_log_loss = -1;
 }
@@ -149,6 +151,7 @@ ai_benchmark_summary_new(
 	gint64 ttft_total;
 	guint ttft_count;
 	gint64 in_total;
+	gint64 in_elapsed;
 	gint64 out_total;
 	gint64 out_elapsed;
 	gboolean any_in;
@@ -171,6 +174,7 @@ ai_benchmark_summary_new(
 	ttft_total = 0;
 	ttft_count = 0;
 	in_total = 0;
+	in_elapsed = 0;
 	out_total = 0;
 	out_elapsed = 0;
 	any_in = FALSE;
@@ -214,6 +218,7 @@ ai_benchmark_summary_new(
 		if (ai_benchmark_sample_get_input_tokens(sample) >= 0)
 		{
 			in_total += ai_benchmark_sample_get_input_tokens(sample);
+			in_elapsed += elapsed;
 			any_in = TRUE;
 		}
 		if (ai_benchmark_sample_get_output_tokens(sample) >= 0)
@@ -257,13 +262,23 @@ ai_benchmark_summary_new(
 
 	if (ttft_count > 0)
 		self->mean_ttft_ms = (gdouble)ttft_total / (gdouble)ttft_count / 1000.0;
+	/*
+	 * Throughput over the wall time of the runs that reported the count.
+	 * A rate needs something to rate: a decision model scores its answer
+	 * from probabilities and generates nothing, so zero output tokens is
+	 * "-" rather than a 0 tok/s that reads as a very slow model. Input
+	 * throughput is the rate every kind can be compared on.
+	 */
 	if (any_in)
+	{
 		self->input_tokens = in_total;
+		if (in_total > 0 && in_elapsed > 0)
+			self->input_tokens_per_second = (gdouble)in_total / ((gdouble)in_elapsed / 1000000.0);
+	}
 	if (any_out)
 	{
 		self->output_tokens = out_total;
-		/* Throughput over the wall time of the runs that reported output. */
-		if (out_elapsed > 0)
+		if (out_total > 0 && out_elapsed > 0)
 			self->tokens_per_second = (gdouble)out_total / ((gdouble)out_elapsed / 1000000.0);
 	}
 	if (brier_count > 0)
@@ -511,7 +526,8 @@ ai_benchmark_summary_get_output_tokens(
  * Wall time includes the time to first token, so this is end-to-end
  * throughput, not decode speed.
  *
- * Returns: tokens per second, or -1 when no output tokens were reported
+ * Returns: tokens per second, or -1 when no run reported output tokens
+ *   or every run reported zero (a decision model generates nothing)
  */
 gdouble
 ai_benchmark_summary_get_output_tokens_per_second(
@@ -519,6 +535,25 @@ ai_benchmark_summary_get_output_tokens_per_second(
 ){
 	g_return_val_if_fail(AI_IS_BENCHMARK_SUMMARY(self), -1);
 	return self->tokens_per_second;
+}
+
+/**
+ * ai_benchmark_summary_get_input_tokens_per_second:
+ * @self: a summary
+ *
+ * Input tokens divided by the wall time of the runs that reported them:
+ * how fast a target gets through what it was sent, end to end. Unlike
+ * output throughput it exists for every kind that reports usage, so it is
+ * the rate a hosted and a local decision model can be compared on.
+ *
+ * Returns: tokens per second, or -1 when no input tokens were reported
+ */
+gdouble
+ai_benchmark_summary_get_input_tokens_per_second(
+	AiBenchmarkSummary *self
+){
+	g_return_val_if_fail(AI_IS_BENCHMARK_SUMMARY(self), -1);
+	return self->input_tokens_per_second;
 }
 
 /**

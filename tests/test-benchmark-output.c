@@ -92,11 +92,11 @@ test_table(
 	static const gchar *expected =
 		"demo\n"
 		"\n"
-		"target        runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  tok/s   brier\n"
-		"------------  ----  ---  --------  ------  ------  -------  -------  -------------  -----  ------\n"
-		"jev              2    0    100.0%   100.0   120.0    110.0        -           80/4   18.2  0.0100\n"
-		"tev1             2    1      0.0%    50.0    50.0     50.0        -              -      -  0.3600\n"
-		"claude-embed     0    0         -       -       -        -        -              -      -       -\n"
+		"target        runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  in tok/s  out tok/s   brier\n"
+		"------------  ----  ---  --------  ------  ------  -------  -------  -------------  --------  ---------  ------\n"
+		"jev              2    0    100.0%   100.0   120.0    110.0        -           80/4     363.6       18.2  0.0100\n"
+		"tev1             2    1      0.0%    50.0    50.0     50.0        -              -         -          -  0.3600\n"
+		"claude-embed     0    0         -       -       -        -        -              -         -          -       -\n"
 		"skipped claude-embed: target 'claude-embed': provider 'claude' cannot run embedding "
 		"(it does not implement AiEmbedder)\n";
 

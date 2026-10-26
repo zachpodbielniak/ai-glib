@@ -40,12 +40,12 @@ A real run of the quick form against a local =tev1:4b=:
 #+begin_example
 $ ai benchmark --kind decision -T ollama:tev1:4b -q 'Is this spam?' --expect true -n 3 \
       'CONGRATULATIONS!!! You have won a $1000 gift card. Click here to claim.'
-[1/3] ollama:tev1:4b / answer #1: 274.6 ms pass
-[2/3] ollama:tev1:4b / answer #2: 271.4 ms pass
-[3/3] ollama:tev1:4b / answer #3: 274.1 ms pass
-target          runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  tok/s   brier
---------------  ----  ---  --------  ------  ------  -------  -------  -------------  -----  ------
-ollama:tev1:4b     3    0    100.0%   274.1   274.6    273.4        -          372/0    0.0  0.0222
+[1/3] ollama:tev1:4b / answer #1: 312.4 ms pass
+[2/3] ollama:tev1:4b / answer #2: 316.8 ms pass
+[3/3] ollama:tev1:4b / answer #3: 316.4 ms pass
+target          runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  in tok/s  out tok/s   brier
+--------------  ----  ---  --------  ------  ------  -------  -------  -------------  --------  ---------  ------
+ollama:tev1:4b     3    0    100.0%   316.4   316.8    315.2        -          372/0     393.4          -  0.0222
 #+end_example
 
 Progress goes to stderr and the result to stdout, so =--format csv > out.csv= captures only the data.
@@ -69,7 +69,8 @@ Every column, exactly as computed. A value that is not available is =-= in the t
 | min, mean, max | Of the same latencies. |
 | ttft | Mean time to the first streamed text, in milliseconds. Streamed chat only. |
 | tokens in/out | Sum of the input and output tokens the provider reported. |
-| tok/s | Output tokens divided by the wall time of the calls that reported them. |
+| in tok/s | Input tokens divided by the wall time of the calls that reported them. End to end, so it includes the network and any queueing. Every kind that reports usage has it, which makes it the throughput a hosted and a local decision model can be compared on. |
+| out tok/s | Output tokens divided by the wall time of the calls that reported them. =-= when every call reported zero: a decision model scores its answer and generates nothing, and a rate of 0 would read as a very slow model. |
 | brier | Mean Brier score of the scored probabilistic answers. 0 is perfect. |
 | log_loss | Mean log-loss of the same answers. Lower is better. |
 
@@ -268,13 +269,13 @@ A per-case run of the =tev1= target alone, against a local =tev1:4b= with one it
 #+begin_example
 Support triage - Jev vs local decision models
 
-target                           runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  tok/s   brier
--------------------------------  ----  ---  --------  ------  ------  -------  -------  -------------  -----  ------
-tev1 / refund-duplicate             1    0    100.0%   245.7   245.7    245.7        -          135/0    0.0  0.0001
-tev1 / refund-shipping-question     1    0    100.0%   300.2   300.2    300.2        -          134/0    0.0  0.0000
-tev1 / spam-prize                   1    0    100.0%   315.0   315.0    315.0        -          129/0    0.0  0.0091
-tev1 / intent-cancel                1    0    100.0%   386.5   386.5    386.5        -          169/0    0.0  0.0000
-tev1 / urgency-outage               1    0    100.0%   325.0   325.0    325.0        -          149/0    0.0  0.0001
+target                           runs  err  accuracy  p50 ms  p95 ms  mean ms  ttft ms  tokens in/out  in tok/s  out tok/s   brier
+-------------------------------  ----  ---  --------  ------  ------  -------  -------  -------------  --------  ---------  ------
+tev1 / refund-duplicate             1    0    100.0%   379.1   379.1    379.1        -          135/0     356.1          -  0.0001
+tev1 / refund-shipping-question     1    0    100.0%   411.1   411.1    411.1        -          134/0     325.9          -  0.0000
+tev1 / spam-prize                   1    0    100.0%   376.5   376.5    376.5        -          129/0     342.6          -  0.0091
+tev1 / intent-cancel                1    0    100.0%   457.1   457.1    457.1        -          169/0     369.8          -  0.0000
+tev1 / urgency-outage               1    0    100.0%   364.0   364.0    364.0        -          149/0     409.3          -  0.0001
 #+end_example
 
 How to read a comparison:
@@ -283,7 +284,7 @@ How to read a comparison:
 - *Then Brier.* Two models at the same accuracy are not equal if one puts 0.55 on everything. If your code gates on a probability (the 0.7 / 0.3 bands in [[file:decisions.org][Typed decisions]]), the better-calibrated model is the one whose gates mean something.
 - *Then p95, not mean.* The tail is what a user waits for.
 - *err is a column, not a footnote.* A model that times out 2% of the time needs a fallback whatever its accuracy.
-- Decision models report their output as a distribution, not text, so they report 0 output tokens and 0 tok/s. Compare them on latency and input tokens.
+- A local Ollama decision model reads its answer off token probabilities and generates nothing, so it reports 0 output tokens and =out tok/s= is =-=. Jev reports a small fixed output count per call. Compare the two on latency and =in tok/s=, not on output.
 
 * Output formats
 =--format= picks one. All four come from the library, so a frontend calling =ai_benchmark_dup_table()= prints the same bytes.
@@ -310,7 +311,7 @@ targets:         # what was asked for, and why any did not run
 summaries:       # one per target
   - { target: jev, runs: 25, errors: 0, error_rate: 0, scored: 25, passed: 24, accuracy: 0.96,
       min_ms: ..., mean_ms: ..., p50_ms: ..., p95_ms: ..., max_ms: ..., mean_ttft_ms: null,
-      input_tokens: ..., output_tokens: ..., output_tokens_per_second: ...,
+      input_tokens: ..., output_tokens: ..., input_tokens_per_second: ..., output_tokens_per_second: ...,
       mean_brier: ..., mean_log_loss: ... }
 cases:           # one per (target, case), same fields plus "case"
   - { target: jev, case: refund-duplicate, ... }

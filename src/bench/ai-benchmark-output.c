@@ -99,6 +99,8 @@ add_summary(
 	add_number_or_null(builder, "mean_ttft_ms", ai_benchmark_summary_get_mean_ttft_ms(summary), 1000);
 	add_int_or_null(builder, "input_tokens", ai_benchmark_summary_get_input_tokens(summary));
 	add_int_or_null(builder, "output_tokens", ai_benchmark_summary_get_output_tokens(summary));
+	add_number_or_null(builder, "input_tokens_per_second",
+	                   ai_benchmark_summary_get_input_tokens_per_second(summary), 100);
 	add_number_or_null(builder, "output_tokens_per_second",
 	                   ai_benchmark_summary_get_output_tokens_per_second(summary), 100);
 	add_number_or_null(builder, "mean_brier", ai_benchmark_summary_get_mean_brier(summary), 10000);
@@ -410,7 +412,7 @@ ai_benchmark_dup_csv(
 
 /* ---- table ------------------------------------------------------ */
 
-#define N_COLUMNS (11)
+#define N_COLUMNS (12)
 
 static gchar *
 cell_ms(
@@ -464,7 +466,7 @@ display_width(
  *
  * An aligned plain-text table for a terminal. Columns: target (and case),
  * runs, errors, accuracy, p50, p95, mean, TTFT (all milliseconds),
- * tokens in/out, output tokens per second, Brier. `-` means not
+ * tokens in/out, input and output tokens per second, Brier. `-` means not
  * available. Targets that could not be built are listed below the table
  * with the reason.
  *
@@ -477,7 +479,7 @@ ai_benchmark_dup_table(
 ){
 	static const gchar *const headers[N_COLUMNS] = {
 		"target", "runs", "err", "accuracy", "p50 ms", "p95 ms",
-		"mean ms", "ttft ms", "tokens in/out", "tok/s", "brier"
+		"mean ms", "ttft ms", "tokens in/out", "in tok/s", "out tok/s", "brier"
 	};
 	g_autolist(AiBenchmarkSummary) summaries = NULL;
 	g_autoptr(GPtrArray) rows = NULL;
@@ -513,8 +515,9 @@ ai_benchmark_dup_table(
 		row[7] = cell_ms(ai_benchmark_summary_get_mean_ttft_ms(s));
 		row[8] = cell_tokens(ai_benchmark_summary_get_input_tokens(s),
 		                     ai_benchmark_summary_get_output_tokens(s));
-		row[9] = cell_ms(ai_benchmark_summary_get_output_tokens_per_second(s));
-		row[10] = cell_ratio(ai_benchmark_summary_get_mean_brier(s), FALSE);
+		row[9] = cell_ms(ai_benchmark_summary_get_input_tokens_per_second(s));
+		row[10] = cell_ms(ai_benchmark_summary_get_output_tokens_per_second(s));
+		row[11] = cell_ratio(ai_benchmark_summary_get_mean_brier(s), FALSE);
 		for (col = 0; col < N_COLUMNS; col++)
 			widths[col] = MAX(widths[col], display_width(row[col]));
 		g_ptr_array_add(rows, row);

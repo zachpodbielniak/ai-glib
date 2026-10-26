@@ -114,6 +114,11 @@ ai_benchmark_summary_get_output_tokens_per_second(
 );
 
 gdouble
+ai_benchmark_summary_get_input_tokens_per_second(
+	AiBenchmarkSummary *self
+);
+
+gdouble
 ai_benchmark_summary_get_mean_brier(
 	AiBenchmarkSummary *self
 );
