@@ -1622,11 +1622,56 @@ into `build/<type>/ai-build-stamp.h`, read only by
 private) checks and updates from that checkout; `ai`, `ai-tui` and
 `ai-gui` all drive it. See `docs/updating.org` and `CHANGELOG.org`.
 
-**Every PR that changes behaviour bumps the version** in `config.mk` and
-adds a matching top heading to `CHANGELOG.org`, in the same PR: micro for
-a fix, minor for a feature (and, below 1.0.0, for a break). `make test`
+### Versioning
+
+The version lives in `config.mk` (`VERSION_MAJOR`, `VERSION_MINOR`,
+`VERSION_MICRO`), and every release on master carries an annotated tag
+`v<MAJOR>.<MINOR>.<MICRO>` on the commit that sets it. Each bump adds a
+matching top heading to `CHANGELOG.org` in the same commit; `make test`
 runs `test-version`, which fails when the two disagree. See
 `docs/contributing.org`, Versioning.
+
+- **Micro** (+1): every landing on master that changes what is built —
+  fixes, patches, small features, new options or properties, polish
+  (`fix`, `perf`, small `feat`, `refactor`). Changes that touch only docs,
+  tests or tooling (`docs`, `test`, `ci`, `chore`) do not bump; they ride
+  with the next release.
+- **Minor** (+1, micro back to 0): a major feature — a new subsystem, a
+  new provider, a new binary — or anything that breaks compatibility
+  (public C API, GIR API, config keys, CLI flags, on-disk formats).
+- **Major**: never bumped without asking the user first.
+- `GIR_VERSION` (the namespace version, `1.0`) is separate and is not
+  changed by these bumps.
+
+One bump per landing, the highest kind it contains: a merge that brings
+several commits bumps once (minor if any of them is a major feature, else
+micro).
+
+**Every landing is released at once.** Each landing on master that changes
+the build bumps, is tagged and is pushed immediately with its tag; nothing
+that changes the build waits on master untagged for a later release.
+
+- **Merging a branch** (the usual case, from a `trees/` worktree): bump in
+  the merge commit itself, so the tag marks the merge and the branch never
+  carries a version:
+
+  ```bash
+  git merge --no-ff --no-commit feat/x     # resolve conflicts if any
+  $EDITOR config.mk CHANGELOG.org          # bump, add the heading
+  make clean all && make test              # zero warnings, all green
+  git commit                               # merge message names the new version
+  git tag -a v0.10.0 -m 'v0.10.0'
+  git push origin master v0.10.0
+  ```
+
+  Fast-forward merges have no commit to hold the bump; use `--no-ff`. A
+  merge that lands only docs/tests may fast-forward and is not tagged.
+- **Working directly on master**: bump `config.mk` and `CHANGELOG.org` in
+  the change's own commit (or, for a run of commits, in the last one),
+  then tag that commit and push it with the tag.
+- Tag only a commit whose `config.mk` matches the tag, after its build and
+  tests pass; never move or delete a pushed tag; a broken release is fixed
+  by the next micro.
 
 Rules that are load-bearing, each with a test:
 

@@ -263,25 +263,34 @@ int main(int argc, char *argv[])
 8. Push and create a merge request
 
 ** Versioning
-Every pull request that changes behaviour bumps the version, in the same
-PR. The number lives in one place, =VERSION_MAJOR=, =VERSION_MINOR= and
+Every landing on master that changes what is built bumps the version, in
+the same change, and is released at once: tagged and pushed with its tag.
+The number lives in one place, =VERSION_MAJOR=, =VERSION_MINOR= and
 =VERSION_MICRO= in =config.mk=; everything else (=--version=, the pkg-config
-file, the shared library's file name) is derived from it.
+file, the shared library's file name) is derived from it. Every release
+carries an annotated tag =v<MAJOR>.<MINOR>.<MICRO>= on the commit that sets
+it.
 
-Pick the bump from what the PR does, using [[https://semver.org/][semantic versioning]]:
+Pick the bump from what the landing does:
 
-- *Fix only* --- bump the micro: =0.4.0= to =0.4.1=.
-- *New feature*, or anything a user can see that was not there before ---
-  bump the minor and reset the micro: =0.4.1= to =0.5.0=.
-- *Breaking change* to the public API --- bump the minor while below
-  =1.0.0=, the major after it.
-- *No behaviour change* (tests, comments, internal refactors, CI) --- no
-  bump and no changelog entry.
+- *Micro* (+1) --- fixes, patches, small features, new options or
+  properties, polish: =0.9.0= to =0.9.1=.
+- *Minor* (+1, micro back to 0) --- a major feature (a new subsystem, a new
+  provider, a new binary) or anything that breaks compatibility (public C
+  API, GIR API, config keys, CLI flags, on-disk formats): =0.9.1= to
+  =0.10.0=.
+- *Major* --- never bumped without the maintainer agreeing first.
+- *Docs, tests, CI or tooling only* --- no bump and no changelog entry; it
+  rides with the next release.
 
-Bump once per PR, from what is on master when it merges, not once per
-commit. If two PRs bump to the same number, the second one to land
-rebases and takes the next number; the conflict in =config.mk= is there to
-make that impossible to miss.
+Bump once per landing, the highest kind it contains, not once per commit.
+When merging a branch, bump in a =--no-ff= merge commit so the tag marks
+the merge and the branch never carries a version; when committing directly
+on master, bump in the change's own commit (or the last of a run). Tag
+only a commit whose =config.mk= matches the tag, after =make clean all= and
+=make test= pass with zero warnings, and push the commit and the tag
+together. Never move or delete a pushed tag; a broken release is fixed by
+the next micro.
 
 Then add the entry to =CHANGELOG.org=: a new top heading for the version
 with the date, =* 0.5.0 - 2026-10-01=, and the change under =** Added=,
