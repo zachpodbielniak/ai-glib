@@ -4,6 +4,18 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.9.1 - 2026-10-28
+
+** Added
+- =ai_benchmark_summary_get_input_tokens_per_second()=, an =in tok/s= table
+  column and =input_tokens_per_second= in YAML and JSON output: the rate a
+  decision model, which generates no tokens, can be compared on.
+
+** Fixed
+- =ai benchmark= no longer shows 0.0 tok/s for a model that generated no
+  tokens (Jev, Ollama decision models); output throughput is absent
+  instead of reading as a very slow model.
+
 * 0.9.0 - 2026-10-26
 
 ** Added
@@ -14,10 +26,7 @@ release may change the API.
   Jev, Ollama decision models, Laya), embeddings and image generation.
   Suites are YAML (or JSON); quick mode builds one case from flags. Output as
   a table, YAML, JSON or CSV. =--dry-run= validates a suite and prints the
-  call count without calling anything. Throughput is reported for input and
-  output separately, so a local decision model (which generates no tokens)
-  is compared on input tokens per second rather than shown as 0 tok/s. See
-  =docs/benchmark.org=.
+  call count without calling anything. See =docs/benchmark.org=.
 - =AiBenchmark=, =AiBenchmarkTarget=, =AiBenchmarkCase=, =AiBenchmarkSample=
   and =AiBenchmarkSummary= in =src/bench/=, fully introspectable, so ai-tui,
   ai-gui and Emacs can drive the same runner and print the same output.
