@@ -20,8 +20,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <wchar.h>
 #include <sys/ioctl.h>
 
+/*
+ * The wide-character curses API (wget_wch, unget_wch, wint_t) is asked for
+ * explicitly rather than left to feature-test macros: Fedora's ncursesw.pc
+ * passes -D_XOPEN_SOURCE=600, which turns it on, while FreeBSD's passes
+ * nothing, leaving those functions undeclared. wchar.h supplies wint_t,
+ * which glibc's headers pull in indirectly and FreeBSD's do not.
+ */
+#define NCURSES_WIDECHAR (1)
 #include <ncurses.h>
 #include <glib-unix.h>
 
