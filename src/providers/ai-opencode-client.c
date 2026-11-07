@@ -1229,6 +1229,13 @@ ai_opencode_client_endpoint_applied(
     return TRUE;
 }
 
+/*
+ * opencode has no single home: its config is under XDG_CONFIG_HOME and its
+ * login (auth.json) under XDG_DATA_HOME, so an account is all three XDG
+ * roots moved into one directory.
+ */
+static const gchar * const opencode_config_dir_env[] = { "XDG_CONFIG_HOME=config", "XDG_DATA_HOME=data", "XDG_STATE_HOME=state", NULL };
+
 static void
 ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
 {
@@ -1243,6 +1250,7 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
     cli_class->get_executable_path = ai_opencode_client_get_executable_path;
     cli_class->endpoint_applied = ai_opencode_client_endpoint_applied;
     cli_class->endpoint_kinds = opencode_endpoint_kinds;
+    cli_class->config_dir_env = opencode_config_dir_env;
     cli_class->build_argv = ai_opencode_client_build_argv;
     cli_class->build_stdin = ai_opencode_client_build_stdin;
     cli_class->parse_json_output = ai_opencode_client_parse_json_output;

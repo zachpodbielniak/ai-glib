@@ -65,7 +65,8 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  *   this particular CLI takes one
  * @endpoint_kinds: the #AiAgentEndpoint kinds this class accepts
  * @check_exit_status: whether streaming requires a successful process exit
- * @_reserved: reserved for future expansion
+ * @config_dir_env: the variables a config directory sets, or %NULL when this
+ *   CLI cannot run under a separate account
  *
  * Class structure for #AiCliClient.
  * Subclasses should override the virtual methods to implement CLI-specific
@@ -154,7 +155,17 @@ struct _AiCliClientClass
 
     /* Reserved for future expansion */
     gboolean check_exit_status;
-    gpointer _reserved[1];
+
+    /*
+     * How this CLI is pointed at a separate account: the environment
+     * variables ai_cli_client_set_config_dir() sets.  Static and
+     * NULL-terminated; each entry is "VAR" (set to the directory itself)
+     * or "VAR=sub" (set to <directory>/sub).  NULL means the CLI keeps its
+     * login somewhere no variable moves, and a config directory is
+     * refused rather than accepted and ignored.  It took the place of the
+     * last reserved pointer, so the class size is unchanged.
+     */
+    const gchar * const *config_dir_env;
 };
 
 AiConfig *
@@ -223,6 +234,19 @@ ai_cli_client_create_launcher(
 
 const AiAgentEndpoint *
 ai_cli_client_get_tool_endpoint(AiCliClient *self);
+
+gboolean
+ai_cli_client_set_config_dir(
+    AiCliClient  *self,
+    const gchar  *config_dir,
+    GError      **error
+);
+
+const gchar *
+ai_cli_client_get_config_dir(AiCliClient *self);
+
+gboolean
+ai_cli_client_supports_config_dir(AiCliClient *self);
 
 const gchar *
 ai_cli_client_get_executable_path(AiCliClient *self);

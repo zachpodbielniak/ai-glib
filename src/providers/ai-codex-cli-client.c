@@ -709,6 +709,11 @@ static const gchar * const endpoint_kinds[] = {
 	NULL
 };
 
+/*
+ * codex keeps auth.json, config.toml and its sessions under CODEX_HOME.
+ */
+static const gchar * const codex_config_dir_env[] = { "CODEX_HOME", NULL };
+
 static void
 ai_codex_cli_client_class_init(AiCodexCliClientClass *klass)
 {
@@ -720,6 +725,7 @@ ai_codex_cli_client_class_init(AiCodexCliClientClass *klass)
     cli->check_exit_status = TRUE;
     cli->endpoint_applied = endpoint_applied;
     cli->endpoint_kinds = endpoint_kinds;
+    cli->config_dir_env = codex_config_dir_env;
     cli->get_executable_path = get_executable;
     cli->build_argv = build_argv;
     cli->build_stdin = build_stdin;

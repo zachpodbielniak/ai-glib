@@ -61,6 +61,32 @@ ai_claude_tmux_client_build_session_argv(
 );
 
 /*
+ * Insert `-e VAR=VAL` for every entry of @caller_env then @endpoint_env
+ * after `new-session` in an argv from build_session_argv().  Exposed so a
+ * test can see the variables reach the pane: the shared tmux server is the
+ * pane's parent, so the client's environment does not get there any other
+ * way.
+ */
+/*
+ * Merge caller settings (a path or a JSON string) into the generated
+ * --settings JSON: hook arrays appended per event, other keys only where
+ * the generated settings lack them.
+ */
+gchar *
+ai_claude_tmux_client_merge_settings(
+    const gchar  *base_json,
+    const gchar  *extra,
+    GError      **error
+);
+
+void
+ai_claude_tmux_client_insert_session_env(
+    GPtrArray  *argv,
+    GHashTable *caller_env,
+    GHashTable *endpoint_env
+);
+
+/*
  * Build the argv for
  *   tmux -L SOCKET paste-buffer -b BUF -t SESSION -d -p -r
  *

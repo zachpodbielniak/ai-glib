@@ -252,6 +252,7 @@ typedef struct
     gboolean  session_persistence;
     gboolean  splits_text_at_tool_use;
     gboolean  portable_context;
+    gchar    *config_dir;      /* the account's directory, or NULL */
 } AiCliClientPrivate;
 
 /*
@@ -376,6 +377,7 @@ ai_cli_client_finalize(GObject *object)
     g_clear_pointer(&priv->effort_level, g_free);
     g_clear_pointer(&priv->environment, g_hash_table_destroy);
     g_clear_pointer(&priv->tool_endpoint, ai_agent_endpoint_free);
+    g_clear_pointer(&priv->config_dir, g_free);
 
     G_OBJECT_CLASS(ai_cli_client_parent_class)->finalize(object);
 }
@@ -1779,6 +1781,159 @@ ai_cli_client_set_environment(
     }
 
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_ENVIRONMENT]);
+}
+
+/* ── Accounts ────────────────────────────────────────────────────── */
+
+/*
+ * Sets (or, with @dir NULL, removes) every variable in the class's
+ * config_dir_env.  The split on '=' is per entry, so one class can point
+ * several variables at subdirectories of the same account directory.
+ */
+static void
+apply_config_dir_env(
+    AiCliClient         *self,
+    const gchar * const *vars,
+    const gchar         *dir
+){
+    guint i;
+
+    for (i = 0; vars != NULL && vars[i] != NULL; i++)
+    {
+        const gchar      *eq   = strchr(vars[i], '=');
+        g_autofree gchar *name = eq != NULL ? g_strndup(vars[i], (gsize)(eq - vars[i]))
+                                            : g_strdup(vars[i]);
+        g_autofree gchar *path = NULL;
+
+        if (dir == NULL)
+        {
+            ai_cli_client_unset_env(self, name);
+            continue;
+        }
+
+        path = (eq != NULL && eq[1] != '\0') ? g_build_filename(dir, eq + 1, NULL)
+                                             : g_strdup(dir);
+        ai_cli_client_set_env(self, name, path);
+    }
+}
+
+/**
+ * ai_cli_client_supports_config_dir:
+ * @self: an #AiCliClient
+ *
+ * Whether this CLI can be pointed at a separate account with
+ * ai_cli_client_set_config_dir().
+ *
+ * Returns: %TRUE when a config directory is honoured
+ */
+gboolean
+ai_cli_client_supports_config_dir(AiCliClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
+
+    return AI_CLI_CLIENT_GET_CLASS(self)->config_dir_env != NULL;
+}
+
+/**
+ * ai_cli_client_set_config_dir:
+ * @self: an #AiCliClient
+ * @config_dir: (nullable): the directory holding this account's login and
+ *   settings, or %NULL for the CLI's default account
+ * @error: return location for a #GError
+ *
+ * Runs the CLI under a separate account, by pointing the variables the
+ * CLI reads for its configuration and credentials at @config_dir --
+ * `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, or opencode's XDG
+ * directories.  Two clients with different directories are two logins
+ * on one machine.
+ *
+ * The directory is not created: a CLI run against an empty one asks for
+ * a login, which is the remedy, whereas a directory made here by a typo
+ * would look like an account nobody can find.
+ *
+ * A tool endpoint already in force is revoked and re-applied around the
+ * change, because a CLI such as grok builds its endpoint from the very
+ * variable this moves.
+ *
+ * Returns: %TRUE on success; %FALSE with %AI_ERROR_NOT_SUPPORTED when the
+ *   CLI keeps its login where no variable reaches (cursor-agent and
+ *   antigravity read `$HOME`)
+ */
+gboolean
+ai_cli_client_set_config_dir(
+    AiCliClient  *self,
+    const gchar  *config_dir,
+    GError      **error
+){
+    AiCliClientPrivate     *priv;
+    AiCliClientClass       *klass;
+    const AiAgentEndpoint  *endpoint;
+    AiAgentEndpoint        *held = NULL;
+    gboolean                ok   = TRUE;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
+
+    priv  = ai_cli_client_get_instance_private(self);
+    klass = AI_CLI_CLIENT_GET_CLASS(self);
+
+    if (config_dir != NULL && *config_dir == '\0')
+        config_dir = NULL;
+
+    if (config_dir != NULL && klass->config_dir_env == NULL)
+    {
+        g_set_error(error, AI_ERROR, AI_ERROR_NOT_SUPPORTED,
+                    "%s cannot run under a separate account: it keeps its login "
+                    "under $HOME, which no setting here moves",
+                    G_OBJECT_TYPE_NAME(self));
+        return FALSE;
+    }
+
+    if (g_strcmp0(priv->config_dir, config_dir) == 0)
+        return TRUE;
+
+    /* Take the endpoint off first, so its revoke restores the old account. */
+    endpoint = priv->tool_endpoint;
+    if (endpoint != NULL)
+    {
+        held = ai_agent_endpoint_copy(endpoint);
+        if (!ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(self), NULL, error))
+        {
+            ai_agent_endpoint_free(held);
+            return FALSE;
+        }
+    }
+
+    apply_config_dir_env(self, klass->config_dir_env, NULL);
+    g_free(priv->config_dir);
+    priv->config_dir = g_strdup(config_dir);
+    if (config_dir != NULL)
+        apply_config_dir_env(self, klass->config_dir_env, config_dir);
+
+    if (held != NULL)
+    {
+        ok = ai_tool_endpoint_consumer_apply(AI_TOOL_ENDPOINT_CONSUMER(self), held, error);
+        ai_agent_endpoint_free(held);
+    }
+
+    return ok;
+}
+
+/**
+ * ai_cli_client_get_config_dir:
+ * @self: an #AiCliClient
+ *
+ * Returns: (transfer none) (nullable): the account directory set with
+ *   ai_cli_client_set_config_dir(), or %NULL for the default account
+ */
+const gchar *
+ai_cli_client_get_config_dir(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->config_dir;
 }
 
 /* ── AiToolEndpointConsumer ──────────────────────────────────────── */

@@ -1956,6 +1956,12 @@ ai_claude_code_client_endpoint_applied(
     return TRUE;
 }
 
+/*
+ * Claude Code reads its login, settings and session store from
+ * CLAUDE_CONFIG_DIR, falling back to ~/.claude and ~/.claude.json.
+ */
+static const gchar * const claude_code_config_dir_env[] = { "CLAUDE_CONFIG_DIR", NULL };
+
 static void
 ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
 {
@@ -1970,6 +1976,7 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     cli_class->get_executable_path = ai_claude_code_client_get_executable_path;
     cli_class->endpoint_applied = ai_claude_code_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_code_endpoint_kinds;
+    cli_class->config_dir_env = claude_code_config_dir_env;
     cli_class->build_argv = ai_claude_code_client_build_argv;
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;
