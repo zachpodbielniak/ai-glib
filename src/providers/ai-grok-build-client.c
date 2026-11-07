@@ -1478,6 +1478,12 @@ ai_grok_build_client_endpoint_applied(
     return TRUE;
 }
 
+/*
+ * grok keeps its login and config under GROK_HOME, which the MCP overlay
+ * already starts from, so an account and an endpoint compose.
+ */
+static const gchar * const grok_build_config_dir_env[] = { "GROK_HOME", NULL };
+
 static void
 ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
 {
@@ -1492,6 +1498,7 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
     cli_class->get_executable_path = ai_grok_build_client_get_executable_path;
     cli_class->endpoint_applied    = ai_grok_build_client_endpoint_applied;
     cli_class->endpoint_kinds      = grok_build_endpoint_kinds;
+    cli_class->config_dir_env = grok_build_config_dir_env;
     cli_class->build_argv          = ai_grok_build_client_build_argv;
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;

@@ -48,6 +48,7 @@ static const gchar * const catalog[] = {
 	"conversation_status", "conversation_send", "conversation_cancel",
 	"conversation_clear", "conversation_transcript", "todo_read", "todo_write",
 	"read", "write", "edit", "multi_edit", "glob", "grep", "ls",
+	"web_search", "web_fetch",
 	"agent_spawn", "agent_status", "agent_result", "agent_cancel", NULL
 };
 
@@ -177,6 +178,20 @@ send_finished(GObject *source, GAsyncResult *result, gpointer user_data)
 	g_free(self->last_error);
 	self->last_error = error != NULL ? g_strdup(error->message) : NULL;
 	g_object_unref(self);
+}
+
+static void
+ensure_search_provider(AiToolExecutor *executor)
+{
+	GList *iter;
+	g_autoptr(AiSearchProvider) provider = NULL;
+
+	for (iter = ai_tool_executor_get_tools(executor); iter != NULL; iter = iter->next)
+		if (g_str_equal(ai_tool_get_name(AI_TOOL(iter->data)), "web_search"))
+			return;
+	provider = ai_search_provider_new_default(NULL);
+	if (provider != NULL)
+		ai_tool_executor_set_search_provider(executor, provider);
 }
 
 /* Build the canonical schema once per registration/call, without model data. */
@@ -646,6 +661,13 @@ ai_mcp_host_new(AiConversation *conversation, const gchar *name,
 	}
 	if (all_tools)
 		for (i = 0; catalog[i] != NULL; i++) g_hash_table_add(self->allowed, g_strdup(catalog[i]));
+	/* web_search exists only once the executor has a search provider, and
+	 * nothing upstream of the host gives it one: without this the tool would
+	 * be granted and then refused as unavailable.  The default provider
+	 * reads LIBRESEARCH_URL, then the API keys, then falls back to the
+	 * keyless DuckDuckGo scraper, so this cannot fail. */
+	if (g_hash_table_contains(self->allowed, "web_search"))
+		ensure_search_provider(ai_conversation_get_executor(conversation));
 	for (i = 0; catalog[i] != NULL; i++)
 	{
 		g_autoptr(AiTool) tool = NULL;

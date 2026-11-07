@@ -533,7 +533,7 @@ test_catalog(gconstpointer data)
 	g_assert_no_error(error);
 	g_assert_true(g_subprocess_get_successful(process));
 	names = g_strsplit(g_strstrip(output), "\n", -1);
-	g_assert_cmpuint(g_strv_length(names), ==, 18);
+	g_assert_cmpuint(g_strv_length(names), ==, 20);
 	peer = peer_new(server_argv, NULL);
 	peer_initialize(peer);
 	reply = peer_request(peer, "tools/list", "{}");

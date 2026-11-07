@@ -72,6 +72,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-native-session.h \
 	$(SRCDIR)/core/ai-tool-endpoint.h \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.h \
+	$(SRCDIR)/core/ai-mcp-config.h \
 	$(SRCDIR)/core/ai-prompt-scorer.h \
 	$(SRCDIR)/view/ai-style.h \
 	$(SRCDIR)/view/ai-tool-call.h \
@@ -119,6 +120,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/convenience/ai-bing-search.h \
 	$(SRCDIR)/convenience/ai-brave-search.h \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.h \
+	$(SRCDIR)/convenience/ai-libresearch-search.h \
 	$(SRCDIR)/convenience/ai-tool-executor.h \
 	$(SRCDIR)/convenience/ai-provider-factory.h \
 	$(SRCDIR)/agent/ai-agent-enums.h \
@@ -181,6 +183,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-cli-report-native.c \
 	$(SRCDIR)/core/ai-tool-endpoint.c \
 	$(SRCDIR)/core/ai-tool-endpoint-consumer.c \
+	$(SRCDIR)/core/ai-mcp-config.c \
 	$(SRCDIR)/core/ai-prompt-scorer.c \
 	$(SRCDIR)/view/ai-style.c \
 	$(SRCDIR)/view/ai-tool-call.c \
@@ -239,6 +242,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/convenience/ai-bing-search.c \
 	$(SRCDIR)/convenience/ai-brave-search.c \
 	$(SRCDIR)/convenience/ai-duckduckgo-search.c \
+	$(SRCDIR)/convenience/ai-libresearch-search.c \
 	$(SRCDIR)/convenience/ai-tool-executor.c \
 	$(SRCDIR)/convenience/ai-provider-factory.c \
 	$(SRCDIR)/agent/ai-agent-enums.c \

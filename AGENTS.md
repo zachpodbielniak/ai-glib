@@ -635,6 +635,28 @@ options, caches the formatted result (5 min), and — when `fetch_content` is se
    the `endpoint` property to test against loopback)
 6. Document it in `docs/web-search.org` + `docs/api-reference/ai-search-provider.org`
 
+`AiLibresearchSearch` is the one provider with more than the vfunc: its
+extra requests are **async** and answer the server's own JSON document, because
+a host such as clawtilla runs them from a daemon's main loop, where a
+synchronous research call would hold every other client for minutes. Keep new
+libresearch endpoints the same shape (`_async` + the shared
+`ai_libresearch_search_request_finish()`), keep the error envelope's `detail`
+in the message (it is the only thing that shows a model where its LQL broke),
+and render documents in the `ai_libresearch_format_*()` functions rather than
+in each host.
+
+### Accounts (`config-dir`)
+
+`AiCliClientClass.config_dir_env` is a class datum listing the variables an
+account directory sets (`"VAR"` or `"VAR=subdir"`). A new CLI provider fills
+it in or leaves it NULL; NULL makes `ai_cli_client_set_config_dir()` refuse,
+which is the point -- a CLI that keys its login on `$HOME` must not accept a
+directory and then spend the default account. Anything a subclass derives
+from one of those variables (grok's MCP overlay from `GROK_HOME`) is
+rebuilt by the base revoking and re-applying the endpoint around the change.
+claude-tmux is the trap: its claude is the shared tmux server's child, so
+client variables reach it only through `tmux new-session -e`.
+
 ## Image Generation Subsystem
 
 Image generation hangs off the `AiImageGenerator` interface

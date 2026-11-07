@@ -42,6 +42,7 @@
 #include "core/ai-client.h"
 #include "core/ai-tool-endpoint.h"
 #include "core/ai-tool-endpoint-consumer.h"
+#include "core/ai-mcp-config.h"
 #include "core/ai-cli-client.h"
 #include "core/ai-cli-report.h"
 #include "core/ai-native-session.h"
@@ -102,6 +103,7 @@
 #include "convenience/ai-bing-search.h"
 #include "convenience/ai-brave-search.h"
 #include "convenience/ai-duckduckgo-search.h"
+#include "convenience/ai-libresearch-search.h"
 #include "convenience/ai-tool-executor.h"
 #include "convenience/ai-provider-factory.h"
 

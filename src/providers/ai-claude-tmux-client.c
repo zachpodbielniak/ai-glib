@@ -45,6 +45,7 @@ struct _AiClaudeTmuxClient
 {
     AiCliClient parent_instance;
     gchar *sandbox;
+    gchar *settings;        /* extra --settings: file path or JSON, merged in */
 
     gchar    *tmux_path;            /* override for tmux binary */
     gchar    *socket_name;          /* tmux -L <name>: our OWN server, never
@@ -103,6 +104,7 @@ enum
     PROP_TURN_TIMEOUT_MS,
     PROP_STARTUP_TIMEOUT_MS,
     PROP_SANDBOX,
+    PROP_SETTINGS,
     PROP_SKIP_PERMISSIONS,
     PROP_PERMISSION_MODE,
     PROP_MCP_CONFIG_PATH,
@@ -181,6 +183,75 @@ compute_project_transcript_dir(
     encoded = ai_claude_tmux_client_encode_cwd(cwd);
 
     return g_build_filename(root, encoded, NULL);
+}
+
+/*
+ * Where this client's claude keeps transcripts.  The explicit property
+ * wins; otherwise a CLAUDE_CONFIG_DIR set on the client (an account)
+ * moves ~/.claude, projects included -- reading ~/.claude/projects then
+ * would look for the transcript in another account and never find it.
+ */
+static gchar *
+effective_project_dir(
+    AiClaudeTmuxClient *self
+){
+    const gchar *config_dir;
+
+    if (self->claude_project_dir != NULL && self->claude_project_dir[0] != '\0')
+        return g_strdup(self->claude_project_dir);
+
+    config_dir = ai_cli_client_get_env(AI_CLI_CLIENT(self), "CLAUDE_CONFIG_DIR");
+    if (config_dir != NULL && config_dir[0] != '\0')
+        return g_build_filename(config_dir, "projects", NULL);
+
+    return NULL;
+}
+
+/*
+ * The client's environment, as `-e VAR=VAL` pairs inserted after
+ * `new-session`.  The pane's claude is a child of the tmux *server*,
+ * which is shared and long-lived, so nothing set on this client reached
+ * it before: an account directory or an endpoint credential was silently
+ * the server's instead.  Endpoint variables come last so they win, the
+ * same order the launcher applies for every other CLI.
+ */
+void
+ai_claude_tmux_client_insert_session_env(
+    GPtrArray  *argv,
+    GHashTable *caller_env,
+    GHashTable *endpoint_env
+){
+    GHashTable     *tables[2];
+    guint           at;
+    guint           t;
+
+    for (at = 0; at < argv->len; at++)
+        if (g_strcmp0(g_ptr_array_index(argv, at), "new-session") == 0)
+            break;
+    if (at == argv->len)
+        return;
+    at++;
+
+    tables[0] = caller_env;
+    tables[1] = endpoint_env;
+    for (t = 0; t < 2; t++)
+    {
+        GHashTableIter iter;
+        gpointer       key;
+        gpointer       value;
+
+        if (tables[t] == NULL)
+            continue;
+        g_hash_table_iter_init(&iter, tables[t]);
+        while (g_hash_table_iter_next(&iter, &key, &value))
+        {
+            if (value == NULL)
+                continue;
+            g_ptr_array_insert(argv, (gint)at++, g_strdup("-e"));
+            g_ptr_array_insert(argv, (gint)at++,
+                               g_strdup_printf("%s=%s", (const gchar *)key, (const gchar *)value));
+        }
+    }
 }
 
 gchar *
@@ -845,6 +916,96 @@ build_settings_json(const gchar *ready_path, const gchar *done_path)
 }
 
 /*
+ * Merge a caller's settings into the generated ones.  The generated hooks
+ * are how this client knows claude is ready and when a turn ended, so they
+ * are never replaced: the caller's hooks are appended beside them, event by
+ * event, and a caller key only fills a gap.
+ */
+gchar *
+ai_claude_tmux_client_merge_settings(
+    const gchar  *base_json,
+    const gchar  *extra,
+    GError      **error
+){
+    g_autoptr(JsonParser) base_parser = json_parser_new();
+    g_autoptr(JsonParser) extra_parser = json_parser_new();
+    g_autoptr(GList) members = NULL;
+    JsonObject *base;
+    JsonObject *more;
+    JsonObject *base_hooks;
+    JsonNode *node;
+    GList *l;
+    const gchar *trimmed;
+
+    if (extra == NULL || *extra == '\0')
+        return g_strdup(base_json);
+
+    if (!json_parser_load_from_data(base_parser, base_json, -1, error))
+        return NULL;
+
+    trimmed = extra;
+    while (g_ascii_isspace(*trimmed))
+        trimmed++;
+    if ((*trimmed == '{' || *trimmed == '[')
+        ? !json_parser_load_from_data(extra_parser, trimmed, -1, error)
+        : !json_parser_load_from_file(extra_parser, extra, error))
+    {
+        g_prefix_error(error, "claude-tmux settings: ");
+        return NULL;
+    }
+
+    node = json_parser_get_root(extra_parser);
+    if (node == NULL || !JSON_NODE_HOLDS_OBJECT(node) || json_node_get_object(node) == NULL)
+    {
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,
+                            "claude-tmux settings must be a JSON object");
+        return NULL;
+    }
+    more = json_node_get_object(node);
+    base = json_node_get_object(json_parser_get_root(base_parser));
+
+    if (!json_object_has_member(base, "hooks"))
+        json_object_set_object_member(base, "hooks", json_object_new());
+    base_hooks = json_object_get_object_member(base, "hooks");
+
+    members = json_object_get_members(more);
+    for (l = members; l != NULL; l = l->next)
+    {
+        const gchar *name = l->data;
+        JsonNode *value = json_object_get_member(more, name);
+
+        if (g_strcmp0(name, "hooks") == 0 && JSON_NODE_HOLDS_OBJECT(value))
+        {
+            JsonObject *hooks = json_node_get_object(value);
+            g_autoptr(GList) events = json_object_get_members(hooks);
+            GList *e;
+
+            for (e = events; e != NULL; e = e->next)
+            {
+                JsonNode *list = json_object_get_member(hooks, e->data);
+                JsonArray *target;
+                guint i;
+
+                if (!JSON_NODE_HOLDS_ARRAY(list))
+                    continue;
+                if (!json_object_has_member(base_hooks, e->data))
+                    json_object_set_array_member(base_hooks, e->data, json_array_new());
+                target = json_object_get_array_member(base_hooks, e->data);
+                for (i = 0; i < json_array_get_length(json_node_get_array(list)); i++)
+                    json_array_add_element(target, json_node_copy(
+                        json_array_get_element(json_node_get_array(list), i)));
+            }
+            continue;
+        }
+
+        if (!json_object_has_member(base, name))
+            json_object_set_member(base, name, json_node_copy(value));
+    }
+
+    return json_to_string(json_parser_get_root(base_parser), FALSE);
+}
+
+/*
  * Block until a path exists or the timeout expires.  Uses a single
  * GMainContext / GMainLoop with a GFileMonitor on the parent dir and
  * a g_timeout source for the deadline.  Returns TRUE if the file
@@ -1350,6 +1511,9 @@ ai_claude_tmux_client_get_property(
         case PROP_SANDBOX:
             g_value_set_string(value, self->sandbox);
             break;
+        case PROP_SETTINGS:
+            g_value_set_string(value, self->settings);
+            break;
         case PROP_PERMISSION_MODE:
             g_value_set_string(value, self->permission_mode);
             break;
@@ -1425,7 +1589,12 @@ ai_claude_tmux_client_set_property(
             break;
         case PROP_SANDBOX:
             g_free(self->sandbox);
+    g_free(self->settings);
             self->sandbox = g_value_dup_string(value);
+            break;
+        case PROP_SETTINGS:
+            g_free(self->settings);
+            self->settings = g_value_dup_string(value);
             break;
         case PROP_PERMISSION_MODE:
             g_free(self->permission_mode);
@@ -1566,6 +1735,12 @@ ai_claude_tmux_client_endpoint_applied(
     return TRUE;
 }
 
+/*
+ * The same binary as claude-code, so the same variable.  It only reaches
+ * claude because the pane is started with -e for every client variable.
+ */
+static const gchar * const claude_tmux_config_dir_env[] = { "CLAUDE_CONFIG_DIR", NULL };
+
 static void
 ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 {
@@ -1580,6 +1755,7 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
     cli_class->get_executable_path = ai_claude_tmux_client_get_executable_path;
     cli_class->endpoint_applied = ai_claude_tmux_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_tmux_endpoint_kinds;
+    cli_class->config_dir_env = claude_tmux_config_dir_env;
 
     properties[PROP_TMUX_PATH] = g_param_spec_string(
         "tmux-path", "Tmux Path",
@@ -1617,6 +1793,19 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
 
     properties[PROP_SANDBOX] = g_param_spec_string(
         "sandbox", "Sandbox", "Native Bash sandbox: enabled or disabled; NULL inherits settings",
+        NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeTmuxClient:settings:
+     *
+     * Extra Claude settings, as a file path or a JSON string -- the same
+     * spelling as #AiClaudeCodeClient:settings.  This client already
+     * passes `--settings` for its own readiness hooks and claude takes one,
+     * so the two are merged: hook arrays are concatenated per event and
+     * any other key is added where the generated settings lack it.
+     */
+    properties[PROP_SETTINGS] = g_param_spec_string(
+        "settings", "Settings", "Extra settings file path or JSON string, merged into --settings",
         NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
     /**
@@ -2106,6 +2295,7 @@ ai_claude_tmux_client_chat_sync_real(
     g_autofree gchar *cwd = NULL;
     g_autofree gchar *jsonl_path = NULL;
     g_autofree gchar *settings_json = NULL;
+    g_autofree gchar *project_dir = NULL;
     g_autofree gchar *prompt_text = NULL;
     g_autofree gchar *jsonl_contents = NULL;
     g_autofree gchar *claude_exec_path = NULL;
@@ -2151,6 +2341,7 @@ ai_claude_tmux_client_chat_sync_real(
     }
 
     cwd = resolve_session_cwd(self);
+    project_dir = effective_project_dir(self);
 
     configured_session_id = ai_cli_client_get_session_id(AI_CLI_CLIENT(self));
     if (configured_session_id != NULL && configured_session_id[0] != '\0')
@@ -2170,7 +2361,7 @@ ai_claude_tmux_client_chat_sync_real(
          * id. Same semantics, and the id stays known.
          */
         session_id = ai_claude_tmux_client_find_latest_session_id(
-            self->claude_project_dir, cwd);
+            project_dir, cwd);
 
         if (session_id == NULL)
         {
@@ -2183,7 +2374,7 @@ ai_claude_tmux_client_chat_sync_real(
         session_id = g_uuid_string_random();
     }
     jsonl_path = ai_claude_tmux_client_compute_jsonl_path(
-        self->claude_project_dir, cwd, session_id);
+        project_dir, cwd, session_id);
 
     /*
      * If a transcript already exists for this session_id, claude
@@ -2279,6 +2470,13 @@ ai_claude_tmux_client_chat_sync_real(
      * up by any shell/argv quirks in the tmux invocation chain.
      */
     settings_json = build_settings_json(ready_path, sentinel_path);
+    if (self->settings != NULL)
+    {
+        gchar *merged = ai_claude_tmux_client_merge_settings(settings_json, self->settings, error);
+        if (merged == NULL) return NULL;
+        g_free(settings_json);
+        settings_json = merged;
+    }
     if (self->sandbox != NULL)
     {
         gchar *merged = ai_claude_sandbox_settings(settings_json, self->sandbox, error);
@@ -2361,6 +2559,14 @@ ai_claude_tmux_client_chat_sync_real(
             ai_cli_client_get_effort_level(AI_CLI_CLIENT(self)),
             self->skip_permissions,
             self->mcp_config_path, self->permission_mode);
+        {
+            const AiAgentEndpoint *endpoint =
+                ai_cli_client_get_tool_endpoint(AI_CLI_CLIENT(self));
+
+            ai_claude_tmux_client_insert_session_env(
+                argv, ai_cli_client_get_environment(AI_CLI_CLIENT(self)),
+                endpoint != NULL ? endpoint->env : NULL);
+        }
 
         ok = run_command_sync(
             (const gchar * const *)argv->pdata, NULL,

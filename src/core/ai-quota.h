@@ -56,6 +56,7 @@ G_BEGIN_DECLS
  * @provider: (nullable): the provider the snapshot belongs to
  * @model: (nullable): its model when the snapshot was taken
  * @cwd: (nullable): its working directory when the snapshot was taken
+ * @config_dir: (nullable): its account directory when the snapshot was taken
  * @data: (nullable): the last successful report body
  * @cancel: (nullable): the in-flight query's cancellable
  * @pending: a query is in flight
@@ -84,6 +85,7 @@ typedef struct
 	GObject      *provider;
 	gchar        *model;
 	gchar        *cwd;
+	gchar        *config_dir;
 	JsonNode     *data;
 	GCancellable *cancel;
 	gboolean      pending;
@@ -493,6 +495,7 @@ ai_quota_refresh(
 ){
 	const gchar *model;
 	const gchar *cwd;
+	const gchar *config_dir;
 	g_autoptr(AiCliClient) client = NULL;
 	AiCliClient *active;
 	gboolean changed = FALSE;
@@ -505,14 +508,20 @@ ai_quota_refresh(
 	cwd = AI_IS_CLI_CLIENT(provider)
 		? ai_cli_client_get_working_directory(AI_CLI_CLIENT(provider)) : NULL;
 
+	/* Two accounts on one model are two allowances. */
+	config_dir = AI_IS_CLI_CLIENT(provider)
+		? ai_cli_client_get_config_dir(AI_CLI_CLIENT(provider)) : NULL;
+
 	if (self->provider != provider || g_strcmp0(self->model, model) != 0 ||
-	    g_strcmp0(self->cwd, cwd) != 0)
+	    g_strcmp0(self->cwd, cwd) != 0 || g_strcmp0(self->config_dir, config_dir) != 0)
 	{
 		g_set_object(&self->provider, provider);
 		g_free(self->model);
 		self->model = g_strdup(model);
 		g_free(self->cwd);
 		self->cwd = g_strdup(cwd);
+		g_free(self->config_dir);
+		self->config_dir = g_strdup(config_dir);
 		g_clear_pointer(&self->data, json_node_unref);
 		self->generation++;
 		self->next_refresh = 0;
@@ -621,6 +630,7 @@ ai_quota_clear(AiQuota *self)
 	g_clear_object(&self->provider);
 	g_clear_pointer(&self->model, g_free);
 	g_clear_pointer(&self->cwd, g_free);
+	g_clear_pointer(&self->config_dir, g_free);
 	g_clear_pointer(&self->reason, g_free);
 	g_clear_pointer(&self->data, json_node_unref);
 }

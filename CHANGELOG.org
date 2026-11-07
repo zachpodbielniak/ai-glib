@@ -4,6 +4,48 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.10.0 - 2026-11-07
+
+** Added
+- =AiLibresearchSearch=: a client for a running libresearch server over
+  its REST API. It is an =AiSearchProvider= (=/api/v1/search=) and also
+  runs category searches, fetches a page's text (with a Wayback Machine
+  fallback), runs LQL queries (=/api/v1/query=), asks for cited research
+  answers (=/api/v1/research=) and reads the instance's LQL environment,
+  each asynchronously; =ai_libresearch_format_*()= render the documents
+  for a model. See =docs/web-search.org=.
+- =ai_search_provider_new_default()= picks libresearch first when
+  =LIBRESEARCH_URL= is set (=LIBRESEARCH_TOKEN= as its bearer token).
+- =web_search= and =web_fetch= in the MCP host catalog; granting
+  =web_search= gives the executor the default search provider.
+- =ai_mcp_config_load_servers()=, =ai_mcp_config_translate()= and
+  =ai_mcp_config_endpoint_for()=: one Claude-schema =.mcp.json= server list
+  rendered in the dialect each CLI takes (codex =-c= lines, a grok TOML
+  fragment, an opencode config). A server a dialect cannot carry is named,
+  never approximated: codex is not given an environment, since it would
+  sit in its argv.
+- =AiClaudeTmuxClient:settings=: extra Claude settings (a path or JSON)
+  merged into the client's own =--settings=; hook arrays are appended per
+  event, so a host's =PreToolUse= hook runs beside the readiness hooks.
+- Per-request =ai_libresearch_search_*_finish()= functions, so
+  introspection pairs each =_async()=.
+- =ai_cli_client_set_config_dir()=, =_get_config_dir()= and
+  =_supports_config_dir()=, with the class datum
+  =AiCliClientClass.config_dir_env= (in the last reserved slot): run a CLI
+  under a separate account. claude-code and claude-tmux set
+  =CLAUDE_CONFIG_DIR=, codex =CODEX_HOME=, grok =GROK_HOME=, opencode its
+  three XDG roots; cursor and antigravity refuse.
+
+** Fixed
+- claude-tmux now hands the client's environment to the pane with
+  =tmux new-session -e=. The pane's claude is a child of the shared tmux
+  server, so nothing set on the client -- an account, an endpoint
+  credential -- reached it before.
+- claude-tmux looks for transcripts under =$CLAUDE_CONFIG_DIR/projects=
+  when that is set, instead of the default account's.
+- =AiQuota= no longer shows one account's allowance under another's.
+- =ai-tui= asks for the wide-character curses API explicitly.
+
 * 0.9.1 - 2026-10-28
 
 ** Added

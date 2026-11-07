@@ -38,6 +38,26 @@ streaming mode.
 | =effort-level=        | string  | "medium" | Reasoning effort; spelled differently by each CLI (see below)   |
 | =process-timeout-ms=  | int     | 0       | Bounds synchronous and shared streaming calls. 0 disables the bound             |
 
+*** Accounts: a separate config directory
+=ai_cli_client_set_config_dir(client, dir, &error)= runs the CLI under another account by pointing the variables it reads for its login and settings at =dir=. Each class declares its variables in =AiCliClientClass.config_dir_env=:
+
+| CLI          | Variables set                                                    |
+|--------------+------------------------------------------------------------------|
+| claude-code  | =CLAUDE_CONFIG_DIR==dir=                                         |
+| claude-tmux  | =CLAUDE_CONFIG_DIR==dir=, delivered into the pane with =tmux -e= |
+| codex-cli    | =CODEX_HOME==dir=                                                |
+| grok-build   | =GROK_HOME==dir= (the MCP overlay is built from it)              |
+| opencode     | =XDG_CONFIG_HOME==dir/config=, =XDG_DATA_HOME==dir/data=, =XDG_STATE_HOME==dir/state= |
+| cursor, antigravity | refused with =AI_ERROR_NOT_SUPPORTED=: they keep their login under =$HOME= |
+
+- The directory is not created. Run the CLI's own login once with the same variable set (=CLAUDE_CONFIG_DIR=dir claude=, =CODEX_HOME=dir codex login=, ...).
+- An endpoint in force is revoked and re-applied around the change, so grok's overlay follows the account.
+- =NULL= returns to the default account and removes exactly the variables it set.
+- =ai_cli_client_supports_config_dir()= answers whether a class can do this at all.
+- =AiQuota= keys its cache on the account too: two accounts on one model are two allowances.
+- claude-tmux takes extra settings through its =settings= property (a path or JSON, as on claude-code). It already passes =--settings= for its readiness hooks and claude reads one, so the two are merged: hook arrays are appended per event and other keys fill only gaps.
+- claude-tmux finds transcripts under =$CLAUDE_CONFIG_DIR/projects= when no =claude-project-dir= is set, and every client variable reaches the pane with =-e=: its claude is a child of the shared tmux server, not of this process.
+
 *** The working directory is the security boundary
 Every permission mode that can write can write anywhere the process can
 reach. The permission flags decide whether the model is *asked*; the
