@@ -76,7 +76,22 @@ its own transcript block, so a new heartbeat kind would have painted the
 TUI the way Claude Code's =thinking_tokens= lines did.
 
 Malformed output, failed turns, truncated output and unsuccessful process
-exits return errors. The subprocess pipeline drains stderr, writes stdin
+exits return errors.
+
+Codex writes three error-shaped lines and only one of them ends a turn.
+An *error item* is a non-fatal notice -- "Model metadata for `x` not
+found. Defaulting to fallback metadata" is one, written before the turn
+starts for any model codex has no metadata for. A top-level =error= is
+written for retry notices as well as for the fault that will end the turn,
+and a fatal one is always followed by =turn.failed=, which is the line the
+turn ends on. Reading the first error-shaped line as the answer reported
+the metadata warning as the reason a ChatGPT login could not use a model,
+while the real refusal arrived two lines later. When a failed API call is
+the cause, codex passes the response body through as the message; the
+client reads the =error.message= out of that envelope with
+=ai_http_error_extract_message()=, so the error says "The 'gpt-5.5' model
+is not supported when using Codex with a ChatGPT account." rather than a
+JSON document. The subprocess pipeline drains stderr, writes stdin
 asynchronously and enforces cancellation and timeouts. The provider inherits
 environment endpoint delivery; it does not translate other providers' MCP
 configuration formats into Codex configuration.
@@ -127,8 +142,10 @@ by a streaming callback does not guarantee that the turn succeeded.
 | Unknown nonempty effort string | =AI_ERROR_INVALID_REQUEST= before subprocess launch |
 | Missing executable | Executable-resolution error from =AiCliClient= |
 | Invalid JSON or missing required event fields | =AI_ERROR_CLI_PARSE_ERROR= |
-| EOF before the current turn completes | =AI_ERROR_CLI_PARSE_ERROR= |
-| =turn.failed=, top-level =error=, error item | =AI_ERROR_CLI_EXECUTION=, even if the child exits zero |
+| EOF before the current turn completes | =AI_ERROR_CLI_EXECUTION= with the last top-level =error= message when codex wrote one, else =AI_ERROR_CLI_PARSE_ERROR= |
+| =turn.failed= | =AI_ERROR_CLI_EXECUTION=, even if the child exits zero; the message is unwrapped (see below) |
+| Top-level =error= | Not the end of the turn: an =AI_EVENT_STATUS=, and remembered for the EOF row above |
+| Error item (=item.completed= of type =error=) | A warning: an =AI_EVENT_STATUS= and nothing else; the turn goes on |
 | Nonzero process exit | =AI_ERROR_CLI_EXECUTION=; streaming retains up to 8 KiB of stderr diagnostics |
 | Deadline exceeded | =AI_ERROR_TIMEOUT= |
 | Cancelled asynchronous request | =G_IO_ERROR_CANCELLED=; an already cancelled request does not launch a child |
@@ -136,7 +153,7 @@ by a streaming callback does not guarantee that the turn succeeded.
 | Completed turn without prose | Valid response with no text; callers must allow =ai_response_get_text()= to return NULL |
 
 Whitespace-only lines and unknown top-level event types are ignored for
-forward compatibility. Unknown item types become status events. Required
+forward compatibility. Unknown item types are dropped (see above). Required
 fields of recognized events remain type-checked. Usage fields are optional:
 missing or nonnumeric counts become zero, negative counts become zero, and
 oversized counts saturate at =G_MAXINT=. Cumulative message updates are not
