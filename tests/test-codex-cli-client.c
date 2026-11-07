@@ -16,6 +16,20 @@ static const gchar *ok_json =
     "{\"type\":\"item.completed\",\"item\":{\"id\":\"m\",\"type\":\"agent_message\",\"text\":\"Hello\"}}\n"
     "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":20,\"cached_input_tokens\":10,\"output_tokens\":3}}\n";
 
+/*
+ * What codex-cli 0.163.0 wrote, verbatim, when a ChatGPT login asked for a
+ * model it may not use: a non-fatal warning item first, then the refusal
+ * as a JSON body inside a string, twice.
+ */
+static const gchar *refused_json =
+    "{\"type\":\"thread.started\",\"thread_id\":\"thread-test\"}\n"
+    "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Model metadata for `gpt-5.4-mini` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\"}}\n"
+    "{\"type\":\"turn.started\"}\n"
+    "{\"type\":\"error\",\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.\\\",\\\"code\\\":\\\"model_not_found\\\"}}\"}\n"
+    "{\"type\":\"turn.failed\",\"error\":{\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.\\\",\\\"code\\\":\\\"model_not_found\\\"}}\"}}\n";
+
+#define REFUSAL "The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."
+
 static const gchar *flag_value(gchar **argv, const gchar *flag)
 {
     guint i;
@@ -140,6 +154,99 @@ static void test_malformed(void)
     }
 }
 
+/*
+ * The refusal is the error, not the warning ahead of it. Reading the first
+ * error-shaped line as the answer reported "Model metadata ... not found"
+ * for every turn on a model the login could not use, which sends the
+ * reader to the model catalogue instead of to the account.
+ */
+static void test_refusal_not_warning(void)
+{
+    g_autoptr(AiCodexCliClient) c = ai_codex_cli_client_new();
+    g_autoptr(GError) error = NULL;
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(AiResponse) streamed = ai_response_new("", "gpt-5.4-mini");
+    g_auto(GStrv) lines = g_strsplit(refused_json, "\n", -1);
+    gboolean saw_warning = FALSE;
+    guint i;
+
+    response = AI_CLI_CLIENT_GET_CLASS(c)->parse_json_output(AI_CLI_CLIENT(c), refused_json, &error);
+    g_assert_null(response);
+    g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+    g_assert_cmpstr(error->message, ==, REFUSAL);
+    g_clear_error(&error);
+
+    /* The streaming parser sees one line at a time and must agree. */
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
+        gboolean ok = AI_CLI_CLIENT_GET_CLASS(c)->parse_stream_events(
+            AI_CLI_CLIENT(c), lines[i], streamed, events, &error);
+        guint e;
+
+        for (e = 0; e < events->len; e++)
+        {
+            AiEvent *event = g_ptr_array_index(events, e);
+            if (ai_event_get_kind(event) == AI_EVENT_STATUS &&
+                strstr(ai_event_get_text(event), "Model metadata") != NULL)
+                saw_warning = TRUE;
+        }
+        if (!ok)
+            break;
+        g_assert_no_error(error);
+    }
+    g_assert_true(saw_warning);
+    g_assert_nonnull(lines[i]);
+    g_assert_nonnull(strstr(lines[i], "turn.failed"));
+    g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+    g_assert_cmpstr(error->message, ==, REFUSAL);
+}
+
+/* A warning is a warning: the turn after it still succeeds. */
+static void test_warning_does_not_fail_turn(void)
+{
+    g_autoptr(AiCodexCliClient) c = ai_codex_cli_client_new();
+    g_autoptr(GError) error = NULL;
+    g_autoptr(AiResponse) response = NULL;
+    g_autofree gchar *text = NULL;
+    g_autofree gchar *json = g_strconcat(
+        "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Model metadata for `x` not found.\"}}\n",
+        "{\"type\":\"error\",\"message\":\"Reconnecting... 1/5\"}\n",
+        ok_json, NULL);
+
+    response = AI_CLI_CLIENT_GET_CLASS(c)->parse_json_output(AI_CLI_CLIENT(c), json, &error);
+    g_assert_no_error(error);
+    text = ai_response_get_text(response);
+    g_assert_cmpstr(text, ==, "Hello");
+}
+
+/*
+ * Output that stops after an error line with no turn.failed reports what
+ * codex said -- unwrapped -- rather than a parse error about the stream.
+ */
+static void test_unfinished_names_last_error(void)
+{
+    g_autoptr(AiCodexCliClient) c = ai_codex_cli_client_new();
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GError) clean = NULL;
+    g_autoptr(AiResponse) response = NULL;
+    g_autoptr(AiResponse) second = NULL;
+    const gchar *json =
+        "{\"type\":\"turn.started\"}\n"
+        "{\"type\":\"error\",\"message\":\"{\\\"error\\\":{\\\"message\\\":\\\"quota exhausted\\\"}}\"}\n";
+
+    response = AI_CLI_CLIENT_GET_CLASS(c)->parse_json_output(AI_CLI_CLIENT(c), json, &error);
+    g_assert_null(response);
+    g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+    g_assert_cmpstr(error->message, ==, "quota exhausted");
+
+    /* The next run starts clean: an old error is not this run's reason. */
+    second = AI_CLI_CLIENT_GET_CLASS(c)->parse_json_output(AI_CLI_CLIENT(c),
+        "{\"type\":\"turn.started\"}\n", &clean);
+    g_assert_null(second);
+    g_assert_error(clean, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR);
+}
+
 typedef struct { GMainLoop *loop; AiResponse *response; GError *error; gboolean streaming; } Result;
 static void done(GObject *source, GAsyncResult *result, gpointer data)
 {
@@ -186,19 +293,21 @@ static void test_subprocess(gconstpointer data)
         script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > args\nexec sleep 5\n";
     if (mode == 9)
         script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > args\ncat > input\necho authentication-failed >&2\nexit 1\n";
+    if (mode >= 11)
+        script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > args\ncat > input\ncat output\nexit 1\n";
     g_assert_true(g_file_set_contents(path, script, -1, NULL));
     g_assert_cmpint(g_chmod(path, 0700), ==, 0);
-    g_assert_true(g_file_set_contents(output, mode == 3 ? "{\"type\":\"turn.started\"}\n" : mode == 10 ? "{\"type\":\"turn.failed\",\"error\":{\"message\":\"denied\"}}\n" : ok_json, -1, NULL));
+    g_assert_true(g_file_set_contents(output, mode == 3 ? "{\"type\":\"turn.started\"}\n" : mode == 10 ? "{\"type\":\"turn.failed\",\"error\":{\"message\":\"denied\"}}\n" : mode >= 11 ? refused_json : ok_json, -1, NULL));
     ai_cli_client_set_executable_path(AI_CLI_CLIENT(c), path);
     ai_cli_client_set_working_directory(AI_CLI_CLIENT(c), dir);
     ai_cli_client_set_system_prompt(AI_CLI_CLIENT(c), "System instructions");
     ai_cli_client_set_process_timeout_ms(AI_CLI_CLIENT(c), mode == 6 ? 100 : 2000);
     g_signal_connect(c, "delta", G_CALLBACK(delta), deltas);
-    if (mode == 0)
+    if (mode == 0 || mode == 11)
         response = ai_cli_client_chat_sync(AI_CLI_CLIENT(c), messages, NULL, &error);
     else
     {
-        Result r = { g_main_loop_new(NULL, FALSE), NULL, NULL, mode != 1 };
+        Result r = { g_main_loop_new(NULL, FALSE), NULL, NULL, mode != 1 && mode != 12 };
         if (mode == 8) g_timeout_add(100, cancel_request, cancel);
         if (r.streaming)
             ai_streamable_chat_stream_async(AI_STREAMABLE(c), messages, "System instructions", 0, NULL, cancel, done, &r);
@@ -215,6 +324,7 @@ static void test_subprocess(gconstpointer data)
         if (mode == 8) g_assert_error(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
         else g_assert_error(error, AI_ERROR, expected);
         if (mode == 9) g_assert_nonnull(strstr(error->message, "authentication-failed"));
+        if (mode >= 11) g_assert_cmpstr(error->message, ==, REFUSAL);
     }
     else
     {
@@ -737,6 +847,12 @@ int main(int argc, char **argv)
     g_test_add_data_func("/codex/process/cancel-blocked-stdin", GINT_TO_POINTER(8), test_subprocess);
     g_test_add_data_func("/codex/process/stderr-only", GINT_TO_POINTER(9), test_subprocess);
     g_test_add_data_func("/codex/process/error-zero-exit", GINT_TO_POINTER(10), test_subprocess);
+    g_test_add_data_func("/codex/process/refused-sync", GINT_TO_POINTER(11), test_subprocess);
+    g_test_add_data_func("/codex/process/refused-async", GINT_TO_POINTER(12), test_subprocess);
+    g_test_add_data_func("/codex/process/refused-stream", GINT_TO_POINTER(13), test_subprocess);
+    g_test_add_func("/codex/errors/refusal-not-warning", test_refusal_not_warning);
+    g_test_add_func("/codex/errors/warning-does-not-fail-turn", test_warning_does_not_fail_turn);
+    g_test_add_func("/codex/errors/unfinished-names-last-error", test_unfinished_names_last_error);
     g_test_add_func("/sandbox/claude", test_claude_sandbox);
     g_test_add_func("/codex/options/policy-matrix", test_option_matrix);
     g_test_add_func("/codex/options/execution", test_execution_options);

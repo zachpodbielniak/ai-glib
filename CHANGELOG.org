@@ -4,6 +4,19 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.10.2 - 2026-11-07
+
+** Fixed
+- =AiCodexCliClient= reports why a turn failed rather than the first
+  warning codex printed. An error *item* (codex's non-fatal notice, such as
+  "Model metadata for `x` not found") and a top-level =error= no longer end
+  the turn; they are status events, and =turn.failed= is the line the turn
+  ends on. Its message is read out of the API error body codex wraps in
+  it, so a ChatGPT login refused a model now says "The 'gpt-5.5' model is
+  not supported when using Codex with a ChatGPT account." Output that ends
+  with no =turn.failed= names the last top-level error instead of a parse
+  error.
+
 * 0.10.1 - 2026-11-07
 
 ** Fixed

@@ -11,6 +11,7 @@
 #include "core/ai-cli-client-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
+#include "core/ai-http-error.h"
 #include "core/ai-event.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-text-content.h"
@@ -24,6 +25,7 @@ struct _AiCodexCliClient
     gchar *profile;
     gchar *turn_system_prompt;
     gchar **mcp_overrides;
+    gchar *last_error;
 	gchar *image_directory;
 	GList *image_files;
     gboolean skip_permissions;
@@ -414,6 +416,23 @@ capture_file_changes(AiCliClient *client, JsonObject *item)
 	}
 }
 
+/*
+ * What codex said went wrong, readable. Codex passes a failed API call's
+ * whole response body through as the message -- {"type":"error",
+ * "status":400,"error":{"message":"The 'gpt-5.5' model is not supported
+ * when using Codex with a ChatGPT account.",...}} -- so the sentence a
+ * person needs is two levels down. ai_http_error_extract_message() reads
+ * that envelope for the HTTP providers already, and gives plain text back
+ * bounded and unchanged.
+ */
+static gchar *
+codex_error_text(const gchar *raw)
+{
+    if (raw == NULL || *raw == '\0')
+        return NULL;
+    return ai_http_error_extract_message(raw, strlen(raw));
+}
+
 static gboolean
 parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
              GPtrArray *events, GError **error)
@@ -439,12 +458,34 @@ parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
         ai_response_set_stop_reason(response, AI_STOP_REASON_NONE);
         g_ptr_array_add(events, ai_event_new(AI_EVENT_STREAM_START));
     }
-    else if (g_str_equal(type, "turn.failed") || g_str_equal(type, "error"))
+    else if (g_str_equal(type, "error"))
     {
-        const gchar *message = ai_json_get_string(obj, "message", NULL);
-        if (message == NULL)
-            message = ai_json_get_string(ai_json_get_object(obj, "error"), "message", "Codex turn failed");
-        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, "%s", message);
+        /*
+         * Not the end of the turn. Codex writes this for a retry notice as
+         * well as for the fault that will end it, and a fatal one is always
+         * followed by turn.failed -- which is where the turn ends. Stopping
+         * here also read the *first* such line as the answer. The message
+         * is kept so that output ending with no turn.failed at all still
+         * reports what codex said rather than a parse error.
+         */
+        AiCodexCliClient *self = AI_CODEX_CLI_CLIENT(client);
+        g_autofree gchar *text = codex_error_text(ai_json_get_string(obj, "message", NULL));
+
+        if (text != NULL)
+        {
+            g_ptr_array_add(events, ai_event_new_status(text));
+            g_free(self->last_error);
+            self->last_error = g_steal_pointer(&text);
+        }
+    }
+    else if (g_str_equal(type, "turn.failed"))
+    {
+        g_autofree gchar *text = codex_error_text(
+            ai_json_get_string(ai_json_get_object(obj, "error"), "message",
+                               ai_json_get_string(obj, "message", NULL)));
+
+        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, "%s",
+                    text != NULL ? text : "Codex turn failed");
         return FALSE;
     }
     else if (g_str_equal(type, "turn.completed"))
@@ -512,9 +553,20 @@ parse_events(AiCliClient *client, const gchar *line, AiResponse *response,
         }
         else if (g_str_equal(kind, "error"))
         {
-            g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, "%s",
-                        ai_json_get_string(item, "message", "Codex item failed"));
-            return FALSE;
+            /*
+             * An error *item* is codex's non-fatal notice -- "Model
+             * metadata for `x` not found. Defaulting to fallback metadata"
+             * is one, written before the turn even starts. Failing on it
+             * reported that warning as the reason every turn on an
+             * unlisted model failed, while the real refusal (a ChatGPT
+             * login cannot use the model) arrived two lines later and was
+             * never read. It is a status, and deliberately not kept as
+             * last_error: naming a warning as the cause is the bug.
+             */
+            const gchar *text = ai_json_get_string(item, "message", NULL);
+
+            if (completed && text != NULL && *text != '\0')
+                g_ptr_array_add(events, ai_event_new_status(text));
         }
         /*
          * Unknown item kinds are dropped. Relaying the raw JSON as
@@ -540,12 +592,28 @@ parse_line(AiCliClient *client, const gchar *line, AiResponse *response,
     return TRUE;
 }
 
+/*
+ * A turn that stopped before turn.completed: say what codex last reported
+ * as an error when it reported one, since that is why, and fall back to
+ * the parse error only when it said nothing.
+ */
+static void
+set_unfinished_error(AiCodexCliClient *self, GError **error)
+{
+    if (self->last_error != NULL)
+        g_set_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION, "%s", self->last_error);
+    else
+        g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
+                            "Codex output ended before turn.completed");
+}
+
 static AiResponse *
 parse_output(AiCliClient *client, const gchar *json, GError **error)
 {
     g_autoptr(AiResponse) response = ai_response_new("", ai_cli_client_get_model(client));
     g_auto(GStrv) lines = g_strsplit(json != NULL ? json : "", "\n", -1);
     guint i;
+    g_clear_pointer(&AI_CODEX_CLI_CLIENT(client)->last_error, g_free);
     for (i = 0; lines[i] != NULL; i++)
     {
         g_autoptr(GPtrArray) events = g_ptr_array_new_with_free_func((GDestroyNotify)ai_event_unref);
@@ -553,7 +621,7 @@ parse_output(AiCliClient *client, const gchar *json, GError **error)
     }
     if (ai_response_get_stop_reason(response) != AI_STOP_REASON_END_TURN)
     {
-        g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR, "Codex output ended before turn.completed");
+        set_unfinished_error(AI_CODEX_CLI_CLIENT(client), error);
         return NULL;
     }
     return g_steal_pointer(&response);
@@ -569,6 +637,7 @@ finalize(GObject *object)
     g_free(self->profile);
     g_free(self->turn_system_prompt);
     g_strfreev(self->mcp_overrides);
+    g_free(self->last_error);
     G_OBJECT_CLASS(ai_codex_cli_client_parent_class)->finalize(object);
 }
 
@@ -766,6 +835,7 @@ chat_async(AiProvider *p, GList *messages, const gchar *system, gint max_tokens,
            GList *tools, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer data)
 {
     (void)tools;
+    g_clear_pointer(&AI_CODEX_CLI_CLIENT(p)->last_error, g_free);
     ai_cli_client_stream_run_async(AI_CLI_CLIENT(p), messages, system, max_tokens, cancellable, callback, data);
 }
 static AiResponse *
@@ -774,8 +844,7 @@ chat_finish(AiProvider *p, GAsyncResult *result, GError **error)
     g_autoptr(AiResponse) response = ai_cli_client_stream_run_finish(AI_CLI_CLIENT(p), result, error);
     if (response != NULL && ai_response_get_stop_reason(response) != AI_STOP_REASON_END_TURN)
     {
-        g_set_error_literal(error, AI_ERROR, AI_ERROR_CLI_PARSE_ERROR,
-                            "Codex output ended before turn.completed");
+        set_unfinished_error(AI_CODEX_CLI_CLIENT(p), error);
         return NULL;
     }
     return g_steal_pointer(&response);
