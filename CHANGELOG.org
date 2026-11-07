@@ -4,6 +4,12 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.10.1 - 2026-11-07
+
+** Fixed
+- =AiLibresearchSearch= no longer leaks the message buffer of every error
+  answer it turns into a =GError= (found by clawtilla's ASan suite).
+
 * 0.10.0 - 2026-11-07
 
 ** Added

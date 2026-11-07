@@ -275,7 +275,12 @@ error_from_response(
 	if (detail != NULL && *detail != '\0')
 		g_string_append_printf(text, "\n%s", detail);
 
-	return g_error_new_literal(AI_ERROR, error_code_for_status(status), text->str);
+	{
+		GError *error = g_error_new_literal(AI_ERROR, error_code_for_status(status), text->str);
+
+		g_string_free(text, TRUE);
+		return error;
+	}
 }
 
 /* ------------------------------------------------------------------
