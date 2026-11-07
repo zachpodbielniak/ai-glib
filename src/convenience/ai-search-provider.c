@@ -13,6 +13,7 @@
 #include "convenience/ai-bing-search.h"
 #include "convenience/ai-brave-search.h"
 #include "convenience/ai-duckduckgo-search.h"
+#include "convenience/ai-libresearch-search.h"
 #include "core/ai-error.h"
 
 G_DEFINE_INTERFACE(AiSearchProvider, ai_search_provider, G_TYPE_OBJECT)
@@ -160,9 +161,14 @@ ai_search_results_format (
  * ai_search_provider_new_default:
  * @error: (out) (optional): return location for a #GError
  *
- * Creates a search provider chosen from the environment: %AiBraveSearch when
- * BRAVE_API_KEY is set, else %AiBingSearch when BING_API_KEY is set, else the
- * keyless %AiDuckDuckGoSearch (so web search works with zero configuration).
+ * Creates a search provider chosen from the environment: %AiLibresearchSearch
+ * when LIBRESEARCH_URL names a libresearch server (with LIBRESEARCH_TOKEN as
+ * its bearer token, if set), else %AiBraveSearch when BRAVE_API_KEY is set,
+ * else %AiBingSearch when BING_API_KEY is set, else the keyless
+ * %AiDuckDuckGoSearch (so web search works with zero configuration).
+ *
+ * A libresearch server comes first because naming one is a deliberate
+ * choice of a self-hosted engine over a third-party API.
  *
  * Returns: (transfer full) (nullable): a new #AiSearchProvider, or %NULL on
  *   error (currently never, since the DuckDuckGo fallback is keyless).
@@ -170,10 +176,15 @@ ai_search_results_format (
 AiSearchProvider *
 ai_search_provider_new_default (GError **error)
 {
+    const gchar *libresearch = g_getenv ("LIBRESEARCH_URL");
     const gchar *brave = g_getenv ("BRAVE_API_KEY");
     const gchar *bing  = g_getenv ("BING_API_KEY");
 
     (void) error;   /* keyless fallback means this never fails today */
+
+    if (libresearch != NULL && *libresearch != '\0')
+        return AI_SEARCH_PROVIDER (ai_libresearch_search_new (
+            libresearch, g_getenv ("LIBRESEARCH_TOKEN")));
 
     if (brave != NULL && *brave != '\0')
         return AI_SEARCH_PROVIDER (ai_brave_search_new (brave));

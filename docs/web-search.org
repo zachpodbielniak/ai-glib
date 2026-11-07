@@ -1,17 +1,21 @@
 * Web Search
 ai-glib gives an agent a =web_search= tool backed by a pluggable
-=AiSearchProvider=. Three backends ship in the box:
+=AiSearchProvider=. Four backends ship in the box:
 
-| Provider             | Key env var     | Notes                              |
-|----------------------+-----------------+------------------------------------|
-| =AiBraveSearch=      | =BRAVE_API_KEY= | [[https://brave.com/search/api/]]  |
+| Provider              | Key env var        | Notes                                         |
+|-----------------------+--------------------+-----------------------------------------------|
+| =AiLibresearchSearch= | =LIBRESEARCH_URL=  | a libresearch server you run; also LQL and research (below) |
+| =AiBraveSearch=       | =BRAVE_API_KEY=    | [[https://brave.com/search/api/]]  |
 | =AiBingSearch=       | =BING_API_KEY=  | Azure Bing Search v7               |
 | =AiDuckDuckGoSearch= | (none)          | keyless, best-effort (no SLA)      |
 
 ** Quick start (zero config)
 =ai_search_provider_new_default()= picks a backend from the environment ---
-Brave if =BRAVE_API_KEY= is set, else Bing if =BING_API_KEY= is set, else the
-keyless DuckDuckGo provider. So =web_search= works out of the box:
+libresearch if =LIBRESEARCH_URL= names a server (with =LIBRESEARCH_TOKEN= as its
+bearer token when set), else Brave if =BRAVE_API_KEY= is set, else Bing if
+=BING_API_KEY= is set, else the keyless DuckDuckGo provider. A libresearch
+server comes first because naming one is a deliberate choice of your own
+engine over a third-party API. So =web_search= works out of the box:
 
 #+begin_src C
 #include <ai-glib.h>
@@ -39,6 +43,81 @@ g_autoptr(AiBingSearch) bing =
                  "endpoint", "https://my-proxy.example/bing/v7.0/search",
                  NULL);
 #+end_src
+
+** libresearch
+[[https://gitlab.com/zachpodbielniak/libresearch][libresearch]] is a self-hosted metasearch engine. =AiLibresearchSearch= talks to a running =libresearchd= over its REST API and never links libresearch itself; the server may be local (=http://127.0.0.1:8087=, its default) or anywhere else you can reach.
+
+*** As a search provider
+#+begin_src C
+g_autoptr(AiLibresearchSearch) lr =
+    ai_libresearch_search_new("http://127.0.0.1:8087", NULL /* or a token */);
+ai_tool_executor_set_search_provider(exec, AI_SEARCH_PROVIDER(lr));
+#+end_src
+
+The synchronous =search= vfunc is =GET /api/v1/search=. Options map onto the server's parameters:
+
+| =AiSearchOptions= | libresearch      |
+|-------------------+------------------|
+| count             | =limit= (max 100) |
+| offset            | =page= holding it |
+| freshness         | =time_range=     |
+| safesearch        | =safesearch=     |
+| language          | =lang=           |
+| site              | =site:= in the query, pushed down by the server |
+
+Each result's engines become =source= ("ddg, bing") and =published= becomes =age=.
+
+*** Beyond search
+Everything libresearch adds is an asynchronous request answering the server's own JSON document, finished with =ai_libresearch_search_request_finish()=:
+
+| Function                                   | Endpoint                     | Document                |
+|--------------------------------------------+------------------------------+-------------------------|
+| =ai_libresearch_search_web_async()=        | =/api/v1/search= (+ =category=) | =libresearch.search/1= |
+| =ai_libresearch_search_fetch_async()=      | =/api/v1/fetch= (+ Wayback =archive=) | =libresearch.fetch/1= |
+| =ai_libresearch_search_query_async()=      | =/api/v1/query= (LQL)        | =libresearch.query/1=   |
+| =ai_libresearch_search_research_async()=   | =/api/v1/research=           | =libresearch.research/1= |
+| =ai_libresearch_search_environment_async()= | =/api/v1/query/environment= | =lql-environment/1=     |
+
+#+begin_src C
+static void
+on_query (GObject *src, GAsyncResult *res, gpointer data)
+{
+    g_autoptr(GError) err = NULL;
+    g_autoptr(JsonNode) doc =
+        ai_libresearch_search_request_finish (AI_LIBRESEARCH_SEARCH (src), res, &err);
+    g_autofree gchar *text = NULL;
+
+    if (doc == NULL) { g_printerr ("%s\n", err->message); return; }
+    text = ai_libresearch_format_query (doc, 20);
+    g_print ("%s", text);
+}
+
+ai_libresearch_search_query_async (lr,
+    "search \"gtk4 list view\", category: CODE | filter site(\"docs.gtk.org\") | fields title, url",
+    FALSE, NULL, on_query, NULL);
+#+end_src
+
+Requests run on the calling thread's thread-default main context, so call them from the thread whose loop dispatches the callback.
+
+=ai_libresearch_format_search()=, =_fetch()=, =_query()= and =_research()= render each document as compact text for a model, so every host shows the same thing: instant answers first, results with engines and dates, the engines that did not answer (a partial failure is still HTTP 200), LQL rows by column name with a count of rows left out, and research sources marked when they were not read or not cited.
+
+*** Timeouts
+Ordinary requests use =timeout= (30 s of silence). Research, and an LQL query whose source is =research=, answer only when the whole run is done, which takes minutes; they use =research-timeout= (900 s) on a separate session.
+
+*** Errors
+Every libresearch error is one envelope, and its words are kept:
+
+| HTTP        | =AI_ERROR_*=          | Typical cause                                   |
+|-------------+-----------------------+-------------------------------------------------|
+| 400, 422    | =INVALID_REQUEST=     | an LQL query that does not parse or is over a limit; the message carries the server's =line:column= and caret excerpt |
+| 401         | =INVALID_API_KEY=     | the server requires a token (=api.require_token=) |
+| 403         | =PERMISSION_DENIED=   | wrong token, =lql.enabled: false=, SSRF guard   |
+| 404         | =NOT_SUPPORTED=       | the research module is not active, or the API is off |
+| 429         | =RATE_LIMITED=        | over =rate_limit.*_per_minute=                  |
+| 502         | =SERVER_ERROR=        | a search the query ran failed                   |
+| 503         | =SERVICE_UNAVAILABLE= | =modules.research.max_busy= runs are going      |
+| 504         | =TIMEOUT=             | the server's LQL time limit ran out             |
+| (transport) | =NETWORK_ERROR=       | nothing answered at the endpoint                |
 
 ** Calling a provider directly
 #+begin_src C

@@ -32,7 +32,7 @@ Fedora packages: =gcc=, =make=, =pkgconf-pkg-config=, =glib2-devel=, =json-glib-
 | =--mcp-server= | Headless MCP server over stdin/stdout; no prompt or ncurses |
 | =--mcp-socket PATH= | Unix socket listener; combined with =--mcp-server= selects headless socket mode instead of stdio |
 | =--mcp-tools NAMES= | Enable comma-separated tool names; repeat to combine selections |
-| =--mcp-all-tools= | Enable all eighteen host tools, including filesystem access, turn control and agent spawning |
+| =--mcp-all-tools= | Enable all twenty host tools, including filesystem access, web search and fetch, turn control and agent spawning |
 | =--mcp-list-tools= | List the complete tool catalog and exit before loading a provider |
 | =--mcp-no-inject= | Allow external MCP clients without configuring the selected CLI provider |
 | =--mcp-connect PATH= | Bridge stdio to an existing absolute Unix socket path; no provider is loaded |
@@ -191,3 +191,18 @@ Explicit Claude MCP JSON files and explicit =OPENCODE_CONFIG= JSON files are mer
 MCP tool registrations hold weak host references and acquire a temporary strong reference only while executing. A retained server or delayed transport callback cannot dereference a destroyed host; calls after host destruction return a closed-session tool error. This avoids both dangling callback data and a host/server reference cycle.
 
 Live TUI sessions with MCP handle SIGTERM and SIGHUP even when herdr is absent. Provider cancellation and MCP shutdown complete before terminal/application storage is released. Pending redraw and keyboard callbacks do not process new work after shutdown begins. A real PTY regression terminates an active provider turn, verifies successful TUI exit, and checks that the provider child and Unix socket are gone.
+
+** Web search and fetch
+=web_search= and =web_fetch= are host tools like the filesystem ones: the same executor definitions and the same grant rules. =web_search= exists in an executor only once it has a search provider, so granting it (by name or with =--mcp-all-tools=) gives the conversation's executor =ai_search_provider_new_default()= when it has none: a libresearch server named by =LIBRESEARCH_URL= first, then the API keys, then the keyless DuckDuckGo scraper. See [[file:web-search.org][web-search.org]].
+
+** One server list for every CLI
+A project names its MCP servers once, in Claude Code's =.mcp.json= schema. Claude Code reads that file from its working directory by itself; codex, grok and opencode do not. =ai_mcp_config_load_servers()= merges the =mcpServers= maps of any number of such files (later wins, a missing file is skipped), =ai_mcp_config_translate()= renders the map in an endpoint kind's dialect, and =ai_mcp_config_endpoint_for()= picks the kind a client accepts, writes the translation to a new 0600 file and returns the endpoint to apply.
+
+| Kind                                  | Carries                                  | Leaves out (named in =skipped=) |
+|---------------------------------------+------------------------------------------+--------------------------------|
+| =AI_ENDPOINT_KIND_MCP_CONFIG=         | everything (Claude's own schema)         | nothing                        |
+| =AI_ENDPOINT_KIND_MCP_CONFIG_GROK=    | command, args, env table, url            | entries with neither command nor url |
+| =AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE= | local (command + environment) and remote (url) | the same                 |
+| =AI_ENDPOINT_KIND_MCP_CONFIG_CODEX=   | command and args, with the server's tools approved | a server with an environment (it would be on codex's command line, readable by every user), a URL server, a name with characters other than letters, digits, =_= and =-= |
+
+A server left out is reported by name and reason rather than approximated. An endpoint is returned only when at least one server survives; nothing surviving is =NULL= without an error, not an empty grant.

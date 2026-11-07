@@ -105,6 +105,9 @@ DuckDuckGo's "lite" HTML endpoint and is therefore *best-effort*: on rate
 limiting or markup changes it returns an empty result list rather than an
 error, so a flaky SERP can't derail an agent loop.
 
+*** AiLibresearchSearch
+=ai_libresearch_search_new(endpoint, api_key)= --- a running libresearch server. Properties: =endpoint= (base URL, default =AI_LIBRESEARCH_DEFAULT_ENDPOINT=), =api-key= (sent as =Authorization: Bearer=), =timeout= and =research-timeout= (seconds of silence). Besides the =search= vfunc it offers =_web_async()= (with a category), =_fetch_async()=, =_query_async()= (LQL), =_research_async()= and =_environment_async()=, all finished with =ai_libresearch_search_request_finish()=, plus =ai_libresearch_results_from_document()= and the =ai_libresearch_format_*()= renderers. See [[file:../web-search.org][web-search.org]].
+
 ** Robustness
 HTTP requests for the API providers go through a shared helper that retries
 transient failures (HTTP 429 honoring =Retry-After=, 5xx, and fast network

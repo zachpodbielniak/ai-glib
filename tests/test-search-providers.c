@@ -1370,6 +1370,7 @@ test_factory_env (void)
 
     g_unsetenv ("BRAVE_API_KEY");
     g_unsetenv ("BING_API_KEY");
+    g_unsetenv ("LIBRESEARCH_URL");
 
     /* Neither key: keyless DuckDuckGo default. */
     p = ai_search_provider_new_default (NULL);
@@ -1388,8 +1389,313 @@ test_factory_env (void)
     g_assert_true (AI_IS_BRAVE_SEARCH (p));
     g_clear_object (&p);
 
+    /* A libresearch server wins over every API key. */
+    g_setenv ("BRAVE_API_KEY", "y", TRUE);
+    g_setenv ("LIBRESEARCH_URL", "http://127.0.0.1:8087", TRUE);
+    p = ai_search_provider_new_default (NULL);
+    g_assert_true (AI_IS_LIBRESEARCH_SEARCH (p));
+    g_assert_cmpstr (ai_libresearch_search_get_endpoint (AI_LIBRESEARCH_SEARCH (p)),
+                     ==, "http://127.0.0.1:8087");
+    g_clear_object (&p);
+
+    g_unsetenv ("LIBRESEARCH_URL");
     g_unsetenv ("BRAVE_API_KEY");
     g_unsetenv ("BING_API_KEY");
+}
+
+/* ============================================================
+ * libresearch
+ * ============================================================ */
+
+static const gchar *LR_SEARCH_JSON =
+    "{\"schema\":\"libresearch.search/1\","
+    "\"results\":[{\"url\":\"https://docs.gtk.org/\",\"title\":\"GTK Docs\","
+    "\"snippet\":\"The GTK documentation\",\"engines\":[\"ddg\",\"bing\"],"
+    "\"position\":1,\"published\":\"2026-10-01\"},"
+    "{\"url\":\"https://two.example/\",\"title\":\"Two\",\"snippet\":null,"
+    "\"engines\":[\"ddg\"],\"position\":2,\"published\":null}],"
+    "\"infoboxes\":[{\"provider\":\"wikipedia\",\"title\":\"GTK\",\"body\":\"A toolkit.\","
+    "\"url\":\"https://en.wikipedia.org/wiki/GTK\"}],"
+    "\"engines\":[{\"id\":\"ddg\",\"state\":\"ok\"},{\"id\":\"startpage\",\"state\":\"blocked\"}]}";
+
+static const gchar *LR_QUERY_JSON =
+    "{\"schema\":\"libresearch.query/1\","
+    "\"query\":\"search \\\"gtk\\\" | fields url, title\","
+    "\"columns\":[{\"name\":\"url\",\"type\":\"String\"},{\"name\":\"title\",\"type\":\"String\"}],"
+    "\"rows\":[{\"url\":\"https://docs.gtk.org/\",\"title\":\"GTK Docs\"},"
+    "{\"url\":\"https://b.example/\",\"title\":null}],"
+    "\"engines\":[],\"confidential\":false,\"explain\":null,\"elapsed_ms\":12}";
+
+static const gchar *LR_QUERY_ERROR_JSON =
+    "{\"error\":{\"code\":\"invalid_query\",\"message\":\"expected an expression\","
+    "\"detail\":\"1:26: expected an expression\\n  search \\\"x\\\" | filter nope(\\n"
+    "                           ^\",\"line\":1,\"column\":26}}";
+
+static const gchar *LR_RESEARCH_JSON =
+    "{\"schema\":\"libresearch.research/1\",\"question\":\"q\","
+    "\"answer\":\"LQL is a pipeline language [1].\","
+    "\"sources\":[{\"n\":1,\"title\":\"LQL docs\",\"url\":\"https://lql.example/\","
+    "\"read\":true,\"cited\":true},"
+    "{\"n\":2,\"title\":\"Other\",\"url\":\"https://o.example/\",\"read\":false,\"cited\":false}],"
+    "\"dropped_citations\":0}";
+
+static AiLibresearchSearch *
+libresearch_on (TServer *ts)
+{
+    g_autofree gchar *endpoint = tserver_url (ts, "/");
+
+    /* The trailing slash is deliberate: it must not double in the path. */
+    return ai_libresearch_search_new (endpoint, "lr-token");
+}
+
+typedef struct
+{
+    GMainLoop *loop;
+    JsonNode  *doc;
+    GError    *error;
+} LrWait;
+
+static void
+lr_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    LrWait *w = user_data;
+
+    w->doc = ai_libresearch_search_request_finish (AI_LIBRESEARCH_SEARCH (source),
+                                                   result, &w->error);
+    g_main_loop_quit (w->loop);
+}
+
+static gboolean
+lr_watchdog (gpointer user_data)
+{
+    g_error ("libresearch request never finished");
+    return G_SOURCE_REMOVE;
+}
+
+/* Runs the loop until the request finishes, with a watchdog: a test that
+ * can hang is worse than one that fails. */
+static void
+lr_run (LrWait *w)
+{
+    guint dog = g_timeout_add_seconds (10, lr_watchdog, NULL);
+
+    g_main_loop_run (w->loop);
+    g_source_remove (dog);
+}
+
+static void
+test_libresearch_sync_search (void)
+{
+    TServer                        *ts  = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr  = NULL;
+    g_autoptr(AiSearchOptions)      o   = ai_search_options_new ();
+    g_autoptr(GError)               err = NULL;
+    g_autofree gchar               *target  = NULL;
+    g_autofree gchar               *request = NULL;
+    GList                          *res;
+    AiSearchResult                 *r0;
+
+    tserver_set_response (ts, 200, "application/json", LR_SEARCH_JSON);
+    lr = libresearch_on (ts);
+    ai_search_options_set_freshness (o, AI_SEARCH_FRESHNESS_WEEK);
+    ai_search_options_set_site (o, "docs.gtk.org");
+
+    res = ai_search_provider_search (AI_SEARCH_PROVIDER (lr), "gtk", o, NULL, &err);
+    g_assert_no_error (err);
+    g_assert_cmpuint (g_list_length (res), ==, 2);
+
+    r0 = res->data;
+    g_assert_cmpstr (ai_search_result_get_title (r0), ==, "GTK Docs");
+    g_assert_cmpstr (ai_search_result_get_source (r0), ==, "ddg, bing");
+    g_assert_cmpstr (ai_search_result_get_age (r0), ==, "2026-10-01");
+    g_assert_cmpuint (ai_search_result_get_rank (r0), ==, 1);
+    g_list_free_full (res, g_object_unref);
+
+    target  = tserver_take_target (ts);
+    request = tserver_take_request (ts);
+    g_assert_true (g_str_has_prefix (target, "/api/v1/search?"));
+    g_assert_nonnull (strstr (target, "q=gtk%20site%3Adocs.gtk.org"));
+    g_assert_nonnull (strstr (target, "time_range=week"));
+    g_assert_nonnull (strstr (request, "Authorization: Bearer lr-token"));
+
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_web_async_category (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    g_autofree gchar               *target = NULL;
+    g_autofree gchar               *text = NULL;
+    LrWait                          w = { loop, NULL, NULL };
+
+    tserver_set_response (ts, 200, "application/json", LR_SEARCH_JSON);
+    lr = libresearch_on (ts);
+
+    ai_libresearch_search_web_async (lr, "glib", NULL, "code", NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_no_error (w.error);
+    g_assert_nonnull (w.doc);
+
+    target = tserver_take_target (ts);
+    g_assert_nonnull (strstr (target, "category=code"));
+    g_assert_nonnull (strstr (target, "format=json"));
+
+    /* The instant answer leads, the failed engine is named. */
+    text = ai_libresearch_format_search (w.doc, 0);
+    g_assert_true (g_str_has_prefix (text, "Answer (wikipedia): A toolkit."));
+    g_assert_nonnull (strstr (text, "1. GTK Docs"));
+    g_assert_nonnull (strstr (text, "Engines that did not answer: startpage (blocked)"));
+
+    json_node_unref (w.doc);
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_query (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    g_autofree gchar               *target = NULL;
+    g_autofree gchar               *text = NULL;
+    LrWait                          w = { loop, NULL, NULL };
+
+    tserver_set_response (ts, 200, "application/json", LR_QUERY_JSON);
+    lr = libresearch_on (ts);
+
+    ai_libresearch_search_query_async (lr, "search \"gtk\" | fields url, title",
+                                       TRUE, NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_no_error (w.error);
+
+    target = tserver_take_target (ts);
+    g_assert_true (g_str_has_prefix (target, "/api/v1/query?"));
+    g_assert_nonnull (strstr (target, "explain=1"));
+    g_assert_nonnull (strstr (target, "%7C"));   /* the pipe, escaped */
+
+    text = ai_libresearch_format_query (w.doc, 1);
+    g_assert_nonnull (strstr (text, "2 rows (columns: url String, title String)"));
+    g_assert_nonnull (strstr (text, "1. url: https://docs.gtk.org/"));
+    g_assert_nonnull (strstr (text, "title: GTK Docs"));
+    g_assert_nonnull (strstr (text, "(1 more rows not shown"));
+
+    json_node_unref (w.doc);
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_query_error_keeps_caret (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    LrWait                          w = { loop, NULL, NULL };
+
+    tserver_set_response (ts, 400, "application/json", LR_QUERY_ERROR_JSON);
+    lr = libresearch_on (ts);
+
+    ai_libresearch_search_query_async (lr, "search \"x\" | filter nope(", FALSE,
+                                       NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_null (w.doc);
+    g_assert_error (w.error, AI_ERROR, AI_ERROR_INVALID_REQUEST);
+    g_assert_nonnull (strstr (w.error->message, "invalid_query"));
+    g_assert_nonnull (strstr (w.error->message, "1:26: expected an expression"));
+    g_assert_nonnull (strstr (w.error->message, "^"));
+
+    g_clear_error (&w.error);
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_research (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    g_autofree gchar               *target = NULL;
+    g_autofree gchar               *text = NULL;
+    LrWait                          w = { loop, NULL, NULL };
+
+    tserver_set_response (ts, 200, "application/json", LR_RESEARCH_JSON);
+    lr = libresearch_on (ts);
+
+    ai_libresearch_search_research_async (lr, "what is LQL", TRUE, 4, NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_no_error (w.error);
+
+    target = tserver_take_target (ts);
+    g_assert_nonnull (strstr (target, "deep=1"));
+    g_assert_nonnull (strstr (target, "pages=4"));
+
+    text = ai_libresearch_format_research (w.doc);
+    g_assert_true (g_str_has_prefix (text, "LQL is a pipeline language [1]."));
+    g_assert_nonnull (strstr (text, "[1] LQL docs -- https://lql.example/\n"));
+    g_assert_nonnull (strstr (text, "[2] Other -- https://o.example/ (not read, not cited)"));
+
+    json_node_unref (w.doc);
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_research_inactive (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    LrWait                          w = { loop, NULL, NULL };
+
+    tserver_set_response (ts, 404, "application/json",
+                          "{\"error\":{\"code\":\"not_found\",\"message\":\"the research module is not active\"}}");
+    lr = libresearch_on (ts);
+
+    ai_libresearch_search_research_async (lr, "q", FALSE, 0, NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_error (w.error, AI_ERROR, AI_ERROR_NOT_SUPPORTED);
+    g_assert_nonnull (strstr (w.error->message, "research module is not active"));
+
+    g_clear_error (&w.error);
+    tserver_stop (ts);
+}
+
+static void
+test_libresearch_unreachable (void)
+{
+    TServer                        *ts = tserver_start ();
+    g_autofree gchar               *endpoint = tserver_url (ts, "");
+    g_autoptr(AiLibresearchSearch)  lr = NULL;
+    g_autoptr(GMainLoop)            loop = g_main_loop_new (NULL, FALSE);
+    LrWait                          w = { loop, NULL, NULL };
+
+    /* A port that was just listening and now is not: nothing answers. */
+    tserver_stop (ts);
+    lr = ai_libresearch_search_new (endpoint, NULL);
+
+    ai_libresearch_search_environment_async (lr, NULL, lr_done, &w);
+    lr_run (&w);
+    g_assert_error (w.error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (w.error->message, "unreachable"));
+
+    g_clear_error (&w.error);
+}
+
+static void
+test_libresearch_format_fetch (void)
+{
+    g_autoptr(JsonNode) doc = json_from_string (
+        "{\"schema\":\"libresearch.fetch/1\",\"url\":\"https://gone.example/\","
+        "\"title\":\"Gone\",\"text\":\"Body text\",\"truncated\":true,"
+        "\"archive_url\":\"https://web.archive.org/web/2024/https://gone.example/\","
+        "\"archived_at\":\"2024-01-01T00:00:00Z\"}", NULL);
+    g_autofree gchar *text = ai_libresearch_format_fetch (doc);
+
+    g_assert_nonnull (strstr (text, "Title: Gone\nURL: https://gone.example/\n"));
+    g_assert_nonnull (strstr (text, "Read from the Wayback Machine"));
+    g_assert_nonnull (strstr (text, "Body text"));
+    g_assert_nonnull (strstr (text, "[truncated"));
 }
 
 /* ============================================================
@@ -1735,6 +2041,15 @@ main (int argc, char *argv[])
     g_test_add_func ("/ai-glib/search/ddg/count", test_ddg_count_truncates);
     g_test_add_func ("/ai-glib/search/ddg/garbage", test_ddg_garbage_is_empty);
     g_test_add_func ("/ai-glib/search/ddg/non-200", test_ddg_non_200_is_empty);
+
+    g_test_add_func ("/ai-glib/search/libresearch/sync", test_libresearch_sync_search);
+    g_test_add_func ("/ai-glib/search/libresearch/category", test_libresearch_web_async_category);
+    g_test_add_func ("/ai-glib/search/libresearch/query", test_libresearch_query);
+    g_test_add_func ("/ai-glib/search/libresearch/query-error", test_libresearch_query_error_keeps_caret);
+    g_test_add_func ("/ai-glib/search/libresearch/research", test_libresearch_research);
+    g_test_add_func ("/ai-glib/search/libresearch/research-inactive", test_libresearch_research_inactive);
+    g_test_add_func ("/ai-glib/search/libresearch/unreachable", test_libresearch_unreachable);
+    g_test_add_func ("/ai-glib/search/libresearch/format-fetch", test_libresearch_format_fetch);
 
     g_test_add_func ("/ai-glib/search/construction", test_construction);
     g_test_add_func ("/ai-glib/search/factory-env", test_factory_env);
