@@ -657,6 +657,15 @@ rebuilt by the base revoking and re-applying the endpoint around the change.
 claude-tmux is the trap: its claude is the shared tmux server's child, so
 client variables reach it only through `tmux new-session -e`.
 
+### Redirects (`ai-http-redirect-private.h`)
+
+A request carrying a credential never follows a redirect. Guard every new
+`SoupSession` with `ai_http_guard_session()` (or a single message with
+`ai_http_guard_message()` after its headers are set), and turn the 3xx into
+an error with `ai_http_redirect_refused()`. The decision must be made before
+the request is sent: setting `SOUP_MESSAGE_NO_REDIRECT` only in "got-headers"
+for a credentialed request hung a synchronous send in libsoup 3.6.
+
 ## Image Generation Subsystem
 
 Image generation hangs off the `AiImageGenerator` interface

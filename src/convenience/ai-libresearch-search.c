@@ -18,6 +18,7 @@
 #include "convenience/ai-search-http.h"
 #include "core/ai-error.h"
 #include "core/ai-json-util.h"
+#include "core/ai-http-redirect-private.h"
 
 #define LIBRESEARCH_DEFAULT_COUNT     10
 #define LIBRESEARCH_MAX_COUNT         100
@@ -343,6 +344,11 @@ on_request_done(
 	}
 
 	status = soup_message_get_status(rd->msg);
+	if (ai_http_redirect_refused(rd->msg, &error))
+	{
+		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
 	if (status < 200 || status >= 300)
 	{
 		g_task_return_error(task, error_from_response(self, status, body));
@@ -1227,6 +1233,12 @@ ai_libresearch_search_init(
 	/* Both sessions exist before the CONSTRUCT properties set their timeouts. */
 	self->session = soup_session_new();
 	self->long_session = soup_session_new();
+	/*
+	 * Every request on both carries the bearer token when one is set, so
+	 * neither follows a redirect with it (ai-http-redirect-private.h).
+	 */
+	ai_http_guard_session(self->session);
+	ai_http_guard_session(self->long_session);
 	self->timeout = LIBRESEARCH_TIMEOUT_S;
 	self->research_timeout = LIBRESEARCH_RESEARCH_TIMEOUT_S;
 }

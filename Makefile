@@ -165,6 +165,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-error.c \
 	$(SRCDIR)/core/ai-session-limit.c \
 	$(SRCDIR)/core/ai-http-error.c \
+	$(SRCDIR)/core/ai-http-redirect.c \
 	$(SRCDIR)/core/ai-enums.c \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \
