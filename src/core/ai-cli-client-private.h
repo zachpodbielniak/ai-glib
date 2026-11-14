@@ -38,4 +38,12 @@ ai_cli_client_messages_for_prompt(
     GList       *messages
 );
 
+AiResponse *
+ai_cli_client_chat_sync_pipeline(
+    AiCliClient   *self,
+    GList         *messages,
+    GCancellable  *cancellable,
+    GError       **error
+);
+
 G_END_DECLS

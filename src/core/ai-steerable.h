@@ -106,6 +106,13 @@ G_DECLARE_INTERFACE(AiSteerable, ai_steerable, AI, STEERABLE, GObject)
  * @can_steer: whether this class can put words into a running turn at
  *   all.  A class datum, not a per-call answer: a caller asks one probe
  *   client rather than keeping a table of providers.
+ * @is_steerable: (nullable): for a class with @can_steer %TRUE whose
+ *   instances can steer only in some configurations, whether this one
+ *   can.  %NULL (the usual case) means every instance of the class can.
+ *   It answers for the configuration, never for the moment: whether a
+ *   turn is running is ai_steerable_dup_turn_id()'s business.
+ *   #AiCodexCliClient is the one user: only its `app-server` transport
+ *   has a seam.
  * @dup_turn_id: returns the id of the turn that is running now, or %NULL
  * @steer_async: delivers words into a running turn
  * @steer_finish: finishes @steer_async
@@ -123,6 +130,7 @@ struct _AiSteerableInterface
 
     gboolean can_steer;
 
+    gboolean      (*is_steerable) (AiSteerable         *self);
     gchar *       (*dup_turn_id)  (AiSteerable         *self);
     void          (*steer_async)  (AiSteerable         *self,
                                    const gchar         *turn_id,

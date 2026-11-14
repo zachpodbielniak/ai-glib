@@ -72,7 +72,14 @@ const gchar   *ai_steer_result_to_string (AiSteerResult result);
 Whether a class can steer is =AiSteerableInterface.can_steer=, a class
 datum like =AiCliClientClass.config_dir_env=. Every client implements the
 interface -- each CLI wrapper through =AiCliClient=, each HTTP client
-through =AiClient= -- so a caller never keeps a table of providers:
+through =AiClient= -- so a caller never keeps a table of providers.
+
+One class answers per instance: =AiCodexCliClient= can steer only on its
+=app-server= transport, so it sets =can_steer= %TRUE *and* the optional
+=AiSteerableInterface.is_steerable= vfunc, and =ai_steerable_can_steer()=
+asks the instance. A probe for codex must therefore be configured the way
+the real client will be (=transport= set). Every other class leaves
+=is_steerable= %NULL and answers for the class as before:
 
 #+begin_src C
 if (AI_IS_STEERABLE (client) &&
@@ -86,7 +93,8 @@ else
 A class with =can_steer= %FALSE answers every steer with =REFUSED= and
 =AI_STEER_ERROR_NOT_SUPPORTED= without its vfuncs being called, so
 implementing the interface with %FALSE is the whole job for a class that
-cannot steer.
+cannot steer. The same holds for an instance whose =is_steerable= says
+no (a codex client on =exec=).
 
 ** The turn handle
 
@@ -123,7 +131,8 @@ and a steer cancelled late is never reported as a refusal.
 | =AiClaudeCodeClient=  | TRUE        | a stream-json user event on the open stdin                 | claude 2.1.325, control run  |
 | =AiClaudeTmuxClient=  | TRUE        | a line typed into the TUI while it works                   | claude 2.1.325, control run  |
 | =AiToolExecutor=      | TRUE        | parked, spliced in at the top of the next round            | tests                        |
-| =AiCodexCliClient=    | FALSE       | (=codex app-server= =turn/steer=; not implemented yet)     | --                           |
+| =AiCodexCliClient=    | per         | =turn/steer= on =codex app-server= (=transport=            | protocol source and a fake   |
+|                       | transport   | =app-server=); exec: FALSE                                 | server only -- see below     |
 | opencode, grok-build, | FALSE       | none: queue only                                           | --                           |
 | antigravity, cursor   |             |                                                            |                              |
 | HTTP clients          | FALSE       | none on the client; steer the =AiToolExecutor= running it  | --                           |
@@ -268,27 +277,161 @@ omission: a turn accepts no input but a cancel, and interrupting and
 re-prompting to fake a seam would break the "nothing is killed" rule.
 The caller queues the words for the next turn, as it always has.
 
-** codex: what remains
+** Codex (=codex app-server=)
 
-=codex app-server= offers the seam -- =turn/steer= with the expected turn
-id, refused with =ExpectedTurnMismatch= or =NoActiveTurn= when the turn
-has moved on -- but it is a different transport from the =codex exec=
-JSONL that =AiCodexCliClient= drives today: JSON-RPC over stdio with an
-=initialize= / =thread/start= / =turn/start= handshake, approval requests
-the client must answer, and its own notification vocabulary to translate
-into =AiEvent=. No codex binary was available to verify any of that
-against, so =AiCodexCliClient= keeps =can_steer= %FALSE. The shared
-machinery below (=ai-cli-steer-private.h=) already has what it needs: the
-parser can write protocol lines to the open stdin, a steer can wait for
-an acknowledgement keyed by the JSON-RPC id with a timeout that answers
-=INDETERMINATE=, and a JSON-RPC error resolves it as =REFUSED=.
+=AiCodexCliClient= has two transports, chosen by its =transport= property:
+
+- =exec= (the default, unchanged): =codex exec --json=. No input reaches a
+  running turn, so =ai_steerable_can_steer()= is %FALSE and a steer is
+  refused with =AI_STEER_ERROR_NOT_SUPPORTED=.
+- =app-server=: =codex app-server=, JSON-RPC over stdio, one process per
+  turn. =ai_steerable_can_steer()= is %TRUE and a steer is a =turn/steer=
+  request naming the running turn.
+
+*** Built from the protocol source, not run against codex
+
+*No codex binary was available where this was written.* The transport was
+built from the published protocol in the open-source openai/codex
+repository at tag =rust-v0.169.0= (commit
+=d32063f96c2dff1dc96af839b3952abb6acfeda4=, released 2026-11-13):
+
+- =codex-rs/app-server-protocol/schema/json/= -- =ClientRequest.json=,
+  =ServerNotification.json=, =ServerRequest.json=, the approval response
+  schemas and =codex_app_server_protocol.v2.schemas.json= (request and
+  response shapes, =ThreadItem=, =TurnError=, =CodexErrorInfo=);
+- =codex-rs/app-server-protocol/src/rpc.rs= -- the wire: JSON-RPC without
+  the ="jsonrpc": "2.0"= member;
+- =codex-rs/app-server-protocol/src/protocol/v2/{turn,thread}.rs= and
+  =common.rs= -- which fields and methods are experimental (none used);
+- =codex-rs/app-server/src/request_processors/turn_processor.rs= -- what
+  =turn/steer= answers and when; =codex-rs/protocol/src/turn_input.rs= --
+  =NotSubmittedReason= (=NoActiveTurn=, =ExpectedTurnMismatch=, ...);
+- =codex-rs/app-server/src/error_code.rs= -- the error codes;
+- =codex-rs/app-server-transport/src/transport/stdio.rs= -- stdin EOF
+  shuts app-server down;
+- =codex-rs/cli/src/main.rs= -- root =-c= overrides reach app-server,
+  =--search= is =web_search="live"=, =--profile= is rejected for
+  app-server.
+
+It has been run only against =tests/fixtures/fake-codex-app-server.bash=,
+a scripted stand-in that records every request and answers what each test
+in =tests/test-codex-app-server.c= tells it to. To check it against a
+real codex (logged in, on =PATH= or =CODEX_PATH=):
+
+#+begin_src sh
+make examples
+./build/release/examples/steer-codex-app-server
+#+end_src
+
+It runs one streamed turn that executes =sleep 15=, steers it when the
+command starts, and exits 0 only when the steer answers =delivered= and
+the reply obeys it (=STEERED-OK=). Until that has passed against a given
+codex release, treat the transport as unverified.
+
+*** The conversation
+
+#+begin_example
+-> {"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai-glib",...}}}
+<- {"id":1,"result":{...}}
+-> {"method":"initialized"}
+-> {"id":2,"method":"thread/start","params":{"model":..,"cwd":..,
+       "approvalPolicy":"never","sandbox":"read-only","ephemeral":true}}
+     (or "thread/resume" with "threadId" when the client has a session id)
+<- {"id":2,"result":{"thread":{"id":"thr-..."},...}}
+-> {"id":3,"method":"turn/start","params":{"threadId":"thr-...",
+       "input":[{"type":"text","text":<prompt>},{"type":"localImage",...}],
+       "effort":..}}
+<- {"id":3,"result":{"turn":{"id":"turn-..."}}}
+<- turn/started, item/started, item/agentMessage/delta, item/completed,
+   thread/tokenUsage/updated, ...
+<- {"method":"turn/completed","params":{"turn":{"status":"completed",..}}}
+-> EOF on stdin; app-server exits
+#+end_example
+
+The request ids are fixed (1, 2, 3, then 4 onwards for steers), and the
+turn id a steer names is codex's own, taken from the =turn/start= answer
+or =turn/started=, whichever comes first.
+
+*** A steer
+
+#+begin_example
+-> {"id":4,"method":"turn/steer","params":{"threadId":"thr-...",
+       "expectedTurnId":"turn-...","input":[{"type":"text","text":..}]}}
+#+end_example
+
+| What happened                                                   | Result          |
+|-----------------------------------------------------------------+-----------------|
+| a =result= (={"turnId":..}=)                                    | =DELIVERED=     |
+| error "no active turn to steer" (=NoActiveTurn=, and the other  | =REFUSED=,      |
+| reasons codex folds into it)                                    | =NO_ACTIVE_TURN= |
+| error "expected active turn id `x` but found `y`"               | =REFUSED=,      |
+| (=ExpectedTurnMismatch=)                                        | =TURN_MISMATCH= |
+| any other error from validation (-32600: a review or compact    | =REFUSED=,      |
+| turn, empty input, a draining server; -32601 from an older      | =NOT_STEERABLE= |
+| app-server without =turn/steer=)                                |                 |
+| internal error (-32603, "failed to steer turn: ...")            | =INDETERMINATE= |
+| written, and no answer within =steer-timeout-ms= (10 s)         | =INDETERMINATE= |
+| written, and the run ended before the answer                    | =INDETERMINATE= |
+| before codex named its turn (handshake still running)           | =REFUSED=,      |
+|                                                                 | =NOT_STEERABLE= |
+| after =turn/completed=                                          | =REFUSED=,      |
+|                                                                 | =NO_ACTIVE_TURN= |
+
+A =REFUSED= after the request went out is still provably not delivered:
+in =turn_processor.rs= every error path returns before, or instead of,
+submitting the input; success is answered only for
+=SteerSubmission::Steered=. The internal error is the exception, because
+it comes from the core call itself, so it is =INDETERMINATE=.
+
+*** Everything else the transport does
+
+- *Text streams.* =item/agentMessage/delta= becomes =AI_EVENT_TEXT_DELTA=
+  as it arrives (exec only has whole messages); the completed item adds
+  the full text to the response without repeating the deltas. Reasoning
+  deltas become =AI_EVENT_THINKING_DELTA=.
+- *Tools* keep exec's names (=command_execution=, =file_change=,
+  =mcp_tool_call=, =web_search=, plus =dynamic_tool_call=), so the view
+  layer styles both transports alike. The tool input is the
+  =ThreadItem= as codex sent it (camelCase keys).
+- *Usage* is the sum of the turn's =thread/tokenUsage/updated= =last=
+  figures, priced as exec's.
+- *Failure* is =turn/completed= with status =failed= (or =interrupted=).
+  The =TurnError= message goes through the same phrase table as exec's
+  =turn.failed=, so a usage limit is =AI_ERROR_SESSION_LIMIT= with the
+  same notice; when the words match nothing but =codexErrorInfo= says
+  =usageLimitExceeded=, =rateLimitExceeded=, =unauthorized= or a retry
+  limit on HTTP 429, that decides. A refused =thread/start= or
+  =turn/start= fails the run with codex's words.
+- *Approvals* are answered as exec's flags decide them. The thread runs
+  with =approvalPolicy= =never= (exec's =--ask-for-approval never=), so
+  codex should not ask; if it does, a command or file change is
+  =decline=d (=denied= on the legacy methods), or =accept=ed
+  (=approved=) under =skip-permissions=, whose thread also runs
+  =danger-full-access= (exec's bypass flag). Extra permissions are never
+  granted; an MCP elicitation is declined; any other server request
+  (user input, dynamic tools, token refresh, attestation) gets a
+  JSON-RPC error so codex never waits on it. Each answered approval is
+  also an =AI_EVENT_STATUS=.
+- *Configuration* without a request field goes in root =-c= overrides
+  before =app-server=: granted MCP servers, =web_search="live"= for
+  =search=, and =sandbox_workspace_write.writable_roots= for
+  =additional-directories= (made absolute against the working
+  directory). =profile= is refused before launch, because codex rejects
+  =--profile= for app-server.
+- *Resume* is =thread/resume= by session id. =continue-session= without a
+  session id has no app-server form (exec's =resume --last=) and starts a
+  new thread.
+- *Every entry point* runs the protocol: =ai_streamable_chat_stream_async()=,
+  =ai_provider_chat_async()=, and =ai_cli_client_chat_sync()= (on a
+  private main context). All three are steerable, unlike claude-code,
+  whose one-shot paths close stdin with the prompt.
 
 * For a CLI wrapper: implementing a seam
 
 The shared stream reader in =AiCliClient= does the plumbing. Re-implement
 =AiSteerable= in the subclass with =can_steer= %TRUE and, per instance,
 call =ai_cli_steer_set_open_input()= (claude-code does it from its
-=steerable= property); from then on =ai_cli_client_stream_run_async()=
+=steerable= property, codex from its =transport=); from then on =ai_cli_client_stream_run_async()=
 keeps that client's stdin open: the
 prompt goes in first, behind it whatever is steered, and the pipe
 belongs to an =AiCliSteerChannel= (=src/core/ai-cli-steer-private.h=).
@@ -305,6 +448,13 @@ The subclass supplies three things:
    says the turn is over. *This is mandatory*: it is what closes stdin,
    and a CLI waiting for EOF never exits without it. The process
    deadline (=process-timeout-ms=) is the only backstop.
+
+A protocol that needs more than one write -- codex's JSON-RPC handshake
+-- writes its own lines with =ai_cli_steer_channel_write()= from the
+parser, and keeps per-run state on the channel
+(=ai_cli_steer_channel_set_data()=), so the handshake and the steers
+share one ordered pipe. A class whose instances differ in whether they
+can steer sets =is_steerable= next to =can_steer= %TRUE.
 
 The channel keeps the tri-state rule for every implementation: queued
 and not started is =REFUSED= at settle or run end; on the wire or
@@ -343,9 +493,20 @@ on_steered (GObject *source, GAsyncResult *result, gpointer user_data)
 #+end_src
 
 - Set =steerable= on the =AiClaudeCodeClient= when the session is built.
+- For codex, set =transport= to ="app-server"= on the =AiCodexCliClient=
+  (=g_object_set (client, "transport", "app-server", NULL)= or
+  =ai_codex_cli_client_set_transport (client,
+  AI_CODEX_CLI_TRANSPORT_APP_SERVER)=) when the session is built; that
+  alone makes =ai_steerable_can_steer()= %TRUE. Keep
+  =session-persistence= on and =session-id= set as today: the thread id
+  is resumed with =thread/resume=. Do not set =profile= (refused on
+  app-server). Optionally tune =steer-timeout-ms= (default 10000).
+  Unverified against a real codex until
+  =examples/steer-codex-app-server= has passed (see above).
 - Only a *streamed* claude-code turn is steerable. A session that runs
   its turns through =ai_cli_client_chat_sync()= has nothing to steer; it
   must take the =AiStreamable= path for any session that may be steered.
+  (codex on app-server is steerable on every path.)
 - =turn_id= is =ai_steerable_dup_turn_id()= taken when the turn started;
   =NULL= is fine when the session runs one turn at a time.
 - Call from the main thread; the stream on the worker thread's private

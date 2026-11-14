@@ -32,7 +32,10 @@
  *   running them twice is worse than running them late.
  *
  * Whether a class can steer at all is a class datum,
- * #AiSteerableInterface.can_steer, so a caller asks one probe client:
+ * #AiSteerableInterface.can_steer, so a caller asks one probe client
+ * configured the way the real one will be (a class whose instances
+ * differ -- #AiCodexCliClient, by transport -- answers per instance
+ * through #AiSteerableInterface.is_steerable):
  *
  * |[<!-- language="C" -->
  * if (AI_IS_STEERABLE (client) &&
@@ -157,20 +160,29 @@ ai_steerable_default_init(AiSteerableInterface *iface)
  * ai_steerable_can_steer:
  * @self: an #AiSteerable
  *
- * Whether this client's class can put words into a running turn at all.
+ * Whether this client can put words into a running turn at all.
  *
- * This is a property of the class, not of the moment: %TRUE does not
- * mean a turn is running now, only that a running turn of this kind can
- * be steered.  A steer can still be refused.
+ * This is a property of the class -- and, for a class that sets
+ * #AiSteerableInterface.is_steerable, of how this instance is
+ * configured -- not of the moment: %TRUE does not mean a turn is running
+ * now, only that a running turn of this kind can be steered.  A steer
+ * can still be refused.
  *
- * Returns: %TRUE when the class can steer
+ * Returns: %TRUE when the client can steer
  */
 gboolean
 ai_steerable_can_steer(AiSteerable *self)
 {
+    AiSteerableInterface *iface;
+
     g_return_val_if_fail(AI_IS_STEERABLE(self), FALSE);
 
-    return AI_STEERABLE_GET_IFACE(self)->can_steer;
+    iface = AI_STEERABLE_GET_IFACE(self);
+    if (!iface->can_steer)
+        return FALSE;
+
+    /* The class can; ask the instance only when the class says it may differ. */
+    return iface->is_steerable == NULL || iface->is_steerable(self);
 }
 
 /**
@@ -195,7 +207,7 @@ ai_steerable_dup_turn_id(AiSteerable *self)
     g_return_val_if_fail(AI_IS_STEERABLE(self), NULL);
 
     iface = AI_STEERABLE_GET_IFACE(self);
-    if (!iface->can_steer || iface->dup_turn_id == NULL)
+    if (!ai_steerable_can_steer(self) || iface->dup_turn_id == NULL)
         return NULL;
 
     return iface->dup_turn_id(self);
@@ -240,7 +252,7 @@ ai_steerable_steer_async(
      * its own -- implementing the interface with can_steer FALSE is the
      * whole job.  The task's source tag is what steer_finish recognises.
      */
-    if (!iface->can_steer || iface->steer_async == NULL ||
+    if (!ai_steerable_can_steer(self) || iface->steer_async == NULL ||
         iface->steer_finish == NULL)
     {
         g_autoptr(GTask) task = g_task_new(self, cancellable, callback, user_data);

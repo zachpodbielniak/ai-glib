@@ -17,10 +17,24 @@ G_DECLARE_FINAL_TYPE(AiCodexCliClient, ai_codex_cli_client, AI, CODEX_CLI_CLIENT
 #define AI_CODEX_CLI_MODEL_GPT_5_4_MINI "gpt-5.4-mini"
 #define AI_CODEX_CLI_MODEL_GPT_5_3_CODEX_SPARK "gpt-5.3-codex-spark"
 #define AI_CODEX_CLI_DEFAULT_MODEL AI_CODEX_CLI_MODEL_GPT_6_ASTRA
+/**
+ * AI_CODEX_CLI_TRANSPORT_EXEC:
+ *
+ * The default #AiCodexCliClient:transport: `codex exec --json`.
+ */
+#define AI_CODEX_CLI_TRANSPORT_EXEC "exec"
+/**
+ * AI_CODEX_CLI_TRANSPORT_APP_SERVER:
+ *
+ * The steerable #AiCodexCliClient:transport: `codex app-server`.
+ */
+#define AI_CODEX_CLI_TRANSPORT_APP_SERVER "app-server"
 AiCodexCliClient *ai_codex_cli_client_new(void);
 AiCodexCliClient *ai_codex_cli_client_new_with_config(AiConfig *config);
 const gchar *ai_codex_cli_client_get_sandbox(AiCodexCliClient *self);
 void ai_codex_cli_client_set_sandbox(AiCodexCliClient *self, const gchar *sandbox);
 gboolean ai_codex_cli_client_get_skip_permissions(AiCodexCliClient *self);
 void ai_codex_cli_client_set_skip_permissions(AiCodexCliClient *self, gboolean skip);
+const gchar *ai_codex_cli_client_get_transport(AiCodexCliClient *self);
+void ai_codex_cli_client_set_transport(AiCodexCliClient *self, const gchar *transport);
 G_END_DECLS

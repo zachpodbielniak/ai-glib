@@ -847,8 +847,11 @@ See `docs/events.org`.
 is already running. Every client implements it (CLI wrappers via
 `AiCliClient`, HTTP clients via `AiClient`) and so does `AiToolExecutor`;
 `can_steer` is a class datum in the interface struct, so callers ask a
-probe client. Today TRUE for `claude-code` (streamed turns), `claude-tmux`
-and `AiToolExecutor`; FALSE for everything else, codex included.
+probe client. Today TRUE for `claude-code` (streamed turns), `claude-tmux`,
+`AiToolExecutor` and codex on its `app-server` transport; FALSE for
+everything else. Codex is the one class that answers per instance: it sets
+`can_steer` TRUE plus the `is_steerable` vfunc (TRUE only when
+`transport` is `app-server`), so a codex probe must carry the transport.
 
 Rules that are load-bearing, each with a test in `tests/test-steerable.c`:
 
@@ -878,6 +881,15 @@ Rules that are load-bearing, each with a test in `tests/test-steerable.c`:
 Claude Code's seam was verified with a control run against the installed
 CLI (stream-json in, `--replay-user-messages` echoes the caller's
 `uuid`); `--help` alone is not evidence. See `docs/steering.org`.
+
+Codex's app-server transport (`AiCodexCliClient:transport` =
+`app-server`) was built from openai/codex `rust-v0.169.0`'s published
+protocol and has run only against `tests/fixtures/fake-codex-app-server.bash`
+(`tests/test-codex-app-server.c`); `examples/steer-codex-app-server.c` is
+the check against a real codex. Keep the request ids fixed (initialize 1,
+thread 2, turn/start 3, steers 4+): the fake's scripts depend on them. A
+`turn/steer` JSON-RPC error is REFUSED except -32603 (INDETERMINATE);
+cite the protocol source in a comment when changing any of it.
 
 ## View layer (`src/view/`)
 

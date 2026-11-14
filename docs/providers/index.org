@@ -20,6 +20,7 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 | [[file:grok-build.org][Grok Build]]              | =AiGrokBuildClient=  | =GROK_PATH= (optional)        | grok-4.7                           |
 | [[file:antigravity.org][Antigravity]]            | =AiAntigravityClient= | =AGY_PATH= (optional)        | gemini-3.7-flash-high              |
 | [[file:cursor.org][Cursor]]                  | =AiCursorClient=      | =CURSOR_AGENT_PATH= / =CURSOR_PATH= | auto                          |
+| [[file:codex-cli.org][Codex CLI]]                | =AiCodexCliClient=    | =CODEX_PATH= (optional)       | gpt-6-astra                        |
 
 The two Claude Code variants drive the same =claude= CLI but differ in billing path: =AiClaudeCodeClient= uses =claude --print= (Agent SDK credits), while =AiClaudeTmuxClient= runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [[file:claude-code-tmux.org]] for details.
 
@@ -147,6 +148,16 @@ A wrapped CLI reports a usage limit, a 429 and an expired login as the same fail
 | antigravity | No             | Not verified                                                                                  |
 
 Re-check a CLI against its current release before changing its answer.
+
+*** Steering a running turn (=AiSteerable=)
+Every client is an =AiSteerable=; =ai_steerable_can_steer()= says whether words can be put into a turn that is already running. See [[file:../steering.org][Steering]].
+
+| Client       | Can steer                              | Seam                                                        |
+|--------------+----------------------------------------+-------------------------------------------------------------|
+| claude-code  | Yes (=steerable= property, streamed)   | a stream-json user event on the open stdin                  |
+| claude-tmux  | Yes                                    | a line typed into the busy TUI                              |
+| codex        | Only with =transport= =app-server=     | =turn/steer= on =codex app-server=; built from the protocol source, not yet run against a real codex |
+| others       | No                                     | queue for the next turn; HTTP clients steer through =AiToolExecutor= |
 
 *** Redirects and credentials
 No HTTP request that carries a credential follows a redirect, not even to its own origin. libsoup keeps custom headers such as =x-api-key= across a redirect and resends the body of a 307 or 308, so following one would replay the key, and the prompt, to a path nobody configured. A request without credentials follows a redirect only when it stays on the same scheme, host and port.

@@ -1376,8 +1376,17 @@ ai_cli_client_resolve_executable(
     return NULL;
 }
 
-static AiResponse *
-cli_client_chat_sync_run(
+/*
+ * ai_cli_client_chat_sync_pipeline:
+ *
+ * The default synchronous argv/spawn/parse pipeline, without the
+ * chat_sync override check.  Private (ai-cli-client-private.h) so that a
+ * subclass whose chat_sync only sometimes differs -- AiCodexCliClient,
+ * whose exec transport is this pipeline and whose app-server transport
+ * is not -- can fall back to it.
+ */
+AiResponse *
+ai_cli_client_chat_sync_pipeline(
     AiCliClient   *self,
     GList         *messages,
     GCancellable  *cancellable,
@@ -1398,16 +1407,6 @@ cli_client_chat_sync_run(
 
     klass = AI_CLI_CLIENT_GET_CLASS(self);
     priv = ai_cli_client_get_instance_private(self);
-
-    /*
-     * If a subclass installs its own chat_sync, defer to it entirely.
-     * Used by AiClaudeTmuxClient whose flow (tmux + Stop hook) bears
-     * no resemblance to the default argv/spawn/parse pipeline.
-     */
-    if (klass->chat_sync != NULL)
-    {
-        return klass->chat_sync(self, messages, cancellable, error);
-    }
 
     g_return_val_if_fail(klass->build_argv != NULL, NULL);
     g_return_val_if_fail(klass->parse_json_output != NULL, NULL);
@@ -1538,6 +1537,29 @@ cli_client_chat_sync_run(
 
     response = klass->parse_json_output(self, stdout_data, error);
     return response;
+}
+
+static AiResponse *
+cli_client_chat_sync_run(
+    AiCliClient   *self,
+    GList         *messages,
+    GCancellable  *cancellable,
+    GError       **error
+){
+    AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(self);
+
+    /*
+     * If a subclass installs its own chat_sync, defer to it entirely.
+     * Used by AiClaudeTmuxClient whose flow (tmux + Stop hook) bears
+     * no resemblance to the default argv/spawn/parse pipeline.
+     */
+    if (klass->chat_sync != NULL)
+    {
+        return klass->chat_sync(self, messages, cancellable, error);
+    }
+
+    return ai_cli_client_chat_sync_pipeline(self, messages, cancellable,
+                                            error);
 }
 
 /**
