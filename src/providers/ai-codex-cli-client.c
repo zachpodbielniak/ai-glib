@@ -9,6 +9,7 @@
 #include "model/ai-image-content.h"
 #include "providers/ai-codex-cli-client.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"
@@ -779,6 +780,52 @@ static const gchar * const endpoint_kinds[] = {
 };
 
 /*
+ * What codex prints when it is limited, throttled or signed out, and what
+ * each means.  Read out of codex-cli 0.163.0-alpha.10.2 (the binary's
+ * strings; the Display impls of CodexErr in codex-rs core/src/error.rs and
+ * the login/token-refresh messages in codex-rs login), and reaching us as
+ * the message of a turn.failed or error event, or on stderr:
+ *
+ *   "You've hit your usage limit. ... Try again at 3:45 PM."
+ *   "You've hit your usage limit. ... Try again at Sep 5th, 2025 3:45 PM."
+ *   "You've hit your usage limit for <model>. Switch to another model now,
+ *    or try again at ..."                  (UsageLimitReachedError)
+ *   "Quota exceeded. Check your plan and billing details."  (QuotaExceeded)
+ *   "To use Codex with your ChatGPT plan, upgrade to Plus: ..."
+ *                                           (UsageNotIncluded)
+ *   "exceeded retry limit, last status: 429 Too Many Requests, request id: ..."
+ *                                           (RetryLimit)
+ *   "Your access token could not be refreshed because your refresh token
+ *    has expired. Please log out and sign in again."  (RefreshTokenFailed)
+ *   "no Codex credentials were found" / "Run codex login or provide an API
+ *    key through a supported auth env var."  / "Not logged in"
+ *
+ * The usage-limit text's reset ("Try again at 3:45 PM", local time, or a
+ * dated "Sep 5th, 2025 3:45 PM") is read by ai_session_limit_parse_reset().
+ * The snake_case codes are the API's error types, which codex passes
+ * through when it forwards a response body whole.
+ */
+static const AiCliLimitPattern codex_limit_patterns[] = {
+    { AI_ERROR_SESSION_LIMIT, "hit your usage limit" },
+    { AI_ERROR_SESSION_LIMIT, "usage_limit_reached" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "quota exceeded" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "insufficient_quota" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "to use codex with your chatgpt plan" },
+    { AI_ERROR_RATE_LIMITED, "too many requests" },
+    { AI_ERROR_RATE_LIMITED, "rate limit" },
+    { AI_ERROR_RATE_LIMITED, "rate_limit_exceeded" },
+    { AI_ERROR_INVALID_API_KEY, "sign in again" },
+    { AI_ERROR_INVALID_API_KEY, "access token could not be refreshed" },
+    { AI_ERROR_INVALID_API_KEY, "no codex credentials were found" },
+    { AI_ERROR_INVALID_API_KEY, "codex login" },
+    { AI_ERROR_INVALID_API_KEY, "not logged in" },
+    { AI_ERROR_INVALID_API_KEY, "401 unauthorized" },
+    { AI_ERROR_INVALID_API_KEY, "invalid_api_key" },
+    { AI_ERROR_INVALID_API_KEY, "incorrect api key" },
+    { 0, NULL }
+};
+
+/*
  * codex keeps auth.json, config.toml and its sessions under CODEX_HOME.
  */
 static const gchar * const codex_config_dir_env[] = { "CODEX_HOME", NULL };
@@ -795,6 +842,7 @@ ai_codex_cli_client_class_init(AiCodexCliClientClass *klass)
     cli->endpoint_applied = endpoint_applied;
     cli->endpoint_kinds = endpoint_kinds;
     cli->config_dir_env = codex_config_dir_env;
+    ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "codex", codex_limit_patterns);
     cli->get_executable_path = get_executable;
     cli->build_argv = build_argv;
     cli->build_stdin = build_stdin;
@@ -844,7 +892,11 @@ chat_finish(AiProvider *p, GAsyncResult *result, GError **error)
     g_autoptr(AiResponse) response = ai_cli_client_stream_run_finish(AI_CLI_CLIENT(p), result, error);
     if (response != NULL && ai_response_get_stop_reason(response) != AI_STOP_REASON_END_TURN)
     {
-        set_unfinished_error(AI_CODEX_CLI_CLIENT(p), error);
+        GError *local_error = NULL;
+
+        set_unfinished_error(AI_CODEX_CLI_CLIENT(p), &local_error);
+        ai_cli_limit_reclassify(AI_CLI_CLIENT(p), &local_error);
+        g_propagate_error(error, local_error);
         return NULL;
     }
     return g_steal_pointer(&response);

@@ -793,7 +793,6 @@ test_stderr_only_with_nonzero_exit(void)
 	Stub *stub = stub_new();
 	g_autoptr(TestCli) client = NULL;
 	Run *run;
-	g_autofree gchar *text = NULL;
 
 	stub_set(stub, "stderr", "something went wrong\n");
 	stub_set(stub, "exit", "1");
@@ -802,14 +801,16 @@ test_stderr_only_with_nonzero_exit(void)
 	run = stream_once(client, NULL);
 
 	/*
-	 * Nothing arrived on stdout, so the reader completes with an empty
-	 * response rather than inventing an error it cannot describe. The
-	 * caller sees an empty answer; the synchronous path is the one that
-	 * reports exit status.
+	 * Nothing arrived on stdout, the process failed, and stderr says why:
+	 * that is an error, and stderr describes it.  Completing with an
+	 * empty answer here is how cursor-agent's sign-out, rate limit and
+	 * usage limit -- all reported this way, with no JSON at all -- read
+	 * as a successful turn that said nothing.  An answer on stdout still
+	 * wins over the exit status (the test above).
 	 */
-	g_assert_no_error(run->error);
-	text = ai_response_get_text(run->response);
-	g_assert_null(text);
+	g_assert_error(run->error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	g_assert_nonnull(strstr(run->error->message, "something went wrong"));
+	g_assert_null(run->response);
 
 	run_free(run);
 	stub_free(stub);

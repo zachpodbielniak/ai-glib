@@ -474,7 +474,8 @@ test_sync_error_payload_with_nonzero_exit(void)
 	                               NULL, &error);
 
 	g_assert_null(resp);
-	g_assert_error(error, AI_ERROR, AI_ERROR_CLI_EXECUTION);
+	/* grok's own words name a rate limit, so that is the code. */
+	g_assert_error(error, AI_ERROR, AI_ERROR_RATE_LIMITED);
 	g_assert_nonnull(strstr(error->message, "rate limit exceeded"));
 	/* Not the raw payload, and not a bare status line. */
 	g_assert_null(strstr(error->message, "\"type\""));

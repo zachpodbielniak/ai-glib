@@ -23,6 +23,7 @@
 #include "providers/ai-cursor-client.h"
 #include "providers/ai-cursor-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -1259,6 +1260,51 @@ ai_cursor_client_finalize(GObject *object)
 	G_OBJECT_CLASS(ai_cursor_client_parent_class)->finalize(object);
 }
 
+/*
+ * What the Cursor agent CLI prints when it is limited, throttled or signed
+ * out.  It writes failures to stderr and exits 1 (cursor.com/docs/cli/
+ * reference/output-format: "No well-formed JSON object is emitted in
+ * failure cases").  Client-side text is from the CLI's own bundle
+ * (agent-cli-package 2026.11.13-eacade1); the usage-limit text is the
+ * server's, quoted at forum.cursor.com/t/cursor-agent-cli-limit-hit/128577:
+ *
+ *   "Error: You've hit your usage limit"  (with a curly apostrophe)
+ *   "Your usage limits will reset when your monthly cycle ends on ..."
+ *   "RetriableError: [resource_exhausted] Error"  (HTTP 429)
+ *   "We've hit a rate limit with the provider. ..."
+ *   server codes PRO_USER_USAGE_LIMIT, FREE_USER_RATE_LIMIT_EXCEEDED,
+ *   USAGE_PRICING_REQUIRED, NOT_LOGGED_IN, AUTH_TOKEN_EXPIRED, BAD_API_KEY
+ *   "Error: Authentication required. Please run 'agent login' first, or
+ *    set CURSOR_API_KEY environment variable."
+ *   "Your stored authentication is invalid. Please log in again."
+ *   "The provided API key is invalid."   "Not authenticated"
+ *
+ * Cursor states no retry time it would be useful to read: its monthly
+ * reset is a date with no time, so a usage limit is reported with no
+ * reset rather than a guessed one.
+ */
+static const AiCliLimitPattern cursor_limit_patterns[] = {
+    { AI_ERROR_SESSION_LIMIT, "hit your usage limit" },
+    { AI_ERROR_SESSION_LIMIT, "usage limits will reset" },
+    { AI_ERROR_SESSION_LIMIT, "user_usage_limit" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "usage_pricing_required" },
+    { AI_ERROR_RATE_LIMITED, "resource_exhausted" },
+    { AI_ERROR_RATE_LIMITED, "rate_limit" },
+    { AI_ERROR_RATE_LIMITED, "hit a rate limit" },
+    { AI_ERROR_RATE_LIMITED, "too many requests" },
+    { AI_ERROR_INVALID_API_KEY, "authentication required" },
+    { AI_ERROR_INVALID_API_KEY, "authentication is invalid" },
+    { AI_ERROR_INVALID_API_KEY, "api key is invalid" },
+    { AI_ERROR_INVALID_API_KEY, "not authenticated" },
+    { AI_ERROR_INVALID_API_KEY, "sign in required" },
+    { AI_ERROR_INVALID_API_KEY, "not_logged_in" },
+    { AI_ERROR_INVALID_API_KEY, "auth_token_expired" },
+    { AI_ERROR_INVALID_API_KEY, "auth_token_not_found" },
+    { AI_ERROR_INVALID_API_KEY, "bad_api_key" },
+    { AI_ERROR_INVALID_API_KEY, "bad_user_api_key" },
+    { 0, NULL }
+};
+
 static void
 ai_cursor_client_class_init(AiCursorClientClass *klass)
 {
@@ -1270,6 +1316,7 @@ ai_cursor_client_class_init(AiCursorClientClass *klass)
 	object_class->set_property = ai_cursor_client_set_property;
 
 	cli_class->get_executable_path = ai_cursor_client_get_executable_path;
+	ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "cursor", cursor_limit_patterns);
 	cli_class->spawn               = ai_cursor_client_spawn;
 	cli_class->build_argv          = ai_cursor_client_build_argv;
 	cli_class->build_stdin         = ai_cursor_client_build_stdin;
@@ -1784,8 +1831,17 @@ ai_cursor_client_chat_finish(
 	GAsyncResult  *result,
 	GError       **error
 ){
-	(void)provider;
-	return g_task_propagate_pointer(G_TASK(result), error);
+	GError *local_error = NULL;
+	AiResponse *response;
+
+	response = g_task_propagate_pointer(G_TASK(result), &local_error);
+	if (response == NULL)
+	{
+		/* A usage limit, a 429 or a lapsed login, by the CLI's own words. */
+		ai_cli_limit_reclassify(AI_CLI_CLIENT(provider), &local_error);
+		g_propagate_error(error, local_error);
+	}
+	return response;
 }
 
 static void

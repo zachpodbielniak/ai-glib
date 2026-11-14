@@ -657,6 +657,19 @@ rebuilt by the base revoking and re-applying the endpoint around the change.
 claude-tmux is the trap: its claude is the shared tmux server's child, so
 client variables reach it only through `tmux new-session -e`.
 
+### Usage limits, rate limits and sign-out (`ai-cli-limit-private.h`)
+
+A CLI provider other than claude-code registers a phrase table from its
+`class_init` with `ai_cli_limit_register()`; the base reclassifies
+`AI_ERROR_CLI_EXECUTION`/`CLI_PARSE_ERROR` in `ai_cli_client_chat_sync()` and
+`ai_cli_client_stream_run_finish()`, and each provider's own `chat_finish`
+calls `ai_cli_limit_reclassify()`. Tables are ordered (session limit before
+the rate-limit words its text also contains), and every phrase cites where it
+came from (the CLI's source or binary, or a forum quote when the text is the
+server's). A session limit uses claude-code's shape: format sentence, notice,
+then the CLI's words. Tests: `tests/test-cli-limit.c`, with captured samples
+and one fake subprocess per CLI on the chat, stream and sync paths.
+
 ### Redirects (`ai-http-redirect-private.h`)
 
 A request carrying a credential never follows a redirect. Guard every new

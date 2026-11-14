@@ -12,6 +12,7 @@
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-opencode-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -1236,6 +1237,53 @@ ai_opencode_client_endpoint_applied(
  */
 static const gchar * const opencode_config_dir_env[] = { "XDG_CONFIG_HOME=config", "XDG_DATA_HOME=data", "XDG_STATE_HOME=state", NULL };
 
+/*
+ * What opencode prints when it is limited, throttled or signed out.  From
+ * opencode's source: v1.19.5 packages/opencode/src/session/retry.ts
+ * (Go-plan and free-tier limits, the retryable rate-limit texts),
+ * provider/error.ts (quota, plan, 401) and session/message-v2.ts
+ * (ProviderAuthError); and the v2 rewrite's
+ * packages/core/src/session/to-session-error.ts, whose error types
+ * ("provider.rate-limit", "provider.auth", "provider.quota", ...) appear in
+ * the serialised error object when there is no message to read:
+ *
+ *   "Usage limit reached. It will reset in 3 hours 20 minutes. ..."
+ *   "Free usage exceeded, subscribe to Go"   "Free limit reached"
+ *   "Workspace usage limit reached. Model use is paused until the limit
+ *    resets."  "ChatGPT usage limit reached. ..."
+ *   "You've reached the spend limit for this model. ..."
+ *   "Quota exceeded. Check your plan and billing details."
+ *   "Too Many Requests"  (and "rate limit", "rate_limit", "rate-limit")
+ *   "ProviderAuthError: ..."  "Unauthorized: request was blocked by a
+ *    gateway or proxy. ... try running `opencode auth login ...`"
+ *   "This ChatGPT connection is no longer valid. Reconnect to ChatGPT."
+ */
+static const AiCliLimitPattern opencode_limit_patterns[] = {
+    { AI_ERROR_SESSION_LIMIT, "usage limit reached" },
+    { AI_ERROR_SESSION_LIMIT, "free usage exceeded" },
+    { AI_ERROR_SESSION_LIMIT, "free limit reached" },
+    { AI_ERROR_SESSION_LIMIT, "provider.free-limit" },
+    { AI_ERROR_SESSION_LIMIT, "provider.go-limit" },
+    { AI_ERROR_SESSION_LIMIT, "provider.chatgpt-limit" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "spend limit" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "budget-limit" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "quota exceeded" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "insufficient_quota" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "provider.quota" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "to use codex with your chatgpt plan" },
+    { AI_ERROR_RATE_LIMITED, "too many requests" },
+    { AI_ERROR_RATE_LIMITED, "rate limit" },
+    { AI_ERROR_RATE_LIMITED, "rate_limit" },
+    { AI_ERROR_RATE_LIMITED, "rate-limit" },
+    { AI_ERROR_INVALID_API_KEY, "providerautherror" },
+    { AI_ERROR_INVALID_API_KEY, "provider.auth" },
+    { AI_ERROR_INVALID_API_KEY, "opencode auth login" },
+    { AI_ERROR_INVALID_API_KEY, "unauthorized" },
+    { AI_ERROR_INVALID_API_KEY, "connection is no longer valid" },
+    { AI_ERROR_INVALID_API_KEY, "check credentials" },
+    { 0, NULL }
+};
+
 static void
 ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
 {
@@ -1248,6 +1296,7 @@ ai_opencode_client_class_init(AiOpenCodeClientClass *klass)
 
     /* Override virtual methods */
     cli_class->get_executable_path = ai_opencode_client_get_executable_path;
+    ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "opencode", opencode_limit_patterns);
     cli_class->endpoint_applied = ai_opencode_client_endpoint_applied;
     cli_class->endpoint_kinds = opencode_endpoint_kinds;
     cli_class->config_dir_env = opencode_config_dir_env;
@@ -2037,8 +2086,17 @@ ai_opencode_client_chat_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)provider;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    GError *local_error = NULL;
+    AiResponse *response;
+
+    response = g_task_propagate_pointer(G_TASK(result), &local_error);
+    if (response == NULL)
+    {
+        /* A usage limit, a 429 or a lapsed login, by the CLI's own words. */
+        ai_cli_limit_reclassify(AI_CLI_CLIENT(provider), &local_error);
+        g_propagate_error(error, local_error);
+    }
+    return response;
 }
 
 /* Models belong to the installed CLI and its configured providers. Static

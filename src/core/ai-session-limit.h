@@ -75,6 +75,21 @@ gboolean ai_session_limit_looks_synthetic(const gchar *model,
  * limit as though it had no reset at all, which is what a refusal here
  * would mean downstream.
  *
+ * The other CLIs say the same thing other ways, and each is read too:
+ *
+ * - a clock with no zone after "try again at" ("Try again at 3:45 PM.",
+ *   codex), read in the local zone as the next occurrence;
+ * - a dated time after "try again at" ("Try again at Sep 5th, 2025
+ *   3:45 PM.", codex), used as written;
+ * - a duration after "try again in", "resets in", "reset after",
+ *   "retry in" or "retrying in" ("try again in 3h 20m", "3 days 2 hours
+ *   5 minutes", "3h20m5s", "23.5s"), counted from @now;
+ * - a Retry-After value ("retry after 30 seconds", "Retry-After: 120"),
+ *   where a bare number is seconds.
+ *
+ * Phrases match without regard to case.  A phrase with no number after
+ * it ("try again later") is not a reset.
+ *
  * Returns: %TRUE if a reset time was found and @reset_out was set
  */
 gboolean ai_session_limit_parse_reset(const gchar *text,
