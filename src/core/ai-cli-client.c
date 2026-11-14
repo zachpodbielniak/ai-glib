@@ -1862,6 +1862,28 @@ ai_cli_client_supports_config_dir(AiCliClient *self)
 }
 
 /**
+ * ai_cli_client_searches_tools:
+ * @self: an #AiCliClient
+ *
+ * Whether this CLI looks its MCP tools up itself as it needs them, rather
+ * than loading every tool's schema into the model's context up front.
+ *
+ * A class datum (#AiCliClientClass.searches_tools), so a probe client
+ * built only to ask -- never run -- answers for every client of its
+ * class.  Claude Code and claude-tmux (the same binary) do; grok-build
+ * exposes MCP tools only through its own search_tool and use_tool.
+ *
+ * Returns: %TRUE when the CLI searches tools itself
+ */
+gboolean
+ai_cli_client_searches_tools(AiCliClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
+
+    return AI_CLI_CLIENT_GET_CLASS(self)->searches_tools;
+}
+
+/**
  * ai_cli_client_set_config_dir:
  * @self: an #AiCliClient
  * @config_dir: (nullable): the directory holding this account's login and

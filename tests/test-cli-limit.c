@@ -403,6 +403,47 @@ static void test_run_chat(gconstpointer data) { run_one(data, RUN_CHAT); }
 static void test_run_stream(gconstpointer data) { run_one(data, RUN_STREAM); }
 static void test_run_sync(gconstpointer data) { run_one(data, RUN_SYNC); }
 
+/* ------------------------------------------------------------------ */
+/* searches_tools                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A class datum, read from a probe that is never run.  Claude Code and
+ * claude-tmux are the same binary with the same tool search; grok-build
+ * reaches MCP tools only through search_tool/use_tool.  The rest load
+ * every schema up front until shown otherwise.
+ */
+static void
+test_searches_tools(void)
+{
+	struct {
+		AiCliClient *client;
+		gboolean     searches;
+	} cases[7];
+	guint i;
+
+	cases[0].client = AI_CLI_CLIENT(ai_claude_code_client_new());
+	cases[0].searches = TRUE;
+	cases[1].client = AI_CLI_CLIENT(ai_claude_tmux_client_new());
+	cases[1].searches = TRUE;
+	cases[2].client = AI_CLI_CLIENT(ai_grok_build_client_new());
+	cases[2].searches = TRUE;
+	cases[3].client = AI_CLI_CLIENT(ai_codex_cli_client_new());
+	cases[3].searches = FALSE;
+	cases[4].client = AI_CLI_CLIENT(ai_opencode_client_new());
+	cases[4].searches = FALSE;
+	cases[5].client = AI_CLI_CLIENT(ai_cursor_client_new());
+	cases[5].searches = FALSE;
+	cases[6].client = AI_CLI_CLIENT(ai_antigravity_client_new());
+	cases[6].searches = FALSE;
+
+	for (i = 0; i < G_N_ELEMENTS(cases); i++) {
+		g_assert_cmpint(ai_cli_client_searches_tools(cases[i].client), ==,
+		                cases[i].searches);
+		g_object_unref(cases[i].client);
+	}
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -416,6 +457,7 @@ main(int argc, char *argv[])
 	g_test_add_func("/cli-limit/other-codes", test_other_codes_are_untouched);
 	g_test_add_func("/cli-limit/unregistered", test_unregistered_cli_is_untouched);
 	g_test_add_func("/cli-limit/session-limit-shape", test_session_limit_shape);
+	g_test_add_func("/cli-limit/searches-tools", test_searches_tools);
 
 	for (i = 0; i < G_N_ELEMENTS(runs); i++) {
 		g_autofree gchar *chat = g_strdup_printf("/cli-limit/run/%s/chat",

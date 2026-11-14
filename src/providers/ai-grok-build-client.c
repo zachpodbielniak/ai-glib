@@ -1539,6 +1539,12 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
     cli_class->endpoint_kinds      = grok_build_endpoint_kinds;
     cli_class->config_dir_env = grok_build_config_dir_env;
     ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "grok", grok_build_limit_patterns);
+    /*
+     * grok exposes MCP tools to its model only through two meta-tools,
+     * search_tool and use_tool (its bundled MCP guide, "Tool Discovery",
+     * in grok 1.0.77), so it searches its catalogue itself.
+     */
+    cli_class->searches_tools = TRUE;
     cli_class->build_argv          = ai_grok_build_client_build_argv;
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;

@@ -657,6 +657,14 @@ rebuilt by the base revoking and re-applying the endpoint around the change.
 claude-tmux is the trap: its claude is the shared tmux server's child, so
 client variables reach it only through `tmux new-session -e`.
 
+### Tool search (`searches_tools`)
+
+`AiCliClientClass.searches_tools` is TRUE when the CLI looks MCP tools up
+itself (claude-code, claude-tmux, grok-build); `ai_cli_client_searches_tools()`
+reads it from a probe client. It occupies the LP64 padding after
+`check_exit_status`, so the class size is unchanged on 64-bit targets. Set it
+only after checking the CLI's current release; cite the evidence in a comment.
+
 ### Usage limits, rate limits and sign-out (`ai-cli-limit-private.h`)
 
 A CLI provider other than claude-code registers a phrase table from its
