@@ -1,0 +1,49 @@
+* AiSteerable
+=AiSteerable= is the GInterface for putting words into a turn that is
+already running. Every client implements it -- each CLI wrapper through
+=AiCliClient=, each HTTP client through =AiClient= -- and so does
+=AiToolExecutor=. Which of them can actually steer is a class datum,
+=can_steer=. See [[file:../steering.org][Steering]] for the contract and the per-engine behaviour.
+
+** Interface
+#+begin_src C
+struct _AiSteerableInterface
+{
+    GTypeInterface parent_iface;
+
+    gboolean can_steer;
+
+    gchar *       (*dup_turn_id)  (AiSteerable *self);
+    void          (*steer_async)  (AiSteerable *self, const gchar *turn_id,
+                                   const gchar *text, GCancellable *cancellable,
+                                   GAsyncReadyCallback callback, gpointer user_data);
+    AiSteerResult (*steer_finish) (AiSteerable *self, GAsyncResult *result,
+                                   GError **error);
+
+    gpointer _reserved[8];
+};
+#+end_src
+
+A class with =can_steer= %FALSE needs no vfuncs: =ai_steerable_steer_async()=
+refuses for it with =AI_STEER_ERROR_NOT_SUPPORTED=.
+
+** Functions
+| Function                       | Returns                    | Notes                                              |
+|--------------------------------+----------------------------+----------------------------------------------------|
+| =ai_steerable_can_steer()=     | =gboolean=                 | the class datum; a probe client answers it         |
+| =ai_steerable_dup_turn_id()=   | =gchar *= (transfer full)  | the running turn's handle, or %NULL                |
+| =ai_steerable_steer_async()=   | --                         | any thread; =turn_id= nullable                     |
+| =ai_steerable_steer_finish()=  | =AiSteerResult=            | =GError= set exactly when the result is =REFUSED=  |
+| =ai_steer_result_to_string()=  | =const gchar *=            | ="refused"=, ="delivered"=, ="indeterminate"=      |
+
+** AiSteerResult
+| Value                    | Caller may queue again |
+|--------------------------+------------------------|
+| =AI_STEER_REFUSED= (0)   | yes                    |
+| =AI_STEER_DELIVERED=     | no                     |
+| =AI_STEER_INDETERMINATE= | no -- counts as delivered |
+
+** AiSteerError (=AI_STEER_ERROR=)
+=NOT_SUPPORTED=, =NO_ACTIVE_TURN=, =TURN_MISMATCH=, =AMBIGUOUS=,
+=NOT_STEERABLE=, =SEND_FAILED=, =CANCELLED=. Every code means the words
+were not delivered.

@@ -11,6 +11,7 @@
 
 #include "core/ai-cli-client.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-steer-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event-source.h"
 #include "core/ai-subprocess-util.h"
@@ -262,12 +263,15 @@ typedef struct
  */
 static void ai_cli_client_endpoint_consumer_init(
     AiToolEndpointConsumerInterface *iface);
+static void ai_cli_client_steerable_init(AiSteerableInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiCliClient, ai_cli_client, G_TYPE_OBJECT,
                         G_ADD_PRIVATE(AiCliClient)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_TOOL_ENDPOINT_CONSUMER,
-                                              ai_cli_client_endpoint_consumer_init))
+                                              ai_cli_client_endpoint_consumer_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_STEERABLE,
+                                              ai_cli_client_steerable_init))
 
 void
 ai_cli_client_mark_portable_context(AiCliClient *self)
@@ -2038,6 +2042,39 @@ ai_cli_client_endpoint_consumer_init(AiToolEndpointConsumerInterface *iface)
     iface->get_endpoint        = ai_cli_client_endpoint_get;
 }
 
+static gchar *
+ai_cli_client_steer_dup_turn_id(AiSteerable *steerable)
+{
+    return ai_cli_steer_dup_turn_id(AI_CLI_CLIENT(steerable));
+}
+
+static AiSteerResult
+ai_cli_client_steer_finish(
+    AiSteerable   *steerable,
+    GAsyncResult  *result,
+    GError       **error
+){
+    return ai_cli_steer_finish(AI_CLI_CLIENT(steerable), result, error);
+}
+
+/*
+ * Every CLI wrapper is an AiSteerable, so a caller can ask any of them.
+ * The base says no: can_steer stays FALSE and no steer_async is set, and
+ * ai_steerable_steer_async() refuses on that alone.  A wrapper whose CLI
+ * accepts input mid-turn implements the interface again with can_steer
+ * TRUE and a steer_async of its own -- and from then on the shared
+ * stream reader keeps that class's stdin open for the whole turn (see
+ * ai-cli-steer-private.h).
+ */
+static void
+ai_cli_client_steerable_init(AiSteerableInterface *iface)
+{
+    iface->can_steer    = FALSE;
+    iface->dup_turn_id  = ai_cli_client_steer_dup_turn_id;
+    iface->steer_async  = NULL;
+    iface->steer_finish = ai_cli_client_steer_finish;
+}
+
 /**
  * ai_cli_client_events_to_delta:
  * @events: (nullable) (element-type AiEvent): events from one parsed line
@@ -2305,6 +2342,13 @@ typedef struct
 
     gchar            *stdin_data;
     GSource          *timeout_source;   /* owned; NULL when none is armed */
+
+    /*
+     * Set when the class can steer: stdin stays open after the prompt and
+     * the channel owns it.  See ai-cli-steer-private.h.
+     */
+    gboolean           steerable;
+    AiCliSteerChannel *steer;
 } StreamRun;
 
 static void stream_run_read_next(StreamRun *run);
@@ -2374,6 +2418,7 @@ stream_run_free(StreamRun *run)
     g_clear_object(&run->cancellable);
     g_clear_object(&run->response);
     g_clear_pointer(&run->stdin_data, g_free);
+    g_clear_pointer(&run->steer, ai_cli_steer_channel_unref);
 
     if (run->accumulated_text != NULL)
     {
@@ -2418,6 +2463,11 @@ stream_run_finish_once(
     }
 
     run->finished = TRUE;
+
+    /* Whatever was steered in and never answered is answered now. */
+    if (run->steer != NULL)
+        ai_cli_steer_channel_end(run->steer);
+
     if (error != NULL)
     {
         g_cancellable_cancel(run->io_cancellable);
@@ -2593,6 +2643,7 @@ on_stream_line_read(
                        GPtrArray *, GError **);
     gsize length;
     guint i;
+    gboolean ok;
 
     (void)source;
 
@@ -2639,7 +2690,12 @@ on_stream_line_read(
         ? klass->parse_stream_events
         : ai_cli_client_real_parse_stream_events;
 
-    if (!parse(run->client, line, run->response, events, &error))
+    /* A steerable parser finds its run's channel through this. */
+    ai_cli_steer_set_current(run->steer);
+    ok = parse(run->client, line, run->response, events, &error);
+    ai_cli_steer_set_current(NULL);
+
+    if (!ok)
     {
         /*
          * The CLI reported an error mid-stream. Fail rather than reading on
@@ -2736,6 +2792,14 @@ stream_run_maybe_complete(StreamRun *run)
     stream_run_complete(run);
 }
 static void stream_run_write_stdin(StreamRun *run);
+
+/* The steer channel could not write the prompt: fail as the plain writer does. */
+static void
+on_steer_input_failed(GError *error, gpointer data)
+{
+    stream_run_finish_once((StreamRun *)data, NULL, error);
+}
+
 static void
 on_stream_stdin(GObject *source, GAsyncResult *result, gpointer data)
 {
@@ -2833,7 +2897,17 @@ stream_run_start(StreamRun *run)
     run->wait_pending = TRUE;
     g_subprocess_wait_async(run->subprocess, run->io_cancellable, on_stream_wait, run);
     stdin_stream = g_subprocess_get_stdin_pipe(run->subprocess);
-    if (stdin_stream != NULL)
+    if (stdin_stream != NULL && run->steerable)
+    {
+        /*
+         * Steerable: the channel writes the prompt and keeps the pipe
+         * open behind it, and the parser closes it at the end of the turn.
+         */
+        run->steer = ai_cli_steer_channel_new(run->client, stdin_stream,
+                                              run->stdin_data,
+                                              on_steer_input_failed, run);
+    }
+    else if (stdin_stream != NULL)
     {
         stream_run_write_stdin(run);
     }
@@ -2967,6 +3041,7 @@ ai_cli_client_stream_run_async(
                                                g_object_ref(run->io_cancellable), g_object_unref);
     run->stdin_data = stdin_data;   /* ownership transferred */
     run->stdin_length = stdin_data != NULL ? strlen(stdin_data) : 0;
+    run->steerable = stdin_data != NULL && ai_cli_steer_wants_open_input(self);
 
     stream_run_start(run);
 }
@@ -3025,6 +3100,14 @@ ai_cli_client_messages_for_images(AiCliClient *self, GList *messages)
 gchar *
 ai_cli_image_user_event(GList *messages, const gchar *text)
 {
+	return ai_cli_user_event(messages, text, NULL);
+}
+
+/* The same event with a caller-chosen "uuid", which claude echoes back on
+ * the --replay-user-messages acknowledgement; NULL leaves it out. */
+gchar *
+ai_cli_user_event(GList *messages, const gchar *text, const gchar *uuid)
+{
 	g_autoptr(JsonBuilder) builder = json_builder_new();
 	g_autoptr(JsonNode) root = NULL;
 	g_autofree gchar *json = NULL;
@@ -3034,6 +3117,11 @@ ai_cli_image_user_event(GList *messages, const gchar *text)
 	json_builder_begin_object(builder);
 	json_builder_set_member_name(builder, "type");
 	json_builder_add_string_value(builder, "user");
+	if (uuid != NULL)
+	{
+		json_builder_set_member_name(builder, "uuid");
+		json_builder_add_string_value(builder, uuid);
+	}
 	json_builder_set_member_name(builder, "message");
 	json_builder_begin_object(builder);
 	json_builder_set_member_name(builder, "role");

@@ -811,6 +811,44 @@ Keep `parse_stream_line` as a projection of it via
 
 See `docs/events.org`.
 
+## Steering (`AiSteerable`)
+
+`AiSteerable` (`src/core/ai-steerable.{h,c}`) puts words into a turn that
+is already running. Every client implements it (CLI wrappers via
+`AiCliClient`, HTTP clients via `AiClient`) and so does `AiToolExecutor`;
+`can_steer` is a class datum in the interface struct, so callers ask a
+probe client. Today TRUE for `claude-code` (streamed turns), `claude-tmux`
+and `AiToolExecutor`; FALSE for everything else, codex included.
+
+Rules that are load-bearing, each with a test in `tests/test-steerable.c`:
+
+- **REFUSED means provably not delivered.** It is the only answer that
+  lets a caller queue the words again. Once any byte reached the engine
+  the answer is DELIVERED or INDETERMINATE, and INDETERMINATE counts as
+  delivered. A steer that is cancelled after sending is never a refusal
+  (`ai_steer_task_new()` turns off GTask's cancellable check for this).
+- **A steerable CLI client keeps stdin open for a streamed turn, and its
+  parser must close it.** `can_steer` TRUE on the class plus
+  `ai_cli_steer_set_open_input()` on the instance (claude-code's
+  `steerable` property, off by default because a test double that reads
+  stdin to EOF would hang) is what makes
+  `ai_cli_client_stream_run_async()` hand stdin to an `AiCliSteerChannel`
+  (`src/core/ai-cli-steer-private.h`); the parser calls
+  `ai_cli_steer_channel_settle()` on the end-of-turn line, or the CLI
+  waits for EOF until the process deadline. Acknowledgements go through
+  `ai_cli_steer_channel_resolve()`.
+- **The own loop splices only at the top of a round.** Steered words are
+  parked and go in through `run_context_splice_pending()`, after every
+  tool result of the batch, never between two. The brigade notice is the
+  other producer of the same queue.
+- **claude-tmux does not end a turn with a steered line still queued.**
+  It counts `queue-operation` enqueue against remove/dequeue past the
+  watermark when Stop fires, under the same lock a steer holds.
+
+Claude Code's seam was verified with a control run against the installed
+CLI (stream-json in, `--replay-user-messages` echoes the caller's
+`uuid`); `--help` alone is not evidence. See `docs/steering.org`.
+
 ## View layer (`src/view/`)
 
 A UI-agnostic model of a conversation, so grouping and summarising tool

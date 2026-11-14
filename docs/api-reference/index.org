@@ -19,6 +19,7 @@ Complete API documentation for ai-glib.
 | [[file:ai-provider.org][AiProvider]]              | Core provider interface                |
 | AiStreamable                                     | Streaming response interface           |
 | [[file:ai-event-source.org][AiEventSource]]       | Structured turn events, any provider   |
+| [[file:ai-steerable.org][AiSteerable]]           | Words into a running turn              |
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface             |
 | [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface                   |
 

@@ -60,6 +60,7 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/core/ai-config.h \
 	$(SRCDIR)/core/ai-provider.h \
 	$(SRCDIR)/core/ai-streamable.h \
+	$(SRCDIR)/core/ai-steerable.h \
 	$(SRCDIR)/core/ai-event.h \
 	$(SRCDIR)/core/ai-event-source.h \
 	$(SRCDIR)/core/ai-image-capabilities.h \
@@ -169,6 +170,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-config.c \
 	$(SRCDIR)/core/ai-provider.c \
 	$(SRCDIR)/core/ai-streamable.c \
+	$(SRCDIR)/core/ai-steerable.c \
 	$(SRCDIR)/core/ai-event.c \
 	$(SRCDIR)/core/ai-event-source.c \
 	$(SRCDIR)/core/ai-image-capabilities.c \
@@ -178,6 +180,7 @@ LIB_SOURCES = \
 	$(SRCDIR)/core/ai-client.c \
 	$(SRCDIR)/core/ai-subprocess-util.c \
 	$(SRCDIR)/core/ai-cli-client.c \
+	$(SRCDIR)/core/ai-cli-steer.c \
 	$(SRCDIR)/core/ai-cli-report.c \
 	$(SRCDIR)/core/ai-native-session.c \
 	$(SRCDIR)/core/ai-cli-report-native.c \

@@ -34,7 +34,8 @@ typedef struct
  */
 G_DEFINE_TYPE_WITH_CODE(AiClient, ai_client, G_TYPE_OBJECT,
                         G_ADD_PRIVATE(AiClient)
-                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL))
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE, NULL)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_STEERABLE, NULL))
 
 /*
  * Property IDs.

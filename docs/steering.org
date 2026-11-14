@@ -1,0 +1,352 @@
+#+TITLE: Steering: words into a running turn
+
+Without steering, a message for a turn that is running waits and becomes
+the next turn. Two costs follow. A correction ("stop, use the staging DB")
+arrives after the work it was meant to change has finished, and a
+follow-up costs a whole extra turn that rereads everything.
+
+=AiSteerable= hands the words to the turn that is running instead, at the
+next point the engine itself accepts input: before the next model call,
+or at the top of the next round of a tool loop. Nothing is killed,
+interrupted or restarted to make room for them.
+
+* The contract: a tri-state
+
+=ai_steerable_steer_finish()= returns one of three answers, and the third
+is the one that matters.
+
+| Result                   | Means                                                   | The caller may queue the words again |
+|--------------------------+---------------------------------------------------------+--------------------------------------|
+| =AI_STEER_REFUSED=       | Provably not delivered. A =GError= says why.            | yes                                  |
+| =AI_STEER_DELIVERED=     | The running turn took the words.                        | no                                   |
+| =AI_STEER_INDETERMINATE= | Sent, and nothing confirmed it: a wait ran out, or the  | no                                   |
+|                          | run ended while the answer was in flight.               |                                      |
+
+=AI_STEER_INDETERMINATE= counts as delivered. The words may already be
+running, and running them twice is the one mistake steering must never
+make. Every implementation keeps the same rule: a steer is =REFUSED= only
+while not one byte of it has reached the engine.
+
+=AI_STEER_REFUSED= is zero, so a zero-initialised result never reads as a
+delivery.
+
+** Refusals
+
+Every =AI_STEER_ERROR= code means the words were *not* delivered.
+
+| Code                             | When                                                         |
+|----------------------------------+--------------------------------------------------------------|
+| =AI_STEER_ERROR_NOT_SUPPORTED=   | the class cannot steer (=can_steer= is %FALSE)               |
+| =AI_STEER_ERROR_NO_ACTIVE_TURN=  | no turn is running, or it ended before the words were sent   |
+| =AI_STEER_ERROR_TURN_MISMATCH=   | the turn id the caller held is not the one running           |
+| =AI_STEER_ERROR_AMBIGUOUS=       | no turn id was given and more than one turn is running       |
+| =AI_STEER_ERROR_NOT_STEERABLE=   | a turn is running but cannot take input now                  |
+| =AI_STEER_ERROR_SEND_FAILED=     | the words could not be sent at all                           |
+| =AI_STEER_ERROR_CANCELLED=       | the caller cancelled before anything was sent                |
+
+* The API
+
+#+begin_src C
+/* Can this kind of client steer at all?  A class datum: ask a probe. */
+gboolean       ai_steerable_can_steer   (AiSteerable *self);
+
+/* The turn running now, as a handle to hold; NULL when none. */
+gchar         *ai_steerable_dup_turn_id (AiSteerable *self);
+
+void           ai_steerable_steer_async  (AiSteerable *self,
+                                          const gchar *turn_id,   /* nullable */
+                                          const gchar *text,
+                                          GCancellable *cancellable,
+                                          GAsyncReadyCallback callback,
+                                          gpointer user_data);
+AiSteerResult  ai_steerable_steer_finish (AiSteerable *self,
+                                          GAsyncResult *result,
+                                          GError **error);
+
+const gchar   *ai_steer_result_to_string (AiSteerResult result);
+          /* "refused" | "delivered" | "indeterminate" */
+#+end_src
+
+** Asking a probe client
+
+Whether a class can steer is =AiSteerableInterface.can_steer=, a class
+datum like =AiCliClientClass.config_dir_env=. Every client implements the
+interface -- each CLI wrapper through =AiCliClient=, each HTTP client
+through =AiClient= -- so a caller never keeps a table of providers:
+
+#+begin_src C
+if (AI_IS_STEERABLE (client) &&
+    ai_steerable_can_steer (AI_STEERABLE (client)))
+  ai_steerable_steer_async (AI_STEERABLE (client), NULL, text,
+                            NULL, on_steered, self);
+else
+  queue_for_next_turn (self, text);
+#+end_src
+
+A class with =can_steer= %FALSE answers every steer with =REFUSED= and
+=AI_STEER_ERROR_NOT_SUPPORTED= without its vfuncs being called, so
+implementing the interface with %FALSE is the whole job for a class that
+cannot steer.
+
+** The turn handle
+
+A steer targets a *running* turn. =ai_steerable_dup_turn_id()= names the
+one running now (the newest, if several are). The id is opaque and local
+to this process; it is not the engine's own turn id.
+
+Passing it back to =ai_steerable_steer_async()= makes the steer land in
+that turn or nowhere: if a different turn is running by then the answer
+is =REFUSED= with =AI_STEER_ERROR_TURN_MISMATCH=, never a delivery into
+the next turn. With =turn_id= %NULL the steer goes to whichever turn is
+running, and is refused as =AMBIGUOUS= when there is more than one.
+
+For a CLI client the id appears when the stream run starts -- inside
+=ai_streamable_chat_stream_async()=, before it returns -- and disappears
+when the run ends. For =AiToolExecutor= it appears when a run starts and
+disappears when it finishes.
+
+** Threads and cancellation
+
+=ai_steerable_steer_async()= may be called from any thread; the callback
+runs in the caller's thread-default main context. A steer for a stream
+running on a worker thread's private context -- libreclaw's shape -- hops
+onto that context to write, and the answer hops back.
+
+The cancellable is honoured only until the words are sent. After that a
+cancel cannot take them back, so the answer is whatever the engine says,
+and a steer cancelled late is never reported as a refusal.
+
+* Per engine
+
+| Client                | =can_steer= | Seam                                                       | Verified                     |
+|-----------------------+-------------+------------------------------------------------------------+------------------------------|
+| =AiClaudeCodeClient=  | TRUE        | a stream-json user event on the open stdin                 | claude 2.1.325, control run  |
+| =AiClaudeTmuxClient=  | TRUE        | a line typed into the TUI while it works                   | claude 2.1.325, control run  |
+| =AiToolExecutor=      | TRUE        | parked, spliced in at the top of the next round            | tests                        |
+| =AiCodexCliClient=    | FALSE       | (=codex app-server= =turn/steer=; not implemented yet)     | --                           |
+| opencode, grok-build, | FALSE       | none: queue only                                           | --                           |
+| antigravity, cursor   |             |                                                            |                              |
+| HTTP clients          | FALSE       | none on the client; steer the =AiToolExecutor= running it  | --                           |
+
+** Claude Code
+
+Steering is opt-in per client: set =AiClaudeCodeClient:steerable= to
+%TRUE. With it on, a *streamed* turn (=ai_streamable_chat_stream_async()=)
+runs
+
+#+begin_example
+claude --print --input-format stream-json --output-format stream-json \
+       --verbose --replay-user-messages ...
+#+end_example
+
+and writes the prompt as one JSON user event carrying a fresh ="uuid"=.
+stdin then stays open. A steer writes another user event with its own
+uuid. Claude takes it before its next model call and, because of
+=--replay-user-messages=, echoes it back on stdout with that uuid
+(="isReplay": true=) at the moment it takes it.
+
+| What happened                                         | Result          |
+|-------------------------------------------------------+-----------------|
+| the echo with the steer's uuid arrived                | =DELIVERED=     |
+| written, and the run ended with no echo               | =INDETERMINATE= |
+| a write error before any byte of it went in           | =REFUSED=       |
+| part of it written, then a write error                | =INDETERMINATE= |
+| the =result= line had already arrived                 | =REFUSED=       |
+
+The =result= line ends the turn: stdin closes as soon as no steer is
+still being written or waiting for its echo, and claude exits. A steer
+written but not yet echoed when =result= arrives is run by claude as a
+follow-on turn in the same process; stdin closes once its echo arrives,
+and the reader carries on to the follow-on turn's =result=. Echoes are
+never treated as model output.
+
+With =steerable= off (the default) a streamed turn is exactly what it was
+before -- the prompt as text on stdin, closed at once -- and a steer is
+refused with =AI_STEER_ERROR_NOT_STEERABLE=. It is opt-in because an open
+stdin changes what the child sees: a stand-in for claude that reads stdin
+to EOF before answering (the usual test double, ai-glib's own included)
+would wait forever. The class datum stays %TRUE: the class *can* steer.
+
+The one-shot paths (=ai_provider_chat_async()=, =ai_cli_client_chat_sync()=)
+close stdin with the prompt as before, so they have no turn to steer: a
+steer during one is refused as =NO_ACTIVE_TURN=.
+
+*** How this was verified
+
+=--help= is not the whole flag list (=--system-prompt-file= taught us
+that), so the flags were checked with a control experiment against the
+installed claude 2.1.325, using haiku and a turn that runs =sleep 12=:
+
+- Control: a prompt written as a stream-json user event, stdin left
+  open. One =result=; the process stays alive until stdin closes, then
+  exits.
+- Steer: a second user event written six seconds in, while the tool ran.
+  claude echoed it (=isReplay=) after the tool result and before the next
+  model call; one =result=, whose text obeyed the steered instruction.
+- Late: a user event written *after* =result=, stdin closed straight
+  after. claude ran it as a second turn with its own =result=, and echoed
+  the caller's uuid back unchanged.
+
+The same steer then ran end to end through =AiClaudeCodeClient=: steered
+when the tool started, answered =DELIVERED= when the echo came after the
+twelve-second tool, reply obeying it.
+
+** Claude Code in tmux
+
+=AiClaudeTmuxClient= drives the interactive TUI, and typing into the TUI
+while it works queues the line in Claude Code itself. A steer is a
+bracketed paste of a prompt file and an Enter, while the turn is busy --
+from the moment the turn's own prompt was accepted until the turn is
+judged over.
+
+The answer is read back the way the turn's own prompt is, from the
+transcript, and from the pane when the transcript cannot say:
+
+| What happened                                                  | Result          |
+|----------------------------------------------------------------+-----------------|
+| a =queue-operation= =enqueue= appeared in the transcript       | =DELIVERED=     |
+| the paste failed (the draft is then cleared)                   | =REFUSED=       |
+| after every Enter the line still sits in the draft box;        | =REFUSED=       |
+| it is cleared with =C-u= and was never submitted               |                 |
+| neither queued nor in the draft box                            | =INDETERMINATE= |
+
+claude logs the hand-over too: a =queue-operation= =remove= with reason
+=absorbed_mid_turn= when the running turn takes the line. That is what
+makes the end of a turn safe. When the Stop hook fires, the turn counts
+=enqueue= against =remove= / =dequeue= past its watermark; while a steered
+line is still queued, claude will run it the moment it stops, so the
+turn removes the sentinel and waits for the next Stop instead of killing
+the session. The decision is made under the same lock a steer holds for
+its whole length, so a steer cannot be typed between the reading and the
+closing.
+
+Verified against claude 2.1.325 in tmux the same way: a line pasted
+during =sleep 15= was logged =enqueue= at once and =remove=
+(=absorbed_mid_turn=) eleven seconds later, the pane showing "Press up
+to edit queued messages" in between; one Stop, the reply obeying the
+line. Through =AiClaudeTmuxClient= the steer answered =DELIVERED= within
+a second and the reply obeyed it.
+
+** ai-glib's own tool loop
+
+=AiToolExecutor= is itself an =AiSteerable=, and always can steer. This
+is how the HTTP providers -- whose clients cannot -- get steering at all:
+steer the executor running them.
+
+The words are parked on the run and spliced in at the *top of the next
+round*, as one user message after every tool result of the batch that
+just ran -- never between two of them, which would separate a tool call
+from its result -- and before the next request. The brigade's "background
+agent finished" notice is the other producer feeding the same splice;
+when both are pending they go in as one message, notice first.
+
+| What happened                                            | Result      |
+|----------------------------------------------------------+-------------|
+| spliced into the conversation                            | =DELIVERED= |
+| the run ended first (final answer at the turn limit, an  | =REFUSED=   |
+| error, a cancel)                                         |             |
+| no run in progress                                       | =REFUSED=   |
+
+A steer that arrives while the model writes what would have been its
+final answer makes that answer not final: the run goes round once more
+with the words, bounded by the turn limit like everything else.
+
+The answer comes at the splice, not when the words are parked, because
+until then the run might still end without them -- and then they are
+provably undelivered.
+
+When the executor runs a provider that can steer itself and a request is
+in flight, the words go straight into that request instead (a streamed
+claude-code turn under the executor); if the provider refuses, they are
+parked for the next round as usual.
+
+** Everything else
+
+Every other client says =can_steer= %FALSE. For ACP-style engines
+(opencode, grok-build, antigravity, cursor) that is the protocol, not an
+omission: a turn accepts no input but a cancel, and interrupting and
+re-prompting to fake a seam would break the "nothing is killed" rule.
+The caller queues the words for the next turn, as it always has.
+
+** codex: what remains
+
+=codex app-server= offers the seam -- =turn/steer= with the expected turn
+id, refused with =ExpectedTurnMismatch= or =NoActiveTurn= when the turn
+has moved on -- but it is a different transport from the =codex exec=
+JSONL that =AiCodexCliClient= drives today: JSON-RPC over stdio with an
+=initialize= / =thread/start= / =turn/start= handshake, approval requests
+the client must answer, and its own notification vocabulary to translate
+into =AiEvent=. No codex binary was available to verify any of that
+against, so =AiCodexCliClient= keeps =can_steer= %FALSE. The shared
+machinery below (=ai-cli-steer-private.h=) already has what it needs: the
+parser can write protocol lines to the open stdin, a steer can wait for
+an acknowledgement keyed by the JSON-RPC id with a timeout that answers
+=INDETERMINATE=, and a JSON-RPC error resolves it as =REFUSED=.
+
+* For a CLI wrapper: implementing a seam
+
+The shared stream reader in =AiCliClient= does the plumbing. Re-implement
+=AiSteerable= in the subclass with =can_steer= %TRUE and, per instance,
+call =ai_cli_steer_set_open_input()= (claude-code does it from its
+=steerable= property); from then on =ai_cli_client_stream_run_async()=
+keeps that client's stdin open: the
+prompt goes in first, behind it whatever is steered, and the pipe
+belongs to an =AiCliSteerChannel= (=src/core/ai-cli-steer-private.h=).
+
+The subclass supplies three things:
+
+1. =steer_async= calling =ai_cli_steer_async()= with a builder that turns
+   the words into the bytes the CLI reads, and optionally an
+   acknowledgement key the CLI will echo back.
+2. In =parse_stream_events=, =ai_cli_steer_channel_resolve()= when the
+   CLI acknowledges a key -- the channel of the line being parsed is
+   =ai_cli_steer_current()=.
+3. In =parse_stream_events=, =ai_cli_steer_channel_settle()= when the CLI
+   says the turn is over. *This is mandatory*: it is what closes stdin,
+   and a CLI waiting for EOF never exits without it. The process
+   deadline (=process-timeout-ms=) is the only backstop.
+
+The channel keeps the tri-state rule for every implementation: queued
+and not started is =REFUSED= at settle or run end; on the wire or
+awaiting an acknowledgement when the run ends is =INDETERMINATE=.
+
+Writing into a pipe the child has just closed raises =SIGPIPE=, whose
+default action kills the caller. The first steerable channel sets
+=SIGPIPE= to ignored if, and only if, nobody installed a handler --
+=ai-mcp-host.c= already does the same.
+
+* For libreclaw
+
+A message for an =LcSession= whose turn is running, with =steer: true=:
+
+#+begin_src C
+if (AI_IS_STEERABLE (client) &&
+    ai_steerable_can_steer (AI_STEERABLE (client)))
+  ai_steerable_steer_async (AI_STEERABLE (client), turn_id, text,
+                            NULL, on_steered, message);
+else
+  g_queue_push_tail (&self->pending, message);
+
+static void
+on_steered (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  g_autoptr(GError) error = NULL;
+  AiSteerResult outcome =
+      ai_steerable_steer_finish (AI_STEERABLE (source), result, &error);
+
+  if (outcome == AI_STEER_REFUSED)
+    push_onto_the_queue (user_data);         /* as today */
+  else
+    record_once_as_steered (user_data,        /* DELIVERED or INDETERMINATE */
+                            ai_steer_result_to_string (outcome));
+}
+#+end_src
+
+- Set =steerable= on the =AiClaudeCodeClient= when the session is built.
+- Only a *streamed* claude-code turn is steerable. A session that runs
+  its turns through =ai_cli_client_chat_sync()= has nothing to steer; it
+  must take the =AiStreamable= path for any session that may be steered.
+- =turn_id= is =ai_steerable_dup_turn_id()= taken when the turn started;
+  =NULL= is fine when the session runs one turn at a time.
+- Call from the main thread; the stream on the worker thread's private
+  context is reached safely, and the callback comes back to the caller.

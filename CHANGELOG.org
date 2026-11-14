@@ -4,6 +4,29 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* Unreleased
+
+** Added
+- =AiSteerable=: words into a running turn. =ai_steerable_can_steer()= is a
+  class datum every client answers; =ai_steerable_steer_async()= /
+  =_finish()= return =AI_STEER_DELIVERED=, =AI_STEER_REFUSED= (with an
+  =AI_STEER_ERROR=) or =AI_STEER_INDETERMINATE=, which counts as
+  delivered. =ai_steerable_dup_turn_id()= is the handle a caller holds so a
+  steer cannot land in a later turn. See =docs/steering.org=.
+- =AiClaudeCodeClient:steerable= (default off): a streamed turn takes its
+  prompt as a stream-json user event and keeps stdin open until the
+  =result= line, and a steer is another user event acknowledged by its
+  =--replay-user-messages= echo.
+- =AiClaudeTmuxClient= steers by typing into the busy TUI; a turn no longer
+  ends while a steered line is still queued in claude.
+- =AiToolExecutor= is steerable: words are spliced in at the top of the
+  next round, after the whole tool batch, alongside the background-agent
+  notice.
+
+** Changed
+- The first steerable stream ignores =SIGPIPE= when no handler is
+  installed, so a CLI that exits mid-steer cannot kill the caller.
+
 * 0.10.2 - 2026-11-07
 
 ** Fixed

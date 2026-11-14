@@ -11,6 +11,12 @@ ai -p codex-cli --continue "Summarize the changes"
 ai -p codex-cli --set session-id=THREAD_ID --sandbox workspace-write "Continue"
 #+end_src
 
+** Steering
+=AiCodexCliClient= is an =AiSteerable= with =can_steer= %FALSE: it drives
+=codex exec=, which takes no input mid-turn. The seam codex offers is
+=turn/steer= on =codex app-server=, a different transport that is not
+implemented yet. See [[file:../steering.org][Steering]], "codex: what remains".
+
 ** Models
 The built-in list returned by =ai_provider_list_models_async()= contains
 the models supplied for this provider:
