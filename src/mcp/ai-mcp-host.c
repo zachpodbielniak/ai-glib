@@ -754,7 +754,10 @@ merge_caller_config(GObject *provider, const gchar *kind, const gchar *generated
 
 	if (g_str_equal(kind, AI_ENDPOINT_KIND_MCP_CONFIG))
 	{
-		g_object_get(provider, "mcp-config-path", &path, NULL);
+		/* Only claude-code and claude-tmux carry a caller's own file; an ACP
+		 * agent takes the same dialect and has none. */
+		if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "mcp-config-path") != NULL)
+			g_object_get(provider, "mcp-config-path", &path, NULL);
 		section = "mcpServers";
 	}
 	else if (g_str_equal(kind, AI_ENDPOINT_KIND_MCP_CONFIG_OPENCODE))

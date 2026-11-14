@@ -42,6 +42,7 @@ That is the whole integration. Swap =ai_claude_code_client_new()= for
 | =antigravity=   | yes  | yes      | yes        | ---       | yes         | yes   | ---  |
 | =cursor=        | yes  | ---      | yes        | ---       | yes         | yes   | ---  |
 | =codex-cli=     | yes  | yes      | yes        | ---       | yes         | yes   | yes  |
+| =acp=           | yes  | yes      | yes        | ---       | yes         | when sent | when sent |
 | =claude-tmux=   | ---  | ---      | ---        | ---       | ---         | ---   | ---  |
 
 Three things that table is really saying:

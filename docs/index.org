@@ -24,6 +24,7 @@ ai-glib provides a unified interface to multiple AI providers through a GObject-
 | [[file:providers/antigravity.org][Antigravity]]      | Google's =agy= coding agent CLI (headless)     | gemini-3.7-flash-high              |
 | [[file:providers/cursor.org][Cursor]]            | Cursor's =cursor-agent= CLI (headless)         | auto                               |
 | [[file:providers/codex-cli.org][Codex CLI]] | OpenAI =codex exec= CLI (headless) | gpt-6-astra |
+| [[file:providers/acp.org][ACP agent]] | Any Agent Client Protocol agent (JSON-RPC over stdio) | default (the agent's own) |
 
 The two Claude Code providers also accept =ollama/<model>= model ids, which
 route the turn through =ollama launch claude= (the Ollama-as-transport mode);

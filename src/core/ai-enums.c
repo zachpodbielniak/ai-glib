@@ -36,6 +36,7 @@ ai_provider_type_get_type(void)
             { AI_PROVIDER_CODEX_CLI, "AI_PROVIDER_CODEX_CLI", "codex-cli" },
             { AI_PROVIDER_CURSOR, "AI_PROVIDER_CURSOR", "cursor" },
             { AI_PROVIDER_OPENAI_COMPATIBLE, "AI_PROVIDER_OPENAI_COMPATIBLE", "openai-compatible" },
+            { AI_PROVIDER_ACP, "AI_PROVIDER_ACP", "acp" },
             { 0, NULL, NULL }
         };
 
@@ -305,6 +306,8 @@ ai_provider_type_to_string(AiProviderType provider)
             return "codex-cli";
         case AI_PROVIDER_CURSOR:
             return "cursor";
+        case AI_PROVIDER_ACP:
+            return "acp";
         default:
             return "unknown";
     }
@@ -335,6 +338,12 @@ ai_provider_type_from_string(const gchar *str)
              g_ascii_strcasecmp(str, "codex") == 0)
     {
         return AI_PROVIDER_CODEX_CLI;
+    }
+    else if (g_ascii_strcasecmp(str, "acp") == 0 ||
+             g_ascii_strcasecmp(str, "acp-agent") == 0 ||
+             g_ascii_strcasecmp(str, "acp_agent") == 0)
+    {
+        return AI_PROVIDER_ACP;
     }
     else if (g_ascii_strcasecmp(str, "openai-compatible") == 0 ||
              g_ascii_strcasecmp(str, "http") == 0)

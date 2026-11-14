@@ -227,7 +227,8 @@ ai-glib/
 │       ├── ai-grok-client.h/.c
 │       ├── ai-ollama-client.h/.c
 │       ├── ai-antigravity-client.h/.c
-│       └── ai-cursor-client.h/.c
+│       ├── ai-cursor-client.h/.c
+│       └── ai-acp-client.h/.c   # any Agent Client Protocol agent
 ├── tests/                     # GTest unit tests
 ├── bin/                       # Installable CLI binaries
 │   ├── ai.c                   # `ai` command-line front-end
@@ -264,6 +265,7 @@ ai-glib/
 | Grok Build | `GROK_PATH` (override `grok` path) |
 | Antigravity | `AGY_PATH` (override `agy` path) |
 | Cursor | `CURSOR_AGENT_PATH` then `CURSOR_PATH` (override `cursor-agent` path), `CURSOR_API_KEY` (optional) |
+| ACP agent | `AI_ACP_COMMAND` (the agent command line when `AiAcpClient:command` is unset) |
 | ai-tui | `VISUAL` then `EDITOR` for `^G`; both parsed as command lines |
 | Self-update | `AI_GLIB_SOURCE_DIR` (checkout), `AI_GLIB_NO_UPDATE_CHECK` (no background check), `AI_GLIB_UPDATE_MAKE` (make program) |
 
@@ -460,6 +462,51 @@ Inspect the command with `ai -p cursor --dry-run "hi"`.
 
 Tests: `tests/test-cursor-client.c` and
 `tests/test-cursor-subprocess.c`, same split as grok-build.
+
+## ACP agents (`acp`)
+
+`AiAcpClient` (`src/providers/ai-acp-client.{h,c}`) runs any program that
+speaks the Agent Client Protocol (agentclientprotocol.com, protocol
+version 1: JSON-RPC 2.0 over stdio, one object per line). The command line
+is the `command` property (shell-style split, no shell), else
+`$AI_ACP_COMMAND`. One process per turn: `initialize` (id 1),
+`session/new` or `session/load` (id 2; a refused load falls back to
+`session/new`, id 4), `session/prompt` (id 3), whose result *is* the end
+of the turn. Keep the ids fixed: the fake agent's scripts depend on them.
+See `docs/providers/acp.org`.
+
+Load-bearing rules, each with a test in `tests/test-acp-client.c`:
+
+- **Every agent request is answered**, or the agent waits for ever.
+  Permissions by option `kind` (allow under `skip-permissions`, reject
+  otherwise, once before always), never by position; `cancelled` when no
+  option fits or after `session/cancel`. Unoffered methods get -32601.
+- **Capabilities are a security decision.** `terminal` is never offered;
+  `fs.readTextFile` with `client-fs`; `fs.writeTextFile` only with
+  `client-fs` *and* `skip-permissions`, because an fs/ write is not
+  preceded by a permission request. Every path goes through
+  `acp_confine()`: absolute, `..` folded, deepest existing part realpath'd,
+  must stay under realpath(cwd). Do not add a file method that skips it.
+- **The caller's cancellable never reaches the subprocess.** The run owns
+  a `kill` cancellable; a cancel becomes `session/cancel` plus
+  `shutdown-timeout-ms` of grace (an immediate kill before the prompt is
+  sent). After the prompt's answer stdin closes and the same grace bounds
+  the exit; the response is complete at that point and survives the kill.
+  Timers are held `GSource`s on the run's context.
+- **The response is assembled by the parser** (text blocks split at tool
+  calls), not by the shared reader's accumulator, precisely so it
+  survives the post-answer kill.
+- **Updates count only between the prompt and its answer**, and only for
+  this session: a `session/load` replays history as updates first.
+- **Errors go through `acp_limit_patterns`** (generic wording, cited) and
+  -32000 is always `AI_ERROR_INVALID_API_KEY`; the JSON-RPC `data` detail
+  is part of the text.
+- **`can_steer` and `searches_tools` are FALSE.** ACP v1 has no mid-turn
+  input. stdin is opened with `ai_cli_steer_set_protocol_input()`.
+
+Tests drive `tests/fixtures/fake-acp-agent.bash` (ShellCheck-clean, same
+script player as the codex fake plus `stderr`, `cwd.log`). It has never run
+against a real agent here.
 
 ## CLI binary (`ai`)
 
@@ -890,6 +937,12 @@ the check against a real codex. Keep the request ids fixed (initialize 1,
 thread 2, turn/start 3, steers 4+): the fake's scripts depend on them. A
 `turn/steer` JSON-RPC error is REFUSED except -32603 (INDETERMINATE);
 cite the protocol source in a comment when changing any of it.
+
+ACP agents (`AiAcpClient`) answer `can_steer` FALSE but still keep stdin
+open: `ai_cli_steer_set_protocol_input()` makes the stream run hand stdin
+to an `AiCliSteerChannel` for a request/response protocol, without making
+the client steerable. `ai_steerable_steer_async()` refuses such a client
+before the channel is reached, so only the parser writes to it.
 
 ## View layer (`src/view/`)
 

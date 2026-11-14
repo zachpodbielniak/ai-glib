@@ -27,6 +27,7 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-cursor-client.h"
+#include "providers/ai-acp-client.h"
 #include "providers/ai-codex-cli-client.h"
 
 #include "convenience/ai-simple.h"
@@ -139,6 +140,12 @@ ai_simple_create_provider(
 
     case AI_PROVIDER_CODEX_CLI:
         provider = G_OBJECT(ai_codex_cli_client_new_with_config(config));
+        if (model != NULL)
+            ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
+        break;
+
+    case AI_PROVIDER_ACP:
+        provider = G_OBJECT(ai_acp_client_new_with_config(config));
         if (model != NULL)
             ai_cli_client_set_model(AI_CLI_CLIENT(provider), model);
         break;

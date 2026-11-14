@@ -158,11 +158,16 @@ steer_ignore_sigpipe(void)
 }
 
 #define STEER_OPEN_INPUT_KEY "ai-cli-steer-open-input"
+#define STEER_PROTOCOL_INPUT_KEY "ai-cli-steer-protocol-input"
 
 gboolean
 ai_cli_steer_wants_open_input(AiCliClient *client)
 {
     g_return_val_if_fail(AI_IS_CLI_CLIENT(client), FALSE);
+
+    /* A request/response protocol on stdin needs it open, steerable or not. */
+    if (g_object_get_data(G_OBJECT(client), STEER_PROTOCOL_INPUT_KEY) != NULL)
+        return TRUE;
 
     return AI_IS_STEERABLE(client) &&
            ai_steerable_can_steer(AI_STEERABLE(client)) &&
@@ -176,6 +181,15 @@ ai_cli_steer_set_open_input(AiCliClient *client, gboolean open_input)
 
     g_object_set_data(G_OBJECT(client), STEER_OPEN_INPUT_KEY,
                       open_input ? GINT_TO_POINTER(1) : NULL);
+}
+
+void
+ai_cli_steer_set_protocol_input(AiCliClient *client, gboolean protocol)
+{
+    g_return_if_fail(AI_IS_CLI_CLIENT(client));
+
+    g_object_set_data(G_OBJECT(client), STEER_PROTOCOL_INPUT_KEY,
+                      protocol ? GINT_TO_POINTER(1) : NULL);
 }
 
 static void

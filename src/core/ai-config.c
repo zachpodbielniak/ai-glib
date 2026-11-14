@@ -1231,6 +1231,8 @@ static const struct {
     { "codex-cli",   AI_PROVIDER_CODEX_CLI },
     { "codex",       AI_PROVIDER_CODEX_CLI },
     { "cursor",      AI_PROVIDER_CURSOR },
+    { "acp",         AI_PROVIDER_ACP },
+    { "acp_agent",   AI_PROVIDER_ACP },
     { NULL,          0 }
 };
 

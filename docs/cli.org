@@ -273,6 +273,7 @@ Providers:
   antigravity    CLI
   cursor         CLI
   codex-cli      CLI
+  acp            CLI   (agent command: --set command="..." or AI_ACP_COMMAND)
 #+end_example
 
 A one-shot chat (HTTP provider):

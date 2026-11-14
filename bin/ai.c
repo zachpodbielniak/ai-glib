@@ -132,7 +132,7 @@ static const GOptionEntry option_entries[] = {
 	  "Maximum historical periods (1..1000; default 20)", "N" },
 	{ "provider", 'p', 0, G_OPTION_ARG_STRING, &opt_provider,
 	  "Provider: claude, openai, gemini, grok, ollama, claude-code, "
-	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli "
+	  "claude-tmux, opencode, grok-build, antigravity (agy), cursor, codex-cli, acp "
 	  "(omitted/default: saved ai defaults)", "NAME" },
 	{ "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
 	  "Model id (omitted/default: matching ai saved model, else native). For claude-code/claude-tmux, "
@@ -500,6 +500,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	case AI_PROVIDER_CURSOR:
 		provider = G_OBJECT(ai_cursor_client_new_with_config(config));
 		break;
+	case AI_PROVIDER_ACP:
+		provider = G_OBJECT(ai_acp_client_new_with_config(config));
+		break;
 	default:
 		return NULL;
 	}
@@ -553,6 +556,9 @@ make_provider(AiConfig *config, AiProviderType ptype)
 	else if (AI_IS_CURSOR_CLIENT(provider))
 		ai_cursor_client_set_skip_permissions(
 			AI_CURSOR_CLIENT(provider), opt_skip_perms);
+	else if (AI_IS_ACP_CLIENT(provider))
+		ai_acp_client_set_skip_permissions(
+			AI_ACP_CLIENT(provider), opt_skip_perms);
 
 	/*
 	 * --continue. Every CLI provider spells this the same way as a
@@ -589,7 +595,8 @@ list_providers(void)
 		AI_PROVIDER_GROK, AI_PROVIDER_OLLAMA, AI_PROVIDER_CLAUDE_CODE,
 		AI_PROVIDER_CLAUDE_TMUX, AI_PROVIDER_OPENCODE,
 		AI_PROVIDER_GROK_BUILD, AI_PROVIDER_ANTIGRAVITY,
-		AI_PROVIDER_CURSOR, AI_PROVIDER_CODEX_CLI, AI_PROVIDER_OPENAI_COMPATIBLE
+		AI_PROVIDER_CURSOR, AI_PROVIDER_CODEX_CLI, AI_PROVIDER_OPENAI_COMPATIBLE,
+		AI_PROVIDER_ACP
 	};
 	gsize i;
 
@@ -613,6 +620,10 @@ list_providers(void)
 		case AI_PROVIDER_CODEX_CLI:
 		case AI_PROVIDER_CURSOR:
 			kind = "CLI";
+			break;
+		case AI_PROVIDER_ACP:
+			kind = "CLI";
+			note = "  (agent command: --set command=\"...\" or AI_ACP_COMMAND)";
 			break;
 		default:
 			kind = "HTTP";
@@ -693,6 +704,14 @@ dry_run(GObject *provider, AiProviderType ptype, GList *messages)
 			argv = klass->build_argv(AI_CLI_CLIENT(provider), messages,
 			                         opt_system, opt_max_tokens,
 			                         opt_stream);
+			if (argv == NULL)
+			{
+				/* A provider that fails closed (acp without a command,
+				 * an invalid codex policy) builds no argv at all. */
+				g_printerr("error: %s cannot build a command line with these "
+				           "settings\n", ai_provider_type_to_string(ptype));
+				return 1;
+			}
 			exe = ai_cli_client_resolve_executable(
 				AI_CLI_CLIENT(provider), &error);
 			if (exe != NULL)

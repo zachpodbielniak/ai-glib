@@ -1,0 +1,121 @@
+* ACP agent (Agent Client Protocol)
+=AiAcpClient= turns any program that speaks the [[https://agentclientprotocol.com][Agent Client Protocol]] over stdio into an ai-glib provider. You name its command line; ai-glib starts it for each turn, speaks ACP v1 (JSON-RPC 2.0, one object per line) on its stdin and stdout, and translates what it says into the same =AiResponse= and =AiEvent= stream every other provider produces. Select it with =acp= (aliases =acp-agent=, =acp_agent=). The agent must be signed in already: ai-glib never runs ACP's =authenticate=.
+
+#+begin_src sh
+AI_ACP_COMMAND="gemini --experimental-acp" ai -p acp --stream "Explain this project"
+ai -p acp --set command="my-agent acp" --skip-permissions "Fix the failing test"
+ai -p acp --set command="npx -y some-agent --stdio" --dry-run "hi"
+#+end_src
+
+#+begin_src c
+const gchar *argv[] = { "my-agent", "acp", NULL };
+g_autoptr(AiAcpClient) agent = ai_acp_client_new_for_command(argv);
+
+ai_cli_client_set_working_directory(AI_CLI_CLIENT(agent), "/path/to/project");
+ai_acp_client_set_skip_permissions(agent, TRUE);
+/* then ai_provider_chat_async(), ai_streamable_chat_stream_async() or ai_cli_client_chat_sync() */
+#+end_src
+
+** Protocol version and sources
+- *Version:* ACP major version =1= (=AI_ACP_PROTOCOL_VERSION=), the current version on agentclientprotocol.com. ai-glib sends it in =initialize=; an agent that answers with another version is refused before a session opens ("the ACP agent speaks protocol version N; ai-glib speaks 1"), which is what the negotiation rules ask of a client that does not support the agent's choice.
+- *Written from:* the published v1 protocol pages -- Overview, Initialization, Session Setup, Prompt Turn, Content, Tool Calls, File System and the Schema (=ErrorCode=, =StopReason=) -- and checked against the ACP driver of OpenMausBot (=server/drivers/acp/core.ts=, =docs/custom-engines.md=).
+- *Tested against:* =tests/fixtures/fake-acp-agent.bash= only (=tests/test-acp-client.c=). No real ACP agent has been run against it here. To check one, run a turn with =ai -p acp --set command="..." --stream "hi"= and compare with the table below.
+
+** The conversation
+One process per turn, the same shape as codex's app-server transport:
+
+| Direction | Message                                                     | Id  |
+|-----------+-------------------------------------------------------------+-----|
+| ->        | =initialize= {=protocolVersion=: 1, =clientCapabilities=, =clientInfo=} | 1   |
+| <-        | result {=protocolVersion=, =agentCapabilities=, =authMethods=} |     |
+| ->        | =session/new= {=cwd=, =mcpServers=}, or =session/load= {=sessionId=, =cwd=, =mcpServers=} | 2 |
+| <-        | result {=sessionId=} (load: ={}= after replaying history)   |     |
+| ->        | =session/prompt= {=sessionId=, =prompt=: [text, images]}    | 3   |
+| <-        | =session/update= notifications, agent requests              |     |
+| <-        | result {=stopReason=}: the end of the turn                  |     |
+| ->        | EOF on stdin; the agent exits                               |     |
+
+A =session/load= the agent refuses (anything but =-32000=) is followed by =session/new= with id 4 and the whole conversation; the refusal is reported as a status event. Ids are fixed so a scripted agent can answer them.
+
+** Configuration
+| Property              | Default | Meaning |
+|-----------------------+---------+---------|
+| =command=             | unset   | The agent's command line, split shell-style with no shell run (no =$VAR=, no pipes). Unset falls back to =$AI_ACP_COMMAND=; with neither, a turn fails before anything starts. =ai_acp_client_set_argv()= quotes an argv into it exactly. |
+| =skip-permissions=    | FALSE   | How =session/request_permission= is answered, and whether file writes are offered. |
+| =client-fs=           | TRUE    | Whether =fs/read_text_file= (and, with =skip-permissions=, =fs/write_text_file=) is offered and served. |
+| =shutdown-timeout-ms= | 5000    | Grace for the agent to exit after its answer, or to honour =session/cancel=, before it is killed. 0 kills at once. |
+
+Inherited from =AiCliClient=: =working-directory= is the session's =cwd= (made absolute) and the root of every file request; =session-persistence= and =session-id= drive =session/load=; =system-prompt= is sent in a =<system>= block at the head of the prompt text; =process-timeout-ms= bounds the whole run; environment variables and the =env= of a tool endpoint reach the agent's process. =model= is reported as =default= and not sent: ACP v1 has no stable request that selects a model, so the agent's own configuration or its command line chooses it. =effort-level= is ignored for the same reason.
+
+** Client capabilities
+| Capability            | Offered                                   | Why |
+|-----------------------+-------------------------------------------+-----|
+| =fs.readTextFile=     | when =client-fs= (default on)              | Reads are confined to the working directory and harmless to answer headless. |
+| =fs.writeTextFile=    | when =client-fs= *and* =skip-permissions= | A write through =fs/= is not preceded by a permission request the client could refuse, so it is offered only where every permission would have been granted anyway. |
+| =terminal=            | never                                     | Running commands for the agent would be a second, unapproved way to execute what its own tools already run behind =session/request_permission=. |
+
+File requests are confined to the working directory: the path must be absolute (ACP requires it); =.= and =..= are folded; the deepest existing part is resolved through its symlinks and the rest appended, and the result must lie under the working directory's real path. Reads are regular files of at most 8 MiB of valid UTF-8, with =line= (1-based) and =limit= in lines honoured. Writes create missing directories and replace the file atomically. A refused request answers JSON-RPC =-32602= with the reason; a method that was not offered answers =-32601=.
+
+** Permissions
+=session/request_permission= is answered at once, the way ai-glib's other CLI wrappers decide without asking anybody:
+
+- =skip-permissions= TRUE picks the agent's =allow_once= option, else =allow_always=.
+- FALSE (the default) picks =reject_once=, else =reject_always=.
+- The option is chosen by its =kind=, never its position or name.
+- No option of the wanted kind, or a request that arrives after =session/cancel=, is answered with the =cancelled= outcome (the prompt-turn page requires it while cancelling).
+
+Every answer is also a status event ("ACP agent asked permission for Write notes.txt: reject_once"). There is no interactive approval callback yet; a host that wants one drives the agent itself.
+
+** Events
+| =session/update= kind       | Becomes |
+|-----------------------------+---------|
+| =agent_message_chunk= (text) | =AI_EVENT_TEXT_DELTA=; the text is the response, split into a new block at each tool call |
+| =agent_thought_chunk= (text) | =AI_EVENT_THINKING_DELTA= (not part of the response) |
+| =tool_call=                 | =AI_EVENT_TOOL_STARTED=, named =acp_<kind>= (=acp_execute=, =acp_edit=, ...), input ={title, kind, name, rawInput, locations}= |
+| =tool_call_update=          | merged into the call; started again when its title or =rawInput= arrives late; =AI_EVENT_TOOL_FINISHED= at =completed= or =failed= (failed is an error result), output from its text content, a line per diff or terminal, else =rawOutput= |
+| =plan=                      | =AI_EVENT_STATUS=: "Plan:" and a line per entry, =[x]= done, =[>]= running, =[ ]= to do |
+| =usage_update=              | its =cost= when in USD becomes the response's cost |
+| anything else               | dropped (user message chunks, commands, modes, session info) |
+
+Updates before the prompt is sent (a =session/load= replay) and updates for another session are dropped. Usage tokens are read from the =session/prompt= result's =usage= ={inputTokens, outputTokens}= when an agent sends it (not part of v1; some agents do), and emitted as =AI_EVENT_USAGE=. The =acp_*= tool styles are registered in =ai-tool-style.c= with the title as their target.
+
+** Stop reasons and errors
+| =stopReason=        | Result |
+|---------------------+--------|
+| =end_turn=          | the response, =AI_STOP_REASON_END_TURN= |
+| =max_tokens=        | the response, =AI_STOP_REASON_MAX_TOKENS= |
+| =max_turn_requests= | the response, =AI_STOP_REASON_MAX_TOKENS=, and a status saying the agent hit its request limit |
+| =refusal=           | the response, =AI_STOP_REASON_CONTENT_FILTER= |
+| =cancelled=         | =G_IO_ERROR_CANCELLED= when the caller cancelled; =AI_ERROR_CANCELLED= when the agent stopped on its own |
+| missing             | =AI_ERROR_CLI_PARSE_ERROR= |
+| anything newer      | the response, =AI_STOP_REASON_END_TURN=, and a status naming the reason |
+
+A JSON-RPC error to any of our requests fails the turn through the shared limit classification (=ai-cli-limit-private.h=): the message, plus the cause many agents put in =data= (a string, =data.message= or =data.details=), is matched against a generic phrase table ("usage limit" -> =AI_ERROR_SESSION_LIMIT=; "quota exceeded", "insufficient_quota", "out of credits" -> =AI_ERROR_INSUFFICIENT_QUOTA=; "429", "rate limit", "too many requests" -> =AI_ERROR_RATE_LIMITED=; "not logged in", "invalid api key", ... -> =AI_ERROR_INVALID_API_KEY=). ACP's =-32000= "Authentication required" is =AI_ERROR_INVALID_API_KEY= whatever its words. Anything else is =AI_ERROR_CLI_EXECUTION=. An agent that exits before answering fails with its stderr when it exits non-zero, and with "the ACP agent exited before answering session/prompt" otherwise. A line on stdout that is not JSON fails the run: ACP agents write logs to stderr.
+
+** Cancellation and shutdown
+The caller's cancellable is not handed to the subprocess; the run keeps its own and decides:
+
+- Before the prompt is sent there is no turn to cancel: the agent is killed at once.
+- While the prompt runs, =session/cancel= {=sessionId=} goes to the agent, which must answer the prompt with =cancelled=; it has =shutdown-timeout-ms= to do so before it is killed. Either way the call returns =G_IO_ERROR_CANCELLED=.
+- After the answer, stdin closes and the agent has =shutdown-timeout-ms= to exit before it is killed; the answer is kept either way.
+
+** Steering
+=ai_steerable_can_steer()= is FALSE: ACP v1 has no request that puts words into a running turn (a second =session/prompt= is a new turn, and the agent may refuse it while one is running). Steered words should be queued for the next turn. The open stdin is used as protocol input only (=ai_cli_steer_set_protocol_input()=), so no caller's words can interleave with protocol lines.
+
+** Tool search
+=ai_cli_client_searches_tools()= is FALSE: nothing in ACP v1 says whether an agent searches its MCP tools, so a host should not count on it.
+
+** MCP servers
+The client accepts an =AI_ENDPOINT_KIND_MCP_CONFIG= endpoint (a Claude-schema =.mcp.json=, which =ai_mcp_config_endpoint_for()= writes for it). The file is read when the endpoint is applied (at most 1 MiB) and kept as a snapshot, so replacing it cannot change a grant already in force; revoking the endpoint clears it. Each server goes to =session/new= (or =session/load=) as an ACP =McpServer=:
+
+- a =command= server as ={name, command, args, env: [{name, value}]}=, the command made absolute through =PATH= because ACP requires an absolute path (one not found is left out, with a status);
+- a =url= server as ={type: "http"|"sse", name, url, headers: [{name, value}]}=, sent only when the agent advertised =mcpCapabilities.http= or =.sse= (else left out, with a status).
+
+** Limits
+- One run per client at a time: the plan of a starting run is kept on the client until its first line arrives (the same as codex's app-server).
+- No =authenticate=, no =session/set_mode= or model selection, no terminals, no =embeddedContext= resources: the prompt is one text block plus images.
+- Images are the newest message's only, and only when the agent advertised =promptCapabilities.image=; otherwise they are left out with a status.
+- No native-session import (=AiNativeSession=): an ACP agent's history lives where that agent keeps it.
+
+** Tests
+=tests/test-acp-client.c= drives the client against =tests/fixtures/fake-acp-agent.bash=, a ShellCheck-clean bash player that records every line the client writes and answers what each test scripts: the handshake and its requests, streamed text, thought, tool calls, plan and usage, permission answers under both settings, =session/cancel= honoured and ignored, cancellation before the prompt, an agent lingering after its answer, every stop reason, errors classified (429, usage limit, =-32000=, protocol version, malformed output, exit before answering), =fs/= reads, writes and confinement (=..= and a symlink), MCP passthrough, =session/load= with its replay and fallback, images, and the synchronous path.
