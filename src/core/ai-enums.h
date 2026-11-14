@@ -38,6 +38,8 @@ G_BEGIN_DECLS
  *   binary in `--print` mode)
  * @AI_PROVIDER_CODEX_CLI: Codex CLI wrapper (codex exec)
  * @AI_PROVIDER_OPENAI_COMPATIBLE: User-configured OpenAI-compatible HTTP API
+ * @AI_PROVIDER_ACP: Any agent speaking the Agent Client Protocol (ACP,
+ *   JSON-RPC over stdio), started from a configured command line
  *
  * Enumeration of supported AI providers.
  */
@@ -55,7 +57,8 @@ typedef enum
     AI_PROVIDER_ANTIGRAVITY,
     AI_PROVIDER_CURSOR,
     AI_PROVIDER_CODEX_CLI,
-    AI_PROVIDER_OPENAI_COMPATIBLE
+    AI_PROVIDER_OPENAI_COMPATIBLE,
+    AI_PROVIDER_ACP
 } AiProviderType;
 
 GType ai_provider_type_get_type(void);

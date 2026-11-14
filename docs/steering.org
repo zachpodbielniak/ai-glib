@@ -135,6 +135,7 @@ and a steer cancelled late is never reported as a refusal.
 |                       | transport   | =app-server=); exec: FALSE                                 | server only -- see below     |
 | opencode, grok-build, | FALSE       | none: queue only                                           | --                           |
 | antigravity, cursor   |             |                                                            |                              |
+| =AiAcpClient=         | FALSE       | none: ACP v1 has no mid-turn input; queue for the next turn | protocol pages and a fake    |
 | HTTP clients          | FALSE       | none on the client; steer the =AiToolExecutor= running it  | --                           |
 
 ** Claude Code

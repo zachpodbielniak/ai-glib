@@ -18,6 +18,7 @@
 #include "providers/ai-grok-client.h"
 #include "providers/ai-ollama-client.h"
 #include "providers/ai-claude-code-client.h"
+#include "providers/ai-acp-client.h"
 #include "providers/ai-claude-tmux-client.h"
 #include "providers/ai-opencode-client.h"
 #include "providers/ai-grok-build-client.h"
@@ -185,6 +186,8 @@ ai_provider_factory_new(
             return G_OBJECT(ai_codex_cli_client_new_with_config(config));
         case AI_PROVIDER_CURSOR:
             return G_OBJECT(ai_cursor_client_new_with_config(config));
+        case AI_PROVIDER_ACP:
+            return G_OBJECT(ai_acp_client_new_with_config(config));
         default:
             break;
     }

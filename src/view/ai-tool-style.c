@@ -95,7 +95,23 @@ static const AiToolStyle BUILTIN_STYLES[] = {
     { "enter_plan_mode",        "Entered",   "plan",     "plans",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
     { "exit_plan_mode",         "Left",      "plan",     "plans",     AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
     { "ask_user_question",      "Asked",     "question", "questions", AI_TOOL_CATEGORY_TASK,       NULL,          FALSE },
-    { "search_tool",            "Searched",  "tool",     "tools",     AI_TOOL_CATEGORY_SEARCH,     "query",       FALSE }
+    { "search_tool",            "Searched",  "tool",     "tools",     AI_TOOL_CATEGORY_SEARCH,     "query",       FALSE },
+
+    /*
+     * Any ACP agent (AiAcpClient). ACP names a call by its ToolKind, not by
+     * the agent's own tool, so the client names it "acp_<kind>" and the
+     * target is the human-readable title the agent gave the call.
+     */
+    { "acp_read",        "Read",      "file",     "files",     AI_TOOL_CATEGORY_FILE_READ,  "title", FALSE },
+    { "acp_edit",        "Edited",    "file",     "files",     AI_TOOL_CATEGORY_FILE_WRITE, "title", FALSE },
+    { "acp_delete",      "Deleted",   "file",     "files",     AI_TOOL_CATEGORY_FILE_WRITE, "title", FALSE },
+    { "acp_move",        "Moved",     "file",     "files",     AI_TOOL_CATEGORY_FILE_WRITE, "title", FALSE },
+    { "acp_search",      "Searched",  "query",    "queries",   AI_TOOL_CATEGORY_SEARCH,     "title", FALSE },
+    { "acp_execute",     "Ran",       "command",  "commands",  AI_TOOL_CATEGORY_COMMAND,    "title", FALSE },
+    { "acp_think",       "Thought",   "step",     "steps",     AI_TOOL_CATEGORY_TASK,       "title", FALSE },
+    { "acp_fetch",       "Fetched",   "page",     "pages",     AI_TOOL_CATEGORY_NETWORK,    "title", FALSE },
+    { "acp_switch_mode", "Switched",  "mode",     "modes",     AI_TOOL_CATEGORY_TASK,       "title", FALSE },
+    { "acp_other",       "Used",      "tool",     "tools",     AI_TOOL_CATEGORY_OTHER,      "title", FALSE }
 };
 
 /*

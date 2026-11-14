@@ -21,6 +21,7 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 | [[file:antigravity.org][Antigravity]]            | =AiAntigravityClient= | =AGY_PATH= (optional)        | gemini-3.7-flash-high              |
 | [[file:cursor.org][Cursor]]                  | =AiCursorClient=      | =CURSOR_AGENT_PATH= / =CURSOR_PATH= | auto                          |
 | [[file:codex-cli.org][Codex CLI]]                | =AiCodexCliClient=    | =CODEX_PATH= (optional)       | gpt-6-astra                        |
+| [[file:acp.org][ACP agent]]                   | =AiAcpClient=         | =AI_ACP_COMMAND= (or =command=) | default (the agent's own)        |
 
 The two Claude Code variants drive the same =claude= CLI but differ in billing path: =AiClaudeCodeClient= uses =claude --print= (Agent SDK credits), while =AiClaudeTmuxClient= runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [[file:claude-code-tmux.org]] for details.
 
@@ -146,6 +147,7 @@ A wrapped CLI reports a usage limit, a 429 and an expired login as the same fail
 | opencode    | No             | Not verified                                                                                  |
 | cursor      | No             | Not verified                                                                                  |
 | antigravity | No             | Not verified                                                                                  |
+| acp         | No             | ACP v1 does not say; an agent that searches its tools still works, it is only not told the catalogue may be large |
 
 Re-check a CLI against its current release before changing its answer.
 
@@ -157,6 +159,7 @@ Every client is an =AiSteerable=; =ai_steerable_can_steer()= says whether words 
 | claude-code  | Yes (=steerable= property, streamed)   | a stream-json user event on the open stdin                  |
 | claude-tmux  | Yes                                    | a line typed into the busy TUI                              |
 | codex        | Only with =transport= =app-server=     | =turn/steer= on =codex app-server=; built from the protocol source, not yet run against a real codex |
+| acp          | No                                     | ACP v1 has no request that adds input to a running turn; the open stdin carries protocol lines only |
 | others       | No                                     | queue for the next turn; HTTP clients steer through =AiToolExecutor= |
 
 *** Redirects and credentials

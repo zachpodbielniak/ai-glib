@@ -63,6 +63,19 @@ void
 ai_cli_steer_set_open_input(AiCliClient *client, gboolean open_input);
 
 /*
+ * The CLI speaks a request/response protocol on stdin (ACP's JSON-RPC)
+ * and needs the channel's open pipe whether or not it can be steered.
+ * The pipe is then the parser's alone: ai_steerable_steer_async() still
+ * refuses a client whose class answers can_steer FALSE before any of
+ * this is reached, so no caller's words can interleave with protocol
+ * lines.  The parser writes with ai_cli_steer_channel_write() and closes
+ * the pipe with ai_cli_steer_channel_settle(), as a steerable protocol
+ * parser does.
+ */
+void
+ai_cli_steer_set_protocol_input(AiCliClient *client, gboolean protocol);
+
+/*
  * Called once if the prompt itself cannot be written, so the run fails
  * as it did when it wrote stdin alone.  A failed *steer* never calls it:
  * that is the steer's refusal, not the run's.  Never called after

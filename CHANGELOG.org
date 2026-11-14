@@ -4,6 +4,44 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.12.0 - 2026-11-14
+
+** Added
+- =AiAcpClient= (provider type =AI_PROVIDER_ACP=, string ="acp"=, aliases
+  ="acp-agent"= / ="acp_agent"=): any program that speaks the Agent Client
+  Protocol (v1, JSON-RPC over stdio) is a CLI provider, started from its
+  command line (=command= property, shell-style split with no shell, or
+  =$AI_ACP_COMMAND=). One process per turn: =initialize=, =session/new=
+  (or =session/load= for a persisted session the agent can load, falling
+  back to a new session when the load is refused), =session/prompt=.
+  =session/update= text, thought, tool calls (=acp_<kind>=, with matching
+  tool styles), plans and USD cost become =AiEvent=; =stopReason= becomes
+  the stop reason (=max_tokens= and =max_turn_requests= ->
+  =MAX_TOKENS=, =refusal= -> =CONTENT_FILTER=). Permission requests are
+  answered by option kind under =skip-permissions= (allow) or not
+  (reject). =fs/read_text_file= (and, with =skip-permissions=,
+  =fs/write_text_file=) are served inside the working directory, symlinks
+  resolved; terminals are never offered. A cancel sends =session/cancel=
+  and gives the agent =shutdown-timeout-ms= (5 s) before it is killed; the
+  same grace bounds the exit after an answer, which is kept. Errors are
+  classified through the shared limit table, ACP's =-32000= as
+  =AI_ERROR_INVALID_API_KEY=. MCP servers from an =AI_ENDPOINT_KIND_MCP_CONFIG=
+  endpoint go to the session as ACP =McpServer= entries. =can_steer= and
+  =searches_tools= are FALSE. Wired into =ai -p acp=, the provider factory,
+  =ai_simple= and config files. See =docs/providers/acp.org=. Tested
+  against a scripted fake agent only.
+- =ai_cli_steer_set_protocol_input()= (private): a CLI whose protocol
+  answers requests mid-turn keeps stdin open as an =AiCliSteerChannel=
+  without becoming steerable.
+
+** Fixed
+- =ai --dry-run= crashed when a CLI provider's =build_argv= refused its
+  settings (it dereferenced the %NULL argv); it now says so and exits 1.
+- =AiMcpHost= read =mcp-config-path= from every provider that takes the
+  Claude-schema MCP dialect; it is a claude-code / claude-tmux property,
+  so a new consumer of that dialect (=AiAcpClient=) aborted the bind. It
+  is now read only where it exists.
+
 * 0.11.0 - 2026-11-14
 
 ** Added

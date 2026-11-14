@@ -88,6 +88,18 @@ def main():
     assert isinstance(compatible, AiGlib.Embedder)
     assert compatible.get_provider_type() == AiGlib.ProviderType.OPENAI_COMPATIBLE
 
+    # ----- ACP agent: the command as a property, argv through an array -----
+    acp = AiGlib.AcpClient.new_for_command(["my agent", "--acp"])
+    assert acp.get_provider_type() == AiGlib.ProviderType.ACP
+    assert acp.dup_argv() == ["my agent", "--acp"]
+    acp.props.command = "other --stdio"
+    assert acp.props.command == "other --stdio"
+    acp.props.skip_permissions = True
+    acp.props.shutdown_timeout_ms = 250
+    assert acp.props.client_fs is True
+    assert acp.props.shutdown_timeout_ms == 250
+    assert not acp.can_steer()
+
     # ----- Class construction -----
     client = AiGlib.ClaudeClient.new()
     assert isinstance(client, AiGlib.ClaudeClient)

@@ -94,6 +94,7 @@
 #include "providers/ai-grok-build-client.h"
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-cursor-client.h"
+#include "providers/ai-acp-client.h"
 #include "providers/ai-codex-cli-client.h"
 
 /* Convenience API */
