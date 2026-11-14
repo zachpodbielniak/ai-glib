@@ -1868,6 +1868,8 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
     cli_class->endpoint_applied = ai_claude_tmux_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_tmux_endpoint_kinds;
     cli_class->config_dir_env = claude_tmux_config_dir_env;
+    /* The same claude binary as claude-code, so the same tool search. */
+    cli_class->searches_tools = TRUE;
 
     properties[PROP_TMUX_PATH] = g_param_spec_string(
         "tmux-path", "Tmux Path",

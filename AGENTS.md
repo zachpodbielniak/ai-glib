@@ -657,6 +657,36 @@ rebuilt by the base revoking and re-applying the endpoint around the change.
 claude-tmux is the trap: its claude is the shared tmux server's child, so
 client variables reach it only through `tmux new-session -e`.
 
+### Tool search (`searches_tools`)
+
+`AiCliClientClass.searches_tools` is TRUE when the CLI looks MCP tools up
+itself (claude-code, claude-tmux, grok-build); `ai_cli_client_searches_tools()`
+reads it from a probe client. It occupies the LP64 padding after
+`check_exit_status`, so the class size is unchanged on 64-bit targets. Set it
+only after checking the CLI's current release; cite the evidence in a comment.
+
+### Usage limits, rate limits and sign-out (`ai-cli-limit-private.h`)
+
+A CLI provider other than claude-code registers a phrase table from its
+`class_init` with `ai_cli_limit_register()`; the base reclassifies
+`AI_ERROR_CLI_EXECUTION`/`CLI_PARSE_ERROR` in `ai_cli_client_chat_sync()` and
+`ai_cli_client_stream_run_finish()`, and each provider's own `chat_finish`
+calls `ai_cli_limit_reclassify()`. Tables are ordered (session limit before
+the rate-limit words its text also contains), and every phrase cites where it
+came from (the CLI's source or binary, or a forum quote when the text is the
+server's). A session limit uses claude-code's shape: format sentence, notice,
+then the CLI's words. Tests: `tests/test-cli-limit.c`, with captured samples
+and one fake subprocess per CLI on the chat, stream and sync paths.
+
+### Redirects (`ai-http-redirect-private.h`)
+
+A request carrying a credential never follows a redirect. Guard every new
+`SoupSession` with `ai_http_guard_session()` (or a single message with
+`ai_http_guard_message()` after its headers are set), and turn the 3xx into
+an error with `ai_http_redirect_refused()`. The decision must be made before
+the request is sent: setting `SOUP_MESSAGE_NO_REDIRECT` only in "got-headers"
+for a credentialed request hung a synchronous send in libsoup 3.6.
+
 ## Image Generation Subsystem
 
 Image generation hangs off the `AiImageGenerator` interface

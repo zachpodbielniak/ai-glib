@@ -5,6 +5,8 @@
 
 #include "ai-glib.h"
 #include "convenience/ai-search-http.h"
+#include "core/ai-http-error.h"
+#include "core/ai-http-redirect-private.h"
 #include "test-server.h"
 
 typedef struct
@@ -41,7 +43,8 @@ chat_finished (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
-check_redirect (const RedirectProvider *provider, gboolean same_origin, gboolean async)
+check_redirect (const RedirectProvider *provider, gboolean same_origin, gboolean async,
+                guint status)
 {
     TServer *origin = tserver_new ();
     TServer *target = same_origin ? origin : tserver_new ();
@@ -60,6 +63,7 @@ check_redirect (const RedirectProvider *provider, gboolean same_origin, gboolean
         "\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true}");
     g_mutex_lock (&origin->lock);
     origin->redirect_to = g_strconcat (target->base_url, "/redirect-target", NULL);
+    origin->redirect_status = status;
     g_mutex_unlock (&origin->lock);
 
     ai_config_set_base_url (config, provider->provider, origin->base_url);
@@ -77,8 +81,27 @@ check_redirect (const RedirectProvider *provider, gboolean same_origin, gboolean
     else
         chat.response = ai_client_chat_sync (client, &messages, NULL, &chat.error);
 
-    if (same_origin)
+    if (same_origin && provider->credential != NULL)
     {
+        /*
+         * A request with a key is not redirected even to its own origin:
+         * a 307/308 would replay the key and the prompt to a path nobody
+         * configured.  The caller is told so rather than "HTTP 307".
+         */
+        g_assert_null (chat.response);
+        g_assert_error (chat.error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+        g_assert_nonnull (strstr (chat.error->message, "Redirect refused"));
+        g_assert_cmpuint (tserver_hits (origin), ==, 1);
+    }
+    else if (same_origin && status >= 307)
+    {
+        /* libsoup itself does not resend a POST on a 307/308. */
+        g_assert_null (chat.response);
+        g_assert_cmpuint (tserver_hits (origin), ==, 1);
+    }
+    else if (same_origin)
+    {
+        /* Nothing to leak: a same-origin hop is still followed. */
         g_assert_no_error (chat.error);
         g_assert_nonnull (chat.response);
         g_assert_cmpuint (tserver_hits (target), ==, 2);
@@ -104,10 +127,13 @@ check_redirect (const RedirectProvider *provider, gboolean same_origin, gboolean
     tserver_free (origin);
 }
 
-static void cross_sync (gconstpointer p) { check_redirect (p, FALSE, FALSE); }
-static void cross_async (gconstpointer p) { check_redirect (p, FALSE, TRUE); }
-static void same_sync (gconstpointer p) { check_redirect (p, TRUE, FALSE); }
-static void same_async (gconstpointer p) { check_redirect (p, TRUE, TRUE); }
+static void cross_sync (gconstpointer p) { check_redirect (p, FALSE, FALSE, 0); }
+static void cross_async (gconstpointer p) { check_redirect (p, FALSE, TRUE, 0); }
+static void same_sync (gconstpointer p) { check_redirect (p, TRUE, FALSE, 0); }
+static void same_async (gconstpointer p) { check_redirect (p, TRUE, TRUE, 0); }
+/* 307 and 308 resend the body: the prompt goes with the key. */
+static void same_307 (gconstpointer p) { check_redirect (p, TRUE, TRUE, 307); }
+static void same_308 (gconstpointer p) { check_redirect (p, TRUE, FALSE, 308); }
 
 static void
 test_search_redirect (gconstpointer data)
@@ -132,17 +158,234 @@ test_search_redirect (gconstpointer data)
     g_assert_nonnull (error);
     g_clear_error (&error);
 
-    /* Relative redirects on the same origin must retain authentication. */
+    /*
+     * A relative redirect on the same origin is refused too while the
+     * request carries its key, and the error says why.
+     */
     g_mutex_lock (&origin->lock);
     g_free (origin->redirect_to);
     origin->redirect_to = g_strdup ("/redirect-target");
     g_mutex_unlock (&origin->lock);
     result = ai_search_http_get_json (session, origin->base_url, headers, NULL, &error);
+    g_assert_null (result);
+    g_assert_error (error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (error->message, "never redirected"));
+    g_clear_error (&error);
+    g_assert_cmpuint (tserver_hits (origin), ==, 2);
+
+    /* Without a key the same hop is followed. */
+    result = ai_search_http_get_json (session, origin->base_url, NULL, NULL, &error);
     g_assert_no_error (error);
     g_assert_nonnull (result);
-    auth = tserver_dup_header (origin, header);
-    g_assert_cmpstr (auth, ==, "search-test-key");
+    g_clear_pointer (&result, json_node_unref);
+    g_assert_cmpuint (tserver_hits (origin), ==, 4);
+    tserver_free (target);
+    tserver_free (origin);
+}
+
+/* ------------------------------------------------------------------ */
+/* The decision, without a network                                     */
+/* ------------------------------------------------------------------ */
+
+static void
+test_decision (void)
+{
+    g_autoptr(GUri) https = g_uri_parse ("https://api.example.com/v1/chat", SOUP_HTTP_URI_FLAGS, NULL);
+    g_autoptr(GUri) http = g_uri_parse ("http://127.0.0.1:8087/api", SOUP_HTTP_URI_FLAGS, NULL);
+
+    /* With credentials: never, whatever the target. */
+    g_assert_false (ai_http_redirect_allowed (https, "/v1/chat/", TRUE));
+    g_assert_false (ai_http_redirect_allowed (https, "https://api.example.com/v2", TRUE));
+    g_assert_false (ai_http_redirect_allowed (https, "https://evil.example/", TRUE));
+
+    /* Without: same scheme, host and port only. */
+    g_assert_true (ai_http_redirect_allowed (https, "/v1/chat/", FALSE));
+    g_assert_true (ai_http_redirect_allowed (https, "https://API.example.com:443/v2", FALSE));
+    g_assert_false (ai_http_redirect_allowed (https, "http://api.example.com/v1", FALSE));
+    g_assert_false (ai_http_redirect_allowed (https, "https://api.example.com:8443/", FALSE));
+    g_assert_false (ai_http_redirect_allowed (https, "https://evil.example/", FALSE));
+    g_assert_true (ai_http_redirect_allowed (http, "http://127.0.0.1:8087/x", FALSE));
+    g_assert_false (ai_http_redirect_allowed (http, "http://127.0.0.1:8088/x", FALSE));
+    g_assert_false (ai_http_redirect_allowed (http, "http://[::1", FALSE));
+    g_assert_false (ai_http_redirect_allowed (http, NULL, FALSE));
+}
+
+static void
+test_credentials_detected (void)
+{
+    static const gchar *credential_headers[] = {
+        "Authorization", "Proxy-Authorization", "Cookie", "x-api-key",
+        "x-goog-api-key", "api-key", "X-Subscription-Token",
+        "Ocp-Apim-Subscription-Key", "X-Auth-Token", "X-Client-Secret", NULL
+    };
+    static const gchar *plain_headers[] = {
+        "User-Agent", "Accept", "Content-Type", "anthropic-version",
+        "TypeSafe-Danger-Zone-Long-Context", NULL
+    };
+    g_autoptr(GUri) plain = g_uri_parse ("https://h.example/", SOUP_HTTP_URI_FLAGS, NULL);
+    g_autoptr(GUri) userinfo = g_uri_parse ("https://u:pw@h.example/", SOUP_HTTP_URI_FLAGS, NULL);
+    guint i;
+
+    for (i = 0; credential_headers[i] != NULL; i++)
+    {
+        SoupMessageHeaders *h = soup_message_headers_new (SOUP_MESSAGE_HEADERS_REQUEST);
+
+        soup_message_headers_replace (h, credential_headers[i], "secret");
+        g_assert_true (ai_http_request_has_credentials (h, plain));
+        soup_message_headers_unref (h);
+    }
+
+    {
+        SoupMessageHeaders *h = soup_message_headers_new (SOUP_MESSAGE_HEADERS_REQUEST);
+
+        for (i = 0; plain_headers[i] != NULL; i++)
+            soup_message_headers_replace (h, plain_headers[i], "value");
+        g_assert_false (ai_http_request_has_credentials (h, plain));
+        g_assert_true (ai_http_request_has_credentials (h, userinfo));
+        soup_message_headers_unref (h);
+    }
+
+    g_assert_false (ai_http_request_has_credentials (NULL, NULL));
+}
+
+/* The status-only error path providers use names the refusal. */
+static void
+test_status_error_names_refusal (void)
+{
+    g_autoptr(GError) error = NULL;
+
+    ai_http_error_set (&error, NULL, 307, NULL, 0);
+    g_assert_error (error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (error->message, "Redirect refused (HTTP 307)"));
+}
+
+/*
+ * A credential the headers do not show (ai-call's OpenID token in a JSON
+ * body) is declared, and the guarded session then refuses even a
+ * same-origin 307 for it.
+ */
+static void
+test_marked_message_is_refused (void)
+{
+    TServer *origin = tserver_new ();
+    g_autoptr(SoupSession) session = soup_session_new ();
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(GBytes) body = NULL;
+    g_autoptr(GBytes) reply = NULL;
+    g_autoptr(GError) error = NULL;
+
+    ai_http_guard_session (session);
+    tserver_set_response (origin, 200, "{}");
+    g_mutex_lock (&origin->lock);
+    origin->redirect_to = g_strdup ("/redirect-target");
+    origin->redirect_status = 307;
+    g_mutex_unlock (&origin->lock);
+
+    msg = soup_message_new ("GET", origin->base_url);
+    body = g_bytes_new_static ("{\"token\":\"openid\"}", 18);
+    soup_message_set_request_body_from_bytes (msg, "application/json", body);
+    ai_http_message_mark_credentials (msg);
+    reply = soup_session_send_and_read (session, msg, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_cmpuint (soup_message_get_status (msg), ==, 307);
+    g_assert_true (ai_http_redirect_refused (msg, &error));
+    g_assert_error (error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (error->message, "never redirected"));
+    g_assert_cmpuint (tserver_hits (origin), ==, 1);
+    g_clear_error (&error);
+
+    /*
+     * Unmarked and keyless, the same hop is followed (a GET: libsoup
+     * itself declines to follow a 307 for a POST).
+     */
+    g_clear_object (&msg);
+    g_clear_pointer (&reply, g_bytes_unref);
+    msg = soup_message_new ("GET", origin->base_url);
+    reply = soup_session_send_and_read (session, msg, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_cmpuint (soup_message_get_status (msg), ==, 200);
+    g_assert_false (ai_http_redirect_refused (msg, NULL));
     g_assert_cmpuint (tserver_hits (origin), ==, 3);
+    tserver_free (origin);
+}
+
+/* ------------------------------------------------------------------ */
+/* libresearch's async requests                                        */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+    gboolean  done;
+    JsonNode *node;
+    GError   *error;
+} LrResult;
+
+static void
+lr_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    LrResult *lr = user_data;
+
+    lr->node = ai_libresearch_search_request_finish (AI_LIBRESEARCH_SEARCH (source),
+                                                     result, &lr->error);
+    lr->done = TRUE;
+}
+
+static void
+lr_search (TServer *origin, const gchar *key, LrResult *lr)
+{
+    g_autoptr(AiLibresearchSearch) lrs = ai_libresearch_search_new (origin->base_url, key);
+
+    lr->done = FALSE;
+    ai_libresearch_search_web_async (lrs, "q", NULL, NULL, NULL, lr_done, lr);
+    while (!lr->done)
+        g_main_context_iteration (NULL, TRUE);
+}
+
+static void
+test_libresearch_async (gconstpointer data)
+{
+    guint status = GPOINTER_TO_UINT (data);
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    LrResult lr = { FALSE, NULL, NULL };
+    g_autofree gchar *auth = NULL;
+
+    tserver_set_response (target, 200, "{\"results\":[]}");
+    tserver_set_response (origin, 200, "{\"results\":[]}");
+
+    /* Cross-origin with the bearer: refused, nothing reaches the target. */
+    g_mutex_lock (&origin->lock);
+    origin->redirect_to = g_strconcat (target->base_url, "/redirect-target", NULL);
+    origin->redirect_status = status;
+    g_mutex_unlock (&origin->lock);
+    lr_search (origin, "lr-test-token", &lr);
+    g_assert_null (lr.node);
+    g_assert_error (lr.error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (lr.error->message, "Redirect refused"));
+    g_clear_error (&lr.error);
+    g_assert_cmpuint (tserver_hits (target), ==, 0);
+    auth = tserver_dup_header (target, "Authorization");
+    g_assert_null (auth);
+
+    /* Same origin with the bearer: refused as well. */
+    g_mutex_lock (&origin->lock);
+    g_free (origin->redirect_to);
+    origin->redirect_to = g_strdup ("/redirect-target");
+    g_mutex_unlock (&origin->lock);
+    lr_search (origin, "lr-test-token", &lr);
+    g_assert_null (lr.node);
+    g_assert_error (lr.error, AI_ERROR, AI_ERROR_NETWORK_ERROR);
+    g_assert_nonnull (strstr (lr.error->message, "never redirected"));
+    g_clear_error (&lr.error);
+    g_assert_cmpuint (tserver_hits (origin), ==, 2);
+
+    /* Same origin without one: followed. */
+    lr_search (origin, NULL, &lr);
+    g_assert_no_error (lr.error);
+    g_assert_nonnull (lr.node);
+    g_clear_pointer (&lr.node, json_node_unref);
+    g_assert_cmpuint (tserver_hits (origin), ==, 4);
+
     tserver_free (target);
     tserver_free (origin);
 }
@@ -155,17 +398,27 @@ main (int argc, char **argv)
     g_test_init (&argc, &argv, NULL);
     g_test_add_data_func ("/ai-glib/redirect/search/bing", "Ocp-Apim-Subscription-Key", test_search_redirect);
     g_test_add_data_func ("/ai-glib/redirect/search/brave", "X-Subscription-Token", test_search_redirect);
+    g_test_add_func ("/ai-glib/redirect/decision", test_decision);
+    g_test_add_func ("/ai-glib/redirect/credentials", test_credentials_detected);
+    g_test_add_func ("/ai-glib/redirect/status-error", test_status_error_names_refusal);
+    g_test_add_func ("/ai-glib/redirect/marked-message", test_marked_message_is_refused);
+    g_test_add_data_func ("/ai-glib/redirect/libresearch/302", GUINT_TO_POINTER (302), test_libresearch_async);
+    g_test_add_data_func ("/ai-glib/redirect/libresearch/307", GUINT_TO_POINTER (307), test_libresearch_async);
     for (i = 0; i < G_N_ELEMENTS (providers); i++)
     {
         g_autofree gchar *a = g_strdup_printf ("/ai-glib/redirect/%s/cross-sync", providers[i].name);
         g_autofree gchar *b = g_strdup_printf ("/ai-glib/redirect/%s/cross-async", providers[i].name);
         g_autofree gchar *c = g_strdup_printf ("/ai-glib/redirect/%s/same-sync", providers[i].name);
         g_autofree gchar *d = g_strdup_printf ("/ai-glib/redirect/%s/same-async", providers[i].name);
+        g_autofree gchar *e = g_strdup_printf ("/ai-glib/redirect/%s/same-307", providers[i].name);
+        g_autofree gchar *f = g_strdup_printf ("/ai-glib/redirect/%s/same-308", providers[i].name);
 
         g_test_add_data_func (a, &providers[i], cross_sync);
         g_test_add_data_func (b, &providers[i], cross_async);
         g_test_add_data_func (c, &providers[i], same_sync);
         g_test_add_data_func (d, &providers[i], same_async);
+        g_test_add_data_func (e, &providers[i], same_307);
+        g_test_add_data_func (f, &providers[i], same_308);
     }
     return g_test_run ();
 }

@@ -137,18 +137,6 @@ ai_client_set_property(
 }
 
 static void
-client_request_queued(SoupSession *session, SoupMessage *message, gpointer user_data)
-{
-    g_signal_connect(message, "got-headers", G_CALLBACK(ai_http_check_redirect), session);
-}
-
-static void
-client_request_unqueued(SoupSession *session, SoupMessage *message, gpointer user_data)
-{
-    g_signal_handlers_disconnect_by_func(message, ai_http_check_redirect, session);
-}
-
-static void
 ai_client_constructed(GObject *object)
 {
     AiClient *self = AI_CLIENT(object);
@@ -164,8 +152,9 @@ ai_client_constructed(GObject *object)
 
     /* Create soup session */
     priv->session = soup_session_new();
-    g_signal_connect(priv->session, "request-queued", G_CALLBACK(client_request_queued), NULL);
-    g_signal_connect(priv->session, "request-unqueued", G_CALLBACK(client_request_unqueued), NULL);
+    /* A request with a key is never redirected, one without stays on
+     * its origin (ai-http-redirect-private.h). */
+    ai_http_guard_session(priv->session);
     soup_session_set_timeout(priv->session, ai_config_get_timeout(priv->config));
 }
 

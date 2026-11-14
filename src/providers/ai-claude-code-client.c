@@ -2042,6 +2042,8 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     cli_class->endpoint_applied = ai_claude_code_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_code_endpoint_kinds;
     cli_class->config_dir_env = claude_code_config_dir_env;
+    /* Claude Code defers MCP tools behind its own tool search. */
+    cli_class->searches_tools = TRUE;
     cli_class->build_argv = ai_claude_code_client_build_argv;
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;

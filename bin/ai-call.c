@@ -3,6 +3,7 @@
 #include <glib-unix.h>
 #include <libsoup/soup.h>
 #include "core/ai-json-util.h"
+#include "core/ai-http-redirect-private.h"
 #include "call/ai-call-config.h"
 #include "call/ai-call-speech-cache.h"
 #include "call/ai-call-transcript.h"
@@ -160,7 +161,9 @@ request_done(GObject *source, GAsyncResult *result, gpointer data)
 	if (bytes != NULL) {
 		gsize size;
 		const gchar *raw = g_bytes_get_data(bytes, &size);
-		if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(r->message)))
+		if (ai_http_redirect_refused(r->message, &error)) {
+			/* error now says where the redirect pointed and why */
+		} else if (!SOUP_STATUS_IS_SUCCESSFUL(soup_message_get_status(r->message)))
 			g_set_error(&error, HTTP_STATUS_ERROR, soup_message_get_status(r->message),
 						"HTTP %u", soup_message_get_status(r->message));
 		else if (size > 8 * 1024 * 1024)
@@ -199,6 +202,9 @@ request(App *app, const gchar *method, const gchar *url, gboolean matrix, JsonNo
 	}
 	soup_message_headers_replace(soup_message_get_request_headers(r->message),
 								 "User-Agent", USER_AGENT);
+	/* Matrix requests carry the access token and the JWT service's carry
+	 * an OpenID token in the body: none of them follows a redirect. */
+	ai_http_message_mark_credentials(r->message);
 	if (matrix) {
 		authorization = g_strconcat("Bearer ", app->access, NULL);
 		soup_message_headers_replace(soup_message_get_request_headers(r->message),
@@ -1776,6 +1782,9 @@ devices:
 		goto fail;
 	}
 	app.http = soup_session_new_with_options("timeout", 40, NULL);
+	/* Every request is marked as credentialed in request(); the session
+	 * guard is what applies that (ai-http-redirect-private.h). */
+	ai_http_guard_session(app.http);
 	app.loop = g_main_loop_new(NULL, FALSE);
 	app.sync_cancel = g_cancellable_new();
 	app.calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, call_unref);

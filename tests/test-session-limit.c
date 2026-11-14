@@ -367,6 +367,78 @@ test_the_prose_is_not_a_machine_format(void)
     g_assert_cmpint(reset, ==, 999);
 }
 
+/*
+ * The other CLIs' spellings of a reset (ai-session-limit.h).  Relative
+ * forms count from @now; a bare Retry-After number is seconds; codex's
+ * clock with no zone is local; its dated form is used as written.
+ */
+static void
+test_other_cli_reset_forms(void)
+{
+    static const struct {
+        const gchar *text;
+        gint64       seconds;
+    } relative[] = {
+        { "You've hit your usage limit. Try again in 3h 20m.", 12000 },
+        { "try again in 3 days 2 hours 5 minutes", 3 * 86400 + 7200 + 300 },
+        { "Usage limit reached. It will reset in 2 hours 5 minutes.", 7500 },
+        { "Resets in 53h16m34s.: RESOURCE_EXHAUSTED", 191794 },
+        { "Your quota will reset after 3h20m5s.", 12005 },
+        { "Please retry in 23.5s.", 24 },
+        { "Rate limited (Retry-After: 120)", 120 },
+        { "retry after 30 seconds", 30 },
+        { "retry_after 500ms", 1 }
+    };
+    gint64 reset = 0;
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS(relative); i++) {
+        reset = 0;
+        g_assert_true(ai_session_limit_parse_reset(relative[i].text,
+                                                   NOON_UTC, &reset));
+        g_assert_cmpint(reset, ==, NOON_UTC + relative[i].seconds);
+    }
+
+    /* codex, same day: "%-I:%M %p" in the local zone, next occurrence. */
+    reset = 0;
+    g_assert_true(ai_session_limit_parse_reset(
+        "You've hit your usage limit. Try again at 3:45 PM.", NOON_UTC,
+        &reset));
+    g_assert_cmpint(reset, >, NOON_UTC);
+    g_assert_cmpint(reset, <=, NOON_UTC + 24 * 3600);
+    {
+        g_autoptr(GDateTime) when = g_date_time_new_from_unix_local(reset);
+
+        g_assert_cmpint(g_date_time_get_hour(when), ==, 15);
+        g_assert_cmpint(g_date_time_get_minute(when), ==, 45);
+    }
+
+    /* codex, another day: "%b %-d{suffix}, %Y %-I:%M %p", as written. */
+    reset = 0;
+    g_assert_true(ai_session_limit_parse_reset(
+        "You've hit your usage limit. Try again at Sep 5th, 2026 3:45 PM.",
+        NOON_UTC, &reset));
+    {
+        g_autoptr(GDateTime) when = g_date_time_new_from_unix_local(reset);
+
+        g_assert_cmpint(g_date_time_get_year(when), ==, 2026);
+        g_assert_cmpint(g_date_time_get_month(when), ==, 9);
+        g_assert_cmpint(g_date_time_get_day_of_month(when), ==, 5);
+        g_assert_cmpint(g_date_time_get_hour(when), ==, 15);
+        g_assert_cmpint(g_date_time_get_minute(when), ==, 45);
+    }
+
+    /* A phrase with no number is no reset. */
+    reset = 42;
+    g_assert_false(ai_session_limit_parse_reset("Try again later.",
+                                                NOON_UTC, &reset));
+    g_assert_false(ai_session_limit_parse_reset(
+        "try again in a few moments", NOON_UTC, &reset));
+    g_assert_false(ai_session_limit_parse_reset("retry after a while",
+                                                NOON_UTC, &reset));
+    g_assert_cmpint(reset, ==, 42);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -382,6 +454,8 @@ main(int argc, char *argv[])
                     test_the_reset_time_is_read);
     g_test_add_func("/session-limit/past-today-is-tomorrow",
                     test_a_reset_already_past_today_is_tomorrow);
+    g_test_add_func("/session-limit/other-cli-reset-forms",
+                    test_other_cli_reset_forms);
     g_test_add_func("/session-limit/24-hour-clock",
                     test_a_24_hour_clock_is_read);
     g_test_add_func("/session-limit/noon-and-midnight",

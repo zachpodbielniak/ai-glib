@@ -27,6 +27,7 @@
 #include "providers/ai-antigravity-client.h"
 #include "providers/ai-antigravity-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -1096,6 +1097,46 @@ ai_antigravity_client_finalize(GObject *object)
 	G_OBJECT_CLASS(ai_antigravity_client_parent_class)->finalize(object);
 }
 
+/*
+ * What agy prints when it is limited, throttled or signed out.  agy is a
+ * closed Go binary (1.5.9); the client strings are from it, the quota
+ * sentence is the server's (discuss.ai.google.dev/t/
+ * bug-google-ai-ultra-plan-persistent-multi-day-quota-lockout/167603).
+ * Headless runs report them in the JSON "error" member with
+ * "status":"ERROR" (antigravity.google/docs/cli/headless.md), or on
+ * stderr:
+ *
+ *   "Contact your administrator to enable overages. Resets in 53h16m34s.:
+ *    RESOURCE_EXHAUSTED (code 429): Individual quota reached."
+ *   "You have exhausted your quota on this model."  "Quota exhausted"
+ *   "model %s is out of quota until %s"
+ *   "Your AI credits balance is too low to continue."  "AI: Out of credits"
+ *   "Too Many Requests"  "RESOURCE_EXHAUSTED (code 429)"
+ *   "Error: authentication required. Run '%s' to log in, then retry."
+ *   "... Please log out (/logout) and log back in (/login)."
+ *
+ * "Resets in 53h16m34s" is read by ai_session_limit_parse_reset().  The
+ * quota phrases come before RESOURCE_EXHAUSTED because the quota error
+ * carries both.
+ */
+static const AiCliLimitPattern agy_limit_patterns[] = {
+    { AI_ERROR_SESSION_LIMIT, "quota reached" },
+    { AI_ERROR_SESSION_LIMIT, "exhausted your quota" },
+    { AI_ERROR_SESSION_LIMIT, "quota exhausted" },
+    { AI_ERROR_SESSION_LIMIT, "out of quota" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "credits balance is too low" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "out of credits" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "ai credits not enabled" },
+    { AI_ERROR_RATE_LIMITED, "resource_exhausted" },
+    { AI_ERROR_RATE_LIMITED, "too many requests" },
+    { AI_ERROR_RATE_LIMITED, "rate limit" },
+    { AI_ERROR_INVALID_API_KEY, "authentication required" },
+    { AI_ERROR_INVALID_API_KEY, "log back in" },
+    { AI_ERROR_INVALID_API_KEY, "verification required" },
+    { AI_ERROR_INVALID_API_KEY, "failed to retrieve token" },
+    { 0, NULL }
+};
+
 static void
 ai_antigravity_client_class_init(AiAntigravityClientClass *klass)
 {
@@ -1107,6 +1148,7 @@ ai_antigravity_client_class_init(AiAntigravityClientClass *klass)
 	object_class->set_property = ai_antigravity_client_set_property;
 
 	cli_class->get_executable_path = ai_antigravity_client_get_executable_path;
+	ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "agy", agy_limit_patterns);
 	cli_class->build_argv          = ai_antigravity_client_build_argv;
 	cli_class->build_stdin         = ai_antigravity_client_build_stdin;
 	cli_class->parse_json_output   = ai_antigravity_client_parse_json_output;
@@ -1656,8 +1698,17 @@ ai_antigravity_client_chat_finish(
 	GAsyncResult  *result,
 	GError       **error
 ){
-	(void)provider;
-	return g_task_propagate_pointer(G_TASK(result), error);
+	GError *local_error = NULL;
+	AiResponse *response;
+
+	response = g_task_propagate_pointer(G_TASK(result), &local_error);
+	if (response == NULL)
+	{
+		/* A usage limit, a 429 or a lapsed login, by the CLI's own words. */
+		ai_cli_limit_reclassify(AI_CLI_CLIENT(provider), &local_error);
+		g_propagate_error(error, local_error);
+	}
+	return response;
 }
 
 /* One agent model registry serves chat discovery and image orchestration. */

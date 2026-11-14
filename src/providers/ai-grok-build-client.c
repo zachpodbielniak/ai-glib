@@ -21,6 +21,7 @@
 #include "providers/ai-grok-home-overlay.h"
 #include "providers/ai-grok-build-client-internal.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "core/ai-event.h"
@@ -1479,6 +1480,44 @@ ai_grok_build_client_endpoint_applied(
 }
 
 /*
+ * What grok prints when it is limited, throttled or signed out.  Read out
+ * of grok 1.0.77 (50ca579fa996), the binary's strings: the headless
+ * prompt-outcome and status texts in crates/codegen/xai-grok-pager
+ * (src/headless/prompt_outcome.rs, src/app/dispatch/status.rs) and the
+ * login messages in xai_grok_login.  They reach us as the "message" of a
+ * {"type":"error"} line or the "result" of an is_error result line:
+ *
+ *   "You hit your weekly limit."         "You hit your free usage limit."
+ *   "Purchase credits to keep using Grok Build"   "run out of credits"
+ *   "You've hit the rate limit for your plan."    "Rate limited (...)"
+ *   "Not logged in. Run `grok login`."   "...; re-run authentication to
+ *   try again"  "HTTP 401 Unauthorized"  "Unauthorized (401) from ..."
+ *
+ * grok writes "(Retry-After: N)" after a throttled request, which
+ * ai_session_limit_parse_reset() reads as N seconds.
+ */
+static const AiCliLimitPattern grok_build_limit_patterns[] = {
+    { AI_ERROR_SESSION_LIMIT, "hit your weekly limit" },
+    { AI_ERROR_SESSION_LIMIT, "hit your free usage limit" },
+    { AI_ERROR_SESSION_LIMIT, "hit your usage limit" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "out of credits" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "purchase credits" },
+    { AI_ERROR_INSUFFICIENT_QUOTA, "status 402" },
+    { AI_ERROR_RATE_LIMITED, "hit the rate limit" },
+    { AI_ERROR_RATE_LIMITED, "rate limited" },
+    { AI_ERROR_RATE_LIMITED, "rate limit exceeded" },
+    { AI_ERROR_RATE_LIMITED, "too many requests" },
+    { AI_ERROR_RATE_LIMITED, "http 429" },
+    { AI_ERROR_INVALID_API_KEY, "not logged in" },
+    { AI_ERROR_INVALID_API_KEY, "grok login" },
+    { AI_ERROR_INVALID_API_KEY, "not authenticated" },
+    { AI_ERROR_INVALID_API_KEY, "re-run authentication" },
+    { AI_ERROR_INVALID_API_KEY, "401 unauthorized" },
+    { AI_ERROR_INVALID_API_KEY, "unauthorized (401)" },
+    { 0, NULL }
+};
+
+/*
  * grok keeps its login and config under GROK_HOME, which the MCP overlay
  * already starts from, so an account and an endpoint compose.
  */
@@ -1499,6 +1538,13 @@ ai_grok_build_client_class_init(AiGrokBuildClientClass *klass)
     cli_class->endpoint_applied    = ai_grok_build_client_endpoint_applied;
     cli_class->endpoint_kinds      = grok_build_endpoint_kinds;
     cli_class->config_dir_env = grok_build_config_dir_env;
+    ai_cli_limit_register(G_TYPE_FROM_CLASS(klass), "grok", grok_build_limit_patterns);
+    /*
+     * grok exposes MCP tools to its model only through two meta-tools,
+     * search_tool and use_tool (its bundled MCP guide, "Tool Discovery",
+     * in grok 1.0.77), so it searches its catalogue itself.
+     */
+    cli_class->searches_tools = TRUE;
     cli_class->build_argv          = ai_grok_build_client_build_argv;
     cli_class->build_stdin         = ai_grok_build_client_build_stdin;
     cli_class->parse_json_output   = ai_grok_build_client_parse_json_output;
@@ -2153,8 +2199,17 @@ ai_grok_build_client_chat_finish(
     GAsyncResult  *result,
     GError       **error
 ){
-    (void)provider;
-    return g_task_propagate_pointer(G_TASK(result), error);
+    GError *local_error = NULL;
+    AiResponse *response;
+
+    response = g_task_propagate_pointer(G_TASK(result), &local_error);
+    if (response == NULL)
+    {
+        /* A usage limit, a 429 or a lapsed login, by grok's own words. */
+        ai_cli_limit_reclassify(AI_CLI_CLIENT(provider), &local_error);
+        g_propagate_error(error, local_error);
+    }
+    return response;
 }
 
 static void

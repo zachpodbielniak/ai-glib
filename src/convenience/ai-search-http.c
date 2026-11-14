@@ -113,7 +113,6 @@ ai_search_http_get_json (
         }
 
         req_headers = soup_message_get_request_headers (msg);
-        g_signal_connect (msg, "got-headers", G_CALLBACK (ai_http_check_redirect), NULL);
         soup_message_headers_replace (req_headers, "User-Agent",
                                       AI_SEARCH_HTTP_USER_AGENT);
         soup_message_headers_replace (req_headers, "Accept",
@@ -129,6 +128,9 @@ ai_search_http_get_json (
                                               header_pairs[i + 1]);
             }
         }
+
+        /* After the headers: a keyed request is never redirected. */
+        ai_http_guard_message (msg);
 
         bytes = soup_session_send_and_read (session, msg, cancellable,
                                             &local_err);
@@ -173,6 +175,10 @@ ai_search_http_get_json (
 
         status      = soup_message_get_status (msg);
         last_status = status;
+
+        /* A redirect the guard declined is terminal and says why. */
+        if (ai_http_redirect_refused (msg, error))
+            return NULL;
 
         if (status >= 200 && status < 300)
         {

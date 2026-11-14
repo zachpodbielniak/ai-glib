@@ -11,6 +11,7 @@
 
 #include "core/ai-cli-client.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-limit-private.h"
 #include "core/ai-cli-steer-private.h"
 #include "core/ai-error.h"
 #include "core/ai-event-source.h"
@@ -1375,20 +1376,8 @@ ai_cli_client_resolve_executable(
     return NULL;
 }
 
-/**
- * ai_cli_client_chat_sync:
- * @self: an #AiCliClient
- * @messages: (element-type AiMessage): the conversation messages
- * @cancellable: (nullable): a #GCancellable
- * @error: (out) (optional): return location for a #GError
- *
- * Performs a synchronous chat completion request via the CLI.
- * Spawns the CLI subprocess, waits for completion, and parses the output.
- *
- * Returns: (transfer full) (nullable): the #AiResponse, or %NULL on error
- */
-AiResponse *
-ai_cli_client_chat_sync(
+static AiResponse *
+cli_client_chat_sync_run(
     AiCliClient   *self,
     GList         *messages,
     GCancellable  *cancellable,
@@ -1548,6 +1537,44 @@ ai_cli_client_chat_sync(
     }
 
     response = klass->parse_json_output(self, stdout_data, error);
+    return response;
+}
+
+/**
+ * ai_cli_client_chat_sync:
+ * @self: an #AiCliClient
+ * @messages: (element-type AiMessage): the conversation messages
+ * @cancellable: (nullable): a #GCancellable
+ * @error: (out) (optional): return location for a #GError
+ *
+ * Performs a synchronous chat completion request via the CLI.
+ * Spawns the CLI subprocess, waits for completion, and parses the output.
+ *
+ * Returns: (transfer full) (nullable): the #AiResponse, or %NULL on error
+ */
+AiResponse *
+ai_cli_client_chat_sync(
+    AiCliClient   *self,
+    GList         *messages,
+    GCancellable  *cancellable,
+    GError       **error
+){
+    GError *local_error = NULL;
+    AiResponse *response;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
+
+    response = cli_client_chat_sync_run(self, messages, cancellable,
+                                        &local_error);
+
+    /* A usage limit, a 429 or a lapsed login, told apart from any other
+     * failed run by the CLI's own words (ai-cli-limit-private.h). */
+    if (response == NULL)
+    {
+        ai_cli_limit_reclassify(self, &local_error);
+        g_propagate_error(error, local_error);
+    }
+
     return response;
 }
 
@@ -1836,6 +1863,28 @@ ai_cli_client_supports_config_dir(AiCliClient *self)
     g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
 
     return AI_CLI_CLIENT_GET_CLASS(self)->config_dir_env != NULL;
+}
+
+/**
+ * ai_cli_client_searches_tools:
+ * @self: an #AiCliClient
+ *
+ * Whether this CLI looks its MCP tools up itself as it needs them, rather
+ * than loading every tool's schema into the model's context up front.
+ *
+ * A class datum (#AiCliClientClass.searches_tools), so a probe client
+ * built only to ask -- never run -- answers for every client of its
+ * class.  Claude Code and claude-tmux (the same binary) do; grok-build
+ * exposes MCP tools only through its own search_tool and use_tool.
+ *
+ * Returns: %TRUE when the CLI searches tools itself
+ */
+gboolean
+ai_cli_client_searches_tools(AiCliClient *self)
+{
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), FALSE);
+
+    return AI_CLI_CLIENT_GET_CLASS(self)->searches_tools;
 }
 
 /**
@@ -2789,6 +2838,23 @@ stream_run_maybe_complete(StreamRun *run)
                         run->stderr_text->len ? run->stderr_text->str : "unsuccessful process exit"));
         return;
     }
+    /*
+     * A failed exit that answered nothing and said why on stderr is a
+     * failure even where the envelope is authoritative: there is no
+     * envelope.  cursor-agent signs out, rate limits and usage limits this
+     * way ("No well-formed JSON object is emitted in failure cases"), and
+     * reading it as an empty success hid all three.
+     */
+    if (!g_subprocess_get_successful(run->subprocess) &&
+        run->stderr_text->len > 0 && run->accumulated_text->len == 0 &&
+        (run->response == NULL ||
+         ai_response_get_content_blocks(run->response) == NULL))
+    {
+        stream_run_finish_once(run, NULL,
+            g_error_new(AI_ERROR, AI_ERROR_CLI_EXECUTION, "CLI failed: %s",
+                        run->stderr_text->str));
+        return;
+    }
     stream_run_complete(run);
 }
 static void stream_run_write_stdin(StreamRun *run);
@@ -3062,10 +3128,21 @@ ai_cli_client_stream_run_finish(
     GAsyncResult  *result,
     GError       **error
 ){
+    GError *local_error = NULL;
+    AiResponse *response;
+
     g_return_val_if_fail(AI_IS_CLI_CLIENT(self), NULL);
     g_return_val_if_fail(g_task_is_valid(result, self), NULL);
 
-    return g_task_propagate_pointer(G_TASK(result), error);
+    response = g_task_propagate_pointer(G_TASK(result), &local_error);
+
+    if (response == NULL)
+    {
+        ai_cli_limit_reclassify(self, &local_error);
+        g_propagate_error(error, local_error);
+    }
+
+    return response;
 }
 
 /* Test the same projected slice used by argv and stdin builders: resumed
