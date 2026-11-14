@@ -54,6 +54,8 @@ typedef struct
 	guint       delay_ms;
 	/* Redirect all paths except /redirect-target when configured. */
 	gchar      *redirect_to;
+	/* The redirect's status; 0 is 302 Found. 307/308 resend the body. */
+	guint       redirect_status;
 
 	/* What was received. */
 	guint       hits;
@@ -134,7 +136,10 @@ tserver_handler(
 
 	if (ts->redirect_to != NULL && g_strcmp0(path, "/redirect-target") != 0)
 	{
-		soup_server_message_set_redirect(msg, SOUP_STATUS_FOUND,
+		soup_server_message_set_redirect(msg,
+		                                 ts->redirect_status != 0
+		                                 ? ts->redirect_status
+		                                 : SOUP_STATUS_FOUND,
 		                                 ts->redirect_to);
 		g_mutex_unlock(&ts->lock);
 		return;

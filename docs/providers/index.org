@@ -20,6 +20,7 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 | [[file:grok-build.org][Grok Build]]              | =AiGrokBuildClient=  | =GROK_PATH= (optional)        | grok-4.7                           |
 | [[file:antigravity.org][Antigravity]]            | =AiAntigravityClient= | =AGY_PATH= (optional)        | gemini-3.7-flash-high              |
 | [[file:cursor.org][Cursor]]                  | =AiCursorClient=      | =CURSOR_AGENT_PATH= / =CURSOR_PATH= | auto                          |
+| [[file:codex-cli.org][Codex CLI]]                | =AiCodexCliClient=    | =CODEX_PATH= (optional)       | gpt-6-astra                        |
 
 The two Claude Code variants drive the same =claude= CLI but differ in billing path: =AiClaudeCodeClient= uses =claude --print= (Agent SDK credits), while =AiClaudeTmuxClient= runs the interactive TUI inside an ephemeral tmux session and consumes the user's normal subscription budget. See [[file:claude-code-tmux.org]] for details.
 
@@ -114,3 +115,53 @@ if (error != NULL)
     }
 }
 #+end_src
+
+*** Usage limits, rate limits and sign-out from the CLI wrappers
+A wrapped CLI reports a usage limit, a 429 and an expired login as the same failed run: a non-zero exit, an error event, a line on stderr. Without help a caller sees =AI_ERROR_CLI_EXECUTION= for all three. ai-glib reads the CLI's own words and returns the error they mean:
+
+| Code                          | Meaning                                       | Examples                                                                                   |
+|-------------------------------+-----------------------------------------------+--------------------------------------------------------------------------------------------|
+| =AI_ERROR_SESSION_LIMIT=      | The account's plan limit; wait for the reset  | codex "You've hit your usage limit", grok "You hit your weekly limit", agy "Individual quota reached" |
+| =AI_ERROR_RATE_LIMITED=       | Throttled; retry later                        | codex "429 Too Many Requests", grok "You've hit the rate limit for your plan", cursor "[resource_exhausted]" |
+| =AI_ERROR_INVALID_API_KEY=    | Signed out, or the credentials were refused   | codex "Please log out and sign in again", grok "Not logged in", cursor "Authentication required" |
+| =AI_ERROR_INSUFFICIENT_QUOTA= | No credits or quota left; a billing question  | codex "Quota exceeded", grok "run out of credits", agy "Your AI credits balance is too low" |
+
+- claude-code recognises its limit from the synthetic message instead (see =claude-code.org=); codex, grok-build, opencode, cursor and antigravity use per-CLI phrase tables. Each table sits next to its provider's =class_init=, with the source of every phrase cited.
+- A session limit's message has claude-code's shape: =ai_session_limit_format()='s sentence, then the =ai-glib-session-limit: reset=<unix>= notice, then the CLI's words in parentheses. A supervisor that already parks on claude-code's notice parks on these.
+- A rate limit that says when to retry carries the same notice, so the same supervisor can wait it out.
+- The reset is read by =ai_session_limit_parse_reset()=. It understands "resets 6:50pm (Zone)", codex's "Try again at 3:45 PM" and "Try again at Sep 5th, 2025 3:45 PM", durations after "try again in", "resets in", "reset after", "retry in" ("3h 20m", "3 days 2 hours 5 minutes", "53h16m34s", "23.5s"), and Retry-After values ("Retry-After: 120"). A phrase with no number ("try again later") leaves the reset unknown, 0 in the notice.
+- Only =AI_ERROR_CLI_EXECUTION= and =AI_ERROR_CLI_PARSE_ERROR= are reclassified, on every exit path: =ai_provider_chat_finish()=, =ai_streamable_chat_stream_finish()= and =ai_cli_client_chat_sync()=. A failure no phrase matches is returned unchanged.
+- Cursor's monthly reset is a date with no time, so a Cursor usage limit carries no reset.
+- A streaming run that exits non-zero, wrote nothing on stdout and explained itself on stderr is an error even for the CLIs whose JSON envelope otherwise decides success. cursor-agent reports every one of these conditions that way.
+
+*** Tool search (=searches_tools=)
+=ai_cli_client_searches_tools()= says whether a CLI looks its MCP tools up itself as it needs them, instead of loading every tool's schema into the model's context. It is a class datum (=AiCliClientClass.searches_tools=), so a probe client that is never run answers for its class.
+
+| Client      | Searches tools | Evidence                                                                                      |
+|-------------+----------------+-----------------------------------------------------------------------------------------------|
+| claude-code | Yes            | Claude Code's tool search                                                                     |
+| claude-tmux | Yes            | The same =claude= binary                                                                      |
+| grok-build  | Yes            | grok 1.0.77's bundled MCP guide, "Tool Discovery": MCP tools are reached only through =search_tool= and =use_tool= |
+| codex       | No             | codex 0.163 lists =tool_search= and =tool_search_always_defer_mcp_tools= as "removed" feature flags; not confirmed with a control run |
+| opencode    | No             | Not verified                                                                                  |
+| cursor      | No             | Not verified                                                                                  |
+| antigravity | No             | Not verified                                                                                  |
+
+Re-check a CLI against its current release before changing its answer.
+
+*** Steering a running turn (=AiSteerable=)
+Every client is an =AiSteerable=; =ai_steerable_can_steer()= says whether words can be put into a turn that is already running. See [[file:../steering.org][Steering]].
+
+| Client       | Can steer                              | Seam                                                        |
+|--------------+----------------------------------------+-------------------------------------------------------------|
+| claude-code  | Yes (=steerable= property, streamed)   | a stream-json user event on the open stdin                  |
+| claude-tmux  | Yes                                    | a line typed into the busy TUI                              |
+| codex        | Only with =transport= =app-server=     | =turn/steer= on =codex app-server=; built from the protocol source, not yet run against a real codex |
+| others       | No                                     | queue for the next turn; HTTP clients steer through =AiToolExecutor= |
+
+*** Redirects and credentials
+No HTTP request that carries a credential follows a redirect, not even to its own origin. libsoup keeps custom headers such as =x-api-key= across a redirect and resends the body of a 307 or 308, so following one would replay the key, and the prompt, to a path nobody configured. A request without credentials follows a redirect only when it stays on the same scheme, host and port.
+
+- A credential is =Authorization=, =Proxy-Authorization=, =Cookie=, any header whose name contains "auth", "token", "secret", "password", "api-key", "apikey", "subscription-key" or "access-key", or a password in the URL. A caller can also mark a message whose credential is in its body.
+- A refused redirect is =AI_ERROR_NETWORK_ERROR= with a message that starts "Redirect refused (HTTP 307)" and says why.
+- Covered: every =AiClient= provider (one session per client), the Bing and Brave search helpers, =AiLibresearchSearch='s synchronous and asynchronous requests, and =ai-call='s Matrix and JWT requests.

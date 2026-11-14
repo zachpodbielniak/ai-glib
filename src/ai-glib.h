@@ -28,6 +28,7 @@
 #include "core/ai-config.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-steerable.h"
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-image-capabilities.h"

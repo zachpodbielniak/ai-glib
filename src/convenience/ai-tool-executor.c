@@ -28,6 +28,8 @@
 #include "core/ai-event.h"
 #include "core/ai-event-source.h"
 #include "core/ai-streamable.h"
+#include "core/ai-steerable.h"
+#include "core/ai-steerable-private.h"
 #include "core/ai-subprocess-util.h"
 #include "model/ai-tool-result.h"
 #include "convenience/ai-search-provider.h"
@@ -124,6 +126,11 @@ struct _AiToolExecutor
     /* Which optional tool groups this executor is willing to offer. */
     AiToolFeatures    features;
     guint             max_tool_result_bytes;
+
+    /* Runs that can be steered, newest last (SteerSlot*, ref'd).  The
+     * only state here touched from other threads, hence the lock. */
+    GMutex            steer_lock;
+    GPtrArray        *steer_slots;
 };
 
 static void
@@ -132,9 +139,13 @@ ai_tool_executor_event_source_init (AiEventSourceInterface *iface)
     (void)iface;
 }
 
+static void ai_tool_executor_steerable_init (AiSteerableInterface *iface);
+
 G_DEFINE_TYPE_WITH_CODE(AiToolExecutor, ai_tool_executor, G_TYPE_OBJECT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_EVENT_SOURCE,
-                                              ai_tool_executor_event_source_init))
+                                              ai_tool_executor_event_source_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_STEERABLE,
+                                              ai_tool_executor_steerable_init))
 
 /*
  * Property and signal IDs.
@@ -241,7 +252,34 @@ ai_tool_executor_ask_approval(
  * Internal run context (async -> sync bridge)
  * ================================================================ */
 
+typedef struct _RunContext RunContext;
+
+/*
+ * The steerable face of one run.
+ *
+ * Refcounted and separate from the RunContext because a synchronous run's
+ * context lives on its caller's stack: a steer hopping onto the run's
+ * main context must find "this run is over" in memory that still exists.
+ * @ctx is cleared when the run ends; everything but @turn_id and
+ * @context is touched only on @context.
+ */
 typedef struct
+{
+    gint           ref_count;     /* atomic */
+    gchar         *turn_id;
+    GMainContext  *context;
+    RunContext    *ctx;           /* NULL once the run has ended */
+    GQueue         pending;       /* PendingInput*: parked, not yet spliced */
+} SteerSlot;
+
+/* Words parked on a run until the top of its next round. */
+typedef struct
+{
+    gchar *text;
+    GTask *task;                  /* the steer waiting on the splice */
+} PendingInput;
+
+struct _RunContext
 {
     /* Exactly one of these is set.  `loop' means a synchronous caller is
      * blocked in ai_tool_executor_run(); `task' means an asynchronous
@@ -264,7 +302,10 @@ typedef struct
     gboolean        return_messages;
     gchar          *result;        /* final text (transfer full to caller) */
     GError         *error;         /* propagated to caller */
-} RunContext;
+
+    SteerSlot      *steer;         /* owned ref; NULL until the run starts */
+    gboolean        in_flight;     /* a model request is outstanding */
+};
 
 typedef struct
 {
@@ -273,6 +314,8 @@ typedef struct
 } RunResult;
 
 static void run_context_finish (RunContext *ctx);
+static void run_context_open_steering (RunContext *ctx);
+static void run_context_close_steering (RunContext *ctx);
 static void executor_unwatch_provider (AiToolExecutor *self);
 static void ai_tool_executor_get_property (GObject *object, guint prop_id,
                                            GValue *value, GParamSpec *pspec);
@@ -289,6 +332,80 @@ static gchar *executor_first_line (const gchar *text, glong max_chars);
 
 /* Forward declaration */
 static void run_context_send (RunContext *ctx);
+
+/* ================================================================
+ * Steering: the run's side
+ * ================================================================ */
+
+static SteerSlot *
+steer_slot_ref (SteerSlot *slot)
+{
+    g_atomic_int_inc (&slot->ref_count);
+    return slot;
+}
+
+static void
+steer_slot_unref (SteerSlot *slot)
+{
+    if (slot == NULL || !g_atomic_int_dec_and_test (&slot->ref_count))
+        return;
+
+    /* Closing the run drains the queue; anything here is a bug's leftovers. */
+    g_warn_if_fail (g_queue_is_empty (&slot->pending));
+    g_main_context_unref (slot->context);
+    g_free (slot->turn_id);
+    g_free (slot);
+}
+
+/* Make the run steerable: a slot on the executor's list, on this context. */
+static void
+run_context_open_steering (RunContext *ctx)
+{
+    SteerSlot *slot = g_new0 (SteerSlot, 1);
+
+    slot->ref_count = 1;
+    slot->turn_id   = g_uuid_string_random ();
+    slot->context   = g_main_context_ref_thread_default ();
+    slot->ctx       = ctx;
+    g_queue_init (&slot->pending);
+    ctx->steer = slot;
+
+    g_mutex_lock (&ctx->executor->steer_lock);
+    g_ptr_array_add (ctx->executor->steer_slots, steer_slot_ref (slot));
+    g_mutex_unlock (&ctx->executor->steer_lock);
+}
+
+/*
+ * The run is over.  Words still parked never reached the model, so they
+ * are refused -- provably undelivered, and the caller may queue them.
+ */
+static void
+run_context_close_steering (RunContext *ctx)
+{
+    SteerSlot    *slot = ctx->steer;
+    PendingInput *input;
+
+    if (slot == NULL)
+        return;
+
+    g_mutex_lock (&ctx->executor->steer_lock);
+    g_ptr_array_remove (ctx->executor->steer_slots, slot);
+    g_mutex_unlock (&ctx->executor->steer_lock);
+
+    slot->ctx = NULL;
+    while ((input = g_queue_pop_head (&slot->pending)) != NULL)
+    {
+        ai_steer_task_return (input->task, AI_STEER_REFUSED,
+            g_error_new_literal (AI_STEER_ERROR, AI_STEER_ERROR_NO_ACTIVE_TURN,
+                                 "the run ended before its next round"));
+        g_object_unref (input->task);
+        g_free (input->text);
+        g_free (input);
+    }
+
+    ctx->steer = NULL;
+    steer_slot_unref (slot);
+}
 
 static void
 run_result_free (RunResult *result)
@@ -334,6 +451,8 @@ run_context_take_new_messages (RunContext *ctx)
 static void
 run_context_finish (RunContext *ctx)
 {
+    run_context_close_steering (ctx);
+
     if (ctx->loop != NULL)
     {
         g_main_loop_quit (ctx->loop);
@@ -368,7 +487,8 @@ run_context_finish (RunContext *ctx)
 }
 
 /*
- * Tell the model about background agents that finished while it worked.
+ * Producer one of the pending input: background agents that finished
+ * while the model worked.
  *
  * This is the whole notification mechanism, and it is deliberately a
  * message rather than anything cleverer: the model is only ever awake
@@ -382,17 +502,17 @@ run_context_finish (RunContext *ctx)
  * doing the work inline would have; `agent_result` fetches it when the
  * model decides it wants it.
  *
- * Returns: %TRUE when something was appended.
+ * Returns: (transfer full) (nullable): the notice, or %NULL for no news
  */
-static gboolean
-run_context_report_agents (RunContext *ctx)
+static GString *
+run_context_collect_agent_notice (RunContext *ctx)
 {
-    AiBrigade          *brigade = ctx->executor->brigade;
-    g_autoptr(GString)  notice  = NULL;
-    gchar              *id;
+    AiBrigade *brigade = ctx->executor->brigade;
+    GString   *notice  = NULL;
+    gchar     *id;
 
     if (brigade == NULL)
-        return FALSE;
+        return NULL;
 
     while ((id = ai_brigade_take_finished (brigade)) != NULL)
     {
@@ -423,15 +543,65 @@ run_context_report_agents (RunContext *ctx)
         g_string_append_c (notice, '\n');
     }
 
-    if (notice == NULL)
+    if (notice != NULL)
+        g_string_append (notice,
+                         "\nCollect an answer with agent_result, or carry on if "
+                         "it is no longer relevant.");
+
+    return notice;
+}
+
+/*
+ * Splice the pending input into the conversation: the one place the
+ * message list is between rounds.
+ *
+ * Two producers feed it.  The brigade's "agent finished" notice is
+ * collected here, and steered words were parked on the run's SteerSlot
+ * by ai_steerable_steer_async().  Everything goes in as one user message,
+ * after every tool result of the batch that just ran -- never between
+ * two of them, which would split a tool_use from its result -- and before
+ * the next request.  Callers call this only immediately before
+ * run_context_send(), i.e. at the top of a round.
+ *
+ * A steer is DELIVERED here and not earlier: until this moment the words
+ * could still miss the run (it may end first), and then they are
+ * refused, provably undelivered.
+ *
+ * Returns: %TRUE when something was appended.
+ */
+static gboolean
+run_context_splice_pending (RunContext *ctx)
+{
+    g_autoptr(GString) text = run_context_collect_agent_notice (ctx);
+    g_autoptr(GPtrArray) delivered = g_ptr_array_new_with_free_func (g_object_unref);
+    PendingInput *input;
+    guint i;
+
+    if (ctx->steer != NULL)
+    {
+        while ((input = g_queue_pop_head (&ctx->steer->pending)) != NULL)
+        {
+            if (text == NULL)
+                text = g_string_new (NULL);
+            else
+                g_string_append (text, "\n\n");
+            g_string_append (text, input->text);
+
+            g_ptr_array_add (delivered, input->task);
+            g_free (input->text);
+            g_free (input);
+        }
+    }
+
+    if (text == NULL)
         return FALSE;
 
-    g_string_append (notice,
-                     "\nCollect an answer with agent_result, or carry on if "
-                     "it is no longer relevant.");
-
     ctx->messages = g_list_append (ctx->messages,
-                                   ai_message_new_user (notice->str));
+                                   ai_message_new_user (text->str));
+
+    for (i = 0; i < delivered->len; i++)
+        ai_steer_task_return (g_ptr_array_index (delivered, i),
+                              AI_STEER_DELIVERED, NULL);
 
     return TRUE;
 }
@@ -446,6 +616,7 @@ on_run_response (
     g_autoptr(AiResponse) response = NULL;
     g_autoptr(GError)     err      = NULL;
 
+    ctx->in_flight = FALSE;
     response = ai_provider_chat_finish (AI_PROVIDER (source), async_result, &err);
 
     if (err != NULL)
@@ -494,13 +665,15 @@ on_run_response_common (
         }
 
         /*
-         * A background agent finished while the model was composing this.
-         * It has not seen that yet, so this is not the end of the turn --
-         * give it the news and let it decide. Bounded by the turn limit
-         * like everything else, and each finish is reported once, so this
-         * cannot cycle.
+         * A background agent finished, or words were steered in, while
+         * the model was composing this.  It has not seen that yet, so
+         * this is not the end of the turn -- give it the news and let it
+         * decide. Bounded by the turn limit like everything else, and
+         * each input is spliced once, so this cannot cycle.  Steered
+         * words still parked when the limit stops the run are refused
+         * by run_context_finish(), so the caller can queue them.
          */
-        if (ctx->turn_count < ctx->max_turns && run_context_report_agents (ctx))
+        if (ctx->turn_count < ctx->max_turns && run_context_splice_pending (ctx))
         {
             g_clear_pointer (&ctx->result, g_free);
             run_context_send (ctx);
@@ -648,7 +821,7 @@ on_run_response_common (
     /* Anything that finished while those tools ran is reported before the
      * next turn, so the model reads it alongside the results it asked
      * for rather than a turn late. */
-    run_context_report_agents (ctx);
+    run_context_splice_pending (ctx);
 
     /* Continue conversation */
     run_context_send (ctx);
@@ -732,6 +905,7 @@ on_run_stream_done (
     g_autoptr(AiResponse) response = NULL;
     g_autoptr(GError) error = NULL;
 
+    ctx->in_flight = FALSE;
     response = ai_streamable_chat_stream_finish (AI_STREAMABLE (source),
                                                  result, &error);
 
@@ -751,6 +925,8 @@ on_run_stream_done (
 static void
 run_context_send (RunContext *ctx)
 {
+    ctx->in_flight = TRUE;
+
     /*
      * Streaming and the tool loop used to be mutually exclusive: this always
      * called chat_async, so a caller got live tokens or tool execution and
@@ -3957,6 +4133,8 @@ ai_tool_executor_finalize (GObject *object)
     g_clear_object (&self->registry);
     g_clear_object (&self->brigade);
     executor_unwatch_provider (self);
+    g_clear_pointer (&self->steer_slots, g_ptr_array_unref);
+    g_mutex_clear (&self->steer_lock);
 
     G_OBJECT_CLASS (ai_tool_executor_parent_class)->finalize (object);
 }
@@ -4313,6 +4491,220 @@ ai_tool_executor_init (AiToolExecutor *self)
                                 (GDestroyNotify)ai_todo_free);
     self->callbacks       = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                     g_free, callback_entry_free);
+    g_mutex_init (&self->steer_lock);
+    self->steer_slots     = g_ptr_array_new_with_free_func (
+                                (GDestroyNotify)steer_slot_unref);
+}
+
+/* ================================================================
+ * AiSteerable
+ * ================================================================ */
+
+typedef struct
+{
+    SteerSlot *slot;              /* ref'd */
+    GTask     *task;              /* ref'd: the caller's steer */
+    gchar     *text;
+} SteerRequest;
+
+static void
+steer_request_free (gpointer data)
+{
+    SteerRequest *request = data;
+
+    steer_slot_unref (request->slot);
+    g_clear_object (&request->task);
+    g_free (request->text);
+    g_free (request);
+}
+
+/* Park the words on the run for run_context_splice_pending(). */
+static void
+steer_park (SteerSlot *slot, GTask *task, const gchar *text)
+{
+    PendingInput *input;
+
+    if (slot->ctx == NULL)
+    {
+        ai_steer_task_return (task, AI_STEER_REFUSED,
+            g_error_new_literal (AI_STEER_ERROR, AI_STEER_ERROR_NO_ACTIVE_TURN,
+                                 "the run has already ended"));
+        return;
+    }
+
+    input = g_new0 (PendingInput, 1);
+    input->text = g_strdup (text);
+    input->task = g_object_ref (task);
+    g_queue_push_tail (&slot->pending, input);
+}
+
+/*
+ * The provider answered a forwarded steer.  Its refusal is not ours: the
+ * words can still be parked for the next round of this run.
+ */
+static void
+on_steer_forwarded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    SteerRequest *request = user_data;
+    g_autoptr(GError) error = NULL;
+    AiSteerResult outcome;
+
+    outcome = ai_steerable_steer_finish (AI_STEERABLE (source), result, &error);
+    if (outcome == AI_STEER_REFUSED)
+        steer_park (request->slot, request->task, request->text);
+    else
+        ai_steer_task_return (request->task, outcome, NULL);
+
+    steer_request_free (request);
+}
+
+/*
+ * On the run's context.  While a request to a provider that can steer
+ * itself (a streamed claude-code turn) is in flight, the words go
+ * straight into that request; otherwise, or when the provider refuses,
+ * they wait for the top of the next round.
+ */
+static gboolean
+steer_dispatch (gpointer user_data)
+{
+    SteerRequest *request = user_data;
+    SteerSlot    *slot = request->slot;
+    GCancellable *cancellable = g_task_get_cancellable (request->task);
+    RunContext   *ctx = slot->ctx;
+
+    if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    {
+        ai_steer_task_return (request->task, AI_STEER_REFUSED,
+            g_error_new_literal (AI_STEER_ERROR, AI_STEER_ERROR_CANCELLED,
+                                 "cancelled before the words were parked"));
+        steer_request_free (request);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (ctx != NULL && ctx->in_flight && AI_IS_STEERABLE (ctx->provider) &&
+        ai_steerable_can_steer (AI_STEERABLE (ctx->provider)))
+    {
+        ai_steerable_steer_async (AI_STEERABLE (ctx->provider), NULL,
+                                  request->text, NULL,
+                                  on_steer_forwarded, request);
+        return G_SOURCE_REMOVE;
+    }
+
+    steer_park (slot, request->task, request->text);
+    steer_request_free (request);
+    return G_SOURCE_REMOVE;
+}
+
+static gchar *
+ai_tool_executor_dup_turn_id (AiSteerable *steerable)
+{
+    AiToolExecutor *self = AI_TOOL_EXECUTOR (steerable);
+    gchar          *turn_id = NULL;
+
+    g_mutex_lock (&self->steer_lock);
+    if (self->steer_slots->len > 0)
+    {
+        SteerSlot *newest = g_ptr_array_index (self->steer_slots,
+                                               self->steer_slots->len - 1);
+
+        turn_id = g_strdup (newest->turn_id);
+    }
+    g_mutex_unlock (&self->steer_lock);
+
+    return turn_id;
+}
+
+static void
+ai_tool_executor_steer_async (
+    AiSteerable         *steerable,
+    const gchar         *turn_id,
+    const gchar         *text,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    AiToolExecutor   *self = AI_TOOL_EXECUTOR (steerable);
+    g_autoptr(GTask)  task = NULL;
+    SteerSlot        *slot = NULL;
+    SteerRequest     *request;
+    GError           *error = NULL;
+    guint             i;
+
+    task = ai_steer_task_new (self, cancellable, callback, user_data);
+    g_task_set_source_tag (task, ai_tool_executor_steer_async);
+
+    /* Same choice as a CLI client makes: named turn, or the only one. */
+    g_mutex_lock (&self->steer_lock);
+    if (turn_id != NULL)
+    {
+        for (i = 0; i < self->steer_slots->len; i++)
+        {
+            SteerSlot *candidate = g_ptr_array_index (self->steer_slots, i);
+
+            if (g_strcmp0 (candidate->turn_id, turn_id) == 0)
+            {
+                slot = steer_slot_ref (candidate);
+                break;
+            }
+        }
+        if (slot == NULL && self->steer_slots->len > 0)
+            error = g_error_new (AI_STEER_ERROR, AI_STEER_ERROR_TURN_MISMATCH,
+                                 "turn %s is not the one running", turn_id);
+    }
+    else if (self->steer_slots->len == 1)
+    {
+        slot = steer_slot_ref (g_ptr_array_index (self->steer_slots, 0));
+    }
+    else if (self->steer_slots->len > 1)
+    {
+        error = g_error_new (AI_STEER_ERROR, AI_STEER_ERROR_AMBIGUOUS,
+                             "%u runs are in progress; name one",
+                             self->steer_slots->len);
+    }
+    g_mutex_unlock (&self->steer_lock);
+
+    if (slot == NULL)
+    {
+        if (error == NULL)
+            error = g_error_new_literal (AI_STEER_ERROR,
+                                         AI_STEER_ERROR_NO_ACTIVE_TURN,
+                                         "no run is in progress");
+        ai_steer_task_return (task, AI_STEER_REFUSED, error);
+        return;
+    }
+
+    request = g_new0 (SteerRequest, 1);
+    request->slot = slot;
+    request->task = g_object_ref (task);
+    request->text = g_strdup (text);
+
+    g_main_context_invoke (slot->context, steer_dispatch, request);
+}
+
+static AiSteerResult
+ai_tool_executor_steer_finish (
+    AiSteerable   *steerable,
+    GAsyncResult  *result,
+    GError       **error
+){
+    g_return_val_if_fail (g_task_is_valid (result, steerable), AI_STEER_REFUSED);
+
+    return ai_steer_task_propagate (G_TASK (result), error);
+}
+
+/*
+ * The executor's own tool loop can always be steered: the words wait for
+ * the top of the next round and go in as a user message there.  Every
+ * provider benefits, which is how HTTP providers -- whose own clients
+ * cannot steer -- get steering at all.
+ */
+static void
+ai_tool_executor_steerable_init (AiSteerableInterface *iface)
+{
+    iface->can_steer    = TRUE;
+    iface->dup_turn_id  = ai_tool_executor_dup_turn_id;
+    iface->steer_async  = ai_tool_executor_steer_async;
+    iface->steer_finish = ai_tool_executor_steer_finish;
 }
 
 /* ================================================================
@@ -5276,6 +5668,10 @@ ai_tool_executor_run_full (
         ctx.n_input++;
     }
 
+    ctx.steer         = NULL;
+    ctx.in_flight     = FALSE;
+    run_context_open_steering (&ctx);
+
     run_context_send (&ctx);
     g_main_loop_run (ctx.loop);
     g_main_loop_unref (ctx.loop);
@@ -5382,6 +5778,7 @@ ai_tool_executor_run_async_internal (
         ctx->n_input++;
     }
 
+    run_context_open_steering (ctx);
     run_context_send (ctx);
 }
 

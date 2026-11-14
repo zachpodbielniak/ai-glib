@@ -11,6 +11,55 @@ ai -p codex-cli --continue "Summarize the changes"
 ai -p codex-cli --set session-id=THREAD_ID --sandbox workspace-write "Continue"
 #+end_src
 
+** Transports and steering
+The =transport= property chooses how codex runs:
+
+| =transport= | Runs | =ai_steerable_can_steer()= |
+|-------------+------+----------------------------|
+| =exec= (default) | =codex exec --json=, as below; unchanged | %FALSE: exec takes no input mid-turn |
+| =app-server= | =codex app-server=, JSON-RPC over stdio, one process per turn | %TRUE: a steer is =turn/steer= naming the running turn |
+
+#+begin_src sh
+ai -p codex-cli --set transport=app-server --stream "Explain this project"
+#+end_src
+
+#+begin_src c
+ai_codex_cli_client_set_transport(codex, AI_CODEX_CLI_TRANSPORT_APP_SERVER);
+/* or: g_object_set(codex, "transport", "app-server", NULL); */
+#+end_src
+
+*The app-server transport was built from codex's published protocol
+(openai/codex =rust-v0.169.0=, commit =d32063f9=) and tested against a
+scripted fake server only; it has not been run against a real codex
+here.* =examples/steer-codex-app-server= is the check to run against an
+installed codex (=make examples && ./build/release/examples/steer-codex-app-server=).
+The protocol, the steer tri-state and every difference from exec are in
+[[file:../steering.org][Steering]], "Codex (codex app-server)". In short:
+
+- Same properties, carried differently: model, working directory,
+  sandbox and approval policy (=never=; =danger-full-access= under
+  =skip-permissions=) in =thread/start=; effort, prompt and images
+  (=localImage= inputs) in =turn/start=; MCP grants, =search=
+  (=web_search="live"=) and =additional-directories=
+  (=sandbox_workspace_write.writable_roots=, absolute) as =-c= overrides
+  before =app-server=.
+- =profile= is refused before launch (codex rejects =--profile= for
+  app-server). =continue-session= without a =session-id= starts a new
+  thread; a =session-id= is resumed with =thread/resume=.
+- Text streams as real deltas. Tool events keep exec's names. Usage is
+  summed from =thread/tokenUsage/updated=. Failures are classified with the
+  same limit table, plus codex's structured =codexErrorInfo=.
+- Approval requests, which approval policy =never= should prevent, are
+  answered as exec would decide: declined, or accepted under
+  =skip-permissions=; other server requests get a JSON-RPC error.
+- Sync, async and streamed calls all run the protocol, and all are
+  steerable.
+
+| Property | Type | Default | Meaning |
+|----------+------+---------+---------|
+| =transport= | string | =exec= | =exec= or =app-server=; anything else fails before launch |
+| =steer-timeout-ms= | uint | 10000 | How long a steer waits for =turn/steer='s answer before =AI_STEER_INDETERMINATE=; 0 waits for the run's end |
+
 ** Models
 The built-in list returned by =ai_provider_list_models_async()= contains
 the models supplied for this provider:
@@ -205,10 +254,12 @@ no saved credentials, model access or network calls.
 | Processes | Sync/async/stream success, stdin privacy, working directory, nonzero exit, structured error with zero exit, stderr-only failure |
 | Pipe handling | 512 KiB prompt with 256 KiB stderr, cancellation while stdin is blocked, timeout, pre-cancellation |
 | Claude sandbox | Inline/file settings, preserved hooks/network/filesystem/exclusions, unchanged source files, invalid policies/structures, missing files |
+| app-server (=test-codex-app-server=) | Handshake requests, resume, =-c= overrides, deltas, usage, tool items, sync path, approvals with and without bypass, unserved requests, classified failures, every steer outcome, fail-closed settings; against =tests/fixtures/fake-codex-app-server.bash= |
 
 #+begin_src sh
 make tests
 build/release/tests/test-codex-cli-client
+build/release/tests/test-codex-app-server
 build/release/tests/test-ai-cli
 build/release/tests/test-cli-stream-reader
 build/release/tests/test-source-teardown

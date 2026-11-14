@@ -21,6 +21,8 @@
 
 #include <glib.h>
 
+#include "providers/ai-claude-tmux-client.h"
+
 G_BEGIN_DECLS
 
 /*
@@ -145,5 +147,47 @@ ai_claude_tmux_client_build_prompt(GList *messages);
  */
 gboolean
 ai_claude_tmux_client_jsonl_has_terminal_stop(const gchar *jsonl_slice);
+
+/*
+ * Steering, read from the transcript.  claude's TUI logs a line typed
+ * while it is busy as a `queue-operation` `enqueue`, and logs a `remove`
+ * (reason `absorbed_mid_turn`) when it hands the line to the running
+ * turn -- checked against claude 2.1.325.
+ *
+ * has_enqueue: whether @jsonl_slice holds an enqueue -- the steer was
+ * submitted.  pending_queued: enqueues not yet removed or dequeued, i.e.
+ * steered words the TUI is still holding; a turn is not over while any
+ * remain, because claude runs them as soon as the current turn stops.
+ */
+gboolean
+ai_claude_tmux_client_jsonl_has_enqueue(const gchar *jsonl_slice);
+
+guint
+ai_claude_tmux_client_jsonl_pending_queued(const gchar *jsonl_slice);
+
+/*
+ * The live-turn record a steer targets, opened by a turn once its prompt
+ * is accepted and settled when its Stop hook fires.  Exposed so a test
+ * can drive the steer against a fake tmux and a transcript it writes,
+ * without a real claude behind them.
+ */
+void
+ai_claude_tmux_client_open_live_turn(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    const gchar        *session_name,
+    const gchar        *session_id,
+    const gchar        *jsonl_path,
+    const gchar        *runtime_dir,
+    goffset             watermark
+);
+
+gboolean
+ai_claude_tmux_client_settle_live_turn(
+    AiClaudeTmuxClient *self,
+    const gchar        *jsonl_path,
+    goffset             watermark
+);
 
 G_END_DECLS

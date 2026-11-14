@@ -4,6 +4,77 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.11.0 - 2026-11-14
+
+** Added
+- =AiSteerable=: words into a running turn. =ai_steerable_can_steer()= is a
+  class datum every client answers; =ai_steerable_steer_async()= /
+  =_finish()= return =AI_STEER_DELIVERED=, =AI_STEER_REFUSED= (with an
+  =AI_STEER_ERROR=) or =AI_STEER_INDETERMINATE=, which counts as
+  delivered. =ai_steerable_dup_turn_id()= is the handle a caller holds so a
+  steer cannot land in a later turn. See =docs/steering.org=.
+- =AiClaudeCodeClient:steerable= (default off): a streamed turn takes its
+  prompt as a stream-json user event and keeps stdin open until the
+  =result= line, and a steer is another user event acknowledged by its
+  =--replay-user-messages= echo.
+- =AiClaudeTmuxClient= steers by typing into the busy TUI; a turn no longer
+  ends while a steered line is still queued in claude.
+- =AiToolExecutor= is steerable: words are spliced in at the top of the
+  next round, after the whole tool batch, alongside the background-agent
+  notice.
+- =AiCodexCliClient:transport= (="exec"= by default, unchanged) and
+  ="app-server"=: drives =codex app-server= (JSON-RPC over stdio:
+  =initialize=, =thread/start= or =thread/resume= by session id,
+  =turn/start=) and translates its notifications into =AiEvent= -- real
+  text deltas, tool items under exec's names, usage, failures through the
+  same limit table plus =codexErrorInfo=. Approval requests are answered
+  as exec's flags decide them. On app-server =ai_steerable_can_steer()= is
+  %TRUE and a steer is =turn/steer= with the expected turn id: a result is
+  =DELIVERED=, a refusal (=NoActiveTurn=, =ExpectedTurnMismatch=, a
+  non-steerable turn) =REFUSED=, an internal error or no answer within
+  =AiCodexCliClient:steer-timeout-ms= (10 s) =INDETERMINATE=. Built from
+  openai/codex =rust-v0.169.0='s published protocol and tested against a
+  scripted fake server only; =examples/steer-codex-app-server= checks it
+  against a real codex. =ai_codex_cli_client_get_transport()= /
+  =_set_transport()=, =AI_CODEX_CLI_TRANSPORT_EXEC= /
+  =AI_CODEX_CLI_TRANSPORT_APP_SERVER=.
+- =AiSteerableInterface.is_steerable=: an optional per-instance answer
+  for a class with =can_steer= %TRUE whose instances differ (codex, by
+  transport). =ai_steerable_can_steer()=, =_dup_turn_id()= and
+  =_steer_async()= consult it.
+- Every CLI wrapper classifies its usage limit, rate limit and sign-out:
+  codex, grok-build, opencode, cursor and antigravity map their own words
+  to =AI_ERROR_SESSION_LIMIT=, =AI_ERROR_RATE_LIMITED=,
+  =AI_ERROR_INVALID_API_KEY= and =AI_ERROR_INSUFFICIENT_QUOTA= instead of
+  =AI_ERROR_CLI_EXECUTION=, on the chat, stream and sync paths; a session
+  limit has claude-code's shape and notice. =ai_session_limit_parse_reset()=
+  reads codex's "Try again at ..." times, more duration forms and
+  Retry-After.
+- =ai_cli_client_searches_tools()= and =AiCliClientClass.searches_tools=:
+  whether a CLI looks its MCP tools up itself (claude-code, claude-tmux,
+  grok-build).
+
+** Changed
+- The first steerable stream ignores =SIGPIPE= when no handler is
+  installed, so a CLI that exits mid-steer cannot kill the caller.
+- A streaming CLI run that exits non-zero with nothing on stdout and a
+  reason on stderr is an error, not an empty answer (cursor-agent reports
+  limits and sign-out that way).
+
+** Fixed
+- A request carrying a credential never follows a redirect, not even to
+  its own origin: libsoup kept headers such as =x-api-key= and resent a
+  307/308 body. A refused redirect is =AI_ERROR_NETWORK_ERROR= naming it.
+  Covers every =AiClient=, the Bing and Brave search helpers,
+  =AiLibresearchSearch= (whose asynchronous requests were unguarded) and
+  =ai-call='s Matrix and JWT requests.
+- =/ai-glib/ai-tui/decision/interactive= failed wherever
+  =TYPESAFE_API_KEY= was exported: =/decide= without =-p= rightly prefers
+  TypeSafe, and the suite's tmux server inherited the developer's key, so
+  the test asked api.typesafe.ai instead of its loopback Laya fixture. The
+  suite now clears =TYPESAFE_*=, =LAYA_*= and =OLLAMA_*= before starting
+  tmux, as the other decision tests do.
+
 * 0.10.2 - 2026-11-07
 
 ** Fixed

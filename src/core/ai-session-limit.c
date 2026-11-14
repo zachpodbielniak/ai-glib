@@ -126,30 +126,72 @@ parse_zone(const gchar *after_clock)
     return zone;
 }
 
-gboolean
-ai_session_limit_parse_reset(const gchar *text,
-                            gint64       now,
-                            gint64      *reset_out)
+/*
+ * The next occurrence of @minutes past midnight in @zone, strictly after
+ * @now.  Shared by every form that names a wall-clock time with no date.
+ */
+static gboolean
+reset_from_clock(gint minutes, GTimeZone *zone, gint64 now, gint64 *reset_out)
 {
-    const gchar *at;
+    g_autoptr(GDateTime) now_utc = NULL;
+    g_autoptr(GDateTime) in_zone = NULL;
+    g_autoptr(GDateTime) candidate = NULL;
+
+    now_utc = g_date_time_new_from_unix_utc(now);
+
+    if (now_utc == NULL)
+        return FALSE;
+
+    in_zone = g_date_time_to_timezone(now_utc, zone);
+
+    if (in_zone == NULL)
+        return FALSE;
+
+    candidate = g_date_time_new(zone,
+                                g_date_time_get_year(in_zone),
+                                g_date_time_get_month(in_zone),
+                                g_date_time_get_day_of_month(in_zone),
+                                minutes / 60, minutes % 60, 0.0);
+
+    if (candidate == NULL)
+        return FALSE;
+
+    /*
+     * The message carries a time and no date, so it means the *next*
+     * occurrence.  A limit reported at 23:00 that resets at 06:50 is
+     * tomorrow morning, and reading it as today puts the reset eight
+     * hours in the past -- which downstream reads as "already
+     * expired", so the agent tries again immediately and the whole
+     * point of the pause is lost.
+     */
+    if (g_date_time_to_unix(candidate) <= now) {
+        g_autoptr(GDateTime) tomorrow = g_date_time_add_days(candidate, 1);
+
+        if (tomorrow == NULL)
+            return FALSE;
+
+        if (reset_out != NULL)
+            *reset_out = g_date_time_to_unix(tomorrow);
+
+        return TRUE;
+    }
+
+    if (reset_out != NULL)
+        *reset_out = g_date_time_to_unix(candidate);
+
+    return TRUE;
+}
+
+/*
+ * "6:50pm (America/New_York)" or "3:45 PM": a clock, then an optional
+ * zone in parentheses (local when there is none).
+ */
+static gboolean
+parse_clock_reset(const gchar *at, gint64 now, gint64 *reset_out)
+{
     const gchar *after_clock = NULL;
     gint minutes;
     g_autoptr(GTimeZone) zone = NULL;
-    g_autoptr(GDateTime) now_local = NULL;
-    g_autoptr(GDateTime) candidate = NULL;
-
-    if (text == NULL)
-        return FALSE;
-
-    at = strstr(text, "resets");
-
-    if (at == NULL)
-        return FALSE;
-
-    at += strlen("resets");
-
-    while (*at == ' ')
-        at++;
 
     minutes = parse_clock(at, &after_clock);
 
@@ -157,52 +199,287 @@ ai_session_limit_parse_reset(const gchar *text,
         return FALSE;
 
     zone = parse_zone(after_clock);
-    now_local = g_date_time_new_from_unix_utc(now);
 
-    if (now_local == NULL)
+    return reset_from_clock(minutes, zone, now, reset_out);
+}
+
+/*
+ * Case-insensitive strstr.  The CLIs capitalise the same phrase
+ * differently ("Try again in", "try again in", "Retry-After"), and none
+ * of the phrases matched here contain anything but ASCII.
+ */
+static const gchar *
+find_ci(const gchar *haystack, const gchar *needle)
+{
+    gsize len = strlen(needle);
+
+    for (; *haystack != '\0'; haystack++)
+        if (g_ascii_strncasecmp(haystack, needle, len) == 0)
+            return haystack;
+
+    return NULL;
+}
+
+/*
+ * The seconds one duration unit is worth, or 0 for a word that is not a
+ * unit.  Spelled out and abbreviated both, because codex writes "3 days
+ * 2 hours", gemini-cli writes "3h20m5s" and the APIs write "30s".
+ */
+static gdouble
+unit_seconds(const gchar *unit)
+{
+    static const struct {
+        const gchar *name;
+        gdouble      seconds;
+    } units[] = {
+        { "d", 86400.0 }, { "day", 86400.0 }, { "days", 86400.0 },
+        { "h", 3600.0 }, { "hr", 3600.0 }, { "hrs", 3600.0 },
+        { "hour", 3600.0 }, { "hours", 3600.0 },
+        { "m", 60.0 }, { "min", 60.0 }, { "mins", 60.0 },
+        { "minute", 60.0 }, { "minutes", 60.0 },
+        { "s", 1.0 }, { "sec", 1.0 }, { "secs", 1.0 },
+        { "second", 1.0 }, { "seconds", 1.0 },
+        { "ms", 0.001 }, { "millisecond", 0.001 }, { "milliseconds", 0.001 }
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS(units); i++)
+        if (g_ascii_strcasecmp(unit, units[i].name) == 0)
+            return units[i].seconds;
+
+    return 0.0;
+}
+
+/*
+ * "3h 20m", "3 days 2 hours 5 minutes", "3h20m5s", "23.5s", or -- when
+ * @bare_is_seconds, as a Retry-After value is -- a plain "120".
+ *
+ * Stops at the first word that is not a number followed by a unit, so
+ * the rest of a sentence is ignored rather than refused.  No number at
+ * all ("try again in a few minutes") is no duration: inventing one
+ * would park an agent until a time that means nothing.
+ */
+static gboolean
+parse_duration(const gchar *at, gboolean bare_is_seconds, gint64 *seconds_out)
+{
+    gdouble total = 0.0;
+    guint parts = 0;
+
+    for (;;) {
+        gdouble value;
+        gdouble per_unit;
+        gchar unit[16];
+        gsize unit_len = 0;
+        gchar *end = NULL;
+
+        while (*at == ' ' || *at == ',' || *at == ':')
+            at++;
+
+        if (parts > 0 && g_ascii_strncasecmp(at, "and ", 4) == 0)
+            at += 4;
+
+        if (!g_ascii_isdigit(*at))
+            break;
+
+        value = g_ascii_strtod(at, &end);
+
+        if (end == at || value < 0.0)
+            break;
+
+        at = end;
+
+        while (*at == ' ')
+            at++;
+
+        while (g_ascii_isalpha(at[unit_len]) && unit_len < sizeof(unit) - 1) {
+            unit[unit_len] = at[unit_len];
+            unit_len++;
+        }
+
+        unit[unit_len] = '\0';
+
+        if (unit_len == 0) {
+            if (!bare_is_seconds || parts > 0)
+                break;
+
+            total += value;
+            parts++;
+            break;
+        }
+
+        per_unit = unit_seconds(unit);
+
+        if (per_unit <= 0.0)
+            break;
+
+        total += value * per_unit;
+        parts++;
+        at += unit_len;
+    }
+
+    if (parts == 0)
         return FALSE;
 
-    {
-        g_autoptr(GDateTime) in_zone = g_date_time_to_timezone(now_local, zone);
+    /* Rounded up: waking a second late costs nothing, a second early
+     * costs another refused call. */
+    if (seconds_out != NULL)
+        *seconds_out = (gint64)total + ((gdouble)(gint64)total < total ? 1 : 0);
 
-        if (in_zone == NULL)
-            return FALSE;
+    return TRUE;
+}
 
-        candidate = g_date_time_new(zone,
-                                    g_date_time_get_year(in_zone),
-                                    g_date_time_get_month(in_zone),
-                                    g_date_time_get_day_of_month(in_zone),
-                                    minutes / 60, minutes % 60, 0.0);
+/*
+ * codex's dated form, "Sep 5th, 2025 3:45 PM" (core/src/error.rs,
+ * format "%b %-d{suffix}, %Y %-I:%M %p", in the local zone).  A reset
+ * that is not today carries its date, so it is used as written rather
+ * than as the next occurrence.
+ */
+static gboolean
+parse_dated_reset(const gchar *at, gint64 *reset_out)
+{
+    static const gchar *months[] = {
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec"
+    };
+    gint month = 0;
+    gint64 day;
+    gint64 year;
+    gint minutes;
+    gchar *end = NULL;
+    guint i;
+    g_autoptr(GTimeZone) zone = NULL;
+    g_autoptr(GDateTime) when = NULL;
 
-        if (candidate == NULL)
-            return FALSE;
+    for (i = 0; i < G_N_ELEMENTS(months); i++)
+        if (g_ascii_strncasecmp(at, months[i], 3) == 0)
+            month = (gint)i + 1;
 
-        /*
-         * The message carries a time and no date, so it means the *next*
-         * occurrence.  A limit reported at 23:00 that resets at 06:50 is
-         * tomorrow morning, and reading it as today puts the reset eight
-         * hours in the past -- which downstream reads as "already
-         * expired", so the agent tries again immediately and the whole
-         * point of the pause is lost.
-         */
-        if (g_date_time_to_unix(candidate) <= now) {
-            g_autoptr(GDateTime) tomorrow =
-                g_date_time_add_days(candidate, 1);
+    if (month == 0)
+        return FALSE;
 
-            if (tomorrow == NULL)
-                return FALSE;
+    while (g_ascii_isalpha(*at))
+        at++;
+
+    while (*at == ' ' || *at == '.')
+        at++;
+
+    day = g_ascii_strtoll(at, &end, 10);
+
+    if (end == at || day < 1 || day > 31)
+        return FALSE;
+
+    at = end;
+
+    /* "st", "nd", "rd", "th" */
+    while (g_ascii_isalpha(*at))
+        at++;
+
+    while (*at == ',' || *at == ' ')
+        at++;
+
+    year = g_ascii_strtoll(at, &end, 10);
+
+    if (end == at || year < 1970 || year > 9999)
+        return FALSE;
+
+    at = end;
+
+    while (*at == ' ' || *at == ',')
+        at++;
+
+    minutes = parse_clock(at, NULL);
+
+    if (minutes < 0)
+        return FALSE;
+
+    zone = g_time_zone_new_local();
+    when = g_date_time_new(zone, (gint)year, month, (gint)day,
+                           minutes / 60, minutes % 60, 0.0);
+
+    if (when == NULL)
+        return FALSE;
+
+    if (reset_out != NULL)
+        *reset_out = g_date_time_to_unix(when);
+
+    return TRUE;
+}
+
+/*
+ * The relative forms.  Each phrase is followed by a duration measured
+ * from @now; the Retry-After spellings take a bare number as seconds,
+ * the way the HTTP header does.
+ */
+static const struct {
+    const gchar *phrase;
+    gboolean     bare_is_seconds;
+} relative_phrases[] = {
+    { "try again in", FALSE },     /* codex (older), cursor, grok */
+    { "resets in", FALSE },
+    { "reset in", FALSE },
+    { "reset after", FALSE },      /* gemini-cli: "reset after 3h20m5s" */
+    { "resets after", FALSE },
+    { "retry in", FALSE },         /* gemini-cli: "Please retry in 23.5s" */
+    { "retrying in", FALSE },      /* opencode's retry status */
+    { "retry after", TRUE },
+    { "retry-after", TRUE },
+    { "retry_after", TRUE }
+};
+
+gboolean
+ai_session_limit_parse_reset(const gchar *text,
+                            gint64       now,
+                            gint64      *reset_out)
+{
+    const gchar *at;
+    guint i;
+
+    if (text == NULL)
+        return FALSE;
+
+    /* claude-code: "resets 6:50pm (America/New_York)". */
+    for (at = find_ci(text, "resets"); at != NULL;
+         at = find_ci(at + 1, "resets")) {
+        const gchar *clock = at + strlen("resets");
+
+        while (*clock == ' ')
+            clock++;
+
+        if (parse_clock_reset(clock, now, reset_out))
+            return TRUE;
+    }
+
+    /* codex: "Try again at 3:45 PM." or "Try again at Sep 5th, 2025 3:45 PM." */
+    for (at = find_ci(text, "try again at"); at != NULL;
+         at = find_ci(at + 1, "try again at")) {
+        const gchar *when = at + strlen("try again at");
+
+        while (*when == ' ')
+            when++;
+
+        if (parse_clock_reset(when, now, reset_out) ||
+            parse_dated_reset(when, reset_out))
+            return TRUE;
+    }
+
+    for (i = 0; i < G_N_ELEMENTS(relative_phrases); i++) {
+        for (at = find_ci(text, relative_phrases[i].phrase); at != NULL;
+             at = find_ci(at + 1, relative_phrases[i].phrase)) {
+            gint64 seconds = 0;
+
+            if (!parse_duration(at + strlen(relative_phrases[i].phrase),
+                                relative_phrases[i].bare_is_seconds,
+                                &seconds))
+                continue;
 
             if (reset_out != NULL)
-                *reset_out = g_date_time_to_unix(tomorrow);
+                *reset_out = now + seconds;
 
             return TRUE;
         }
     }
 
-    if (reset_out != NULL)
-        *reset_out = g_date_time_to_unix(candidate);
-
-    return TRUE;
+    return FALSE;
 }
 
 gchar *

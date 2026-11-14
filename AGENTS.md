@@ -657,6 +657,36 @@ rebuilt by the base revoking and re-applying the endpoint around the change.
 claude-tmux is the trap: its claude is the shared tmux server's child, so
 client variables reach it only through `tmux new-session -e`.
 
+### Tool search (`searches_tools`)
+
+`AiCliClientClass.searches_tools` is TRUE when the CLI looks MCP tools up
+itself (claude-code, claude-tmux, grok-build); `ai_cli_client_searches_tools()`
+reads it from a probe client. It occupies the LP64 padding after
+`check_exit_status`, so the class size is unchanged on 64-bit targets. Set it
+only after checking the CLI's current release; cite the evidence in a comment.
+
+### Usage limits, rate limits and sign-out (`ai-cli-limit-private.h`)
+
+A CLI provider other than claude-code registers a phrase table from its
+`class_init` with `ai_cli_limit_register()`; the base reclassifies
+`AI_ERROR_CLI_EXECUTION`/`CLI_PARSE_ERROR` in `ai_cli_client_chat_sync()` and
+`ai_cli_client_stream_run_finish()`, and each provider's own `chat_finish`
+calls `ai_cli_limit_reclassify()`. Tables are ordered (session limit before
+the rate-limit words its text also contains), and every phrase cites where it
+came from (the CLI's source or binary, or a forum quote when the text is the
+server's). A session limit uses claude-code's shape: format sentence, notice,
+then the CLI's words. Tests: `tests/test-cli-limit.c`, with captured samples
+and one fake subprocess per CLI on the chat, stream and sync paths.
+
+### Redirects (`ai-http-redirect-private.h`)
+
+A request carrying a credential never follows a redirect. Guard every new
+`SoupSession` with `ai_http_guard_session()` (or a single message with
+`ai_http_guard_message()` after its headers are set), and turn the 3xx into
+an error with `ai_http_redirect_refused()`. The decision must be made before
+the request is sent: setting `SOUP_MESSAGE_NO_REDIRECT` only in "got-headers"
+for a credentialed request hung a synchronous send in libsoup 3.6.
+
 ## Image Generation Subsystem
 
 Image generation hangs off the `AiImageGenerator` interface
@@ -810,6 +840,56 @@ Keep `parse_stream_line` as a projection of it via
 `ai_cli_client_events_to_delta()`, never as a second implementation.
 
 See `docs/events.org`.
+
+## Steering (`AiSteerable`)
+
+`AiSteerable` (`src/core/ai-steerable.{h,c}`) puts words into a turn that
+is already running. Every client implements it (CLI wrappers via
+`AiCliClient`, HTTP clients via `AiClient`) and so does `AiToolExecutor`;
+`can_steer` is a class datum in the interface struct, so callers ask a
+probe client. Today TRUE for `claude-code` (streamed turns), `claude-tmux`,
+`AiToolExecutor` and codex on its `app-server` transport; FALSE for
+everything else. Codex is the one class that answers per instance: it sets
+`can_steer` TRUE plus the `is_steerable` vfunc (TRUE only when
+`transport` is `app-server`), so a codex probe must carry the transport.
+
+Rules that are load-bearing, each with a test in `tests/test-steerable.c`:
+
+- **REFUSED means provably not delivered.** It is the only answer that
+  lets a caller queue the words again. Once any byte reached the engine
+  the answer is DELIVERED or INDETERMINATE, and INDETERMINATE counts as
+  delivered. A steer that is cancelled after sending is never a refusal
+  (`ai_steer_task_new()` turns off GTask's cancellable check for this).
+- **A steerable CLI client keeps stdin open for a streamed turn, and its
+  parser must close it.** `can_steer` TRUE on the class plus
+  `ai_cli_steer_set_open_input()` on the instance (claude-code's
+  `steerable` property, off by default because a test double that reads
+  stdin to EOF would hang) is what makes
+  `ai_cli_client_stream_run_async()` hand stdin to an `AiCliSteerChannel`
+  (`src/core/ai-cli-steer-private.h`); the parser calls
+  `ai_cli_steer_channel_settle()` on the end-of-turn line, or the CLI
+  waits for EOF until the process deadline. Acknowledgements go through
+  `ai_cli_steer_channel_resolve()`.
+- **The own loop splices only at the top of a round.** Steered words are
+  parked and go in through `run_context_splice_pending()`, after every
+  tool result of the batch, never between two. The brigade notice is the
+  other producer of the same queue.
+- **claude-tmux does not end a turn with a steered line still queued.**
+  It counts `queue-operation` enqueue against remove/dequeue past the
+  watermark when Stop fires, under the same lock a steer holds.
+
+Claude Code's seam was verified with a control run against the installed
+CLI (stream-json in, `--replay-user-messages` echoes the caller's
+`uuid`); `--help` alone is not evidence. See `docs/steering.org`.
+
+Codex's app-server transport (`AiCodexCliClient:transport` =
+`app-server`) was built from openai/codex `rust-v0.169.0`'s published
+protocol and has run only against `tests/fixtures/fake-codex-app-server.bash`
+(`tests/test-codex-app-server.c`); `examples/steer-codex-app-server.c` is
+the check against a real codex. Keep the request ids fixed (initialize 1,
+thread 2, turn/start 3, steers 4+): the fake's scripts depend on them. A
+`turn/steer` JSON-RPC error is REFUSED except -32603 (INDETERMINATE);
+cite the protocol source in a comment when changing any of it.
 
 ## View layer (`src/view/`)
 

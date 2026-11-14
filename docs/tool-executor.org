@@ -314,6 +314,21 @@ It defaults to =FALSE= so every existing caller takes the path it always
 did. [[file:api-reference/ai-conversation.org][AiConversation]] sets it from
 its own =stream= property.
 
+* Steering a run
+=AiToolExecutor= is an =AiSteerable= with =can_steer= %TRUE, which is how
+HTTP providers get steering at all. =ai_steerable_steer_async()= on the
+executor parks the words on the running run; they are spliced in at the
+top of the next round, as one user message after every tool result of
+the batch -- never between two results -- and the steer answers
+=AI_STEER_DELIVERED= then. Words that arrive while the model writes its
+final answer send the run round once more. Words still parked when the
+run ends (turn limit, error, cancel) are refused, provably undelivered.
+
+The brigade's "background agent finished" notice is the other producer of
+the same pending input; both go in through =run_context_splice_pending()=.
+While a request to a provider that can steer itself is in flight, the
+words go straight into it instead. See [[file:steering.org][Steering]].
+
 * Tool approval
 | Property            | Type             | Default                   |
 |---------------------+------------------+---------------------------|

@@ -19,6 +19,7 @@
 #include "providers/ai-claude-code-client-internal.h"
 #include "providers/ai-claude-launch.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-cli-steer-private.h"
 #include "core/ai-json-util.h"
 #include "providers/ai-claude-sandbox-private.h"
 #include "core/ai-error.h"
@@ -100,6 +101,7 @@ struct _AiClaudeCodeClient
     gboolean bare;
     gboolean safe_mode;
     gboolean continue_session;
+    gboolean steerable;
 
     /* Cached summary for the re-prompt fallback when the AI
      * produces no text (empty "result" with tool use only). */
@@ -116,6 +118,14 @@ struct _AiClaudeCodeClient
      */
     gchar *system_prompt_path;
     gchar *append_system_prompt_path;
+
+    /*
+     * Whether the command line being built reads stream-json on stdin, so
+     * build_stdin (called right after build_argv, without its streaming
+     * flag) writes a JSON user event instead of plain text.  Streaming
+     * always does: that is what keeps a turn steerable.
+     */
+    gboolean stdin_json;
 };
 
 /*
@@ -123,12 +133,15 @@ struct _AiClaudeCodeClient
  */
 static void ai_claude_code_client_provider_init(AiProviderInterface *iface);
 static void ai_claude_code_client_streamable_init(AiStreamableInterface *iface);
+static void ai_claude_code_client_steerable_init(AiSteerableInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE(AiClaudeCodeClient, ai_claude_code_client, AI_TYPE_CLI_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
                                               ai_claude_code_client_provider_init)
                         G_IMPLEMENT_INTERFACE(AI_TYPE_STREAMABLE,
-                                              ai_claude_code_client_streamable_init))
+                                              ai_claude_code_client_streamable_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_STEERABLE,
+                                              ai_claude_code_client_steerable_init))
 
 /*
  * Property IDs.
@@ -170,6 +183,7 @@ enum
     PROP_BARE,
     PROP_SAFE_MODE,
     PROP_CONTINUE_SESSION,
+    PROP_STEERABLE,
     N_PROPS
 };
 
@@ -299,6 +313,9 @@ ai_claude_code_client_get_property(
             break;
         case PROP_CONTINUE_SESSION:
             g_value_set_boolean(value, self->continue_session);
+            break;
+        case PROP_STEERABLE:
+            g_value_set_boolean(value, self->steerable);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -436,6 +453,11 @@ ai_claude_code_client_set_property(
             break;
         case PROP_CONTINUE_SESSION:
             self->continue_session = g_value_get_boolean(value);
+            break;
+        case PROP_STEERABLE:
+            self->steerable = g_value_get_boolean(value);
+            /* Tells the shared stream reader to keep stdin open. */
+            ai_cli_steer_set_open_input(AI_CLI_CLIENT(self), self->steerable);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -888,11 +910,28 @@ ai_claude_code_client_build_argv(
         g_ptr_array_add(args, g_strdup(self->mcp_config_path));
     }
 
-    if (ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
+    /*
+     * stream-json input for images, and for a streamed turn when the
+     * client is "steerable".
+     *
+     * Streamed, it is what makes the turn steerable: stdin stays open
+     * after the prompt, a second user event written mid-turn reaches the
+     * model before its next call, and --replay-user-messages echoes each
+     * event back (carrying the "uuid" we gave it) at the moment claude
+     * takes it -- the acknowledgement a steer waits for.  Checked against
+     * claude 2.1.325 with a control run; see docs/steering.org.  Both
+     * flags are --print-only and need stream-json output, which a
+     * streamed turn always has.
+     */
+    self->stdin_json = (streaming && self->steerable) ||
+        ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages));
+    if (self->stdin_json)
     {
         g_ptr_array_add(args, g_strdup("--input-format"));
         g_ptr_array_add(args, g_strdup("stream-json"));
     }
+    if (streaming && self->steerable)
+        g_ptr_array_add(args, g_strdup("--replay-user-messages"));
 
     /* Output format */
     if (streaming || ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
@@ -1029,6 +1068,7 @@ ai_claude_code_client_build_stdin(
     AiCliClient *client,
     GList       *messages
 ){
+    AiClaudeCodeClient *self = AI_CLAUDE_CODE_CLIENT(client);
     GString *prompt;
     GList *l;
 
@@ -1056,10 +1096,13 @@ ai_claude_code_client_build_stdin(
         "Tool use is fine, but you MUST provide a text summary of "
         "your work when finished. Never end your turn on tool calls alone.");
 
-    if (ai_cli_messages_have_images(ai_cli_client_messages_for_images(client, messages)))
+    if (self->stdin_json)
     {
         g_autofree gchar *flat = g_string_free(prompt, FALSE);
-        return ai_cli_image_user_event(ai_cli_client_messages_for_images(client, messages), flat);
+        g_autofree gchar *uuid = g_uuid_string_random();
+
+        return ai_cli_user_event(ai_cli_client_messages_for_images(client, messages),
+                                 flat, uuid);
     }
     return g_string_free(prompt, FALSE);
 }
@@ -1719,6 +1762,20 @@ ai_claude_code_client_parse_stream_events(
         /* Tool results come back as a user message full of tool_result. */
         JsonObject *msg_obj = ai_json_get_object(obj, "message");
 
+        /*
+         * --replay-user-messages: claude echoing a user event we wrote,
+         * at the moment it takes it.  For a steer that is the delivery
+         * receipt.  It is our own words, never the model's, so it emits
+         * nothing -- walking it would put the prompt into the reply.
+         */
+        if (ai_json_get_boolean(obj, "isReplay", FALSE))
+        {
+            ai_cli_steer_channel_resolve(ai_cli_steer_current(),
+                                         ai_json_get_string(obj, "uuid", NULL),
+                                         AI_STEER_DELIVERED, NULL);
+            return TRUE;
+        }
+
         if (msg_obj != NULL)
             cc_emit_message_content(msg_obj, out_events);
     }
@@ -1841,6 +1898,14 @@ ai_claude_code_client_parse_stream_events(
         }
 
         ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
+
+        /*
+         * The turn is over: close stdin so claude exits, unless a steer
+         * is still on its way in -- written but not yet echoed.  Claude
+         * runs that as a follow-on turn in the same process, and stdin
+         * closes once its echo arrives.
+         */
+        ai_cli_steer_channel_settle(ai_cli_steer_current());
     }
 
     return TRUE;
@@ -1977,6 +2042,8 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     cli_class->endpoint_applied = ai_claude_code_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_code_endpoint_kinds;
     cli_class->config_dir_env = claude_code_config_dir_env;
+    /* Claude Code defers MCP tools behind its own tool search. */
+    cli_class->searches_tools = TRUE;
     cli_class->build_argv = ai_claude_code_client_build_argv;
     cli_class->build_stdin = ai_claude_code_client_build_stdin;
     cli_class->parse_json_output = ai_claude_code_client_parse_json_output;
@@ -2443,6 +2510,28 @@ ai_claude_code_client_class_init(AiClaudeCodeClientClass *klass)
     properties[PROP_CONTINUE_SESSION] =
         g_param_spec_boolean("continue-session", "Continue Session",
                              "Continue the most recent conversation (--continue)",
+                             FALSE,
+                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /**
+     * AiClaudeCodeClient:steerable:
+     *
+     * Whether a streamed turn can be steered (#AiSteerable).
+     *
+     * When %TRUE, ai_streamable_chat_stream_async() runs claude with
+     * `--input-format stream-json --replay-user-messages`, writes the
+     * prompt as a JSON user event and keeps stdin open until the `result`
+     * line, so ai_steerable_steer_async() can add words to the running
+     * turn.  When %FALSE (the default) a streamed turn is exactly what it
+     * was before: the prompt as text on stdin, closed at once.  It is
+     * opt-in because a stand-in for claude that reads stdin to EOF before
+     * answering -- the usual shape of a test double -- would wait forever
+     * on an open pipe.  Steering a client with this off is refused with
+     * %AI_STEER_ERROR_NOT_STEERABLE.
+     */
+    properties[PROP_STEERABLE] =
+        g_param_spec_boolean("steerable", "Steerable",
+                             "Keep stdin open during a streamed turn so it can be steered",
                              FALSE,
                              G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
@@ -3047,6 +3136,88 @@ ai_claude_code_client_streamable_init(AiStreamableInterface *iface)
 {
     iface->chat_stream_async = ai_claude_code_client_chat_stream_async;
     iface->chat_stream_finish = ai_claude_code_client_chat_stream_finish;
+}
+
+/*
+ * AiSteerable: words into a streamed turn.
+ *
+ * A steer is one more stream-json user event on the open stdin, with a
+ * fresh "uuid".  Claude takes it before its next model call and echoes
+ * it back (--replay-user-messages), which is the DELIVERED.  Written but
+ * never echoed before the run ends is INDETERMINATE; nothing written is
+ * REFUSED.  Only a streamed turn is steerable -- chat_async and
+ * chat_sync close stdin with the prompt, and a steer finds no turn.
+ */
+static gchar *
+cc_build_steer(
+    AiCliClient        *client,
+    AiCliSteerChannel  *channel,
+    const gchar        *text,
+    gchar             **ack_key,
+    GError            **error
+){
+    g_autofree gchar *uuid = g_uuid_string_random();
+    gchar *line;
+
+    (void)client;
+    (void)channel;
+    (void)error;
+
+    line = ai_cli_user_event(NULL, text, uuid);
+    *ack_key = g_steal_pointer(&uuid);
+
+    return line;
+}
+
+static gchar *
+ai_claude_code_client_dup_turn_id(AiSteerable *steerable)
+{
+    return ai_cli_steer_dup_turn_id(AI_CLI_CLIENT(steerable));
+}
+
+static void
+ai_claude_code_client_steer_async(
+    AiSteerable         *steerable,
+    const gchar         *turn_id,
+    const gchar         *text,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    if (!AI_CLAUDE_CODE_CLIENT(steerable)->steerable)
+    {
+        g_autoptr(GTask) task = g_task_new(steerable, cancellable, callback, user_data);
+
+        g_task_set_source_tag(task, ai_cli_steer_async);
+        g_task_return_new_error(task, AI_STEER_ERROR, AI_STEER_ERROR_NOT_STEERABLE,
+                                "this client's turns are not steerable; set "
+                                "AiClaudeCodeClient:steerable before the turn starts");
+        return;
+    }
+
+    /* No ack timeout: the echo comes when claude reaches its next model
+     * call, which can be a long tool run away, and the run's own end
+     * answers anything still waiting. */
+    ai_cli_steer_async(AI_CLI_CLIENT(steerable), turn_id, text,
+                       cc_build_steer, 0, cancellable, callback, user_data);
+}
+
+static AiSteerResult
+ai_claude_code_client_steer_finish(
+    AiSteerable   *steerable,
+    GAsyncResult  *result,
+    GError       **error
+){
+    return ai_cli_steer_finish(AI_CLI_CLIENT(steerable), result, error);
+}
+
+static void
+ai_claude_code_client_steerable_init(AiSteerableInterface *iface)
+{
+    iface->can_steer    = TRUE;
+    iface->dup_turn_id  = ai_claude_code_client_dup_turn_id;
+    iface->steer_async  = ai_claude_code_client_steer_async;
+    iface->steer_finish = ai_claude_code_client_steer_finish;
 }
 
 /*

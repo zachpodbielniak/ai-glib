@@ -144,6 +144,20 @@ ai_http_error_set(
         g_set_error(error, AI_ERROR, AI_ERROR_RATE_LIMITED,
                     "Rate limited (HTTP %u)%s%s", status, sep, text);
     }
+    else if (status >= 300 && status < 400)
+    {
+        /*
+         * A 3xx reaches a caller only when the redirect guard refused it
+         * (ai-http-redirect-private.h): libsoup follows every other one.
+         * Saying so is the whole point -- "Request failed (HTTP 307)"
+         * reads as a server fault when it is ai-glib declining to send a
+         * key somewhere it was not configured to go.
+         */
+        g_set_error(error, AI_ERROR, AI_ERROR_NETWORK_ERROR,
+                    "Redirect refused (HTTP %u): a request that carries "
+                    "credentials is never redirected, and none leaves its "
+                    "configured origin%s%s", status, sep, text);
+    }
     else if (status >= 500)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_SERVER_ERROR,

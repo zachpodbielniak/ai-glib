@@ -139,6 +139,11 @@ If neither shape appears within =prompt-resend-interval-ms=, the Enter is re-sen
 
 The classification is a pure function, =ai_claude_tmux_client_jsonl_has_accepted_prompt()=, exported so it can be unit-tested without spawning =claude=.
 
+*** Steering
+=AiClaudeTmuxClient= is an =AiSteerable=. From the moment the turn's prompt is accepted until the turn is judged over, a steer pastes a prompt file into the TUI and presses Enter: claude queues the line (=queue-operation= =enqueue=, which is the =DELIVERED=) and hands it to the running turn at its next model call (=remove=, reason =absorbed_mid_turn=). A line still in the draft box after every Enter is cleared with =C-u= and refused; one neither queued nor visible is =INDETERMINATE=.
+
+When the Stop hook fires, the turn is not over while a steered line is still queued: claude would run it the moment it stops, so the client removes the sentinel and waits for the next Stop rather than killing the session with the words inside. See [[file:../steering.org][Steering]].
+
 *** Resume-mode picker
 When a session is resumed, claude's TUI can stop on an interactive picker asking whether to resume "with a summary", "as-is", or "clear". Because this client always kills the tmux session at the end of a turn (claude never exits cleanly on its own), every resumed session looks "interrupted" to claude --- which is what triggers the picker. There is no CLI flag or settings-file key to suppress it.
 

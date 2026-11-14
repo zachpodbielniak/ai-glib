@@ -78,6 +78,7 @@ see their provider pages.
 
 *** Observing a turn
 - [[file:events.org][The event stream]] - Watch a turn happen: text, reasoning, tool calls, usage
+- [[file:steering.org][Steering]] - Words into a running turn: the tri-state, and what each engine offers
 - [[file:transcript.org][The transcript]] - A renderable model of a conversation, and the Emacs recipe
 - [[file:agents.org][Agents & Brigades]] - Orchestrating agent runs, and background agents on any provider
 

@@ -22,6 +22,7 @@
 #include "core/ai-tool-endpoint-consumer.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-steerable.h"
 #include "model/ai-message.h"
 #include "model/ai-response.h"
 
@@ -65,6 +66,8 @@ G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
  *   this particular CLI takes one
  * @endpoint_kinds: the #AiAgentEndpoint kinds this class accepts
  * @check_exit_status: whether streaming requires a successful process exit
+ * @searches_tools: whether the CLI searches its MCP tools itself instead of
+ *   loading every tool's schema up front
  * @config_dir_env: the variables a config directory sets, or %NULL when this
  *   CLI cannot run under a separate account
  *
@@ -157,6 +160,17 @@ struct _AiCliClientClass
     gboolean check_exit_status;
 
     /*
+     * Whether this CLI looks MCP tools up itself as it needs them rather
+     * than putting every tool's schema in the model's context.  Claude
+     * Code does (its tool search); a host that curates tools for a CLI
+     * reads this through ai_cli_client_searches_tools() to know whether
+     * the CLI will cope with a large catalogue on its own.  FALSE unless
+     * a class sets it.  It sits in the padding after check_exit_status
+     * on LP64 targets, so the class size is unchanged there.
+     */
+    gboolean searches_tools;
+
+    /*
      * How this CLI is pointed at a separate account: the environment
      * variables ai_cli_client_set_config_dir() sets.  Static and
      * NULL-terminated; each entry is "VAR" (set to the directory itself)
@@ -247,6 +261,9 @@ ai_cli_client_get_config_dir(AiCliClient *self);
 
 gboolean
 ai_cli_client_supports_config_dir(AiCliClient *self);
+
+gboolean
+ai_cli_client_searches_tools(AiCliClient *self);
 
 const gchar *
 ai_cli_client_get_executable_path(AiCliClient *self);

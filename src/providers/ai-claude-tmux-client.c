@@ -28,6 +28,7 @@
 
 #include "core/ai-error.h"
 #include "core/ai-cli-client-private.h"
+#include "core/ai-steerable-private.h"
 #include "core/ai-json-util.h"
 #include "providers/ai-claude-sandbox-private.h"
 #include "core/ai-provider.h"
@@ -93,6 +94,17 @@ struct _AiClaudeTmuxClient
                                      * one-shot server setup (start-server
                                      * + exit-empty off) for this client */
     gdouble   total_cost;           /* last parsed cost in USD */
+
+    /*
+     * Steering.  @live is set while a turn is running and its prompt has
+     * been accepted -- the window in which a line typed into the TUI
+     * joins that turn -- and cleared when the turn is judged over.  The
+     * lock is held across a whole steer, so the end-of-turn decision
+     * (which reads the transcript for steered words still queued) can
+     * never interleave with a steer half-typed.
+     */
+    GMutex    steer_lock;
+    struct _TmuxLiveTurn *live;
 };
 
 enum
@@ -124,11 +136,15 @@ enum
 static GParamSpec *properties[N_PROPS];
 
 static void ai_claude_tmux_client_provider_init(AiProviderInterface *iface);
+static void ai_claude_tmux_client_steerable_init(AiSteerableInterface *iface);
+static void tmux_live_turn_free(struct _TmuxLiveTurn *live);
 
 G_DEFINE_TYPE_WITH_CODE(AiClaudeTmuxClient, ai_claude_tmux_client,
                         AI_TYPE_CLI_CLIENT,
                         G_IMPLEMENT_INTERFACE(AI_TYPE_PROVIDER,
-                                              ai_claude_tmux_client_provider_init))
+                                              ai_claude_tmux_client_provider_init)
+                        G_IMPLEMENT_INTERFACE(AI_TYPE_STEERABLE,
+                                              ai_claude_tmux_client_steerable_init))
 
 /* ------------------------------------------------------------------ */
 /* Pure helpers                                                        */
@@ -468,6 +484,100 @@ ai_claude_tmux_client_jsonl_has_accepted_prompt(const gchar *jsonl_slice)
     }
 
     return FALSE;
+}
+
+/*
+ * Walk the queue-operation entries of a transcript slice.
+ *
+ * @enqueued counts enqueues; @pending is enqueues not yet taken back out
+ * (`remove`, `dequeue`), and a `popAll` empties it.  Only `enqueue` and
+ * `remove` (reason `absorbed_mid_turn`) were seen in the control run
+ * against claude 2.1.325; the other two are read so that a TUI which
+ * drains its queue another way does not leave a turn waiting forever.
+ * Lines that do not parse are skipped, as everywhere else here: the file
+ * is read while claude is still appending to it.
+ */
+static void
+jsonl_queue_counts(const gchar *jsonl_slice, guint *enqueued, guint *pending)
+{
+    g_auto(GStrv) lines = NULL;
+    guint i;
+
+    *enqueued = 0;
+    *pending = 0;
+
+    lines = g_strsplit(jsonl_slice, "\n", -1);
+    for (i = 0; lines[i] != NULL; i++)
+    {
+        g_autoptr(JsonParser) parser = NULL;
+        JsonObject *obj;
+        const gchar *op;
+
+        if (lines[i][0] == '\0' || strstr(lines[i], "queue-operation") == NULL)
+            continue;
+
+        parser = json_parser_new();
+        if (!json_parser_load_from_data(parser, lines[i], -1, NULL))
+            continue;
+        obj = ai_json_root_object(parser);
+        if (obj == NULL ||
+            g_strcmp0(ai_json_get_string(obj, "type", ""), "queue-operation") != 0)
+            continue;
+
+        op = ai_json_get_string(obj, "operation", "");
+        if (g_strcmp0(op, "enqueue") == 0)
+        {
+            (*enqueued)++;
+            (*pending)++;
+        }
+        else if ((g_strcmp0(op, "remove") == 0 ||
+                  g_strcmp0(op, "dequeue") == 0) && *pending > 0)
+        {
+            (*pending)--;
+        }
+        else if (g_strcmp0(op, "popAll") == 0)
+        {
+            *pending = 0;
+        }
+    }
+}
+
+gboolean
+ai_claude_tmux_client_jsonl_has_enqueue(const gchar *jsonl_slice)
+{
+    guint enqueued;
+    guint pending;
+
+    g_return_val_if_fail(jsonl_slice != NULL, FALSE);
+
+    jsonl_queue_counts(jsonl_slice, &enqueued, &pending);
+    return enqueued > 0;
+}
+
+guint
+ai_claude_tmux_client_jsonl_pending_queued(const gchar *jsonl_slice)
+{
+    guint enqueued;
+    guint pending;
+
+    g_return_val_if_fail(jsonl_slice != NULL, 0);
+
+    jsonl_queue_counts(jsonl_slice, &enqueued, &pending);
+    return pending;
+}
+
+/* Reads @jsonl_path past @from_offset; an absent or unchanged file is "". */
+static gchar *
+read_jsonl_slice(const gchar *jsonl_path, goffset from_offset)
+{
+    g_autofree gchar *content = NULL;
+    gsize content_len = 0;
+
+    if (!g_file_get_contents(jsonl_path, &content, &content_len, NULL) ||
+        (goffset)content_len <= from_offset)
+        return g_strdup("");
+
+    return g_strdup(content + from_offset);
 }
 
 /*
@@ -1652,6 +1762,8 @@ ai_claude_tmux_client_finalize(GObject *object)
     g_free(self->mcp_config_path);
 
     g_free(self->saved_mcp_config_path);
+    g_clear_pointer(&self->live, tmux_live_turn_free);
+    g_mutex_clear(&self->steer_lock);
     G_OBJECT_CLASS(ai_claude_tmux_client_parent_class)->finalize(object);
 }
 
@@ -1756,6 +1868,8 @@ ai_claude_tmux_client_class_init(AiClaudeTmuxClientClass *klass)
     cli_class->endpoint_applied = ai_claude_tmux_client_endpoint_applied;
     cli_class->endpoint_kinds = claude_tmux_endpoint_kinds;
     cli_class->config_dir_env = claude_tmux_config_dir_env;
+    /* The same claude binary as claude-code, so the same tool search. */
+    cli_class->searches_tools = TRUE;
 
     properties[PROP_TMUX_PATH] = g_param_spec_string(
         "tmux-path", "Tmux Path",
@@ -1950,6 +2064,8 @@ ai_claude_tmux_client_init(AiClaudeTmuxClient *self)
     self->turn_active = 0;
     self->server_ready = 0;
     self->total_cost = 0.0;
+    g_mutex_init(&self->steer_lock);
+    self->live = NULL;
 
     ai_cli_client_set_model(AI_CLI_CLIENT(self), AI_CLAUDE_TMUX_DEFAULT_MODEL);
 }
@@ -2272,6 +2388,140 @@ ai_claude_tmux_client_build_session_argv(
     g_ptr_array_add(argv, NULL);
 
     return argv;
+}
+
+/* ------------------------------------------------------------------ */
+/* Steering: the live turn                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * What a steer needs to reach the turn running now.  Copies, not
+ * borrows: the turn's own strings live on chat_sync_real()'s stack.
+ */
+typedef struct _TmuxLiveTurn
+{
+    gchar   *turn_id;
+    gchar   *tmux_bin;
+    gchar   *socket_name;
+    gchar   *session_name;
+    gchar   *session_id;
+    gchar   *jsonl_path;
+    gchar   *runtime_dir;
+    goffset  watermark;     /* pre-prompt size: queue entries past it are ours */
+    guint    steers;        /* numbers each steer's prompt file and buffer */
+} TmuxLiveTurn;
+
+static void
+tmux_live_turn_free(TmuxLiveTurn *live)
+{
+    if (live == NULL)
+        return;
+
+    g_free(live->turn_id);
+    g_free(live->tmux_bin);
+    g_free(live->socket_name);
+    g_free(live->session_name);
+    g_free(live->session_id);
+    g_free(live->jsonl_path);
+    g_free(live->runtime_dir);
+    g_free(live);
+}
+
+/* The prompt was accepted: from now on a typed line joins this turn. */
+static void
+tmux_live_open(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    const gchar        *session_name,
+    const gchar        *session_id,
+    const gchar        *jsonl_path,
+    const gchar        *runtime_dir,
+    goffset             watermark
+){
+    TmuxLiveTurn *live = g_new0(TmuxLiveTurn, 1);
+
+    live->turn_id = g_uuid_string_random();
+    live->tmux_bin = g_strdup(tmux_bin);
+    live->socket_name = g_strdup(socket_name);
+    live->session_name = g_strdup(session_name);
+    live->session_id = g_strdup(session_id);
+    live->jsonl_path = g_strdup(jsonl_path);
+    live->runtime_dir = g_strdup(runtime_dir);
+    live->watermark = watermark;
+
+    g_mutex_lock(&self->steer_lock);
+    tmux_live_turn_free(self->live);
+    self->live = live;
+    g_mutex_unlock(&self->steer_lock);
+}
+
+static void
+tmux_live_close(AiClaudeTmuxClient *self)
+{
+    g_mutex_lock(&self->steer_lock);
+    g_clear_pointer(&self->live, tmux_live_turn_free);
+    g_mutex_unlock(&self->steer_lock);
+}
+
+/*
+ * The Stop hook fired.  Is the turn over?
+ *
+ * Not while the TUI still holds steered words: claude runs them the
+ * moment it stops, as a follow-on turn in the same session, and killing
+ * the session now would lose words a caller was told were delivered.
+ * Decided under the steer lock, so a steer cannot be typed between the
+ * reading and the closing; when the answer is "over", the live turn is
+ * closed in the same breath and later steers are refused.
+ *
+ * Returns: %TRUE when the turn is over
+ */
+static gboolean
+tmux_live_settle(AiClaudeTmuxClient *self, const gchar *jsonl_path,
+                 goffset watermark)
+{
+    g_autofree gchar *slice = read_jsonl_slice(jsonl_path, watermark);
+    guint pending;
+
+    g_mutex_lock(&self->steer_lock);
+    pending = ai_claude_tmux_client_jsonl_pending_queued(slice);
+    if (pending == 0)
+        g_clear_pointer(&self->live, tmux_live_turn_free);
+    g_mutex_unlock(&self->steer_lock);
+
+    if (pending > 0)
+        g_debug("claude-tmux: Stop fired with %u steered line(s) still "
+                "queued; waiting for the follow-on turn", pending);
+
+    return pending == 0;
+}
+
+void
+ai_claude_tmux_client_open_live_turn(
+    AiClaudeTmuxClient *self,
+    const gchar        *tmux_bin,
+    const gchar        *socket_name,
+    const gchar        *session_name,
+    const gchar        *session_id,
+    const gchar        *jsonl_path,
+    const gchar        *runtime_dir,
+    goffset             watermark
+){
+    g_return_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self));
+
+    tmux_live_open(self, tmux_bin, socket_name, session_name, session_id,
+                   jsonl_path, runtime_dir, watermark);
+}
+
+gboolean
+ai_claude_tmux_client_settle_live_turn(
+    AiClaudeTmuxClient *self,
+    const gchar        *jsonl_path,
+    goffset             watermark
+){
+    g_return_val_if_fail(AI_IS_CLAUDE_TMUX_CLIENT(self), TRUE);
+
+    return tmux_live_settle(self, jsonl_path, watermark);
 }
 
 /*
@@ -2924,6 +3174,10 @@ ai_claude_tmux_client_chat_sync_real(
         }
     }
 
+    /* The turn is running: steerable from here until it is judged over. */
+    tmux_live_open(self, tmux_bin, socket_name, tmux_session_name, session_id,
+                   jsonl_path, runtime_dir, jsonl_size_before);
+
     /*
      * ---------- wait for Stop hook sentinel ----------
      * The Stop hook fires when claude finishes its turn.  By the time
@@ -2937,14 +3191,28 @@ ai_claude_tmux_client_chat_sync_real(
      * turn.  See wait_for_sentinel_or_idle() for the rationale — this is
      * the fix for long turns being killed mid-flight with no reply.
      */
-    if (!ai_claude_tmux_client_wait_for_sentinel_or_idle(
-             sentinel_path, jsonl_path, self->turn_timeout_ms,
-             cancellable, error))
+    for (;;)
     {
-        g_prefix_error(error,
-                       "Stop hook sentinel '%s' never appeared: ",
-                       sentinel_path);
-        goto cleanup_and_fail;
+        if (!ai_claude_tmux_client_wait_for_sentinel_or_idle(
+                 sentinel_path, jsonl_path, self->turn_timeout_ms,
+                 cancellable, error))
+        {
+            g_prefix_error(error,
+                           "Stop hook sentinel '%s' never appeared: ",
+                           sentinel_path);
+            goto cleanup_and_fail;
+        }
+
+        /*
+         * A steered line the TUI has not handed to the turn yet runs as
+         * a follow-on turn the moment this one stops, and fires Stop
+         * again.  Wait for that one.  The sentinel is removed first so
+         * the wait sees the next Stop, not this one; a follow-on turn
+         * is a model call away, far longer than this takes.
+         */
+        if (tmux_live_settle(self, jsonl_path, jsonl_size_before))
+            break;
+        g_unlink(sentinel_path);
     }
 
     /*
@@ -3088,6 +3356,7 @@ ai_claude_tmux_client_chat_sync_real(
         kill_cancel_id = 0;
     }
 
+    tmux_live_close(self);
     g_atomic_int_set(&self->turn_active, 0);
     return g_steal_pointer(&response);
 
@@ -3122,8 +3391,323 @@ cleanup_and_fail:
         kill_cancel_id = 0;
     }
 
+    tmux_live_close(self);
     g_atomic_int_set(&self->turn_active, 0);
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* AiSteerable                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Whether the TUI's draft box still shows the start of @text.
+ *
+ * A pasted line whose Enter never registered sits there unsubmitted; a
+ * submitted one moves above the box.  Only the bottom few lines of the
+ * pane are read -- the draft box is at the bottom -- so the same words
+ * already echoed in the transcript area higher up do not count.
+ */
+static gboolean
+pane_shows_draft(
+    AiClaudeTmuxClient *self,
+    TmuxLiveTurn       *live,
+    const gchar        *text,
+    GCancellable       *cancellable
+){
+    g_autoptr(GPtrArray) argv = tmux_argv_new(
+        live->tmux_bin, live->socket_name,
+        "capture-pane", "-p", "-t", live->session_name, NULL);
+    g_autoptr(GSubprocess) sub = NULL;
+    g_autofree gchar *pane = NULL;
+    g_autofree gchar *needle = NULL;
+    g_auto(GStrv) lines = NULL;
+    const gchar *newline;
+    guint n;
+    guint i;
+    guint seen = 0;
+
+    sub = g_subprocess_newv((const gchar * const *)argv->pdata,
+                            G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                            G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+    if (sub == NULL ||
+        !ai_subprocess_communicate_utf8_bounded(sub, NULL,
+                                                self->command_timeout_ms,
+                                                cancellable, &pane, NULL, NULL) ||
+        pane == NULL)
+        return FALSE;
+
+    /* The first line of the steer, and not too much of it: the box wraps. */
+    newline = strchr(text, '\n');
+    needle = g_strndup(text, MIN(newline != NULL ? (gsize)(newline - text)
+                                                 : strlen(text), 40));
+    g_strstrip(needle);
+    if (needle[0] == '\0')
+        return FALSE;
+
+    lines = g_strsplit(pane, "\n", -1);
+    n = g_strv_length(lines);
+    for (i = n; i > 0 && seen < 6; i--)
+    {
+        if (g_strstrip(lines[i - 1])[0] == '\0')
+            continue;
+        seen++;
+        if (strstr(lines[i - 1], needle) != NULL)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Polls the transcript for the TUI's enqueue of the line just submitted. */
+static gboolean
+wait_for_enqueue(
+    TmuxLiveTurn *live,
+    goffset       watermark,
+    gint          wait_ms,
+    GCancellable *cancellable
+){
+    const gint poll_ms = 100;
+    gint waited = 0;
+
+    for (;;)
+    {
+        g_autofree gchar *slice = read_jsonl_slice(live->jsonl_path, watermark);
+
+        if (ai_claude_tmux_client_jsonl_has_enqueue(slice))
+            return TRUE;
+        if (waited >= wait_ms ||
+            (cancellable != NULL && g_cancellable_is_cancelled(cancellable)))
+            return FALSE;
+        g_usleep(poll_ms * 1000);
+        waited += poll_ms;
+    }
+}
+
+/*
+ * One steer, start to finish, on a worker thread.
+ *
+ * Typing into the TUI while it works queues the line in claude itself;
+ * claude hands it to the running turn at the next model call (a
+ * `queue-operation` `remove`, reason `absorbed_mid_turn`).  The outcome
+ * is read back the way the turn's own prompt is:
+ *
+ *   - an `enqueue` in the transcript: DELIVERED;
+ *   - the paste or the keystrokes failing, or the line still sitting in
+ *     the draft box after every Enter, which is then cleared: REFUSED --
+ *     claude never got it;
+ *   - neither: INDETERMINATE.
+ */
+static AiSteerResult
+tmux_steer_blocking(
+    AiClaudeTmuxClient *self,
+    const gchar        *turn_id,
+    const gchar        *text,
+    GCancellable       *cancellable,
+    GError            **error
+){
+    TmuxLiveTurn *live;
+    g_autoptr(GError) local_error = NULL;
+    g_autofree gchar *prompt_path = NULL;
+    g_autofree gchar *paste_id = NULL;
+    AiSteerResult result = AI_STEER_INDETERMINATE;
+    goffset watermark = 0;
+    GStatBuf st;
+    gint attempt;
+    gint wait_ms;
+
+    g_mutex_lock(&self->steer_lock);
+    live = self->live;
+
+    if (live == NULL)
+    {
+        g_set_error_literal(error, AI_STEER_ERROR, AI_STEER_ERROR_NO_ACTIVE_TURN,
+                            "no turn is running");
+        result = AI_STEER_REFUSED;
+        goto out;
+    }
+    if (turn_id != NULL && g_strcmp0(turn_id, live->turn_id) != 0)
+    {
+        g_set_error(error, AI_STEER_ERROR, AI_STEER_ERROR_TURN_MISMATCH,
+                    "turn %s is not the one running", turn_id);
+        result = AI_STEER_REFUSED;
+        goto out;
+    }
+    if (cancellable != NULL && g_cancellable_is_cancelled(cancellable))
+    {
+        g_set_error_literal(error, AI_STEER_ERROR, AI_STEER_ERROR_CANCELLED,
+                            "cancelled before the words were typed");
+        result = AI_STEER_REFUSED;
+        goto out;
+    }
+
+    /* Everything the TUI logs from here on answers this steer. */
+    if (g_stat(live->jsonl_path, &st) == 0)
+        watermark = (goffset)st.st_size;
+
+    live->steers++;
+    paste_id = g_strdup_printf("steer-%u-%s", live->steers, live->session_id);
+    {
+        g_autofree gchar *base = g_strconcat(paste_id, ".md", NULL);
+        prompt_path = g_build_filename(live->runtime_dir, base, NULL);
+    }
+
+    if (!write_prompt_file_atomic(prompt_path, text, &local_error) ||
+        !paste_prompt_into_tui(self, live->tmux_bin, live->socket_name,
+                               live->session_name, paste_id, prompt_path,
+                               cancellable, &local_error))
+    {
+        /* Whatever of it landed must not be submitted by a later Enter. */
+        clear_tui_draft(self, live->tmux_bin, live->socket_name,
+                        live->session_name, NULL);
+        g_set_error(error, AI_STEER_ERROR, AI_STEER_ERROR_SEND_FAILED,
+                    "steer not typed: %s",
+                    local_error != NULL ? local_error->message : "unknown error");
+        result = AI_STEER_REFUSED;
+        goto out;
+    }
+
+    /* The same Enter ladder as the prompt's, with the same budget. */
+    wait_ms = self->prompt_resend_interval_ms;
+    for (attempt = 1; attempt <= self->max_prompt_send_attempts; attempt++)
+    {
+        g_autoptr(GPtrArray) enter_argv = tmux_argv_new(
+            live->tmux_bin, live->socket_name,
+            "send-keys", "-t", live->session_name, "Enter", NULL);
+
+        if (!run_command_sync((const gchar * const *)enter_argv->pdata, NULL,
+                              self->command_timeout_ms, cancellable, NULL))
+            break;
+
+        if (wait_for_enqueue(live, watermark, wait_ms, cancellable))
+        {
+            result = AI_STEER_DELIVERED;
+            goto out;
+        }
+
+        if (self->prompt_send_exponential_backoff)
+            wait_ms *= 2;
+    }
+
+    /*
+     * Never seen queued.  Still in the draft box means never submitted:
+     * clear it and look once more, in case the last Enter was only
+     * slow to show.  Gone from the box but not in the transcript is the
+     * case nothing here can decide.
+     */
+    if (pane_shows_draft(self, live, text, NULL))
+    {
+        clear_tui_draft(self, live->tmux_bin, live->socket_name,
+                        live->session_name, NULL);
+        if (wait_for_enqueue(live, watermark, 500, NULL))
+        {
+            result = AI_STEER_DELIVERED;
+        }
+        else
+        {
+            g_set_error_literal(error, AI_STEER_ERROR,
+                                AI_STEER_ERROR_SEND_FAILED,
+                                "the TUI never took the line; it was "
+                                "cleared from the draft box");
+            result = AI_STEER_REFUSED;
+        }
+    }
+
+out:
+    g_mutex_unlock(&self->steer_lock);
+    if (prompt_path != NULL && !self->keep_artifacts)
+        g_unlink(prompt_path);
+
+    return result;
+}
+
+typedef struct
+{
+    gchar *turn_id;
+    gchar *text;
+} TmuxSteerData;
+
+static void
+tmux_steer_data_free(gpointer data)
+{
+    TmuxSteerData *steer = data;
+
+    g_free(steer->turn_id);
+    g_free(steer->text);
+    g_free(steer);
+}
+
+static void
+tmux_steer_thread(
+    GTask        *task,
+    gpointer      source_object,
+    gpointer      task_data,
+    GCancellable *cancellable
+){
+    TmuxSteerData *steer = task_data;
+    GError *error = NULL;
+    AiSteerResult result;
+
+    result = tmux_steer_blocking(AI_CLAUDE_TMUX_CLIENT(source_object),
+                                 steer->turn_id, steer->text,
+                                 cancellable, &error);
+    ai_steer_task_return(task, result, error);
+}
+
+static gchar *
+ai_claude_tmux_client_dup_turn_id(AiSteerable *steerable)
+{
+    AiClaudeTmuxClient *self = AI_CLAUDE_TMUX_CLIENT(steerable);
+    gchar *turn_id = NULL;
+
+    g_mutex_lock(&self->steer_lock);
+    if (self->live != NULL)
+        turn_id = g_strdup(self->live->turn_id);
+    g_mutex_unlock(&self->steer_lock);
+
+    return turn_id;
+}
+
+static void
+ai_claude_tmux_client_steer_async(
+    AiSteerable         *steerable,
+    const gchar         *turn_id,
+    const gchar         *text,
+    GCancellable        *cancellable,
+    GAsyncReadyCallback  callback,
+    gpointer             user_data
+){
+    g_autoptr(GTask) task = NULL;
+    TmuxSteerData *steer = g_new0(TmuxSteerData, 1);
+
+    steer->turn_id = g_strdup(turn_id);
+    steer->text = g_strdup(text);
+
+    /* tmux commands and transcript polls block: a worker thread. */
+    task = ai_steer_task_new(steerable, cancellable, callback, user_data);
+    g_task_set_source_tag(task, ai_claude_tmux_client_steer_async);
+    g_task_set_task_data(task, steer, tmux_steer_data_free);
+    g_task_run_in_thread(task, tmux_steer_thread);
+}
+
+static AiSteerResult
+ai_claude_tmux_client_steer_finish(
+    AiSteerable   *steerable,
+    GAsyncResult  *result,
+    GError       **error
+){
+    g_return_val_if_fail(g_task_is_valid(result, steerable), AI_STEER_REFUSED);
+
+    return ai_steer_task_propagate(G_TASK(result), error);
+}
+
+static void
+ai_claude_tmux_client_steerable_init(AiSteerableInterface *iface)
+{
+    iface->can_steer    = TRUE;
+    iface->dup_turn_id  = ai_claude_tmux_client_dup_turn_id;
+    iface->steer_async  = ai_claude_tmux_client_steer_async;
+    iface->steer_finish = ai_claude_tmux_client_steer_finish;
 }
 
 /* ------------------------------------------------------------------ */

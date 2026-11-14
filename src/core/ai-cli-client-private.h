@@ -18,6 +18,7 @@ G_BEGIN_DECLS
 gboolean ai_cli_messages_have_images(GList *messages);
 GList *ai_cli_client_messages_for_images(AiCliClient *self, GList *messages);
 gchar *ai_cli_image_user_event(GList *messages, const gchar *text);
+gchar *ai_cli_user_event(GList *messages, const gchar *text, const gchar *uuid);
 
 gboolean
 ai_cli_client_mcp_config_has_host(const gchar *path, gboolean toml);
@@ -35,6 +36,14 @@ GList *
 ai_cli_client_messages_for_prompt(
     AiCliClient *self,
     GList       *messages
+);
+
+AiResponse *
+ai_cli_client_chat_sync_pipeline(
+    AiCliClient   *self,
+    GList         *messages,
+    GCancellable  *cancellable,
+    GError       **error
 );
 
 G_END_DECLS

@@ -20,6 +20,7 @@
 #include "core/ai-config.h"
 #include "core/ai-provider.h"
 #include "core/ai-streamable.h"
+#include "core/ai-steerable.h"
 #include "model/ai-message.h"
 #include "model/ai-response.h"
 
