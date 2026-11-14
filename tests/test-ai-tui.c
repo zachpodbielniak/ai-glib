@@ -4140,6 +4140,23 @@ main(int argc, char *argv[])
 	 * background fetch, and a checkout that does not exist. */
 	g_setenv("AI_GLIB_NO_UPDATE_CHECK", "1", TRUE);
 	g_setenv("AI_GLIB_SOURCE_DIR", "/nonexistent/ai-glib-test-checkout", TRUE);
+	/*
+	 * Nor reach a real decision service with the developer's credentials.
+	 * /decide without -p picks TypeSafe whenever TYPESAFE_API_KEY is set,
+	 * ahead of LAYA_BASE_URL (bin/ai-decide-options.h), and the private
+	 * tmux server -- with every ai-tui it starts -- inherits this process's
+	 * environment.  With a key exported, the decision test sent its
+	 * question to api.typesafe.ai instead of the loopback Laya fixture and
+	 * waited for an answer the fixture never gave.  test-decision.c and
+	 * test-decision-cli.c already clear the same variables.
+	 */
+	g_unsetenv("TYPESAFE_API_KEY");
+	g_unsetenv("TYPESAFE_BASE_URL");
+	g_unsetenv("TYPESAFE_DEFAULT_MODEL");
+	g_unsetenv("LAYA_BASE_URL");
+	g_unsetenv("LAYA_API_KEY");
+	g_unsetenv("OLLAMA_HOST");
+	g_unsetenv("OLLAMA_API_KEY");
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/ai-glib/ai-tui/decision/interactive", test_decision_interactive);
 	/* Never inherit the developer's tmux options or touch their sessions. */
