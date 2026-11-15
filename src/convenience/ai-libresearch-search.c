@@ -405,7 +405,11 @@ send_get(
 	g_task_set_source_tag(task, source_tag);
 
 	rd = g_new0(RequestData, 1);
-	rd->msg = soup_message_new(SOUP_METHOD_GET, owned_url);
+	/* The bearer, when one is set, is the credential. */
+	rd->msg = ai_http_message_new(SOUP_METHOD_GET, owned_url,
+	                              self->api_key != NULL && *self->api_key != '\0'
+	                              ? AI_HTTP_CARRIES_CREDENTIALS
+	                              : AI_HTTP_NO_CREDENTIALS);
 	g_task_set_task_data(task, rd, request_data_free);
 
 	if (rd->msg == NULL)
@@ -1231,14 +1235,12 @@ ai_libresearch_search_init(
 	AiLibresearchSearch *self
 ){
 	/* Both sessions exist before the CONSTRUCT properties set their timeouts. */
-	self->session = soup_session_new();
-	self->long_session = soup_session_new();
 	/*
 	 * Every request on both carries the bearer token when one is set, so
 	 * neither follows a redirect with it (ai-http-redirect-private.h).
 	 */
-	ai_http_guard_session(self->session);
-	ai_http_guard_session(self->long_session);
+	self->session = ai_http_session_new();
+	self->long_session = ai_http_session_new();
 	self->timeout = LIBRESEARCH_TIMEOUT_S;
 	self->research_timeout = LIBRESEARCH_RESEARCH_TIMEOUT_S;
 }

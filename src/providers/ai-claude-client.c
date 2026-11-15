@@ -17,6 +17,7 @@
 #include "core/ai-event-source.h"
 #include "model/ai-text-content.h"
 #include "model/ai-tool-use.h"
+#include "core/ai-client-private.h"
 
 #define CLAUDE_MESSAGES_ENDPOINT "/v1/messages"
 #define CLAUDE_MODELS_ENDPOINT "/v1/models?limit=100"
@@ -575,7 +576,8 @@ ai_claude_client_chat_async(
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
     /* Create HTTP request */
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -747,7 +749,8 @@ ai_claude_client_list_models_async(
 
     url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_CLAUDE),
                       CLAUDE_MODELS_ENDPOINT, NULL);
-    msg = soup_message_new("GET", url);
+    msg = ai_http_message_new("GET", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
     data = g_slice_new0(ClaudeListModelsData);
@@ -1438,7 +1441,8 @@ ai_claude_client_chat_stream_async(
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
     /* Create HTTP request */
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
     soup_message_headers_append(soup_message_get_request_headers(msg),

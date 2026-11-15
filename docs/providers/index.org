@@ -167,4 +167,18 @@ No HTTP request that carries a credential follows a redirect, not even to its ow
 
 - A credential is =Authorization=, =Proxy-Authorization=, =Cookie=, any header whose name contains "auth", "token", "secret", "password", "api-key", "apikey", "subscription-key" or "access-key", or a password in the URL. A caller can also mark a message whose credential is in its body.
 - A refused redirect is =AI_ERROR_NETWORK_ERROR= with a message that starts "Redirect refused (HTTP 307)" and says why.
-- Covered: every =AiClient= provider (one session per client), the Bing and Brave search helpers, =AiLibresearchSearch='s synchronous and asynchronous requests, and =ai-call='s Matrix and JWT requests.
+- A public URL is the one exception: a generated image's or video's download link, and the page =web_fetch= reads. It carries no credential and came from outside, and a hop to a CDN or another host is how such links work, so it follows a redirect wherever libsoup would. If a credential header is on it when it is sent, it is refused like any other.
+- Covered: every HTTP request ai-glib makes. Each =SoupMessage= is built by one private constructor that makes the call site say what the request carries, and each =SoupSession= by one that guards it, so a message that reaches a session by another road is still judged by its headers when it is queued. =tests/check-http-constructors.sh=, run by =make test=, fails the build on a bare =soup_message_new*()= or =soup_session_new*()= anywhere else in =src/=, =bin/= or =gui/=.
+
+**** What each request declares
+| Request                                                               | Declared                       | Redirect                                      |
+|-----------------------------------------------------------------------+--------------------------------+-----------------------------------------------|
+| Provider chat, streaming, models, images, video, embeddings (HTTP)    | what =add_auth_headers()= attaches | never with a key; same origin without one (Ollama, a keyless local server) |
+| Retry of a provider image or video request                            | what the first attempt declared | as the first attempt                          |
+| SystemOne decision (=AiTypesafeClient=, =AiLayaClient=, =AiOllamaClient=) | credentials                  | never                                         |
+| Bing, Brave (key in a header)                                         | credentials                    | never                                         |
+| =AiLibresearchSearch=                                                 | credentials with a bearer, none without | never / same origin                  |
+| DuckDuckGo                                                            | none                           | same origin                                   |
+| Voice: HTTP synthesizer, websocket recognizer                         | none (configured endpoint)     | same origin                                   |
+| Generated image or video download, =web_fetch=, =web_search= page fetch | public URL                   | anywhere, unless a credential header is on it |
+| =ai-call= Matrix and JWT requests                                     | credentials                    | never                                         |

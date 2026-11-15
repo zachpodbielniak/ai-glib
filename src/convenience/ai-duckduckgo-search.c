@@ -17,6 +17,7 @@
 #include "convenience/ai-duckduckgo-search.h"
 #include "convenience/ai-search-provider.h"
 #include "core/ai-error.h"
+#include "core/ai-http-redirect-private.h"
 
 #define DDG_ENDPOINT        "https://lite.duckduckgo.com/lite/"
 #define DDG_DEFAULT_COUNT   10
@@ -365,7 +366,9 @@ ai_duckduckgo_search_do_search (
         if (g_cancellable_set_error_if_cancelled (cancellable, error))
             return NULL;
 
-        msg = soup_message_new ("POST", self->endpoint);
+        /* Keyless, to a configured endpoint: same origin only. */
+        msg = ai_http_message_new ("POST", self->endpoint,
+                                   AI_HTTP_NO_CREDENTIALS);
         if (msg == NULL)
             return NULL;   /* malformed endpoint: degrade to empty */
 
@@ -521,7 +524,7 @@ static void
 ai_duckduckgo_search_init (AiDuckDuckGoSearch *self)
 {
     self->endpoint = NULL;   /* set by the CONSTRUCT default */
-    self->session  = soup_session_new ();
+    self->session  = ai_http_session_new ();
     g_object_set (self->session, "timeout", (guint) DDG_SESSION_TIMEOUT, NULL);
 }
 

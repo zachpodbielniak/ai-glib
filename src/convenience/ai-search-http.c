@@ -104,7 +104,16 @@ ai_search_http_get_json (
         if (g_cancellable_set_error_if_cancelled (cancellable, error))
             return NULL;
 
-        msg = soup_message_new ("GET", url);
+        /*
+         * The header pairs are how a caller passes its API key (Brave's
+         * X-Subscription-Token, Bing's Ocp-Apim-Subscription-Key), so a
+         * request that has any is declared credentialed; a keyless one
+         * stays on its origin.
+         */
+        msg = ai_http_message_new ("GET", url,
+                                   header_pairs != NULL
+                                   ? AI_HTTP_CARRIES_CREDENTIALS
+                                   : AI_HTTP_NO_CREDENTIALS);
         if (msg == NULL)
         {
             g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,

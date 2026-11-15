@@ -15,6 +15,7 @@
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
 #include "model/ai-generated-image.h"
+#include "core/ai-http-redirect-private.h"
 
 /* Base backoff, doubled per attempt.  Kept small: image generation is
  * already slow, and a long backoff on top of it is worse than failing. */
@@ -144,7 +145,17 @@ ai_image_copy_header (const gchar *name, const gchar *value, gpointer user_data)
 static SoupMessage *
 ai_image_shared_new_message (AiImageSendData *data)
 {
-    SoupMessage *msg = soup_message_new_from_uri (data->method, data->uri);
+    /*
+     * A retry declares what the first attempt did: a credentialed
+     * provider request was built with SOUP_MESSAGE_NO_REDIRECT, which the
+     * snapshot kept, and is never redirected either.  The copied headers
+     * are judged again when the session queues the retry.
+     */
+    SoupMessage *msg = ai_http_message_new_from_uri (
+        data->method, data->uri,
+        (data->flags & SOUP_MESSAGE_NO_REDIRECT) != 0
+        ? AI_HTTP_CARRIES_CREDENTIALS
+        : AI_HTTP_NO_CREDENTIALS);
 
     soup_message_set_flags (msg, data->flags);
     soup_message_headers_foreach (data->headers, ai_image_copy_header,

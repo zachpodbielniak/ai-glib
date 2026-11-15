@@ -25,6 +25,7 @@
 #include "model/ai-image-request.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"
+#include "core/ai-client-private.h"
 
 #define OPENAI_COMPLETIONS_ENDPOINT "/v1/chat/completions"
 #define OPENAI_IMAGES_ENDPOINT "/v1/images/generations"
@@ -498,7 +499,10 @@ ai_openai_client_chat_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = url != NULL ? soup_message_new("POST", url) : NULL;
+    msg = url != NULL
+        ? ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)))
+        : NULL;
     if (msg == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
@@ -673,7 +677,10 @@ ai_openai_client_list_models_async(
     task = g_task_new(provider, cancellable, callback, user_data);
 
     url = openai_api_url(self, OPENAI_MODELS_ENDPOINT);
-    msg = url != NULL ? soup_message_new("GET", url) : NULL;
+    msg = url != NULL
+        ? ai_http_message_new("GET", url,
+                              ai_client_http_credentials(AI_CLIENT(self)))
+        : NULL;
     if (msg == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
@@ -1216,7 +1223,10 @@ ai_openai_client_chat_stream_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = url != NULL ? soup_message_new("POST", url) : NULL;
+    msg = url != NULL
+        ? ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)))
+        : NULL;
     if (msg == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,
@@ -1538,7 +1548,10 @@ ai_openai_client_generate_image_async(
         }
 
         url = openai_api_url(self, endpoint);
-        msg = url != NULL ? soup_message_new("POST", url) : NULL;
+        msg = url != NULL
+            ? ai_http_message_new("POST", url,
+                                  ai_client_http_credentials(AI_CLIENT(self)))
+            : NULL;
 
         if (msg == NULL)
         {
@@ -1588,7 +1601,10 @@ ai_openai_client_generate_image_async(
         }
 
         url = openai_api_url(self, OPENAI_IMAGES_ENDPOINT);
-        msg = url != NULL ? soup_message_new("POST", url) : NULL;
+        msg = url != NULL
+            ? ai_http_message_new("POST", url,
+                                  ai_client_http_credentials(AI_CLIENT(self)))
+            : NULL;
 
         if (msg == NULL)
         {
@@ -1866,7 +1882,10 @@ ai_openai_client_embed_async(
     }
 
     url = openai_api_url(self, OPENAI_EMBEDDINGS_ENDPOINT);
-    msg = url != NULL ? soup_message_new("POST", url) : NULL;
+    msg = url != NULL
+        ? ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)))
+        : NULL;
 
     if (NULL == msg)
     {

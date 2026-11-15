@@ -23,6 +23,7 @@
 #include "providers/ai-embedding-shared.h"
 #include "providers/ai-image-shared.h"
 #include "providers/ai-systemone.h"
+#include "core/ai-client-private.h"
 
 #define OLLAMA_CHAT_ENDPOINT "/api/chat"
 #define OLLAMA_TAGS_ENDPOINT "/api/tags"
@@ -605,7 +606,8 @@ ai_ollama_client_chat_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -769,7 +771,8 @@ ai_ollama_client_list_models_async(
     /* Query the local Ollama daemon for what is actually pulled. */
     url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_OLLAMA),
                       OLLAMA_TAGS_ENDPOINT, NULL);
-    msg = soup_message_new("GET", url);
+    msg = ai_http_message_new("GET", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
     data = g_slice_new0(OllamaListModelsData);
@@ -1297,7 +1300,8 @@ ai_ollama_client_chat_stream_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -1525,7 +1529,8 @@ ai_ollama_client_embed_async(
     }
 
     url = g_strconcat(base_url, OLLAMA_EMBED_ENDPOINT, NULL);
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
 
     if (NULL == msg)
     {

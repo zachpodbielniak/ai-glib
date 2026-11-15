@@ -176,6 +176,7 @@ help:
 	@echo "  test-gi      - Run the PyGObject binding smoke test (needs python3-gobject)"
 	@echo "  test-gir-clean - Assert g-ir-scanner emits zero warnings"
 	@echo "  test-version - Assert CHANGELOG.org's newest heading matches config.mk"
+	@echo "  check-http-constructors - Fail on a bare soup_message_new*/soup_session_new* (run by test)"
 	@echo "  examples     - Build example programs"
 	@echo "  binaries     - Build installable CLI binaries (the 'ai' front-end)"
 	@echo "  gui          - Build the ai-gui desktop client (needs gtk4 + libadwaita)"

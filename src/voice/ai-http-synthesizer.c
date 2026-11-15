@@ -2,6 +2,7 @@
 #include "voice/ai-http-synthesizer.h"
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
+#include "core/ai-http-redirect-private.h"
 
 struct _AiHttpSynthesizer {
 	GObject parent_instance;
@@ -246,7 +247,8 @@ synthesize(AiSpeechSynthesizer *synth, const gchar *text, GCancellable *cancel,
 		s->cancel_handler = g_cancellable_connect(
 			cancel, G_CALLBACK(cancel_io), g_object_ref(s->io_cancel), g_object_unref);
 	}
-	s->message = soup_message_new("POST", self->url);
+	/* A configured TTS endpoint with no credential header: same origin only. */
+	s->message = ai_http_message_new("POST", self->url, AI_HTTP_NO_CREDENTIALS);
 	g_task_set_task_data(task, s, synthesis_free);
 	if (s->message == NULL) {
 		complete(task, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -337,7 +339,7 @@ static void
 ai_http_synthesizer_init(AiHttpSynthesizer *self)
 {
 	/* The request-owned inactivity source is the single timeout authority. */
-	self->http = soup_session_new();
+	self->http = ai_http_session_new();
 }
 
 /**

@@ -42,6 +42,7 @@
 #include "model/ai-response.h"
 #include "model/ai-tool.h"
 #include "model/ai-tool-use.h"
+#include "core/ai-http-redirect-private.h"
 
 #define MAX_TURNS          20
 #define WEB_FETCH_MAX_BYTES (100 * 1024)  /* 100 KB */
@@ -2420,7 +2421,11 @@ web_fetch_get (
     SoupMessageHeaders *req_headers;
     GBytes             *bytes;
 
-    msg = soup_message_new ("GET", url);
+    /*
+     * An arbitrary web page, fetched with no credential: following it to
+     * another host is the point (tool_web_fetch reports the final host).
+     */
+    msg = ai_http_message_new ("GET", url, AI_HTTP_PUBLIC_URL);
     if (msg == NULL)
     {
         g_set_error (error, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
@@ -2492,7 +2497,7 @@ tool_web_fetch (
         const gchar            *final_host;
         gchar                  *final_str;
 
-        session = soup_session_new ();
+        session = ai_http_session_new ();
         g_object_set (session, "timeout", (guint)WEB_FETCH_TIMEOUT_SECS, NULL);
 
         /* http:// -> https:// upgrade, with fall-back to the original.
@@ -2611,7 +2616,7 @@ web_search_fetch_excerpt (const gchar *url, GCancellable *cancellable)
         const gchar            *charset;
         guint                   status;
 
-        session = soup_session_new ();
+        session = ai_http_session_new ();
         g_object_set (session, "timeout", (guint) WEB_SEARCH_FETCH_TIMEOUT, NULL);
 
         bytes = web_fetch_get (session, url, &msg, cancellable, &local_err);

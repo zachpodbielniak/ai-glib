@@ -27,6 +27,7 @@
 #include "model/ai-image-request.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"
+#include "core/ai-client-private.h"
 
 #define GROK_COMPLETIONS_ENDPOINT "/v1/chat/completions"
 #define GROK_IMAGES_ENDPOINT "/v1/images/generations"
@@ -486,7 +487,8 @@ ai_grok_client_chat_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -656,7 +658,8 @@ ai_grok_client_list_models_async(
 
     url = g_strconcat(ai_config_get_base_url(config, AI_PROVIDER_GROK),
                       GROK_MODELS_ENDPOINT, NULL);
-    msg = soup_message_new("GET", url);
+    msg = ai_http_message_new("GET", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     klass->add_auth_headers(AI_CLIENT(self), msg);
 
     data = g_slice_new0(GrokListModelsData);
@@ -1183,7 +1186,8 @@ ai_grok_client_chat_stream_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
     soup_message_headers_append(soup_message_get_request_headers(msg),
@@ -1508,7 +1512,8 @@ ai_grok_client_generate_image_async(
 	base_url = ai_config_get_base_url(config, AI_PROVIDER_GROK);
 	url = g_strconcat(base_url, ai_image_request_get_reference_image_count(request) > 0 ? "/v1/images/edits" : GROK_IMAGES_ENDPOINT, NULL);
 
-	msg = soup_message_new("POST", url);
+	msg = ai_http_message_new("POST", url,
+		ai_client_http_credentials(AI_CLIENT(self)));
 	if (msg == NULL)
 	{
 		g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,

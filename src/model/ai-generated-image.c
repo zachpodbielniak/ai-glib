@@ -14,6 +14,7 @@
 
 #include "model/ai-generated-image.h"
 #include "core/ai-error.h"
+#include "core/ai-http-redirect-private.h"
 
 /*
  * Private structure for AiGeneratedImage boxed type.
@@ -469,7 +470,12 @@ ai_generated_image_load_bytes_async(
         return;
     }
 
-    msg = soup_message_new("GET", self->url);
+    /*
+     * The URL a provider answered with, fetched with no credential:
+     * signed links commonly redirect to a CDN or object store, so it may
+     * follow one anywhere.
+     */
+    msg = ai_http_message_new("GET", self->url, AI_HTTP_PUBLIC_URL);
     if (msg == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_RESPONSE,
@@ -484,7 +490,7 @@ ai_generated_image_load_bytes_async(
      * client that produced it, and may well outlive it.  The message is
      * kept as task data because the completion needs its status code.
      */
-    session = soup_session_new();
+    session = ai_http_session_new();
     g_task_set_task_data(task, msg, (GDestroyNotify)g_object_unref);
 
     soup_session_send_and_read_async(session, msg, G_PRIORITY_DEFAULT,

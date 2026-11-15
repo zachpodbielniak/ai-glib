@@ -6,6 +6,7 @@
 #include "ai-glib.h"
 #include "convenience/ai-search-http.h"
 #include "core/ai-http-error.h"
+#include "core/ai-client-private.h"
 #include "core/ai-http-redirect-private.h"
 #include "test-server.h"
 
@@ -390,6 +391,288 @@ test_libresearch_async (gconstpointer data)
     tserver_free (origin);
 }
 
+/* ------------------------------------------------------------------ */
+/* The constructors every call site goes through                        */
+/* ------------------------------------------------------------------ */
+
+/* Points @origin's redirect at @target (or at its own path when NULL). */
+static void
+point_redirect (TServer *origin, TServer *target, guint status)
+{
+    g_mutex_lock (&origin->lock);
+    g_free (origin->redirect_to);
+    origin->redirect_to = target != NULL
+        ? g_strconcat (target->base_url, "/redirect-target", NULL)
+        : g_strdup ("/redirect-target");
+    origin->redirect_status = status;
+    g_mutex_unlock (&origin->lock);
+}
+
+/* Sends @msg on @session (sync GET) and returns the status. */
+static guint
+send_get (SoupSession *session, SoupMessage *msg)
+{
+    g_autoptr(GBytes) reply = NULL;
+    g_autoptr(GError) error = NULL;
+
+    reply = soup_session_send_and_read (session, msg, NULL, &error);
+    g_assert_no_error (error);
+    return soup_message_get_status (msg);
+}
+
+/*
+ * AI_HTTP_CARRIES_CREDENTIALS is decided before the request has any
+ * header: the flag is on the message the constructor returns, and the
+ * request is refused even on a session nobody guarded.  Zero is that
+ * value, so a forgotten argument refuses.
+ */
+static void
+test_constructor_carries_credentials (void)
+{
+    TServer *origin = tserver_new ();
+    g_autoptr(SoupSession) bare = soup_session_new ();
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(GError) error = NULL;
+
+    g_assert_cmpint (AI_HTTP_CARRIES_CREDENTIALS, ==, 0);
+    tserver_set_response (origin, 200, "{}");
+    point_redirect (origin, NULL, 302);
+
+    msg = ai_http_message_new ("GET", origin->base_url, AI_HTTP_CARRIES_CREDENTIALS);
+    g_assert_nonnull (msg);
+    g_assert_true ((soup_message_get_flags (msg) & SOUP_MESSAGE_NO_REDIRECT) != 0);
+
+    g_assert_cmpuint (send_get (bare, msg), ==, 302);
+    g_assert_true (ai_http_redirect_refused (msg, &error));
+    g_assert_nonnull (strstr (error->message, "never redirected"));
+    g_assert_cmpuint (tserver_hits (origin), ==, 1);
+    tserver_free (origin);
+}
+
+/* AI_HTTP_NO_CREDENTIALS: followed on its origin, refused off it. */
+static void
+test_constructor_no_credentials (void)
+{
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    g_autoptr(SoupSession) session = ai_http_session_new ();
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(GError) error = NULL;
+
+    tserver_set_response (origin, 200, "{}");
+    tserver_set_response (target, 200, "{}");
+
+    point_redirect (origin, NULL, 302);
+    msg = ai_http_message_new ("GET", origin->base_url, AI_HTTP_NO_CREDENTIALS);
+    g_assert_true ((soup_message_get_flags (msg) & SOUP_MESSAGE_NO_REDIRECT) == 0);
+    g_assert_cmpuint (send_get (session, msg), ==, 200);
+    g_assert_cmpuint (tserver_hits (origin), ==, 2);
+
+    g_clear_object (&msg);
+    point_redirect (origin, target, 302);
+    msg = ai_http_message_new ("GET", origin->base_url, AI_HTTP_NO_CREDENTIALS);
+    g_assert_cmpuint (send_get (session, msg), ==, 302);
+    g_assert_true (ai_http_redirect_refused (msg, &error));
+    g_assert_nonnull (strstr (error->message, "leaves the request's origin"));
+    g_assert_cmpuint (tserver_hits (target), ==, 0);
+
+    tserver_free (target);
+    tserver_free (origin);
+}
+
+/*
+ * AI_HTTP_PUBLIC_URL follows a hop to another host -- a download link
+ * to its CDN -- unless a credential header is on it when it is sent.
+ */
+static void
+test_constructor_public_url (void)
+{
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    g_autoptr(SoupSession) session = ai_http_session_new ();
+    g_autoptr(SoupMessage) msg = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *auth = NULL;
+
+    tserver_set_response (origin, 200, "{}");
+    tserver_set_response (target, 200, "{}");
+    point_redirect (origin, target, 302);
+
+    msg = ai_http_message_new ("GET", origin->base_url, AI_HTTP_PUBLIC_URL);
+    g_assert_cmpuint (send_get (session, msg), ==, 200);
+    g_assert_cmpuint (tserver_hits (target), ==, 1);
+    g_assert_false (ai_http_redirect_refused (msg, NULL));
+
+    /* The same URL with a key added after construction is refused. */
+    g_clear_object (&msg);
+    msg = ai_http_message_new ("GET", origin->base_url, AI_HTTP_PUBLIC_URL);
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+                                  "Authorization", "Bearer public-test-key");
+    g_assert_cmpuint (send_get (session, msg), ==, 302);
+    g_assert_true (ai_http_redirect_refused (msg, &error));
+    g_assert_nonnull (strstr (error->message, "never redirected"));
+    g_assert_cmpuint (tserver_hits (target), ==, 1);
+    auth = tserver_dup_header (target, "Authorization");
+    g_assert_null (auth);
+
+    tserver_free (target);
+    tserver_free (origin);
+}
+
+/* An unparseable URL is NULL, as from soup_message_new(). */
+static void
+test_constructor_bad_url (void)
+{
+    g_autoptr(GUri) uri = g_uri_parse ("https://example.invalid/x", G_URI_FLAGS_NONE, NULL);
+    g_autoptr(SoupMessage) msg = NULL;
+
+    g_assert_null (ai_http_message_new ("GET", "not a url", AI_HTTP_NO_CREDENTIALS));
+
+    msg = ai_http_message_new_from_uri ("POST", uri, AI_HTTP_CARRIES_CREDENTIALS);
+    g_assert_nonnull (msg);
+    g_assert_true ((soup_message_get_flags (msg) & SOUP_MESSAGE_NO_REDIRECT) != 0);
+}
+
+/*
+ * ai_http_session_new() is guarded: a message built some other way --
+ * by a caller, by a test -- is judged by its headers when it is queued.
+ */
+static void
+test_session_new_is_guarded (void)
+{
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    g_autoptr(SoupSession) session = ai_http_session_new ();
+    g_autoptr(SoupMessage) msg = NULL;
+
+    tserver_set_response (origin, 200, "{}");
+    tserver_set_response (target, 200, "{}");
+    point_redirect (origin, target, 302);
+
+    msg = soup_message_new ("GET", origin->base_url);
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+                                  "x-api-key", "session-test-key");
+    g_assert_cmpuint (send_get (session, msg), ==, 302);
+    g_assert_true ((soup_message_get_flags (msg) & SOUP_MESSAGE_NO_REDIRECT) != 0);
+    g_assert_true (ai_http_redirect_refused (msg, NULL));
+    g_assert_cmpuint (tserver_hits (target), ==, 0);
+
+    tserver_free (target);
+    tserver_free (origin);
+}
+
+/*
+ * A provider's requests are declared from what its own add_auth_headers()
+ * attaches: credentialed with a key, keyless without one.  A new provider
+ * whose header the detector misses would fail here, not in production.
+ */
+static void
+test_client_http_credentials (gconstpointer data)
+{
+    const RedirectProvider *provider = data;
+    g_autoptr(AiConfig) config = ai_config_new ();
+    g_autoptr(AiClient) client = NULL;
+
+    ai_config_set_api_key (config, provider->provider, "declared-test-key");
+    client = g_object_new (provider->get_type (), "config", config, NULL);
+
+    g_assert_cmpint (ai_client_http_credentials (client), ==,
+                     provider->credential != NULL
+                     ? AI_HTTP_CARRIES_CREDENTIALS
+                     : AI_HTTP_NO_CREDENTIALS);
+}
+
+/* The OpenAI-compatible client has its own add_auth_headers(). */
+static void
+test_compatible_http_credentials (void)
+{
+    g_autoptr(AiConfig) config = ai_config_new ();
+    g_autoptr(AiClient) keyed = NULL;
+    g_autoptr(AiClient) keyless = NULL;
+
+    /* "" rather than NULL, so no environment variable stands in. */
+    keyed = g_object_new (AI_TYPE_OPENAI_COMPATIBLE_CLIENT, "config", config,
+                          "base-url", "http://127.0.0.1:1", "api-key", "compat-key", NULL);
+    keyless = g_object_new (AI_TYPE_OPENAI_COMPATIBLE_CLIENT, "config", config,
+                            "base-url", "http://127.0.0.1:1", "api-key", "", NULL);
+    g_assert_cmpint (ai_client_http_credentials (AI_CLIENT (keyed)), ==,
+                     AI_HTTP_CARRIES_CREDENTIALS);
+    g_assert_cmpint (ai_client_http_credentials (AI_CLIENT (keyless)), ==,
+                     AI_HTTP_NO_CREDENTIALS);
+}
+
+/* ------------------------------------------------------------------ */
+/* Call sites that had no guard before                                 */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+    gboolean  done;
+    GBytes   *bytes;
+    GError   *error;
+} LoadResult;
+
+static void
+image_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    LoadResult *load = user_data;
+
+    load->bytes = ai_generated_image_load_bytes_finish (NULL, result, &load->error);
+    load->done = TRUE;
+}
+
+/* A generated image's URL is public: its CDN hop is followed. */
+static void
+test_generated_image_follows (void)
+{
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    g_autoptr(AiGeneratedImage) image = NULL;
+    LoadResult load = { FALSE, NULL, NULL };
+
+    tserver_set_response (target, 200, "PNGBYTES");
+    point_redirect (origin, target, 302);
+    image = ai_generated_image_new_from_url (origin->base_url);
+    ai_generated_image_load_bytes_async (image, NULL, image_loaded, &load);
+    while (!load.done)
+        g_main_context_iteration (NULL, TRUE);
+
+    g_assert_no_error (load.error);
+    g_assert_nonnull (load.bytes);
+    g_assert_cmpuint (g_bytes_get_size (load.bytes), ==, 8);
+    g_assert_cmpuint (tserver_hits (target), ==, 1);
+    g_bytes_unref (load.bytes);
+
+    tserver_free (target);
+    tserver_free (origin);
+}
+
+/*
+ * DuckDuckGo is keyless but configured: its session used to follow a
+ * redirect anywhere; now it stays on the endpoint's origin.
+ */
+static void
+test_duckduckgo_stays_on_origin (void)
+{
+    TServer *origin = tserver_new ();
+    TServer *target = tserver_new ();
+    g_autoptr(AiDuckDuckGoSearch) ddg = NULL;
+    g_autoptr(GError) error = NULL;
+    GList *results;
+
+    tserver_set_response (target, 200, "<html></html>");
+    point_redirect (origin, target, 302);
+    ddg = g_object_new (AI_TYPE_DUCKDUCKGO_SEARCH, "endpoint", origin->base_url, NULL);
+    results = ai_search_provider_search (AI_SEARCH_PROVIDER (ddg), "q", NULL, NULL, &error);
+    g_assert_no_error (error);
+    g_assert_null (results);
+    g_assert_cmpuint (tserver_hits (target), ==, 0);
+    g_assert_cmpuint (tserver_hits (origin), >=, 1);
+
+    tserver_free (target);
+    tserver_free (origin);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -404,6 +687,14 @@ main (int argc, char **argv)
     g_test_add_func ("/ai-glib/redirect/marked-message", test_marked_message_is_refused);
     g_test_add_data_func ("/ai-glib/redirect/libresearch/302", GUINT_TO_POINTER (302), test_libresearch_async);
     g_test_add_data_func ("/ai-glib/redirect/libresearch/307", GUINT_TO_POINTER (307), test_libresearch_async);
+    g_test_add_func ("/ai-glib/redirect/constructor/carries-credentials", test_constructor_carries_credentials);
+    g_test_add_func ("/ai-glib/redirect/constructor/no-credentials", test_constructor_no_credentials);
+    g_test_add_func ("/ai-glib/redirect/constructor/public-url", test_constructor_public_url);
+    g_test_add_func ("/ai-glib/redirect/constructor/bad-url", test_constructor_bad_url);
+    g_test_add_func ("/ai-glib/redirect/session-new", test_session_new_is_guarded);
+    g_test_add_func ("/ai-glib/redirect/client-credentials/openai-compatible", test_compatible_http_credentials);
+    g_test_add_func ("/ai-glib/redirect/site/generated-image", test_generated_image_follows);
+    g_test_add_func ("/ai-glib/redirect/site/duckduckgo", test_duckduckgo_stays_on_origin);
     for (i = 0; i < G_N_ELEMENTS (providers); i++)
     {
         g_autofree gchar *a = g_strdup_printf ("/ai-glib/redirect/%s/cross-sync", providers[i].name);
@@ -419,6 +710,11 @@ main (int argc, char **argv)
         g_test_add_data_func (d, &providers[i], same_async);
         g_test_add_data_func (e, &providers[i], same_307);
         g_test_add_data_func (f, &providers[i], same_308);
+        {
+            g_autofree gchar *g = g_strdup_printf ("/ai-glib/redirect/client-credentials/%s", providers[i].name);
+
+            g_test_add_data_func (g, &providers[i], test_client_http_credentials);
+        }
     }
     return g_test_run ();
 }

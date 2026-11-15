@@ -12,7 +12,7 @@
 #include "core/ai-client.h"
 #include "core/ai-error.h"
 #include "core/ai-http-error.h"
-#include "core/ai-http-redirect-private.h"
+#include "core/ai-client-private.h"
 #include "core/ai-event-source.h"
 
 /*
@@ -151,10 +151,9 @@ ai_client_constructed(GObject *object)
     }
 
     /* Create soup session */
-    priv->session = soup_session_new();
     /* A request with a key is never redirected, one without stays on
      * its origin (ai-http-redirect-private.h). */
-    ai_http_guard_session(priv->session);
+    priv->session = ai_http_session_new();
     soup_session_set_timeout(priv->session, ai_config_get_timeout(priv->config));
 }
 
@@ -437,6 +436,35 @@ ai_client_set_system_prompt(
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_SYSTEM_PROMPT]);
 }
 
+AiHttpCredentials
+ai_client_http_credentials(AiClient *self)
+{
+    AiClientClass *klass;
+    g_autoptr(SoupMessage) probe = NULL;
+
+    g_return_val_if_fail(AI_IS_CLIENT(self), AI_HTTP_CARRIES_CREDENTIALS);
+
+    klass = AI_CLIENT_GET_CLASS(self);
+    if (klass->add_auth_headers == NULL)
+        return AI_HTTP_NO_CREDENTIALS;
+
+    /*
+     * The provider's own add_auth_headers() is the one place its key is
+     * attached, so run it on a scratch message and look at the result:
+     * no per-provider list of header names to keep in step.  The URL is
+     * never sent anywhere.
+     */
+    probe = ai_http_message_new("GET", "http://ai-glib.invalid/", AI_HTTP_NO_CREDENTIALS);
+    if (probe == NULL)
+        return AI_HTTP_CARRIES_CREDENTIALS;
+
+    klass->add_auth_headers(self, probe);
+
+    return ai_http_request_has_credentials(soup_message_get_request_headers(probe), NULL)
+           ? AI_HTTP_CARRIES_CREDENTIALS
+           : AI_HTTP_NO_CREDENTIALS;
+}
+
 /**
  * ai_client_get_soup_session:
  * @self: an #AiClient
@@ -523,7 +551,8 @@ ai_client_chat_sync(
     }
 
     /* Create HTTP request */
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(self));
     if (msg == NULL)
     {
         g_set_error(error, AI_ERROR, AI_ERROR_INVALID_REQUEST,

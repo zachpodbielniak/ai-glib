@@ -13,6 +13,63 @@
 G_BEGIN_DECLS
 
 /*
+ * AiHttpCredentials:
+ * @AI_HTTP_CARRIES_CREDENTIALS: the request carries a credential -- an
+ *   Authorization or API-key header, a token in its body -- or is a
+ *   provider request whose body is the prompt; it never follows a
+ *   redirect, not even to its own origin
+ * @AI_HTTP_NO_CREDENTIALS: the request carries nothing secret and goes
+ *   to an endpoint somebody configured; it follows a redirect only on
+ *   the same scheme, host and port
+ * @AI_HTTP_PUBLIC_URL: the request carries nothing secret and fetches a
+ *   URL that came from outside -- a web page, a signed download link a
+ *   provider answered with -- where a hop to another host (http to
+ *   https, a CDN, an object store) is normal; it follows a redirect
+ *   wherever libsoup would, unless a credential header is on it when it
+ *   is sent, which turns it back into the first case
+ *
+ * What a request carries, which decides where it may be redirected.
+ * Zero is the safe value on purpose, so a zeroed field or a forgotten
+ * argument refuses rather than follows.
+ *
+ * Private: not in a public header, not in the GIR.
+ */
+typedef enum {
+    AI_HTTP_CARRIES_CREDENTIALS = 0,
+    AI_HTTP_NO_CREDENTIALS,
+    AI_HTTP_PUBLIC_URL
+} AiHttpCredentials;
+
+/*
+ * The only way ai-glib builds a SoupMessage.  Creates it as
+ * soup_message_new() does, then applies @credentials and
+ * ai_http_guard_message() before returning it, so no caller can add a
+ * credential first and decide later, or forget to decide.
+ * tests/check-http-constructors.sh fails `make test` on a bare
+ * soup_message_new*() anywhere else in src/, bin/ or gui/.
+ *
+ * Returns NULL when @uri_string does not parse, as soup_message_new()
+ * does.
+ */
+SoupMessage *ai_http_message_new(const gchar       *method,
+                                 const gchar       *uri_string,
+                                 AiHttpCredentials  credentials);
+
+/* ai_http_message_new() for a URI that is already parsed. */
+SoupMessage *ai_http_message_new_from_uri(const gchar       *method,
+                                          GUri              *uri,
+                                          AiHttpCredentials  credentials);
+
+/*
+ * The only way ai-glib builds a SoupSession: soup_session_new() with
+ * ai_http_guard_session() applied, so a message that reaches it from
+ * anywhere -- a caller's own, one built before this rule -- is still
+ * judged by its headers when it is queued.  Set options such as
+ * "timeout" with g_object_set() afterwards.
+ */
+SoupSession *ai_http_session_new(void);
+
+/*
  * Whether a request carries a credential: Authorization,
  * Proxy-Authorization or Cookie, any header whose name says it holds a
  * key, token or secret (x-api-key, x-goog-api-key, X-Subscription-Token,

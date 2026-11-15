@@ -2,6 +2,7 @@
 #include "voice/ai-websocket-recognizer.h"
 #include "core/ai-json-util.h"
 #include <libsoup/soup.h>
+#include "core/ai-http-redirect-private.h"
 
 /* One independently cancellable connection per utterance/participant. */
 typedef struct {
@@ -246,7 +247,8 @@ begin(AiSpeechRecognizer *recognizer, const gchar *speaker, GError **error)
 							"STT stream already active or invalid id");
 		return FALSE;
 	}
-	msg = soup_message_new("GET", self->url);
+	/* A configured STT endpoint with no credential header: same origin only. */
+	msg = ai_http_message_new("GET", self->url, AI_HTTP_NO_CREDENTIALS);
 	if (msg == NULL) {
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 							"Invalid STT URL");
@@ -422,7 +424,8 @@ static void
 ai_websocket_recognizer_init(AiWebsocketRecognizer *self)
 {
 	self->timeout_ms = 30000;
-	self->http = soup_session_new_with_options("timeout", 30, NULL);
+	self->http = ai_http_session_new();
+	g_object_set(self->http, "timeout", 30, NULL);
 	self->streams =
 		g_hash_table_new_full(g_str_hash, g_str_equal, g_free, recognition_stop);
 }
