@@ -26,6 +26,7 @@
 #include "model/ai-image-request.h"
 #include "model/ai-generated-image.h"
 #include "model/ai-image-response.h"
+#include "core/ai-client-private.h"
 
 /*
  * Private structure for AiGeminiClient.
@@ -700,7 +701,8 @@ ai_gemini_client_chat_async(
 
     url = klass->get_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
 
@@ -900,7 +902,8 @@ ai_gemini_client_list_models_async(
 
     url = g_strdup_printf("%s/v1beta/models?pageSize=200",
                           ai_config_get_base_url(config, AI_PROVIDER_GEMINI));
-    msg = soup_message_new("GET", url);
+    msg = ai_http_message_new("GET", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
 
     /*
      * The key rides in the header here too.  This path builds its own
@@ -1327,7 +1330,8 @@ ai_gemini_client_chat_stream_async(
     /* Use streaming endpoint */
     url = ai_gemini_client_get_stream_endpoint_url(AI_CLIENT(self));
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     soup_message_headers_append(soup_message_get_request_headers(msg),
                                 "Content-Type", "application/json");
     soup_message_headers_append(soup_message_get_request_headers(msg),
@@ -2165,7 +2169,8 @@ ai_gemini_client_generate_image_async(
     url = g_strdup_printf("%s/v1beta/models/%s:%s", base_url, model,
                           is_nano_banana ? "generateContent" : "predict");
 
-    msg = soup_message_new("POST", url);
+    msg = ai_http_message_new("POST", url,
+                              ai_client_http_credentials(AI_CLIENT(self)));
     if (msg == NULL)
     {
         g_task_return_new_error(task, AI_ERROR, AI_ERROR_INVALID_REQUEST,

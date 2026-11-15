@@ -8,6 +8,7 @@
 #include "providers/ai-image-shared.h"
 #include "core/ai-json-util.h"
 #include "core/ai-error.h"
+#include "core/ai-client-private.h"
 
 typedef struct {
 	AiVideoRequest *request;
@@ -284,7 +285,8 @@ send_step(GTask *task)
 		bytes = g_bytes_new(body, strlen(body));
 		url = g_strconcat(job->base, "/v1/videos/generations", NULL);
 	}
-	msg = soup_message_new(job->id != NULL ? "GET" : "POST", url);
+	msg = ai_http_message_new(job->id != NULL ? "GET" : "POST", url,
+		ai_client_http_credentials(client));
 	if (msg == NULL) {
 		finish_error(task, g_error_new_literal(AI_ERROR, AI_ERROR_INVALID_REQUEST, "Invalid Grok base URL"));
 		return;

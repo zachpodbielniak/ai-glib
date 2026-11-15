@@ -4,6 +4,43 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.12.1 - 2026-11-15
+
+** Fixed
+- The "no credential across a redirect" rule from 0.11.0 now covers every
+  HTTP request. 0.11.0 guarded the =AiClient= session, Bing, Brave,
+  libresearch and =ai-call=; 34 =soup_message_new*()= calls and 14
+  =soup_session_new*()= calls still built messages and sessions nobody had
+  decided for. Unguarded until now: the SystemOne decision session (whose
+  messages already refused redirects), the HTTP synthesizer and websocket
+  recognizer (followed anywhere; now same origin), DuckDuckGo (followed
+  anywhere; now same origin), the generated-image and video downloads and
+  =web_fetch= (still followed anywhere, as public URLs, but refused once a
+  credential header is on them). Provider requests are now declared
+  credentialed before any header is set, from what the provider's own
+  =add_auth_headers()= attaches, instead of being inferred when the session
+  queues them; a keyless provider (Ollama) keeps its same-origin redirects.
+  A retried image or video request keeps the first attempt's declaration.
+
+** Added
+- Private constructors in =core/ai-http-redirect-private.h=:
+  =ai_http_message_new()=, =ai_http_message_new_from_uri()= (with
+  =AiHttpCredentials=: =AI_HTTP_CARRIES_CREDENTIALS=, the zero value,
+  =AI_HTTP_NO_CREDENTIALS=, =AI_HTTP_PUBLIC_URL=) and
+  =ai_http_session_new()=; =ai_client_http_credentials()= in the new
+  private =core/ai-client-private.h=. Not installed, not in the GIR.
+- =tests/check-http-constructors.sh=, run by =make test= (and =make
+  check-http-constructors=): fails on a bare =soup_message_new*()= or
+  =soup_session_new*()= in =src/=, =bin/= or =gui/= outside the helper,
+  with comments and string literals blanked first; =--self-test= proves it
+  catches nine probes (including ones behind a ="*/*"= string and a
+  comment) and passes decoys. On 0.12.0 it reports all 48 sites.
+- Tests in =tests/test-http-redirect.c=: each declaration end to end, a
+  key added to a public-URL request after construction, the guarded
+  session, every provider's declared credentials (and the OpenAI-compatible
+  client's), a generated image following its CDN hop, DuckDuckGo staying
+  on its origin.
+
 * 0.12.0 - 2026-11-14
 
 ** Added

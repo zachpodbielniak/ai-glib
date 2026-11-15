@@ -11,6 +11,7 @@
 #include "core/ai-error.h"
 #include "providers/ai-laya-client.h"
 #include <string.h>
+#include "core/ai-http-redirect-private.h"
 
 typedef struct
 {
@@ -343,7 +344,7 @@ ai_systemone_decide_async(GObject *source, const AiSystemOneTarget *target,
 	while (length > 0 && target->base_url[length - 1] == '/')
 		length--;
 	url = g_strdup_printf("%.*s/v1/systemone", (gint)length, target->base_url);
-	message = soup_message_new("POST", url);
+	message = ai_http_message_new("POST", url, AI_HTTP_CARRIES_CREDENTIALS);
 	if (message == NULL)
 	{
 		g_task_return_new_error(task, AI_ERROR, AI_ERROR_CONFIGURATION_ERROR,
@@ -373,7 +374,7 @@ ai_systemone_decide_async(GObject *source, const AiSystemOneTarget *target,
 	body = g_bytes_new(encoded, strlen(encoded));
 	soup_message_set_request_body_from_bytes(message, "application/json", body);
 	op = g_new0(Operation, 1);
-	op->session = soup_session_new();
+	op->session = ai_http_session_new();
 	op->request = g_object_ref(request);
 	op->cancel = g_cancellable_new();
 	op->started = g_get_monotonic_time();

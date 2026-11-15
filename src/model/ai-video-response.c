@@ -3,6 +3,7 @@
 #include "model/ai-video-response.h"
 #include "core/ai-error.h"
 #include <libsoup/soup.h>
+#include "core/ai-http-redirect-private.h"
 
 /**
  * AiVideoResponse:
@@ -215,8 +216,14 @@ ai_video_response_save_to_file(
 	if (g_str_has_prefix(self->url, "https://") ||
 	    g_str_has_prefix(self->url, "http://"))
 	{
-		session = soup_session_new_with_options("timeout", 120, NULL);
-		message = soup_message_new("GET", self->url);
+		session = ai_http_session_new();
+		g_object_set(session, "timeout", 120, NULL);
+		/*
+		 * A download link the provider answered with, sent with no
+		 * credential; such links are commonly a redirect to a CDN or
+		 * object store, so it may follow one anywhere.
+		 */
+		message = ai_http_message_new("GET", self->url, AI_HTTP_PUBLIC_URL);
 		if (message == NULL)
 		{
 			g_set_error_literal(error, AI_ERROR, AI_ERROR_INVALID_RESPONSE,

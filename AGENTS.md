@@ -727,12 +727,34 @@ and one fake subprocess per CLI on the chat, stream and sync paths.
 
 ### Redirects (`ai-http-redirect-private.h`)
 
-A request carrying a credential never follows a redirect. Guard every new
-`SoupSession` with `ai_http_guard_session()` (or a single message with
-`ai_http_guard_message()` after its headers are set), and turn the 3xx into
-an error with `ai_http_redirect_refused()`. The decision must be made before
-the request is sent: setting `SOUP_MESSAGE_NO_REDIRECT` only in "got-headers"
-for a credentialed request hung a synchronous send in libsoup 3.6.
+A request carrying a credential never follows a redirect. **Never call
+`soup_message_new*()` or `soup_session_new*()` directly**:
+`tests/check-http-constructors.sh` (run by `make test`, with a self-test that
+proves it still catches probes) fails on one anywhere in `src/`, `bin/` or
+`gui/` outside `src/core/ai-http-redirect.c`. Instead:
+
+- Build every message with `ai_http_message_new()` /
+  `ai_http_message_new_from_uri()` and declare what it carries:
+  `AI_HTTP_CARRIES_CREDENTIALS` (never redirected; the zero value),
+  `AI_HTTP_NO_CREDENTIALS` (configured endpoint, same origin only) or
+  `AI_HTTP_PUBLIC_URL` (a URL from outside -- download link, web page --
+  followed anywhere unless a credential header is on it when sent).
+- A provider request declares `ai_client_http_credentials(client)`
+  (`core/ai-client-private.h`), which runs the provider's own
+  `add_auth_headers()` on a scratch message: credentialed with a key,
+  keyless (same origin) without. A new provider's auth header must be one
+  `ai_http_request_has_credentials()` recognises; add it to the
+  `providers` table in `tests/test-http-redirect.c`.
+- Build every session with `ai_http_session_new()` (set "timeout" with
+  `g_object_set()` afterwards); it is guarded, so a message built elsewhere
+  is still judged by its headers when queued.
+- Turn the 3xx into an error with `ai_http_redirect_refused()`.
+
+The decision must be made before the request is sent: setting
+`SOUP_MESSAGE_NO_REDIRECT` only in "got-headers" for a credentialed request
+hung a synchronous send in libsoup 3.6, which is why the constructor takes
+the declaration rather than inferring it later. The per-site table is in
+`docs/providers/index.org` ("Redirects and credentials").
 
 ## Image Generation Subsystem
 

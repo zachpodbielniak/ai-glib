@@ -17,6 +17,7 @@
 #include "convenience/ai-search-http.h"
 #include "core/ai-error.h"
 #include "core/ai-json-util.h"
+#include "core/ai-http-redirect-private.h"
 
 #define BRAVE_SEARCH_ENDPOINT "https://api.search.brave.com/res/v1/web/search"
 #define BRAVE_DEFAULT_COUNT   10
@@ -338,7 +339,7 @@ ai_brave_search_init (AiBraveSearch *self)
 {
     self->api_key  = NULL;
     self->endpoint = NULL;   /* set by the CONSTRUCT default */
-    self->session  = soup_session_new ();
+    self->session  = ai_http_session_new ();
     g_object_set (self->session, "timeout", (guint) BRAVE_SESSION_TIMEOUT, NULL);
 }
 

@@ -190,7 +190,9 @@ request(App *app, const gchar *method, const gchar *url, gboolean matrix, JsonNo
 	r->callback = callback;
 	r->data = data;
 	r->destroy = destroy;
-	r->message = soup_message_new(method, url);
+	/* Matrix requests carry the access token and the JWT service's carry
+	 * an OpenID token in the body: none of them follows a redirect. */
+	r->message = ai_http_message_new(method, url, AI_HTTP_CARRIES_CREDENTIALS);
 	if (r->message == NULL) {
 		g_autoptr(GError) error = g_error_new_literal(
 			G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid HTTP URL");
@@ -202,9 +204,6 @@ request(App *app, const gchar *method, const gchar *url, gboolean matrix, JsonNo
 	}
 	soup_message_headers_replace(soup_message_get_request_headers(r->message),
 								 "User-Agent", USER_AGENT);
-	/* Matrix requests carry the access token and the JWT service's carry
-	 * an OpenID token in the body: none of them follows a redirect. */
-	ai_http_message_mark_credentials(r->message);
 	if (matrix) {
 		authorization = g_strconcat("Bearer ", app->access, NULL);
 		soup_message_headers_replace(soup_message_get_request_headers(r->message),
@@ -1781,10 +1780,11 @@ devices:
 							"Configure ai_call.jwt-url, focus-url and a nonempty device");
 		goto fail;
 	}
-	app.http = soup_session_new_with_options("timeout", 40, NULL);
-	/* Every request is marked as credentialed in request(); the session
-	 * guard is what applies that (ai-http-redirect-private.h). */
-	ai_http_guard_session(app.http);
+	/* Every request is declared credentialed in request(); the session
+	 * guard applies the same rule to anything else it sends
+	 * (ai-http-redirect-private.h). */
+	app.http = ai_http_session_new();
+	g_object_set(app.http, "timeout", 40, NULL);
 	app.loop = g_main_loop_new(NULL, FALSE);
 	app.sync_cancel = g_cancellable_new();
 	app.calls = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, call_unref);

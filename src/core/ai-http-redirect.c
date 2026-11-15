@@ -18,6 +18,9 @@
 /* Message data: the caller says the request carries a credential. */
 #define CREDENTIALS_KEY "ai-http-redirect-credentials"
 
+/* Message data: the caller says the URL came from outside (AI_HTTP_PUBLIC_URL). */
+#define PUBLIC_URL_KEY "ai-http-redirect-public-url"
+
 /*
  * Words that mark a request header as holding a credential, matched
  * anywhere in the lower-cased name.  "auth" covers Authorization,
@@ -75,7 +78,6 @@ ai_http_request_has_credentials(SoupMessageHeaders *headers,
     return FALSE;
 }
 
-/* The port a URI really uses, so "https://h/" and "https://h:443/" agree. */
 void
 ai_http_message_mark_credentials(SoupMessage *message)
 {
@@ -84,6 +86,7 @@ ai_http_message_mark_credentials(SoupMessage *message)
     g_object_set_data(G_OBJECT(message), CREDENTIALS_KEY, GINT_TO_POINTER(1));
 }
 
+/* The port a URI really uses, so "https://h/" and "https://h:443/" agree. */
 static gint
 effective_port(GUri *uri)
 {
@@ -154,6 +157,16 @@ ai_http_check_redirect(SoupMessage *message,
                       soup_message_get_request_headers(message),
                       soup_message_get_uri(message));
 
+    /*
+     * A public URL without a credential goes wherever libsoup would take
+     * it; anything else is held to ai_http_redirect_allowed().  The
+     * credential test above runs on every hop, so a public request that
+     * picked up an Authorization header is refused like any other.
+     */
+    if (!credentials &&
+        g_object_get_data(G_OBJECT(message), PUBLIC_URL_KEY) != NULL)
+        return;
+
     if (ai_http_redirect_allowed(soup_message_get_uri(message), location,
                                  credentials))
         return;
@@ -191,6 +204,69 @@ ai_http_guard_message(SoupMessage *message)
                               (gpointer)ai_http_check_redirect, NULL) == 0)
         g_signal_connect(message, "got-headers",
                          G_CALLBACK(ai_http_check_redirect), NULL);
+}
+
+/*
+ * Applies @credentials to a freshly built message: the up-front flag for
+ * a credentialed one, the marker for a public URL, then the guard.  The
+ * headers are still empty here, which is why the caller has to say what
+ * it will carry rather than leave it to ai_http_request_has_credentials().
+ */
+static SoupMessage *
+apply_credentials(SoupMessage       *message,
+                  AiHttpCredentials  credentials)
+{
+    if (message == NULL)
+        return NULL;
+
+    switch (credentials)
+    {
+    case AI_HTTP_NO_CREDENTIALS:
+        break;
+    case AI_HTTP_PUBLIC_URL:
+        g_object_set_data(G_OBJECT(message), PUBLIC_URL_KEY, GINT_TO_POINTER(1));
+        break;
+    case AI_HTTP_CARRIES_CREDENTIALS:
+    default:
+        /* An unknown value is treated as the safe one. */
+        ai_http_message_mark_credentials(message);
+        break;
+    }
+
+    ai_http_guard_message(message);
+    return message;
+}
+
+SoupMessage *
+ai_http_message_new(const gchar       *method,
+                    const gchar       *uri_string,
+                    AiHttpCredentials  credentials)
+{
+    g_return_val_if_fail(method != NULL, NULL);
+    g_return_val_if_fail(uri_string != NULL, NULL);
+
+    /* The one place in ai-glib a bare constructor is allowed. */
+    return apply_credentials(soup_message_new(method, uri_string), credentials);
+}
+
+SoupMessage *
+ai_http_message_new_from_uri(const gchar       *method,
+                             GUri              *uri,
+                             AiHttpCredentials  credentials)
+{
+    g_return_val_if_fail(method != NULL, NULL);
+    g_return_val_if_fail(uri != NULL, NULL);
+
+    return apply_credentials(soup_message_new_from_uri(method, uri), credentials);
+}
+
+SoupSession *
+ai_http_session_new(void)
+{
+    SoupSession *session = soup_session_new();
+
+    ai_http_guard_session(session);
+    return session;
 }
 
 static void

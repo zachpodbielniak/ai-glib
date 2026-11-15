@@ -542,7 +542,20 @@ $(OUTDIR)/tests/test-ai-cli-update: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-tui-update: $(BIN_BINARIES)
 $(OUTDIR)/tests/test-ai-loop-cli: $(BIN_BINARIES)
 
-test: check-headers $(TEST_BINARIES) $(BIN_BINARIES)
+#
+# Every SoupMessage is built by ai_http_message_new*() and every
+# SoupSession by ai_http_session_new() (core/ai-http-redirect-private.h),
+# so each request has declared whether it may follow a redirect.  v0.11.0
+# guarded some sessions and left twenty-odd bare constructors behind; the
+# self-test proves the check still catches a bare one before it is
+# trusted to pass the tree.
+#
+.PHONY: check-http-constructors
+check-http-constructors:
+	@bash tests/check-http-constructors.sh --self-test
+	@bash tests/check-http-constructors.sh
+
+test: check-headers check-http-constructors $(TEST_BINARIES) $(BIN_BINARIES)
 	@echo "Running tests..."
 	@for test in $(TEST_BINARIES); do \
 		echo "Running $$test..."; \
