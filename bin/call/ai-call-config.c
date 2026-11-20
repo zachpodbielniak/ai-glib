@@ -60,12 +60,36 @@ static const Setting settings[] = {
 	/* 0: never speak unasked. 1-10: the relevance score that makes it. */
 	{"chime-in-threshold", "AI_VOICE_CHIME_IN_THRESHOLD", NULL, 0, 0, 10},
 	{"chime-in-cooldown-ms", "AI_VOICE_CHIME_IN_COOLDOWN_MS", NULL, 60000, 0, 3600000},
+	/* Quiet after the last unaddressed line before it is scored; 0 at once. */
+	{"relevance-debounce-ms", "AI_VOICE_RELEVANCE_DEBOUNCE_MS", NULL, 0, 0, 60000},
+	{"relevance-max-tokens", "AI_VOICE_RELEVANCE_MAX_TOKENS", NULL, 200, 16, 8192},
+	/* What room mode keeps of unaddressed talk for the next turn. */
+	{"room-history-lines", "AI_VOICE_ROOM_HISTORY_LINES", NULL, 40, 1, 10000},
+	/* 0: no character limit. */
+	{"room-history-chars", "AI_VOICE_ROOM_HISTORY_CHARS", NULL, 6000, 0, 1000000},
+	/* 0: no age limit. */
+	{"room-history-age-ms", "AI_VOICE_ROOM_HISTORY_AGE_MS", NULL, 900000, 0, 86400000},
+	/* yes: each turn starts with "[Present: ...]". Unset: yes when speakers
+	 * are named by voice. */
+	{"room-roster", "AI_VOICE_ROOM_ROSTER", NULL, 0, 0, 0},
 	/* Unset: the call's own provider and model, as a separate client. */
 	{"relevance-provider", "AI_VOICE_RELEVANCE_PROVIDER", NULL, 0, 0, 0},
 	{"relevance-model", "AI_VOICE_RELEVANCE_MODEL", NULL, 0, 0, 0},
 	/* Unset: every utterance is its participant's. Set: the voiceprint
 	 * service's embedding URL, and utterances are named by voice. */
 	{"speaker-url", "AI_VOICE_SPEAKER_URL", NULL, 0, 0, 0},
+	/* A speaker-embedding ONNX model run in this process instead of a
+	 * service (needs ai-glib built with onnxruntime). */
+	{"speaker-model", "AI_VOICE_SPEAKER_MODEL", NULL, 0, 0, 0},
+	/* http|onnx. Unset: onnx when speaker-model is set, else http when
+	 * speaker-url is. */
+	{"speaker-backend", "AI_VOICE_SPEAKER_BACKEND", NULL, 0, 0, 0},
+	/* auto|kaldi|nemo: the features speaker-model takes. Unset: auto, from
+	 * the model's metadata. */
+	{"speaker-frontend", "AI_VOICE_SPEAKER_FRONTEND", NULL, 0, 0, 0},
+	{"speaker-threads", "AI_VOICE_SPEAKER_THREADS", NULL, 1, 1, 64},
+	/* The longest one request to speaker-url may take. */
+	{"speaker-timeout-ms", "AI_VOICE_SPEAKER_TIMEOUT_MS", NULL, 5000, 1, 600000},
 	/* Unset: $XDG_DATA_HOME/ai-glib/voiceprints. */
 	{"voiceprint-dir", "AI_VOICE_VOICEPRINT_DIR", NULL, 0, 0, 0},
 	/* Similarity, in percent, a voice needs to be named. */
@@ -78,6 +102,16 @@ static const Setting settings[] = {
 	{"track-guests", "AI_VOICE_TRACK_GUESTS", NULL, 0, 0, 0},
 	/* Similarity, in percent, to be a guest already heard rather than a new one. */
 	{"guest-threshold", "AI_VOICE_GUEST_THRESHOLD", NULL, 35, 1, 100},
+	/* The most guests at once; a stranger beyond them is unknown-speaker-name. */
+	{"max-guests", "AI_VOICE_MAX_GUESTS", NULL, 32, 1, 1024},
+	/* The least audio that may start a new guest. */
+	{"min-guest-ms", "AI_VOICE_MIN_GUEST_MS", NULL, 1500, 0, 60000},
+	/* A short utterance is whoever its microphone was last named, this recently. */
+	{"name-memory-ms", "AI_VOICE_NAME_MEMORY_MS", NULL, 120000, 0, 3600000},
+	/* Spoken after "guest two is Kim"; {name} and {guest} are filled in. */
+	{"promoted-message", "AI_VOICE_PROMOTED_MESSAGE", "Okay, I'll remember {name}.", 0, 0, 0},
+	{"promotion-refused-message", "AI_VOICE_PROMOTION_REFUSED_MESSAGE",
+	 "I can't save that voice as {name}: {reason}.", 0, 0, 0},
 	/* Comma-separated; a command may start with one, as in "Name, mute". */
 	{"assistant-names", "AI_VOICE_ASSISTANT_NAMES", NULL, 0, 0, 0},
 	/* Comma-separated words STT hears for a name ("say" for a short one); room

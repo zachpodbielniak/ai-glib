@@ -37,6 +37,16 @@ ai_call_transcript_append_command(AiCallTranscript *self, GDateTime *at, const g
 gboolean
 ai_call_transcript_append_relevance(AiCallTranscript *self, GDateTime *at, guint score,
 									const gchar *reason, gboolean chimed, GError **error);
+/* How the speaker of the next utterance was named: KIND is "enrolled",
+ * "guest", "unknown", "inherited" or "fallback"; SCORE the similarity. */
+gboolean
+ai_call_transcript_append_speaker(AiCallTranscript *self, GDateTime *at,
+								  const gchar *participant, const gchar *name, const gchar *kind,
+								  gdouble score, GError **error);
+/* A guest's voice was saved under a lasting name, by voice command. */
+gboolean
+ai_call_transcript_append_promotion(AiCallTranscript *self, GDateTime *at, const gchar *guest,
+									const gchar *name, GError **error);
 /* Rewrites the header with END and the duration, atomically. Idempotent. */
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error);

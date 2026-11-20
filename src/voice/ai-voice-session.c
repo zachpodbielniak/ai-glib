@@ -124,6 +124,7 @@ typedef struct {
 	gchar *unknown_speaker_name;
 	GQueue naming;
 	guint naming_timeout_ms; /* the longest a final waits to be named */
+	guint name_memory_ms;	 /* how long a short utterance inherits the last name */
 } AiVoiceSessionPrivate;
 enum {
 	PROP_0,
@@ -161,6 +162,7 @@ enum {
 	PROP_UNKNOWN_SPEAKER_NAME,
 	PROP_ASSISTANT_SOUNDALIKES,
 	PROP_NAMING_TIMEOUT,
+	PROP_NAME_MEMORY,
 	PROP_ROOM,
 	PROP_ADDRESS_DETECTOR,
 	PROP_RELEVANCE_JUDGE,
@@ -1681,7 +1683,6 @@ deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
  * delivered in the order they were heard. A final too short to tell is
  * whoever that participant was last named, for a while; a voice that matches
  * nobody is unknown-speaker-name, or the participant's own name. */
-#define NAME_MEMORY_US (120 * G_USEC_PER_SEC)
 /*
  * One final waiting for its name. The queue holds one reference and an
  * identification in flight holds another, so a reply that arrives after the
@@ -1752,7 +1753,7 @@ deliver_named(AiVoiceSession *self)
 				p->last_named_us = now;
 			}
 		} else if ((n->too_short || n->failed) && p != NULL && p->last_named != NULL &&
-				   now - p->last_named_us < NAME_MEMORY_US)
+				   now - p->last_named_us < (gint64)P(self)->name_memory_ms * 1000)
 			final = ai_speaker_match_new(AI_SPEAKER_MATCH_INHERITED, p->last_named, 0);
 		else if (n->match != NULL) {
 			/* A stranger: unknown-speaker-name, or the participant. */
@@ -2150,6 +2151,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_object(value, P(self)->identifier);
 	else if (id == PROP_NAMING_TIMEOUT)
 		g_value_set_uint(value, P(self)->naming_timeout_ms);
+	else if (id == PROP_NAME_MEMORY)
+		g_value_set_uint(value, P(self)->name_memory_ms);
 	else if (id == PROP_UNKNOWN_SPEAKER_NAME)
 		g_value_set_string(value, P(self)->unknown_speaker_name);
 	else if (id == PROP_ASSISTANT_SOUNDALIKES)
@@ -2261,6 +2264,8 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 		g_set_object(&P(self)->identifier, g_value_get_object(value));
 	else if (id == PROP_NAMING_TIMEOUT)
 		P(self)->naming_timeout_ms = g_value_get_uint(value);
+	else if (id == PROP_NAME_MEMORY)
+		P(self)->name_memory_ms = g_value_get_uint(value);
 	else if (id == PROP_ASSISTANT_SOUNDALIKES)
 		g_object_set_property(G_OBJECT(P(self)->name_detector), "soundalikes", value);
 	else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
@@ -2547,6 +2552,18 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							"Spoken when a guest's voice cannot be saved under a name",
 							"I can't save that voice as {name}: {reason}.",
 							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:name-memory-ms:
+	 *
+	 * An utterance too short to name, or whose naming failed, is whoever
+	 * that microphone was last named -- if that was within this long.
+	 */
+	g_object_class_install_property(
+		oc, PROP_NAME_MEMORY,
+		g_param_spec_uint("name-memory-ms", "Name memory",
+						  "How long a short utterance inherits the last name heard", 0,
+						  3600000, 120000,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	/**
 	 * AiVoiceSession:naming-timeout-ms:
 	 *

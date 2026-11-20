@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "ai-call-transcript.h"
+#include <math.h>
 #include <json-glib/json-glib.h>
 #include <glib/gstdio.h>
 #include <errno.h>
@@ -314,6 +315,84 @@ ai_call_transcript_append_relevance(AiCallTranscript *self, GDateTime *at, guint
 	root = json_builder_get_root(builder);
 	line = json_to_string(root, FALSE);
 	return write_line(self, line, error);
+}
+/* One record: {"type": TYPE, "at": AT, ...} with the members BUILD adds. */
+typedef void (*Members)(JsonBuilder *builder, gpointer data);
+static gboolean
+append_record(AiCallTranscript *self, GDateTime *at, const gchar *type, Members build,
+			  gpointer data, GError **error)
+{
+	g_autoptr(JsonBuilder) builder = NULL;
+	g_autoptr(JsonNode) root = NULL;
+	g_autofree gchar *when = NULL, *line = NULL;
+	g_return_val_if_fail(AI_IS_CALL_TRANSCRIPT(self), FALSE);
+	g_return_val_if_fail(at != NULL, FALSE);
+	if (self->closed) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_CLOSED, "Transcript %s is closed",
+					self->path);
+		return FALSE;
+	}
+	builder = json_builder_new();
+	when = timestamp(at);
+	json_builder_begin_object(builder);
+	json_builder_set_member_name(builder, "type");
+	json_builder_add_string_value(builder, type);
+	json_builder_set_member_name(builder, "at");
+	json_builder_add_string_value(builder, when);
+	build(builder, data);
+	json_builder_end_object(builder);
+	root = json_builder_get_root(builder);
+	line = json_to_string(root, FALSE);
+	return write_line(self, line, error);
+}
+typedef struct {
+	const gchar *participant, *name, *kind, *guest;
+	gdouble score;
+} Fields;
+static void
+speaker_members(JsonBuilder *builder, gpointer data)
+{
+	const Fields *f = data;
+	json_builder_set_member_name(builder, "participant");
+	json_builder_add_string_value(builder, f->participant != NULL ? f->participant : "");
+	json_builder_set_member_name(builder, "speaker");
+	json_builder_add_string_value(builder, f->name != NULL ? f->name : "");
+	json_builder_set_member_name(builder, "kind");
+	json_builder_add_string_value(builder, f->kind != NULL ? f->kind : "");
+	json_builder_set_member_name(builder, "score");
+	/* Two decimals: enough to tune a threshold, not a voiceprint. */
+	json_builder_add_double_value(builder, round(f->score * 100) / 100);
+}
+gboolean
+ai_call_transcript_append_speaker(AiCallTranscript *self, GDateTime *at,
+								  const gchar *participant, const gchar *name, const gchar *kind,
+								  gdouble score, GError **error)
+{
+	Fields f = {0};
+	f.participant = participant;
+	f.name = name;
+	f.kind = kind;
+	f.score = score;
+	return append_record(self, at, "speaker", speaker_members, &f, error);
+}
+static void
+promotion_members(JsonBuilder *builder, gpointer data)
+{
+	const Fields *f = data;
+	json_builder_set_member_name(builder, "guest");
+	json_builder_add_string_value(builder, f->guest);
+	json_builder_set_member_name(builder, "speaker");
+	json_builder_add_string_value(builder, f->name);
+}
+gboolean
+ai_call_transcript_append_promotion(AiCallTranscript *self, GDateTime *at, const gchar *guest,
+									const gchar *name, GError **error)
+{
+	Fields f = {0};
+	g_return_val_if_fail(guest != NULL && name != NULL, FALSE);
+	f.guest = guest;
+	f.name = name;
+	return append_record(self, at, "promotion", promotion_members, &f, error);
 }
 gboolean
 ai_call_transcript_close(AiCallTranscript *self, GDateTime *end, GError **error)
