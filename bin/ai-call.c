@@ -883,8 +883,10 @@ static void
 enrolled_voice(GObject *source, GAsyncResult *result, gpointer data)
 {
 	Enrolling *e = data;
-	e->ok = ai_voiceprint_identifier_enroll_finish(AI_VOICEPRINT_IDENTIFIER(source), result,
-												   &e->error);
+	g_autoptr(AiVoiceprint) saved =
+		ai_voiceprint_identifier_enroll_finish(AI_VOICEPRINT_IDENTIFIER(source), result,
+											   &e->error);
+	e->ok = saved != NULL;
 	e->done = TRUE;
 }
 /* NAME's voiceprint from the recording at PATH, or from SECONDS of the

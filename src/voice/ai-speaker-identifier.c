@@ -19,6 +19,9 @@ ai_speaker_identifier_default_init(AiSpeakerIdentifierInterface *iface)
  * @cancellable: (nullable): cancellation token
  * @callback: (scope async): completion callback
  * @user_data: data for @callback
+ *
+ * Starts naming the speaker of @pcm. Calls must complete in any order the
+ * implementation likes; the session delivers finals in the order heard.
  */
 void
 ai_speaker_identifier_identify_async(AiSpeakerIdentifier *self, GBytes *pcm,
@@ -42,28 +45,79 @@ ai_speaker_identifier_identify_async(AiSpeakerIdentifier *self, GBytes *pcm,
  * ai_speaker_identifier_identify_finish:
  * @self: a #AiSpeakerIdentifier
  * @result: asynchronous result
- * @score: (out) (optional): similarity of the best match, 0 to 1
  * @error: return location for an error
  *
- * %NULL with no error means a voice that matches nobody. An utterance too
- * short to tell is %G_IO_ERROR_INVALID_DATA, which a caller can tell apart
- * from a stranger and answer with whoever spoke last.
+ * A voice that matches nobody is a match of kind
+ * %AI_SPEAKER_MATCH_UNKNOWN with no name. An utterance too short to tell is
+ * %G_IO_ERROR_INVALID_DATA, which a caller can tell apart from a stranger
+ * and answer with whoever spoke last. Any other error means naming failed.
  *
- * Returns: (transfer full) (nullable): the speaker's name
+ * Returns: (transfer full) (nullable): the match, or %NULL with @error set
  */
-gchar *
+AiSpeakerMatch *
 ai_speaker_identifier_identify_finish(AiSpeakerIdentifier *self, GAsyncResult *result,
-									  gdouble *score, GError **error)
+									  GError **error)
 {
 	AiSpeakerIdentifierInterface *iface;
-	if (score != NULL)
-		*score = 0;
 	g_return_val_if_fail(AI_IS_SPEAKER_IDENTIFIER(self), NULL);
 	iface = AI_SPEAKER_IDENTIFIER_GET_IFACE(self);
 	if (iface->identify_finish == NULL) {
+		/* identify_async() returned NOT_SUPPORTED through a plain GTask. */
+		if (G_IS_TASK(result))
+			return g_task_propagate_pointer(G_TASK(result), error);
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
 							"Operation is not implemented");
 		return NULL;
 	}
-	return iface->identify_finish(self, result, score, error);
+	return iface->identify_finish(self, result, error);
+}
+
+/**
+ * ai_speaker_identifier_promote:
+ * @self: a #AiSpeakerIdentifier
+ * @guest: the guest's name, as matched ("Guest 2")
+ * @name: the lasting name to give that voice
+ * @merge: when @name is already enrolled, average the guest into it rather
+ *   than refuse
+ * @error: return location for an error
+ *
+ * Gives a voice heard during the call a lasting name, so it is named that
+ * from now on. Without @merge an enrolled @name is %G_IO_ERROR_EXISTS: one
+ * person must never silently take over another's voiceprint. An unknown
+ * @guest is %G_IO_ERROR_NOT_FOUND; an identifier that cannot promote is
+ * %G_IO_ERROR_NOT_SUPPORTED.
+ *
+ * Returns: whether the voice was saved under @name
+ */
+gboolean
+ai_speaker_identifier_promote(AiSpeakerIdentifier *self, const gchar *guest, const gchar *name,
+							  gboolean merge, GError **error)
+{
+	AiSpeakerIdentifierInterface *iface;
+	g_return_val_if_fail(AI_IS_SPEAKER_IDENTIFIER(self), FALSE);
+	g_return_val_if_fail(guest != NULL, FALSE);
+	g_return_val_if_fail(name != NULL, FALSE);
+	iface = AI_SPEAKER_IDENTIFIER_GET_IFACE(self);
+	if (iface->promote == NULL) {
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+							"This speaker identifier cannot save voices");
+		return FALSE;
+	}
+	return iface->promote(self, guest, name, merge, error);
+}
+
+/**
+ * ai_speaker_identifier_has_name:
+ * @self: a #AiSpeakerIdentifier
+ * @name: a name
+ *
+ * Returns: whether @name is already enrolled
+ */
+gboolean
+ai_speaker_identifier_has_name(AiSpeakerIdentifier *self, const gchar *name)
+{
+	AiSpeakerIdentifierInterface *iface;
+	g_return_val_if_fail(AI_IS_SPEAKER_IDENTIFIER(self), FALSE);
+	iface = AI_SPEAKER_IDENTIFIER_GET_IFACE(self);
+	return name != NULL && iface->has_name != NULL && iface->has_name(self, name);
 }

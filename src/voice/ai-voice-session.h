@@ -8,6 +8,10 @@
 #include "voice/ai-speech-synthesizer.h"
 #include "voice/ai-voice-activity.h"
 #include "view/ai-conversation.h"
+#include "voice/ai-speaker-identifier.h"
+#include "voice/ai-voice-room.h"
+#include "voice/ai-address-detector.h"
+#include "voice/ai-relevance-judge.h"
 G_BEGIN_DECLS
 /**
  * AiVoiceState:
@@ -26,7 +30,39 @@ typedef enum {
 GType
 ai_voice_state_get_type(void) G_GNUC_CONST;
 #define AI_TYPE_VOICE_SESSION (ai_voice_session_get_type())
-G_DECLARE_FINAL_TYPE(AiVoiceSession, ai_voice_session, AI, VOICE_SESSION, GObject)
+G_DECLARE_DERIVABLE_TYPE(AiVoiceSession, ai_voice_session, AI, VOICE_SESSION, GObject)
+/**
+ * AiVoiceSessionClass:
+ * @parent_class: the parent class
+ * @transcript: class handler of #AiVoiceSession::transcript
+ * @reply: class handler of #AiVoiceSession::reply
+ * @command: class handler of #AiVoiceSession::command
+ * @relevance: class handler of #AiVoiceSession::relevance
+ * @speaker_named: class handler of #AiVoiceSession::speaker-named
+ * @allow_promotion: class handler of #AiVoiceSession::allow-promotion;
+ *   %TRUE by default
+ * @guest_promoted: class handler of #AiVoiceSession::guest-promoted
+ *
+ * A subclass can react to everything the session reports without
+ * connecting handlers, and decide in one place whether a guest may be
+ * given a lasting name. The pieces a room session is made of -- who spoke
+ * (#AiSpeakerIdentifier), whether it was said to the assistant
+ * (#AiAddressDetector), whether to chime in (#AiRelevanceJudge), and what
+ * is remembered between turns (#AiVoiceRoom) -- are properties, each
+ * replaceable on its own.
+ */
+struct _AiVoiceSessionClass {
+	GObjectClass parent_class;
+	void (*transcript)(AiVoiceSession *self, const gchar *speaker, const gchar *text,
+					   gboolean final);
+	void (*reply)(AiVoiceSession *self, const gchar *text);
+	void (*command)(AiVoiceSession *self, const gchar *name);
+	void (*relevance)(AiVoiceSession *self, guint score, const gchar *reason, gboolean chimed);
+	void (*speaker_named)(AiVoiceSession *self, const gchar *participant, AiSpeakerMatch *match);
+	gboolean (*allow_promotion)(AiVoiceSession *self, const gchar *guest, const gchar *name);
+	void (*guest_promoted)(AiVoiceSession *self, const gchar *guest, const gchar *name);
+	gpointer _reserved[12];
+};
 AiVoiceSession *
 ai_voice_session_new(AiAudioTransport *transport, AiSpeechRecognizer *recognizer,
 					 AiSpeechSynthesizer *synthesizer, AiVoiceActivity *activity,

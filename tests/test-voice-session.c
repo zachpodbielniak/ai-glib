@@ -497,6 +497,7 @@ typedef struct {
 	GQueue script; /* of Naming * */
 	guint calls;
 	gsize last_bytes;
+	gchar *promoted; /* "Guest N=Name" of the last promotion asked for */
 } TestIdentifier;
 typedef GObjectClass TestIdentifierClass;
 static void test_identifier_iface_init(AiSpeakerIdentifierInterface *iface);
@@ -505,8 +506,15 @@ G_DEFINE_TYPE_WITH_CODE(TestIdentifier, test_identifier, G_TYPE_OBJECT,
 											  test_identifier_iface_init))
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(TestIdentifier, g_object_unref)
 static void
+test_identifier_finalize(GObject *object)
+{
+	g_free(((TestIdentifier *)object)->promoted);
+	G_OBJECT_CLASS(test_identifier_parent_class)->finalize(object);
+}
+static void
 test_identifier_class_init(TestIdentifierClass *c)
 {
+	c->finalize = test_identifier_finalize;
 }
 static void
 test_identifier_init(TestIdentifier *self)
@@ -520,7 +528,11 @@ naming_due(gpointer data)
 	if (n->error >= 0)
 		g_task_return_new_error(task, G_IO_ERROR, n->error, "scripted");
 	else
-		g_task_return_pointer(task, g_strdup(n->name), g_free);
+		g_task_return_pointer(task,
+							  ai_speaker_match_new(n->name != NULL ? AI_SPEAKER_MATCH_ENROLLED
+																   : AI_SPEAKER_MATCH_UNKNOWN,
+												   n->name, 0.9),
+							  g_object_unref);
 	g_object_unref(task);
 	return G_SOURCE_REMOVE;
 }
@@ -537,18 +549,31 @@ identifier_identify(AiSpeakerIdentifier *id, GBytes *pcm, GCancellable *cancel,
 	g_task_set_task_data(task, (gpointer)(n != NULL ? n : &nobody), NULL);
 	g_timeout_add(n != NULL ? n->delay_ms : 0, naming_due, task);
 }
-static gchar *
-identifier_finish(AiSpeakerIdentifier *id, GAsyncResult *result, gdouble *score, GError **error)
+static AiSpeakerMatch *
+identifier_finish(AiSpeakerIdentifier *id, GAsyncResult *result, GError **error)
 {
-	if (score != NULL)
-		*score = 0.9;
 	return g_task_propagate_pointer(G_TASK(result), error);
+}
+/* Ada is enrolled; any other name may be given to a guest. */
+static gboolean
+identifier_promote(AiSpeakerIdentifier *id, const gchar *guest, const gchar *name,
+				   gboolean merge, GError **error)
+{
+	TestIdentifier *self = (TestIdentifier *)id;
+	g_free(self->promoted);
+	self->promoted = g_strdup_printf("%s=%s", guest, name);
+	if (g_str_equal(name, "Ada") && !merge) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "%s is already enrolled", name);
+		return FALSE;
+	}
+	return TRUE;
 }
 static void
 test_identifier_iface_init(AiSpeakerIdentifierInterface *iface)
 {
 	iface->identify_async = identifier_identify;
 	iface->identify_finish = identifier_finish;
+	iface->promote = identifier_promote;
 }
 static TestIdentifier *
 naming(Fixture *f, const Naming *script, guint n)
@@ -719,6 +744,334 @@ room_mute_cancels_score(Fixture *f, gconstpointer data)
 	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
 	g_free(r.reason);
 }
+/* ---- room mode, extended ---- */
+
+/* A busy room: talk that arrives while a score is on its way does not
+ * cancel it -- in steady chatter no score would ever finish -- but has the
+ * latest talk scored as soon as it is back. */
+static void
+room_busy_still_scores(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	g_autofree gchar *sent = NULL;
+	Relevance r = {0};
+	ai_mock_provider_set_delay_ms(judge, 100);
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 1\nREASON: stale by the time it lands");
+	ai_mock_provider_push_text(judge, "SCORE: 9\nREASON: the date question went unanswered");
+	ai_mock_provider_push_text(f->provider, "Thursday.");
+	said_by(f, "second", "So the release.");
+	pass_ms(30);
+	said_by(f, "caller", "Yes, the release.");
+	pass_ms(30);
+	said_by(f, "second", "When is it, does anyone know?");
+	wait_relevance(&r, 1);
+	wait_replies(f, 1);
+	g_assert_cmpuint(r.count, ==, 1);
+	g_assert_cmpuint(r.score, ==, 9);
+	g_assert_true(r.chimed);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(judge), ==, 2);
+	sent = last_user_text(f);
+	g_assert_nonnull(strstr(sent, "[Sam]: So the release."));
+	g_assert_nonnull(strstr(sent, "[Sam]: When is it, does anyone know?"));
+	g_free(r.reason);
+}
+/* An application decides what is said to the assistant: here, only what
+ * Sam says. */
+typedef struct {
+	GObject parent;
+} SamOnly;
+typedef GObjectClass SamOnlyClass;
+static void sam_only_iface_init(AiAddressDetectorInterface *iface);
+G_DEFINE_TYPE_WITH_CODE(SamOnly, sam_only, G_TYPE_OBJECT,
+						G_IMPLEMENT_INTERFACE(AI_TYPE_ADDRESS_DETECTOR, sam_only_iface_init))
+static gboolean
+sam_only_addressed(AiAddressDetector *d, const gchar *speaker, const gchar *text)
+{
+	return g_strcmp0(speaker, "Sam") == 0;
+}
+static void
+sam_only_iface_init(AiAddressDetectorInterface *iface)
+{
+	iface->is_addressed = sam_only_addressed;
+}
+static void
+sam_only_class_init(SamOnlyClass *c)
+{
+}
+static void
+sam_only_init(SamOnly *self)
+{
+}
+static void
+room_custom_detector(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	g_autoptr(GObject) detector = g_object_new(sam_only_get_type(), NULL);
+	g_autofree gchar *sent = NULL;
+	g_object_set(f->session, "address-detector", detector, NULL);
+	said_by(f, "caller", "Ada, are you there?");
+	settle(f);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	ai_mock_provider_push_text(f->provider, "Yes.");
+	said_by(f, "second", "Anything at all.");
+	wait_replies(f, 1);
+	sent = last_user_text(f);
+	g_assert_cmpstr(sent, ==, "[Caller]: Ada, are you there?\n[Sam]: Anything at all.");
+}
+/* An application's own judge: always keen. */
+typedef struct {
+	GObject parent;
+	guint asked;
+	gchar *last_assistant;
+} Keen;
+typedef GObjectClass KeenClass;
+static void keen_iface_init(AiRelevanceJudgeInterface *iface);
+G_DEFINE_TYPE_WITH_CODE(Keen, keen, G_TYPE_OBJECT,
+						G_IMPLEMENT_INTERFACE(AI_TYPE_RELEVANCE_JUDGE, keen_iface_init))
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(Keen, g_object_unref)
+static void
+keen_judge(AiRelevanceJudge *judge, const gchar *assistant, const gchar *const *lines,
+		   GCancellable *cancel, GAsyncReadyCallback cb, gpointer data)
+{
+	Keen *self = (Keen *)judge;
+	g_autoptr(GTask) task = g_task_new(judge, cancel, cb, data);
+	self->asked++;
+	g_free(self->last_assistant);
+	self->last_assistant = g_strdup(assistant);
+	g_task_return_int(task, 9);
+}
+static gint
+keen_finish(AiRelevanceJudge *judge, GAsyncResult *result, gchar **reason, GError **error)
+{
+	*reason = g_strdup("always keen");
+	return (gint)g_task_propagate_int(G_TASK(result), error);
+}
+static void
+keen_iface_init(AiRelevanceJudgeInterface *iface)
+{
+	iface->judge_async = keen_judge;
+	iface->judge_finish = keen_finish;
+}
+static void
+keen_finalize(GObject *object)
+{
+	g_free(((Keen *)object)->last_assistant);
+	G_OBJECT_CLASS(keen_parent_class)->finalize(object);
+}
+static void
+keen_class_init(KeenClass *c)
+{
+	c->finalize = keen_finalize;
+}
+static void
+keen_init(Keen *self)
+{
+}
+static void
+room_custom_judge(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) unused = room(f, 6);
+	g_autoptr(Keen) keen = g_object_new(keen_get_type(), NULL);
+	g_autoptr(AiRelevanceJudge) back = NULL;
+	Relevance r = {0};
+	g_object_set(f->session, "relevance-judge", keen, NULL);
+	g_object_get(f->session, "relevance-judge", &back, NULL);
+	g_assert_true(back == AI_RELEVANCE_JUDGE(keen));
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(f->provider, "Here to help.");
+	said_by(f, "second", "Nice weather.");
+	wait_relevance(&r, 1);
+	wait_replies(f, 1);
+	g_assert_true(r.chimed);
+	g_assert_cmpstr(r.reason, ==, "always keen");
+	g_assert_cmpstr(keen->last_assistant, ==, "Ada");
+	g_free(r.reason);
+}
+/* With the roster announced, the model is told who is present. */
+static void
+room_roster_announced(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	g_autoptr(AiVoiceRoom) room_memory = NULL;
+	g_autofree gchar *sent = NULL;
+	g_object_get(f->session, "room", &room_memory, NULL);
+	g_object_set(room_memory, "announce-roster", TRUE, NULL);
+	said_by(f, "second", "Morning all.");
+	ai_mock_provider_push_text(f->provider, "Morning.");
+	said_by(f, "caller", "Ada, morning.");
+	wait_replies(f, 1);
+	sent = last_user_text(f);
+	g_assert_cmpstr(sent, ==, "[Present: Sam, Caller]\n[Sam]: Morning all.\n[Caller]: Ada, morning.");
+}
+
+/* ---- naming, reported ---- */
+
+typedef struct {
+	GPtrArray *kinds; /* GINT_TO_POINTER(AiSpeakerMatchKind) */
+	GPtrArray *names;
+} NamedLog;
+static void
+on_speaker_named(AiVoiceSession *s, const gchar *participant, AiSpeakerMatch *match,
+				 gpointer data)
+{
+	NamedLog *log = data;
+	g_ptr_array_add(log->kinds, GINT_TO_POINTER(ai_speaker_match_get_kind(match)));
+	g_ptr_array_add(log->names, g_strdup(ai_speaker_match_get_name(match)));
+}
+/* Every final is reported with how its speaker was decided: named by the
+ * identifier, inherited when too short, the participant when naming fails. */
+static void
+speakers_reported(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{NULL, G_IO_ERROR_FAILED, 0},
+									{"Sam", -1, 0},
+									{NULL, G_IO_ERROR_INVALID_DATA, 0},
+									{NULL, -1, 0}};
+	g_autoptr(AiMockProvider) judge = room(f, 0);
+	g_autoptr(TestIdentifier) id = naming(f, script, 4);
+	NamedLog log;
+	log.kinds = g_ptr_array_new();
+	log.names = g_ptr_array_new_with_free_func(g_free);
+	g_signal_connect(f->session, "speaker-named", G_CALLBACK(on_speaker_named), &log);
+	said(f, "One.");
+	said(f, "Two.");
+	said(f, "Three.");
+	said(f, "Four.");
+	pass_ms(100);
+	g_assert_cmpuint(log.kinds->len, ==, 4);
+	g_assert_cmpint(GPOINTER_TO_INT(log.kinds->pdata[0]), ==, AI_SPEAKER_MATCH_FALLBACK);
+	g_assert_cmpstr(log.names->pdata[0], ==, "Caller");
+	g_assert_cmpint(GPOINTER_TO_INT(log.kinds->pdata[1]), ==, AI_SPEAKER_MATCH_ENROLLED);
+	g_assert_cmpstr(log.names->pdata[1], ==, "Sam");
+	g_assert_cmpint(GPOINTER_TO_INT(log.kinds->pdata[2]), ==, AI_SPEAKER_MATCH_INHERITED);
+	g_assert_cmpstr(log.names->pdata[2], ==, "Sam");
+	g_assert_cmpint(GPOINTER_TO_INT(log.kinds->pdata[3]), ==, AI_SPEAKER_MATCH_UNKNOWN);
+	g_assert_cmpstr(log.names->pdata[3], ==, "Caller");
+	g_ptr_array_unref(log.kinds);
+	g_ptr_array_unref(log.names);
+}
+
+/* ---- giving a guest a name by voice ---- */
+
+static void
+promotion_setup(Fixture *f, TestIdentifier **id)
+{
+	static const Naming script[] = {{NULL, -1, 0}};
+	*id = naming(f, script, 1);
+	g_object_set(f->session, "voice-commands", TRUE, "assistant-names", "Ada", NULL);
+}
+static void
+on_guest_promoted(AiVoiceSession *s, const gchar *guest, const gchar *name, gpointer data)
+{
+	*(gchar **)data = g_strdup_printf("%s=%s", guest, name);
+}
+/* "Ada, guest two is Kim" saves the guest's voice as Kim's and says so; it
+ * is a command, never a turn. */
+static void
+promote_by_voice(Fixture *f, gconstpointer data)
+{
+	g_autoptr(TestIdentifier) id = NULL;
+	g_autofree gchar *seen = NULL;
+	promotion_setup(f, &id);
+	g_signal_connect(f->session, "guest-promoted", G_CALLBACK(on_guest_promoted), &seen);
+	said(f, "Ada, guest two is kim.");
+	wait_replies(f, 1);
+	g_assert_cmpstr(id->promoted, ==, "Guest 2=Kim");
+	g_assert_cmpstr(seen, ==, "Guest 2=Kim");
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==, "Okay, I'll remember Kim.");
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	/* Other phrasings. */
+	said(f, "Call guest 3 Lee Park.");
+	wait_replies(f, 2);
+	g_assert_cmpstr(id->promoted, ==, "Guest 3=Lee Park");
+	said(f, "Guest number one's name is Jo");
+	wait_replies(f, 3);
+	g_assert_cmpstr(id->promoted, ==, "Guest 1=Jo");
+}
+/* A name already enrolled is refused aloud; nobody takes over a voice. A
+ * sentence that only mentions a guest is not a command. */
+static void
+promote_refused(Fixture *f, gconstpointer data)
+{
+	g_autoptr(TestIdentifier) id = NULL;
+	promotion_setup(f, &id);
+	said(f, "Ada, guest one is Ada.");
+	wait_replies(f, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==,
+					"I can't save that voice as Ada: someone by that name is already enrolled.");
+	g_clear_pointer(&id->promoted, g_free);
+	ai_mock_provider_push_text(f->provider, "Sure.");
+	said(f, "Guest two is not here yet, is he?");
+	wait_replies(f, 2);
+	g_assert_null(id->promoted);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 1);
+}
+static gboolean
+deny(AiVoiceSession *s, const gchar *guest, const gchar *name, gpointer data)
+{
+	return FALSE;
+}
+/* The application has the last word. */
+static void
+promote_vetoed(Fixture *f, gconstpointer data)
+{
+	g_autoptr(TestIdentifier) id = NULL;
+	promotion_setup(f, &id);
+	g_signal_connect(f->session, "allow-promotion", G_CALLBACK(deny), NULL);
+	said(f, "Ada, guest two is Kim.");
+	wait_replies(f, 1);
+	g_assert_null(id->promoted);
+	g_assert_cmpstr(g_ptr_array_index(f->tts->texts, 0), ==,
+					"I can't save that voice as Kim: that is not allowed here.");
+}
+
+/* ---- subclassing the session ---- */
+
+typedef struct {
+	AiVoiceSession parent;
+} Strict;
+typedef struct {
+	AiVoiceSessionClass parent_class;
+} StrictClass;
+G_DEFINE_TYPE(Strict, strict, AI_TYPE_VOICE_SESSION)
+static gboolean
+strict_allow_promotion(AiVoiceSession *self, const gchar *guest, const gchar *name)
+{
+	return FALSE;
+}
+static void
+strict_class_init(StrictClass *klass)
+{
+	AI_VOICE_SESSION_CLASS(klass)->allow_promotion = strict_allow_promotion;
+}
+static void
+strict_init(Strict *self)
+{
+}
+/* A subclass decides in its class handler, with no signal connected. */
+static void
+session_subclass(void)
+{
+	g_autoptr(GObject) transport = g_object_new(test_transport_get_type(), NULL);
+	g_autoptr(GObject) stt = g_object_new(test_recognizer_get_type(), NULL);
+	g_autoptr(GObject) tts = g_object_new(test_synthesizer_get_type(), NULL);
+	g_autoptr(GObject) vad = g_object_new(test_activity_get_type(), NULL);
+	g_autoptr(AiMockProvider) provider = ai_mock_provider_new();
+	g_autoptr(AiConversation) conversation = ai_conversation_new(G_OBJECT(provider));
+	g_autoptr(TestIdentifier) id = g_object_new(test_identifier_get_type(), NULL);
+	g_autoptr(AiVoiceSession) session = NULL;
+	gboolean allowed = TRUE;
+	session = g_object_new(strict_get_type(), "transport", transport, "recognizer", stt,
+						   "synthesizer", tts, "activity", vad, "conversation", conversation,
+						   "speaker-identifier", id, NULL);
+	g_assert_true(AI_IS_VOICE_SESSION(session));
+	g_signal_emit_by_name(session, "allow-promotion", "Guest 1", "Kim", &allowed);
+	g_assert_false(allowed);
+	ai_voice_session_stop(session);
+	drain();
+}
+
 /* The deadline gives up on a turn stuck in a tool, and the caller is heard
  * again: the next question is answered, not queued behind the stuck one. */
 static void
@@ -1933,6 +2286,23 @@ main(int argc, char **argv)
 			   room_no_chime_while_naming, teardown);
 	g_test_add("/voice/session/room-mute-cancels-score", Fixture, NULL, setup,
 			   room_mute_cancels_score, teardown);
+	g_test_add("/voice/session/room-busy-still-scores", Fixture, NULL, setup,
+			   room_busy_still_scores, teardown);
+	g_test_add("/voice/session/room-custom-detector", Fixture, NULL, setup,
+			   room_custom_detector, teardown);
+	g_test_add("/voice/session/room-custom-judge", Fixture, NULL, setup, room_custom_judge,
+			   teardown);
+	g_test_add("/voice/session/room-roster-announced", Fixture, NULL, setup,
+			   room_roster_announced, teardown);
+	g_test_add("/voice/session/speakers-reported", Fixture, NULL, setup, speakers_reported,
+			   teardown);
+	g_test_add("/voice/session/promote-by-voice", Fixture, NULL, setup, promote_by_voice,
+			   teardown);
+	g_test_add("/voice/session/promote-refused", Fixture, NULL, setup, promote_refused,
+			   teardown);
+	g_test_add("/voice/session/promote-vetoed", Fixture, NULL, setup, promote_vetoed,
+			   teardown);
+	g_test_add_func("/voice/session/subclass", session_subclass);
 	g_test_add("/voice/session/room-unaddressed-heard", Fixture, NULL, setup,
 			   room_unaddressed_heard, teardown);
 	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);

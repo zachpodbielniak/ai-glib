@@ -4,6 +4,9 @@
 #include "model/ai-tool-result.h"
 #include "core/ai-provider.h"
 #include "voice/ai-speaker-identifier.h"
+#include "voice/ai-voice-room.h"
+#include "voice/ai-address-detector.h"
+#include "voice/ai-relevance-judge.h"
 #include <string.h>
 
 /**
@@ -60,8 +63,7 @@ typedef struct {
 	gint64 at;
 } Said;
 
-struct _AiVoiceSession {
-	GObject parent_instance;
+typedef struct {
 	AiAudioTransport *transport;
 	AiSpeechRecognizer *recognizer;
 	AiSpeechSynthesizer *synthesizer;
@@ -83,8 +85,8 @@ struct _AiVoiceSession {
 	/* voice-commands: spoken controls, and whether the caller is being heard */
 	gboolean voice_commands, muted;
 	gchar **assistant_names;
-	gchar **soundalikes; /* heard for a name, counted only where a name would be */
 	gchar *mute_message, *unmute_message;
+	gchar *promoted_message, *promotion_refused_message;
 	GHashTable *repeats;
 	gboolean runaway;
 	GSource *progress; /* pending tool-progress line, held for teardown */
@@ -105,13 +107,16 @@ struct _AiVoiceSession {
 	guint64 generation, provider_generation;
 	AiVoiceState state;
 	gboolean stopped, provider_pending, media_recovering, barge_in_confirm;
-	/* room-mode: talk that does not name the assistant is heard, not answered */
+	/* room-mode: talk the address detector does not pass is heard, not answered */
 	gboolean room_mode;
-	GQueue room;           /* "[Name]: text" heard since the assistant last took a turn */
-	guint64 room_revision; /* bumped by every line heard; a score for an older one is stale */
-	GObject *relevance_provider;
-	guint chime_threshold, chime_cooldown_ms;
-	GCancellable *scoring;
+	AiVoiceRoom *room;		   /* what was heard since the last turn, and who is present */
+	AiAddressDetector *detector; /* the application's, or NULL for name_detector */
+	AiNameAddressDetector *name_detector; /* from assistant-names and -soundalikes */
+	AiRelevanceJudge *judge;	 /* NULL: never chime in */
+	guint chime_threshold, chime_cooldown_ms, relevance_debounce_ms;
+	GCancellable *scoring; /* the one score in flight */
+	gboolean rescore;	   /* talk arrived while it was in flight */
+	GSource *debounce;
 	gint64 last_turn_us;
 	gchar *logged_tool; /* id of the last tool whose start was logged */
 	/* speaker-identifier: finals wait here, in order, until each is named */
@@ -119,7 +124,7 @@ struct _AiVoiceSession {
 	gchar *unknown_speaker_name;
 	GQueue naming;
 	guint naming_timeout_ms; /* the longest a final waits to be named */
-};
+} AiVoiceSessionPrivate;
 enum {
 	PROP_0,
 	PROP_TURN_DEADLINE,
@@ -155,9 +160,18 @@ enum {
 	PROP_SPEAKER_IDENTIFIER,
 	PROP_UNKNOWN_SPEAKER_NAME,
 	PROP_ASSISTANT_SOUNDALIKES,
-	PROP_NAMING_TIMEOUT
+	PROP_NAMING_TIMEOUT,
+	PROP_ROOM,
+	PROP_ADDRESS_DETECTOR,
+	PROP_RELEVANCE_JUDGE,
+	PROP_RELEVANCE_DEBOUNCE,
+	PROP_PROMOTED_MESSAGE,
+	PROP_PROMOTION_REFUSED_MESSAGE
 };
-G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
+G_DEFINE_TYPE_WITH_PRIVATE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
+/* Every field lives in the private struct, so a subclass's instance can grow
+ * without breaking this one's layout. */
+#define P(o) ((AiVoiceSessionPrivate *)ai_voice_session_get_instance_private(o))
 /* A word that starts softly -- "f", "h", "th" -- is not speech to the
  * detector until its vowel, so recognition would begin mid-word: "Fai" heard
  * as "-ay", and transcribed "say" or "Bay". This much of what came just
@@ -194,9 +208,9 @@ remember_said(AiVoiceSession *self, const gchar *text)
 	Said *said = g_new0(Said, 1);
 	said->text = g_strdup(text);
 	said->at = g_get_monotonic_time();
-	g_queue_push_tail(&self->said, said);
-	while (g_queue_get_length(&self->said) > 16)
-		said_free(g_queue_pop_head(&self->said));
+	g_queue_push_tail(&P(self)->said, said);
+	while (g_queue_get_length(&P(self)->said) > 16)
+		said_free(g_queue_pop_head(&P(self)->said));
 }
 static void
 add_words(GHashTable *words, const gchar *text)
@@ -228,7 +242,7 @@ is_echo(AiVoiceSession *self, const gchar *text)
 	GHashTableIter iter;
 	gpointer word;
 	GList *l;
-	for (l = self->said.head; l != NULL; l = l->next) {
+	for (l = P(self)->said.head; l != NULL; l = l->next) {
 		Said *said = l->data;
 		if (now - said->at <= ECHO_WINDOW_US)
 			add_words(ours, said->text);
@@ -298,9 +312,9 @@ participant_free(gpointer data)
 static void
 state(AiVoiceSession *self, AiVoiceState next)
 {
-	if (self->state == next)
+	if (P(self)->state == next)
 		return;
-	self->state = next;
+	P(self)->state = next;
 	g_object_notify(G_OBJECT(self), "state");
 	g_signal_emit_by_name(self, "state-changed", (gint)next);
 }
@@ -315,10 +329,10 @@ report(AiVoiceSession *self, const GError *error)
 static void
 clear_deadline(AiVoiceSession *self)
 {
-	if (self->deadline == NULL)
+	if (P(self)->deadline == NULL)
 		return;
-	g_source_destroy(self->deadline);
-	g_clear_pointer(&self->deadline, g_source_unref);
+	g_source_destroy(P(self)->deadline);
+	g_clear_pointer(&P(self)->deadline, g_source_unref);
 }
 /* Emoji, pictographs and markdown markup have no pronunciation. A TTS model
  * handed only those does not fail: it invents audio, and a seeded one invents
@@ -384,9 +398,9 @@ queue_line_full(AiVoiceSession *self, const gchar *text, gboolean remember,
 	Line *line;
 	g_autofree gchar *valid = NULL;
 	g_autofree gchar *spoken = NULL;
-	if (text == NULL || self->stopped)
+	if (text == NULL || P(self)->stopped)
 		return;
-	if (g_queue_get_length(&self->lines) >= 128)
+	if (g_queue_get_length(&P(self)->lines) >= 128)
 		return;
 	/* A byte-bounded cut can split a character, and the synthesizer refuses
 	 * invalid UTF-8, which would read as a TTS outage. The replacement
@@ -400,9 +414,9 @@ queue_line_full(AiVoiceSession *self, const gchar *text, gboolean remember,
 	line = g_new0(Line, 1);
 	line->text = g_steal_pointer(&spoken);
 	line->remember = remember;
-	g_queue_push_tail(&self->lines, line);
+	g_queue_push_tail(&P(self)->lines, line);
 	if (counted)
-		self->turn_lines++;
+		P(self)->turn_lines++;
 }
 static void
 queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
@@ -412,10 +426,10 @@ queue_line(AiVoiceSession *self, const gchar *text, gboolean remember)
 static void
 clear_progress(AiVoiceSession *self)
 {
-	if (self->progress == NULL)
+	if (P(self)->progress == NULL)
 		return;
-	g_source_destroy(self->progress);
-	g_clear_pointer(&self->progress, g_source_unref);
+	g_source_destroy(P(self)->progress);
+	g_clear_pointer(&P(self)->progress, g_source_unref);
 }
 static void
 pump(AiVoiceSession *self);
@@ -425,26 +439,26 @@ static gboolean
 progress_fire(gpointer data)
 {
 	AiVoiceSession *self = data;
-	g_clear_pointer(&self->progress, g_source_unref);
-	if (self->stopped || !self->provider_pending ||
-		self->progress_generation != self->generation || self->turn_lines != 0)
+	g_clear_pointer(&P(self)->progress, g_source_unref);
+	if (P(self)->stopped || !P(self)->provider_pending ||
+		P(self)->progress_generation != P(self)->generation || P(self)->turn_lines != 0)
 		return G_SOURCE_REMOVE;
 	/* Not counted: it is not a reply, so an empty turn still says so. */
-	queue_line_full(self, self->tool_progress_message, FALSE, FALSE);
+	queue_line_full(self, P(self)->tool_progress_message, FALSE, FALSE);
 	pump(self);
 	return G_SOURCE_REMOVE;
 }
 static void
 tool_started(AiVoiceSession *self)
 {
-	if (self->progress_used || self->tool_progress_message == NULL ||
-		*self->tool_progress_message == '\0' || self->turn_lines != 0)
+	if (P(self)->progress_used || P(self)->tool_progress_message == NULL ||
+		*P(self)->tool_progress_message == '\0' || P(self)->turn_lines != 0)
 		return;
-	self->progress_used = TRUE;
-	self->progress_generation = self->generation;
-	self->progress = g_timeout_source_new(self->tool_progress_delay_ms);
-	g_source_set_callback(self->progress, progress_fire, self, NULL);
-	g_source_attach(self->progress, self->context);
+	P(self)->progress_used = TRUE;
+	P(self)->progress_generation = P(self)->generation;
+	P(self)->progress = g_timeout_source_new(P(self)->tool_progress_delay_ms);
+	g_source_set_callback(P(self)->progress, progress_fire, self, NULL);
+	g_source_attach(P(self)->progress, P(self)->context);
 }
 static gboolean
 terminator(gchar c)
@@ -519,10 +533,10 @@ sentence_end(const gchar *text, gsize len, gboolean final)
 static void
 clear_hold(AiVoiceSession *self)
 {
-	if (self->hold == NULL)
+	if (P(self)->hold == NULL)
 		return;
-	g_source_destroy(self->hold);
-	g_clear_pointer(&self->hold, g_source_unref);
+	g_source_destroy(P(self)->hold);
+	g_clear_pointer(&P(self)->hold, g_source_unref);
 }
 static void
 segment(AiVoiceSession *self, gboolean final);
@@ -533,8 +547,8 @@ static gboolean
 hold_fire(gpointer data)
 {
 	AiVoiceSession *self = data;
-	g_clear_pointer(&self->hold, g_source_unref);
-	if (self->stopped)
+	g_clear_pointer(&P(self)->hold, g_source_unref);
+	if (P(self)->stopped)
 		return G_SOURCE_REMOVE;
 	segment(self, TRUE);
 	pump(self);
@@ -545,11 +559,11 @@ hold_fire(gpointer data)
 static void
 update_hold(AiVoiceSession *self)
 {
-	const gchar *end = self->pending_text->str + self->pending_text->len;
+	const gchar *end = P(self)->pending_text->str + P(self)->pending_text->len;
 	gboolean waiting = FALSE;
-	while (end > self->pending_text->str && closing_len(end - 1, 1) != 0)
+	while (end > P(self)->pending_text->str && closing_len(end - 1, 1) != 0)
 		end--;
-	while (end > self->pending_text->str && terminator(end[-1])) {
+	while (end > P(self)->pending_text->str && terminator(end[-1])) {
 		if (end[-1] == '.')
 			waiting = TRUE;
 		end--;
@@ -558,11 +572,11 @@ update_hold(AiVoiceSession *self)
 		clear_hold(self);
 		return;
 	}
-	if (self->hold != NULL)
+	if (P(self)->hold != NULL)
 		return;
-	self->hold = g_timeout_source_new(PERIOD_HOLD_MS);
-	g_source_set_callback(self->hold, hold_fire, self, NULL);
-	g_source_attach(self->hold, self->context);
+	P(self)->hold = g_timeout_source_new(PERIOD_HOLD_MS);
+	g_source_set_callback(P(self)->hold, hold_fire, self, NULL);
+	g_source_attach(P(self)->hold, P(self)->context);
 }
 /* A model that loses the thread can emit the same line for as long as it is
  * allowed to generate, and the caller hears all of it. The third "grep the
@@ -584,27 +598,27 @@ static void
 stop_runaway(AiVoiceSession *self)
 {
 	g_log("ai-glib", G_LOG_LEVEL_INFO,
-		  "Reply repeated a line more than %u times; stopping it", self->repeat_limit);
-	self->runaway = TRUE;
-	g_string_truncate(self->pending_text, 0);
+		  "Reply repeated a line more than %u times; stopping it", P(self)->repeat_limit);
+	P(self)->runaway = TRUE;
+	g_string_truncate(P(self)->pending_text, 0);
 	clear_hold(self);
 	clear_progress(self);
-	if (self->turn_cancel != NULL)
-		g_cancellable_cancel(self->turn_cancel);
-	if (self->repeat_message != NULL && *self->repeat_message != '\0')
-		queue_line(self, self->repeat_message, FALSE);
+	if (P(self)->turn_cancel != NULL)
+		g_cancellable_cancel(P(self)->turn_cancel);
+	if (P(self)->repeat_message != NULL && *P(self)->repeat_message != '\0')
+		queue_line(self, P(self)->repeat_message, FALSE);
 }
 static void
 offer_line(AiVoiceSession *self, const gchar *text)
 {
-	if (self->runaway)
+	if (P(self)->runaway)
 		return;
-	if (self->repeat_limit > 0) {
+	if (P(self)->repeat_limit > 0) {
 		g_autofree gchar *key = repeat_key(text);
 		if (*key != '\0') {
-			guint seen = GPOINTER_TO_UINT(g_hash_table_lookup(self->repeats, key)) + 1;
-			g_hash_table_insert(self->repeats, g_steal_pointer(&key), GUINT_TO_POINTER(seen));
-			if (seen > self->repeat_limit) {
+			guint seen = GPOINTER_TO_UINT(g_hash_table_lookup(P(self)->repeats, key)) + 1;
+			g_hash_table_insert(P(self)->repeats, g_steal_pointer(&key), GUINT_TO_POINTER(seen));
+			if (seen > P(self)->repeat_limit) {
 				stop_runaway(self);
 				return;
 			}
@@ -616,15 +630,15 @@ static void
 segment(AiVoiceSession *self, gboolean final)
 {
 	gsize end;
-	while (!self->runaway && (end = sentence_end(self->pending_text->str,
-												 self->pending_text->len, final)) != 0) {
-		g_autofree gchar *text = g_strndup(self->pending_text->str, end);
-		g_string_erase(self->pending_text, 0, end);
+	while (!P(self)->runaway && (end = sentence_end(P(self)->pending_text->str,
+												 P(self)->pending_text->len, final)) != 0) {
+		g_autofree gchar *text = g_strndup(P(self)->pending_text->str, end);
+		g_string_erase(P(self)->pending_text, 0, end);
 		offer_line(self, text);
 	}
-	if (final && self->pending_text->len != 0) {
-		g_autofree gchar *text = g_strdup(self->pending_text->str);
-		g_string_truncate(self->pending_text, 0);
+	if (final && P(self)->pending_text->len != 0) {
+		g_autofree gchar *text = g_strdup(P(self)->pending_text->str);
+		g_string_truncate(P(self)->pending_text, 0);
 		offer_line(self, text);
 	}
 }
@@ -635,13 +649,13 @@ static void
 close_span(AiVoiceSession *self)
 {
 	const gchar *p;
-	for (p = self->span->str; *p != '\0'; p++)
+	for (p = P(self)->span->str; *p != '\0'; p++)
 		if (g_ascii_isspace(*p))
 			break;
 	if (*p == '\0')
-		g_string_append_len(self->pending_text, self->span->str, self->span->len);
-	g_string_truncate(self->span, 0);
-	self->in_inline = FALSE;
+		g_string_append_len(P(self)->pending_text, P(self)->span->str, P(self)->span->len);
+	g_string_truncate(P(self)->span, 0);
+	P(self)->in_inline = FALSE;
 }
 /* speak-code off: markdown code is what a model writes when it shows a command
  * instead of running it, and read aloud it is noise. Fenced blocks and
@@ -652,44 +666,44 @@ static void
 append_reply(AiVoiceSession *self, const gchar *text, gboolean final)
 {
 	const gchar *p;
-	if (self->speak_code) {
-		g_string_append(self->pending_text, text);
+	if (P(self)->speak_code) {
+		g_string_append(P(self)->pending_text, text);
 		return;
 	}
 	for (p = text; *p != '\0'; p++) {
 		if (*p == '`') {
-			self->ticks++;
+			P(self)->ticks++;
 			continue;
 		}
-		if (self->ticks >= 3) {
-			self->in_fence = !self->in_fence;
-			self->in_inline = FALSE;
-			g_string_truncate(self->span, 0);
-			g_string_append_c(self->pending_text, '\n');
-		} else if (self->ticks > 0 && !self->in_fence) {
-			if (self->in_inline)
+		if (P(self)->ticks >= 3) {
+			P(self)->in_fence = !P(self)->in_fence;
+			P(self)->in_inline = FALSE;
+			g_string_truncate(P(self)->span, 0);
+			g_string_append_c(P(self)->pending_text, '\n');
+		} else if (P(self)->ticks > 0 && !P(self)->in_fence) {
+			if (P(self)->in_inline)
 				close_span(self);
 			else
-				self->in_inline = TRUE;
+				P(self)->in_inline = TRUE;
 		}
-		self->ticks = 0;
-		if (self->in_fence)
+		P(self)->ticks = 0;
+		if (P(self)->in_fence)
 			continue;
-		if (self->in_inline) {
+		if (P(self)->in_inline) {
 			/* An unclosed span ends with its line rather than eating the reply. */
 			if (*p == '\n') {
 				close_span(self);
-				g_string_append_c(self->pending_text, '\n');
+				g_string_append_c(P(self)->pending_text, '\n');
 			} else
-				g_string_append_c(self->span, *p);
+				g_string_append_c(P(self)->span, *p);
 			continue;
 		}
-		g_string_append_c(self->pending_text, *p);
+		g_string_append_c(P(self)->pending_text, *p);
 	}
 	if (final) {
-		if (self->in_inline)
+		if (P(self)->in_inline)
 			close_span(self);
-		self->ticks = 0;
+		P(self)->ticks = 0;
 	}
 }
 static void
@@ -698,17 +712,17 @@ speech_complete(Speech *s)
 	AiVoiceSession *self = s->session;
 	if (!s->synthesized || s->pending != 0)
 		return;
-	self->speech = NULL;
+	P(self)->speech = NULL;
 	/* Only speech that reached the caller was said; cut short is still said. */
 	if (s->heard)
 		g_signal_emit_by_name(self, "spoken", s->text, !s->discarded);
-	if (!s->discarded && s->generation == self->generation && s->remember) {
-		if (self->spoken->len != 0)
-			g_string_append_c(self->spoken, ' ');
-		g_string_append(self->spoken, s->text);
-		if (self->worker != NULL)
-			ai_voice_worker_spoken(self->worker, self->spoken->str,
-								   self->provider_generation);
+	if (!s->discarded && s->generation == P(self)->generation && s->remember) {
+		if (P(self)->spoken->len != 0)
+			g_string_append_c(P(self)->spoken, ' ');
+		g_string_append(P(self)->spoken, s->text);
+		if (P(self)->worker != NULL)
+			ai_voice_worker_spoken(P(self)->worker, P(self)->spoken->str,
+								   P(self)->provider_generation);
 	}
 	g_clear_object(&s->cancel);
 	g_free(s->text);
@@ -737,7 +751,7 @@ static void
 audio_out(AiSpeechSynthesizer *synthesizer, GBytes *pcm, guint sample_rate, gpointer data)
 {
 	AiVoiceSession *self = data;
-	Speech *s = self->speech;
+	Speech *s = P(self)->speech;
 	Playback *p;
 	gsize size = g_bytes_get_size(pcm);
 	if (s == NULL || s->discarded || g_cancellable_is_cancelled(s->cancel))
@@ -754,7 +768,7 @@ audio_out(AiSpeechSynthesizer *synthesizer, GBytes *pcm, guint sample_rate, gpoi
 	p->size = size;
 	s->pending++;
 	s->queued += size;
-	ai_audio_transport_write_pcm_async(self->transport, pcm, sample_rate, s->cancel,
+	ai_audio_transport_write_pcm_async(P(self)->transport, pcm, sample_rate, s->cancel,
 									   played, p);
 }
 static void
@@ -766,18 +780,18 @@ synthesized(GObject *source, GAsyncResult *result, gpointer data)
 												 &error)) {
 		s->discarded = TRUE;
 		report(s->session, error);
-		if (!s->fallback && !s->session->stopped &&
-			s->generation == s->session->generation &&
+		if (!s->fallback && !P(s->session)->stopped &&
+			s->generation == P(s->session)->generation &&
 			!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
 			/* A failed notice is not a barge-in: do not retry it indefinitely. */
 			s->notice = FALSE;
 			interrupt_turn(s->session);
-			if (s->session->synthesis_error_message != NULL &&
-			    *s->session->synthesis_error_message != '\0') {
+			if (P(s->session)->synthesis_error_message != NULL &&
+			    *P(s->session)->synthesis_error_message != '\0') {
 				Line *fallback = g_new0(Line, 1);
-				fallback->text = g_strdup(s->session->synthesis_error_message);
+				fallback->text = g_strdup(P(s->session)->synthesis_error_message);
 				fallback->fallback = TRUE;
-				g_queue_push_head(&s->session->lines, fallback);
+				g_queue_push_head(&P(s->session)->lines, fallback);
 			}
 		}
 	}
@@ -788,42 +802,42 @@ static gboolean
 deadline(gpointer data)
 {
 	AiVoiceSession *self = data;
-	g_clear_pointer(&self->deadline, g_source_unref);
+	g_clear_pointer(&P(self)->deadline, g_source_unref);
 	interrupt_turn(self);
-	queue_line(self, self->deadline_message, FALSE);
+	queue_line(self, P(self)->deadline_message, FALSE);
 	pump(self);
 	return G_SOURCE_REMOVE;
 }
 static void
 start_turn(AiVoiceSession *self, const gchar *text)
 {
-	self->last_turn_us = g_get_monotonic_time();
-	self->generation++;
-	self->provider_generation = self->generation;
-	self->provider_pending = TRUE;
-	g_clear_object(&self->turn_cancel);
-	self->turn_cancel = g_cancellable_new();
-	g_string_truncate(self->spoken, 0);
-	self->turn_lines = 0;
-	self->progress_used = FALSE;
-	self->in_fence = self->in_inline = self->runaway = FALSE;
-	self->ticks = 0;
-	g_string_truncate(self->span, 0);
-	g_hash_table_remove_all(self->repeats);
+	P(self)->last_turn_us = g_get_monotonic_time();
+	P(self)->generation++;
+	P(self)->provider_generation = P(self)->generation;
+	P(self)->provider_pending = TRUE;
+	g_clear_object(&P(self)->turn_cancel);
+	P(self)->turn_cancel = g_cancellable_new();
+	g_string_truncate(P(self)->spoken, 0);
+	P(self)->turn_lines = 0;
+	P(self)->progress_used = FALSE;
+	P(self)->in_fence = P(self)->in_inline = P(self)->runaway = FALSE;
+	P(self)->ticks = 0;
+	g_string_truncate(P(self)->span, 0);
+	g_hash_table_remove_all(P(self)->repeats);
 	clear_progress(self);
 	clear_hold(self);
 	state(self, AI_VOICE_THINKING);
-	self->deadline = g_timeout_source_new(self->deadline_ms);
-	g_source_set_callback(self->deadline, deadline, self, NULL);
-	g_source_attach(self->deadline, self->context);
-	ai_voice_worker_send(self->worker, text, self->turn_cancel, self->generation);
+	P(self)->deadline = g_timeout_source_new(P(self)->deadline_ms);
+	g_source_set_callback(P(self)->deadline, deadline, self, NULL);
+	g_source_attach(P(self)->deadline, P(self)->context);
+	ai_voice_worker_send(P(self)->worker, text, P(self)->turn_cancel, P(self)->generation);
 }
 static gboolean
 recognizing(AiVoiceSession *self)
 {
 	GHashTableIter iter;
 	gpointer value;
-	g_hash_table_iter_init(&iter, self->participants);
+	g_hash_table_iter_init(&iter, P(self)->participants);
 	while (g_hash_table_iter_next(&iter, NULL, &value))
 		if (((Participant *)value)->recognizing)
 			return TRUE;
@@ -833,12 +847,12 @@ static void
 pump(AiVoiceSession *self)
 {
 	Line *line;
-	if (self->stopped || self->media_recovering || self->speech != NULL)
+	if (P(self)->stopped || P(self)->media_recovering || P(self)->speech != NULL)
 		return;
-	line = g_queue_pop_head(&self->lines);
-	if (line == NULL && !self->provider_pending && !recognizing(self) &&
-		g_queue_is_empty(&self->turns))
-		line = g_queue_pop_head(&self->pending_notices);
+	line = g_queue_pop_head(&P(self)->lines);
+	if (line == NULL && !P(self)->provider_pending && !recognizing(self) &&
+		g_queue_is_empty(&P(self)->turns))
+		line = g_queue_pop_head(&P(self)->pending_notices);
 	if (line != NULL) {
 		Speech *s = g_new0(Speech, 1);
 		s->session = g_object_ref(self);
@@ -847,31 +861,31 @@ pump(AiVoiceSession *self)
 		s->notice = line->notice;
 		s->fallback = line->fallback;
 		s->cancel = g_cancellable_new();
-		s->generation = self->generation;
-		self->speech = s;
+		s->generation = P(self)->generation;
+		P(self)->speech = s;
 		line_free(line);
 		state(self, AI_VOICE_SPEAKING);
 		remember_said(self, s->text);
 		g_signal_emit_by_name(self, "reply", s->text);
-		if (s->fallback && self->fallback_pcm != NULL) {
+		if (s->fallback && P(self)->fallback_pcm != NULL) {
 			s->synthesized = TRUE;
-			audio_out(self->synthesizer, self->fallback_pcm, self->fallback_sample_rate,
+			audio_out(P(self)->synthesizer, P(self)->fallback_pcm, P(self)->fallback_sample_rate,
 					  self);
 			speech_complete(s);
 		} else {
-			ai_speech_synthesizer_synthesize_async(self->synthesizer, s->text, s->cancel,
+			ai_speech_synthesizer_synthesize_async(P(self)->synthesizer, s->text, s->cancel,
 												   synthesized, s);
 		}
 		return;
 	}
-	if (!self->provider_pending) {
-		g_autofree gchar *turn = g_queue_pop_head(&self->turns);
+	if (!P(self)->provider_pending) {
+		g_autofree gchar *turn = g_queue_pop_head(&P(self)->turns);
 		clear_deadline(self);
 		if (turn != NULL)
 			start_turn(self, turn);
 		else
 			state(self, recognizing(self) ? AI_VOICE_TRANSCRIBING : AI_VOICE_LISTENING);
-	} else if (self->generation != self->provider_generation)
+	} else if (P(self)->generation != P(self)->provider_generation)
 		state(self, recognizing(self) ? AI_VOICE_TRANSCRIBING : AI_VOICE_LISTENING);
 	else
 		state(self, AI_VOICE_THINKING);
@@ -882,24 +896,24 @@ interrupt_turn(AiVoiceSession *self)
 	clear_deadline(self);
 	clear_progress(self);
 	clear_hold(self);
-	self->paused_deadline_us = 0;
-	if (self->turn_cancel != NULL)
-		g_cancellable_cancel(self->turn_cancel);
-	if (self->speech != NULL) {
-		if (!self->stopped && self->speech->notice && !self->speech->discarded) {
+	P(self)->paused_deadline_us = 0;
+	if (P(self)->turn_cancel != NULL)
+		g_cancellable_cancel(P(self)->turn_cancel);
+	if (P(self)->speech != NULL) {
+		if (!P(self)->stopped && P(self)->speech->notice && !P(self)->speech->discarded) {
 			Line *notice = g_new0(Line, 1);
-			notice->text = g_strdup(self->speech->text);
+			notice->text = g_strdup(P(self)->speech->text);
 			notice->notice = TRUE;
-			g_queue_push_head(&self->pending_notices, notice);
+			g_queue_push_head(&P(self)->pending_notices, notice);
 		}
-		self->speech->discarded = TRUE;
-		g_cancellable_cancel(self->speech->cancel);
+		P(self)->speech->discarded = TRUE;
+		g_cancellable_cancel(P(self)->speech->cancel);
 	}
-	if (self->transport != NULL)
-		ai_audio_transport_flush(self->transport);
-	g_queue_clear_full(&self->lines, line_free);
-	g_string_truncate(self->pending_text, 0);
-	self->generation++;
+	if (P(self)->transport != NULL)
+		ai_audio_transport_flush(P(self)->transport);
+	g_queue_clear_full(&P(self)->lines, line_free);
+	g_string_truncate(P(self)->pending_text, 0);
+	P(self)->generation++;
 }
 /* A tool that ran has run, even in a turn since interrupted: report it for
  * any generation. */
@@ -924,7 +938,7 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 			const gchar *text, const GError *error)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
-	if (self->stopped)
+	if (P(self)->stopped)
 		return;
 	if (kind == AI_VOICE_MAIL_EVENT && event != NULL &&
 		ai_event_get_kind(event) == AI_EVENT_TOOL_FINISHED)
@@ -932,21 +946,21 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 	if (kind == AI_VOICE_MAIL_AGENT) {
 		/* A finished agent becomes a turn for the model, queued behind any turn
 		 * under way, so it fetches the result and says it unprompted. */
-		if (!g_hash_table_contains(self->notices, text)) {
-			g_hash_table_add(self->notices, g_strdup(text));
-			g_queue_push_tail(&self->turns, g_strdup(text));
+		if (!g_hash_table_contains(P(self)->notices, text)) {
+			g_hash_table_add(P(self)->notices, g_strdup(text));
+			g_queue_push_tail(&P(self)->turns, g_strdup(text));
 		}
 	} else if (kind == AI_VOICE_MAIL_DONE) {
-		if (generation == self->provider_generation) {
+		if (generation == P(self)->provider_generation) {
 			clear_progress(self);
 			clear_hold(self);
-			self->provider_pending = FALSE;
+			P(self)->provider_pending = FALSE;
 			clear_deadline(self);
-			self->paused_deadline_us = 0;
+			P(self)->paused_deadline_us = 0;
 		}
-		if (generation == self->generation && self->runaway) {
+		if (generation == P(self)->generation && P(self)->runaway) {
 			/* Stopped on purpose; the cancellation is not an error to speak. */
-		} else if (generation == self->generation) {
+		} else if (generation == P(self)->generation) {
 			if (error != NULL) {
 				g_autofree gchar *line =
 					g_strdup_printf("There was an error: %s", error->message);
@@ -961,33 +975,33 @@ worker_mail(GObject *object, AiVoiceMailKind kind, guint64 generation, AiEvent *
 				 * returns an empty turn, or a tool call a provider failed to
 				 * read, would otherwise end in silence the caller cannot tell
 				 * from a dropped call. */
-				if (self->turn_lines == 0) {
+				if (P(self)->turn_lines == 0) {
 					g_log("ai-glib", G_LOG_LEVEL_INFO,
 						  "Provider turn ended with nothing to say; speaking the "
 						  "empty-reply message");
-					queue_line(self, self->empty_reply_message, FALSE);
+					queue_line(self, P(self)->empty_reply_message, FALSE);
 				}
 			}
 		}
-	} else if (generation == self->generation) {
+	} else if (generation == P(self)->generation) {
 		AiEventKind k = ai_event_get_kind(event);
 		if (k == AI_EVENT_TOOL_STARTED) {
 			/* A tool that never finishes never reaches the transcript: log its
 			 * start, once per call, so a stuck turn names what it is stuck in. */
 			AiToolUse *use = ai_event_get_tool_use(event);
 			const gchar *id = use != NULL ? ai_tool_use_get_id(use) : NULL;
-			if (use != NULL && g_strcmp0(id, self->logged_tool) != 0) {
-				g_free(self->logged_tool);
-				self->logged_tool = g_strdup(id);
+			if (use != NULL && g_strcmp0(id, P(self)->logged_tool) != 0) {
+				g_free(P(self)->logged_tool);
+				P(self)->logged_tool = g_strdup(id);
 				g_log("ai-glib", G_LOG_LEVEL_INFO, "Tool started: %s",
 					  ai_tool_use_get_name(use) != NULL ? ai_tool_use_get_name(use) : "?");
 			}
 			tool_started(self);
 		}
 		else if (k == AI_EVENT_TEXT_DELTA) {
-			if (self->runaway)
+			if (P(self)->runaway)
 				;
-			else if (self->pending_text->len < 65536)
+			else if (P(self)->pending_text->len < 65536)
 				append_reply(self, ai_event_get_text(event), FALSE);
 			segment(self, FALSE);
 			update_hold(self);
@@ -1014,7 +1028,7 @@ joined(AiAudioTransport *transport, const gchar *speaker, const gchar *name,
 {
 	AiVoiceSession *self = data;
 	Participant *p;
-	if (self->stopped || g_hash_table_contains(self->participants, speaker))
+	if (P(self)->stopped || g_hash_table_contains(P(self)->participants, speaker))
 		return;
 	p = g_new0(Participant, 1);
 	p->name = g_strdup(name != NULL && *name != '\0' ? name : speaker);
@@ -1022,25 +1036,25 @@ joined(AiAudioTransport *transport, const gchar *speaker, const gchar *name,
 	p->onset = g_byte_array_new();
 	p->preroll = g_byte_array_new();
 	p->utterance = g_byte_array_new();
-	g_hash_table_insert(self->participants, g_strdup(speaker), p);
+	g_hash_table_insert(P(self)->participants, g_strdup(speaker), p);
 }
 static void
 left(AiAudioTransport *transport, const gchar *speaker, gpointer data)
 {
 	AiVoiceSession *self = data;
-	ai_speech_recognizer_cancel(self->recognizer, speaker);
-	ai_voice_activity_reset(self->activity, speaker);
-	g_hash_table_remove(self->participants, speaker);
+	ai_speech_recognizer_cancel(P(self)->recognizer, speaker);
+	ai_voice_activity_reset(P(self)->activity, speaker);
+	g_hash_table_remove(P(self)->participants, speaker);
 	pump(self);
 }
 static void
 audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointer data)
 {
 	AiVoiceSession *self = data;
-	Participant *p = g_hash_table_lookup(self->participants, speaker);
+	Participant *p = g_hash_table_lookup(P(self)->participants, speaker);
 	gsize n;
 	const guint8 *raw = g_bytes_get_data(pcm, &n);
-	if (self->stopped || p == NULL || n % 2 != 0 || n > 32000)
+	if (P(self)->stopped || p == NULL || n % 2 != 0 || n > 32000)
 		return;
 	g_byte_array_append(p->frames, raw, n);
 	while (p->frames->len >= 320) {
@@ -1049,7 +1063,7 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		gint activity;
 		gboolean fed_onset = FALSE;
 		g_byte_array_remove_range(p->frames, 0, 320);
-		activity = ai_voice_activity_process(self->activity, speaker, frame, &error);
+		activity = ai_voice_activity_process(P(self)->activity, speaker, frame, &error);
 		if (activity < 0) {
 			p->speech_ms = 0;
 			g_byte_array_set_size(p->onset, 0);
@@ -1065,29 +1079,29 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					g_byte_array_append(p->onset, p->preroll->data, p->preroll->len);
 				g_byte_array_append(p->onset, samples, size);
 			}
-			if (p->speech_ms >= self->barge_in_ms) {
+			if (p->speech_ms >= P(self)->barge_in_ms) {
 				/* While we are talking, sound alone may be our own voice
 				 * returning through the caller's speaker. Listen, and let
 				 * words decide whether this is an interruption. */
 				/* Muted, the caller is not heard, so cannot interrupt: only
 				 * the words "unmute" or "hang up" reach us, as commands. */
-				if (self->muted) {
-				} else if (self->state == AI_VOICE_SPEAKING && self->barge_in_confirm) {
+				if (P(self)->muted) {
+				} else if (P(self)->state == AI_VOICE_SPEAKING && P(self)->barge_in_confirm) {
 					if (!p->pending_barge)
 						g_log("ai-glib", G_LOG_LEVEL_INFO,
 							  "possible barge-in by %s after %u ms of speech, waiting for words",
 							  p->name, p->speech_ms);
 					p->pending_barge = TRUE;
-				} else if (self->state == AI_VOICE_SPEAKING ||
-						   self->state == AI_VOICE_THINKING) {
+				} else if (P(self)->state == AI_VOICE_SPEAKING ||
+						   P(self)->state == AI_VOICE_THINKING) {
 					g_log("ai-glib", G_LOG_LEVEL_INFO,
 						  "barge-in by %s after %u ms of speech, cancelling %s", p->name,
 						  p->speech_ms,
-						  self->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
+						  P(self)->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
 					interrupt_turn(self);
 				}
 				if (p->ended) {
-					ai_speech_recognizer_cancel(self->recognizer, speaker);
+					ai_speech_recognizer_cancel(P(self)->recognizer, speaker);
 					p->recognizing = FALSE;
 					p->ended = FALSE;
 				}
@@ -1101,9 +1115,9 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					g_byte_array_set_size(p->utterance, 0);
 					g_byte_array_append(p->utterance, samples, size);
 					recognizing =
-						ai_speech_recognizer_begin(self->recognizer, speaker, &error);
-					if (self->stopped ||
-						g_hash_table_lookup(self->participants, speaker) != p)
+						ai_speech_recognizer_begin(P(self)->recognizer, speaker, &error);
+					if (P(self)->stopped ||
+						g_hash_table_lookup(P(self)->participants, speaker) != p)
 						return;
 					p->recognizing = recognizing;
 					/* Preserve the confirmed onset rather than clipping initial words.
@@ -1111,18 +1125,18 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					for (offset = 0; p->recognizing && error == NULL && offset < size;
 						 offset += 320) {
 						g_autoptr(GBytes) buffered = g_bytes_new(samples + offset, 320);
-						ai_speech_recognizer_feed(self->recognizer, speaker, buffered,
+						ai_speech_recognizer_feed(P(self)->recognizer, speaker, buffered,
 												  &error);
-						if (self->stopped ||
-							g_hash_table_lookup(self->participants, speaker) != p)
+						if (P(self)->stopped ||
+							g_hash_table_lookup(P(self)->participants, speaker) != p)
 							return;
 					}
 					fed_onset = TRUE;
 				}
 				if (!p->pending_barge)
 					state(self, AI_VOICE_TRANSCRIBING);
-				if (self->stopped ||
-					g_hash_table_lookup(self->participants, speaker) != p)
+				if (P(self)->stopped ||
+					g_hash_table_lookup(P(self)->participants, speaker) != p)
 					return;
 			}
 		} else {
@@ -1135,19 +1149,19 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		if (p->recognizing && !p->ended && error == NULL && !fed_onset) {
 			if (p->utterance->len < UTTERANCE_BYTES)
 				g_byte_array_append(p->utterance, g_bytes_get_data(frame, NULL), 320);
-			ai_speech_recognizer_feed(self->recognizer, speaker, frame, &error);
+			ai_speech_recognizer_feed(P(self)->recognizer, speaker, frame, &error);
 		}
-		if (self->stopped || g_hash_table_lookup(self->participants, speaker) != p)
+		if (P(self)->stopped || g_hash_table_lookup(P(self)->participants, speaker) != p)
 			return;
 		if (error != NULL) {
-			ai_speech_recognizer_cancel(self->recognizer, speaker);
-			stt_error(self->recognizer, speaker, error, self);
+			ai_speech_recognizer_cancel(P(self)->recognizer, speaker);
+			stt_error(P(self)->recognizer, speaker, error, self);
 			return;
 		}
 		if ((activity & AI_VOICE_ACTIVITY_END) && p->recognizing && !p->ended) {
 			p->ended = TRUE;
-			ai_speech_recognizer_end(self->recognizer, speaker);
-			if (self->stopped || g_hash_table_lookup(self->participants, speaker) != p)
+			ai_speech_recognizer_end(P(self)->recognizer, speaker);
+			if (P(self)->stopped || g_hash_table_lookup(P(self)->participants, speaker) != p)
 				return;
 		}
 	}
@@ -1228,8 +1242,8 @@ match_command(AiVoiceSession *self, const gchar *text)
 		again = FALSE;
 		for (i = 0; lead_words[i] != NULL; i++)
 			again |= strip_lead(&words, lead_words[i]);
-		for (i = 0; self->assistant_names != NULL && self->assistant_names[i] != NULL; i++) {
-			g_autofree gchar *name = command_words(self->assistant_names[i]);
+		for (i = 0; P(self)->assistant_names != NULL && P(self)->assistant_names[i] != NULL; i++) {
+			g_autofree gchar *name = command_words(P(self)->assistant_names[i]);
 			again |= strip_lead(&words, name);
 		}
 		for (i = 0; tail_words[i] != NULL; i++)
@@ -1248,9 +1262,9 @@ drop_pending_namings(AiVoiceSession *self);
 static void
 set_muted(AiVoiceSession *self, gboolean muted)
 {
-	if (self->muted == muted)
+	if (P(self)->muted == muted)
 		return;
-	self->muted = muted;
+	P(self)->muted = muted;
 	/* A score on its way was asked before the mute; it must not chime. */
 	if (muted)
 		cancel_scoring(self);
@@ -1261,120 +1275,233 @@ run_command(AiVoiceSession *self, const gchar *name)
 {
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "Voice command: %s", name);
 	g_signal_emit_by_name(self, "command", name);
-	if (self->stopped)
+	if (P(self)->stopped)
 		return;
 	if (g_str_equal(name, "stop") || g_str_equal(name, "mute")) {
 		/* A cut-off notice goes back in the queue after a barge-in, so the
 		 * caller's turn goes first. After "stop" there is no turn: it would
 		 * be replayed at once. */
-		if (self->speech != NULL)
-			self->speech->notice = FALSE;
+		if (P(self)->speech != NULL)
+			P(self)->speech->notice = FALSE;
 		interrupt_turn(self);
-		g_queue_clear_full(&self->turns, g_free);
+		g_queue_clear_full(&P(self)->turns, g_free);
 		/* Finals said before the command and still being named must not
 		 * become turns after it: "stop" would be followed by an answer. */
 		drop_pending_namings(self);
 	}
 	if (g_str_equal(name, "mute")) {
 		set_muted(self, TRUE);
-		if (self->mute_message != NULL && *self->mute_message != '\0')
-			queue_line(self, self->mute_message, FALSE);
+		if (P(self)->mute_message != NULL && *P(self)->mute_message != '\0')
+			queue_line(self, P(self)->mute_message, FALSE);
 	} else if (g_str_equal(name, "unmute")) {
 		set_muted(self, FALSE);
-		if (self->unmute_message != NULL && *self->unmute_message != '\0')
-			queue_line(self, self->unmute_message, FALSE);
+		if (P(self)->unmute_message != NULL && *P(self)->unmute_message != '\0')
+			queue_line(self, P(self)->unmute_message, FALSE);
 	}
 }
+/* ---- giving a guest a lasting name, by voice ----
+ *
+ * "Ada, guest two is Kim", "call guest 2 Kim", "guest number two's name is
+ * Kim". The identifier saves the guest's voice as Kim's, but only as a new
+ * voiceprint: a name already enrolled is refused, so nobody can take over
+ * someone else's voice by saying so. An application may veto any promotion
+ * through AiVoiceSession::allow-promotion. */
+static const gchar *const number_words[] = {"zero",	   "one",	  "two",	 "three",
+											"four",	   "five",	  "six",	 "seven",
+											"eight",   "nine",	  "ten",	 "eleven",
+											"twelve",  "thirteen", "fourteen", "fifteen",
+											"sixteen", "seventeen", "eighteen", "nineteen",
+											"twenty",  NULL};
+/* "two" or "2" -> 2; 0 when WORD is not a number up to 99. */
+static guint
+number_of(const gchar *word)
+{
+	guint i;
+	if (g_ascii_isdigit(*word)) {
+		guint64 n = g_ascii_strtoull(word, NULL, 10);
+		return n <= 99 ? (guint)n : 0;
+	}
+	for (i = 1; number_words[i] != NULL; i++)
+		if (g_str_equal(word, number_words[i]))
+			return i;
+	/* "to" and "too" are how recognition often writes "two". */
+	return g_str_equal(word, "to") || g_str_equal(word, "too") ? 2 : 0;
+}
+/* Words of a name, each capitalized: "kim lee" -> "Kim Lee". */
+static gchar *
+title_case(gchar **words)
+{
+	GString *out = g_string_new(NULL);
+	guint i;
+	for (i = 0; words[i] != NULL; i++) {
+		const gchar *w = words[i];
+		if (*w == '\0')
+			continue;
+		if (out->len > 0)
+			g_string_append_c(out, ' ');
+		g_string_append_unichar(out, g_unichar_totitle(g_utf8_get_char(w)));
+		g_string_append(out, g_utf8_next_char(w));
+	}
+	return g_string_free(out, FALSE);
+}
+static gboolean
+match_promotion(AiVoiceSession *self, const gchar *text, gchar **guest, gchar **name)
+{
+	g_autofree gchar *words = command_words(text);
+	g_auto(GStrv) parts = NULL;
+	gboolean again = TRUE;
+	guint i, n = 0, at, number;
+	while (again) {
+		again = FALSE;
+		for (i = 0; lead_words[i] != NULL; i++)
+			again |= strip_lead(&words, lead_words[i]);
+		for (i = 0; P(self)->assistant_names != NULL && P(self)->assistant_names[i] != NULL; i++) {
+			g_autofree gchar *assistant = command_words(P(self)->assistant_names[i]);
+			again |= strip_lead(&words, assistant);
+		}
+		for (i = 0; tail_words[i] != NULL; i++)
+			again |= strip_tail(words, tail_words[i]);
+	}
+	parts = g_strsplit(words, " ", -1);
+	n = g_strv_length(parts);
+	at = 0;
+	if (at < n && (g_str_equal(parts[at], "call") || g_str_equal(parts[at], "name")))
+		at++;
+	if (at >= n || !g_str_equal(parts[at], "guest"))
+		return FALSE;
+	at++;
+	if (at < n && g_str_equal(parts[at], "number"))
+		at++;
+	if (at >= n)
+		return FALSE;
+	/* "guest two's name is", "guest two is", "guest 2 Kim" after "call". */
+	if (g_str_has_suffix(parts[at], "'s")) {
+		parts[at][strlen(parts[at]) - 2] = '\0';
+		if ((number = number_of(parts[at])) == 0)
+			return FALSE;
+		at++;
+		if (at < n && g_str_equal(parts[at], "name"))
+			at++;
+	} else if ((number = number_of(parts[at++])) == 0)
+		return FALSE;
+	if (at < n && (g_str_equal(parts[at], "is") || g_str_equal(parts[at], "as")))
+		at++;
+	/* A name of one to three words, and nothing that reads as a sentence. */
+	if (at >= n || n - at > 3)
+		return FALSE;
+	for (i = at; i < n; i++)
+		if (g_str_equal(parts[i], "not") || g_str_equal(parts[i], "the") ||
+			g_str_equal(parts[i], "a") || g_str_equal(parts[i], "here") ||
+			g_str_equal(parts[i], "gone") || g_str_equal(parts[i], "back"))
+			return FALSE;
+	*guest = g_strdup_printf("Guest %u", number);
+	*name = title_case(parts + at);
+	if (ai_voiceprint_name_is_valid(*name))
+		return TRUE;
+	g_clear_pointer(guest, g_free);
+	g_clear_pointer(name, g_free);
+	return FALSE;
+}
+/* TEMPLATE with {name}, {guest} and {reason} replaced. */
+static gchar *
+fill_template(const gchar *template, const gchar *name, const gchar *guest,
+			  const gchar *reason)
+{
+	GString *out = g_string_new(template);
+	g_string_replace(out, "{name}", name, 0);
+	g_string_replace(out, "{guest}", guest, 0);
+	g_string_replace(out, "{reason}", reason != NULL ? reason : "", 0);
+	return g_string_free(out, FALSE);
+}
+static void
+run_promotion(AiVoiceSession *self, const gchar *guest, const gchar *name)
+{
+	g_autoptr(GError) error = NULL;
+	gboolean allowed = TRUE;
+	GHashTableIter iter;
+	gpointer value;
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "Voice command: promote %s to %s", guest, name);
+	g_signal_emit_by_name(self, "command", "promote");
+	g_signal_emit_by_name(self, "allow-promotion", guest, name, &allowed);
+	if (!allowed)
+		error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+									"that is not allowed here");
+	else if (!ai_speaker_identifier_promote(AI_SPEAKER_IDENTIFIER(P(self)->identifier), guest, name,
+											FALSE, &error)) {
+		/* Spoken to the room, so said plainly. */
+		const gchar *why = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_EXISTS)
+							   ? "someone by that name is already enrolled"
+						   : g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND)
+							   ? "I haven't heard that guest"
+							   : error->message;
+		g_autofree gchar *reason = g_strdup(why);
+		g_clear_error(&error);
+		error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, reason);
+	}
+	if (error != NULL) {
+		g_autofree gchar *line = NULL;
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "Not promoting %s to %s: %s", guest, name,
+			  error->message);
+		if (P(self)->promotion_refused_message != NULL && *P(self)->promotion_refused_message != '\0') {
+			line = fill_template(P(self)->promotion_refused_message, name, guest, error->message);
+			queue_line(self, line, FALSE);
+		}
+		return;
+	}
+	/* From now on that voice is NAME: in the room's memory, and for whoever
+	 * a short utterance inherits its name from. */
+	ai_voice_room_rename_speaker(P(self)->room, guest, name);
+	g_hash_table_iter_init(&iter, P(self)->participants);
+	while (g_hash_table_iter_next(&iter, NULL, &value)) {
+		Participant *p = value;
+		if (g_strcmp0(p->last_named, guest) == 0) {
+			g_free(p->last_named);
+			p->last_named = g_strdup(name);
+		}
+	}
+	g_signal_emit_by_name(self, "guest-promoted", guest, name);
+	if (P(self)->promoted_message != NULL && *P(self)->promoted_message != '\0') {
+		g_autofree gchar *line = fill_template(P(self)->promoted_message, name, guest, NULL);
+		queue_line(self, line, FALSE);
+	}
+}
+
 /* ---- room mode ----
  *
  * With several people in a room, most of what is said is not for the
- * assistant. It is kept, and handed to the model with the next turn so a
- * reply knows what was said; a turn happens when someone names the assistant,
- * or when a relevance score of what was said clears chime-in-threshold. */
-#define ROOM_LINES 40
-static const gchar relevance_prompt[] =
-	"You are listening to a live conversation between people in a room. An AI "
-	"assistant named %s is present and hears everything, but nobody addressed it. "
-	"Decide how much the assistant should speak up right now, from 0 (stay quiet) "
-	"to 10 (clearly should speak). Lines marked [Assistant] are what the "
-	"assistant itself said last; talk that follows up on them -- a next question, "
-	"a correction, another sum -- is usually meant for it.\n"
-	"Score high when: a question was asked that nobody answered; someone states "
-	"something that is wrong; the group is stuck or looking for information the "
-	"assistant is likely to have; someone seems to be waiting for the assistant.\n"
-	"Score low when: people are chatting, joking or talking about personal "
-	"matters; the conversation is going fine without help; the point is already "
-	"settled.\n"
-	"Answer with exactly two lines and nothing else:\n"
-	"SCORE: <0-10>\n"
-	"REASON: <one short sentence>";
-/* A sound-alike in a name's place: after a greeting ("Hi, say."), before a
- * comma at the start ("Say, could you..."), after a comma at the end ("What
- * do you think, say?"). Anywhere else it is the ordinary word. */
-static gboolean
-soundalike_addressed(AiVoiceSession *self, const gchar *text)
+ * assistant. The AiVoiceRoom keeps it, and hands it to the model with the
+ * next turn so a reply knows what was said; a turn happens when the address
+ * detector says an utterance is for the assistant, or when the relevance
+ * judge scores what was said at chime-in-threshold or above.
+ *
+ * One score is in flight at a time. Talk heard while it is on its way does
+ * not cancel it -- in a busy room that would mean no score ever finished --
+ * but marks it stale: when it comes back, the latest talk is scored instead. */
+static AiAddressDetector *
+detector_of(AiVoiceSession *self)
 {
-	guint i;
-	for (i = 0; self->soundalikes != NULL && self->soundalikes[i] != NULL; i++) {
-		g_autofree gchar *word = g_regex_escape_string(self->soundalikes[i], -1);
-		g_autofree gchar *pattern = NULL;
-		if (*word == '\0')
-			continue;
-		pattern = g_strdup_printf("^\\W*(?:hi|hey|hello|ok|okay|yo)\\W+%s\\s*(?:[,.!?]|$)"
-								  "|^\\W*%s\\s*,"
-								  "|,\\s*%s\\W*$",
-								  word, word, word);
-		if (g_regex_match_simple(pattern, text, G_REGEX_CASELESS, 0))
-			return TRUE;
-	}
-	return FALSE;
+	return P(self)->detector != NULL ? P(self)->detector : AI_ADDRESS_DETECTOR(P(self)->name_detector);
 }
-/* Named anywhere in the utterance, as whole words: "Ada, what do you think?"
- * and "what does Ada think?" both are. With no names, everything is. */
 static gboolean
-addressed(AiVoiceSession *self, const gchar *text)
+addressed(AiVoiceSession *self, const gchar *speaker, const gchar *text)
 {
-	g_autofree gchar *words = NULL, *padded = NULL;
-	guint i;
-	if (self->assistant_names == NULL || self->assistant_names[0] == NULL)
-		return TRUE;
-	if (soundalike_addressed(self, text))
-		return TRUE;
-	words = command_words(text);
-	padded = g_strconcat(" ", words, " ", NULL);
-	for (i = 0; self->assistant_names[i] != NULL; i++) {
-		g_autofree gchar *name = command_words(self->assistant_names[i]);
-		g_autofree gchar *needle = g_strconcat(" ", name, " ", NULL);
-		if (*name != '\0' && strstr(padded, needle) != NULL)
-			return TRUE;
-	}
-	return FALSE;
-}
-/* What was said in the room, then LINE, as one turn; the room starts over. */
-static gchar *
-room_turn(AiVoiceSession *self, const gchar *line)
-{
-	GString *turn = g_string_new(NULL);
-	gchar *heard;
-	while ((heard = g_queue_pop_head(&self->room)) != NULL) {
-		g_string_append(turn, heard);
-		g_string_append_c(turn, '\n');
-		g_free(heard);
-	}
-	g_string_append(turn, line);
-	return g_string_free(turn, FALSE);
+	return ai_address_detector_is_addressed(detector_of(self), speaker, text);
 }
 static void
 cancel_scoring(AiVoiceSession *self)
 {
-	if (self->scoring != NULL)
-		g_cancellable_cancel(self->scoring);
-	g_clear_object(&self->scoring);
+	if (P(self)->scoring != NULL)
+		g_cancellable_cancel(P(self)->scoring);
+	g_clear_object(&P(self)->scoring);
+	if (P(self)->debounce != NULL) {
+		g_source_destroy(P(self)->debounce);
+		g_clear_pointer(&P(self)->debounce, g_source_unref);
+	}
+	P(self)->rescore = FALSE;
 }
 typedef struct {
 	AiVoiceSession *session;
 	GCancellable *cancel;
-	GList *messages;
 	guint64 revision;
 } Scoring;
 static void
@@ -1382,136 +1509,139 @@ scoring_free(Scoring *sc)
 {
 	g_object_unref(sc->session);
 	g_object_unref(sc->cancel);
-	g_list_free_full(sc->messages, g_object_unref);
 	g_free(sc);
-}
-/* "SCORE: 7" anywhere, then "REASON: ..." to the end of its line. Anything
- * unreadable is a zero: a judge that cannot answer is not a reason to speak. */
-static guint
-parse_relevance(const gchar *text, gchar **reason)
-{
-	g_autofree gchar *lower = g_ascii_strdown(text != NULL ? text : "", -1);
-	const gchar *at = strstr(lower, "score"), *why = strstr(lower, "reason:");
-	guint score = 0;
-	*reason = g_strdup("");
-	if (at == NULL)
-		return 0;
-	for (at += 5; *at == ':' || *at == ' ' || *at == '*'; at++)
-		;
-	if (!g_ascii_isdigit(*at))
-		return 0;
-	score = (guint)MIN(g_ascii_strtoull(at, NULL, 10), 10);
-	if (why != NULL) {
-		const gchar *start = text + (why - lower) + 7;
-		const gchar *end = strchr(start, '\n');
-		g_free(*reason);
-		*reason = g_strstrip(end != NULL ? g_strndup(start, end - start) : g_strdup(start));
-	}
-	return score;
 }
 static gboolean
 recognizing(AiVoiceSession *self);
+static void
+maybe_score(AiVoiceSession *self);
+static gboolean
+can_score(AiVoiceSession *self)
+{
+	return P(self)->judge != NULL && P(self)->chime_threshold > 0 && !P(self)->stopped && !P(self)->muted &&
+		   ai_voice_room_get_n_lines(P(self)->room) > 0 &&
+		   (P(self)->last_turn_us == 0 ||
+			g_get_monotonic_time() - P(self)->last_turn_us >= (gint64)P(self)->chime_cooldown_ms * 1000);
+}
 static void
 scored(GObject *source, GAsyncResult *result, gpointer data)
 {
 	Scoring *sc = data;
 	AiVoiceSession *self = sc->session;
 	g_autoptr(GError) error = NULL;
-	g_autoptr(AiResponse) response =
-		ai_provider_chat_finish(AI_PROVIDER(source), result, &error);
-	g_autofree gchar *text = NULL, *reason = NULL;
-	guint score;
+	g_autofree gchar *reason = NULL;
+	gint score;
 	gboolean chime;
-	if (self->scoring == sc->cancel)
-		g_clear_object(&self->scoring);
-	/* Stale: someone spoke since, and that talk has its own score coming. */
-	if (self->stopped || g_cancellable_is_cancelled(sc->cancel) ||
-		sc->revision != self->room_revision) {
+	score = ai_relevance_judge_judge_finish(AI_RELEVANCE_JUDGE(source), result, &reason, &error);
+	if (P(self)->scoring == sc->cancel)
+		g_clear_object(&P(self)->scoring);
+	if (P(self)->stopped || g_cancellable_is_cancelled(sc->cancel)) {
 		scoring_free(sc);
 		return;
 	}
-	if (response == NULL) {
+	if (score < 0) {
 		g_debug("voice: relevance not scored: %s",
 				error != NULL ? error->message : "the judge returned nothing");
 		scoring_free(sc);
 		return;
 	}
-	text = ai_response_get_text(response);
-	score = parse_relevance(text, &reason);
-	/* Never over anyone, and never on top of a turn already under way. */
-	chime = score >= self->chime_threshold && !self->provider_pending && !self->muted &&
-			self->speech == NULL && g_queue_is_empty(&self->turns) &&
-			g_queue_is_empty(&self->naming) && !recognizing(self) &&
-			!g_queue_is_empty(&self->room);
-	g_log("ai-glib", G_LOG_LEVEL_INFO, "Relevance %u/10 (threshold %u)%s: %s", score,
-		  self->chime_threshold, chime ? ", chiming in" : "", reason);
-	g_signal_emit_by_name(self, "relevance", score, reason, chime);
-	if (chime && !self->stopped) {
+	/* Stale: someone spoke since. Score what is there now instead. */
+	if (sc->revision != ai_voice_room_get_revision(P(self)->room)) {
+		P(self)->rescore = FALSE;
+		maybe_score(self);
+		scoring_free(sc);
+		return;
+	}
+	/* Never over anyone -- not even someone whose words are still being
+	 * named -- never while muted, and never on top of a turn under way. */
+	chime = (guint)score >= P(self)->chime_threshold && !P(self)->provider_pending && !P(self)->muted &&
+			P(self)->speech == NULL && g_queue_is_empty(&P(self)->turns) &&
+			g_queue_is_empty(&P(self)->naming) && !recognizing(self) &&
+			ai_voice_room_get_n_lines(P(self)->room) > 0;
+	g_log("ai-glib", G_LOG_LEVEL_INFO, "Relevance %d/10 (threshold %u)%s: %s", score,
+		  P(self)->chime_threshold, chime ? ", chiming in" : "", reason);
+	g_signal_emit_by_name(self, "relevance", (guint)score, reason, chime);
+	if (chime && !P(self)->stopped) {
 		g_autofree gchar *note = g_strdup_printf(
 			"[Note]: Nobody addressed you. You are chiming in because: %s. Say it "
 			"in one or two sentences, to whoever it is for.",
 			*reason != '\0' ? reason : "it seemed useful");
-		g_queue_push_tail(&self->turns, room_turn(self, note));
+		g_queue_push_tail(&P(self)->turns, ai_voice_room_take_turn(P(self)->room, NULL, note));
 		pump(self);
 	}
 	scoring_free(sc);
 }
-/* Score what was said since the assistant last spoke, superseding any score
- * still on its way. Nothing is scored in the cooldown after a turn. */
+/* Ask the judge about what was said since the assistant last spoke. */
 static void
-maybe_score(AiVoiceSession *self)
+start_score(AiVoiceSession *self)
 {
-	GString *talk = g_string_new(NULL);
-	g_autofree gchar *system = NULL;
+	g_autoptr(GPtrArray) lines = g_ptr_array_new_with_free_func(g_free);
+	g_auto(GStrv) heard = NULL;
 	Scoring *sc;
 	GList *l;
-	cancel_scoring(self);
-	if (self->relevance_provider == NULL || self->chime_threshold == 0 || self->stopped ||
-		self->muted || g_queue_is_empty(&self->room) ||
-		(self->last_turn_us != 0 &&
-		 g_get_monotonic_time() - self->last_turn_us < (gint64)self->chime_cooldown_ms * 1000)) {
-		g_string_free(talk, TRUE);
+	guint i;
+	if (!can_score(self))
+		return;
+	if (P(self)->scoring != NULL) {
+		P(self)->rescore = TRUE;
 		return;
 	}
 	/* What the assistant said last, so a follow-up to it reads as one. */
-	for (l = self->said.head; l != NULL; l = l->next) {
+	for (l = P(self)->said.head; l != NULL; l = l->next) {
 		const Said *said = l->data;
-		if (said->at >= self->last_turn_us &&
+		if (said->at >= P(self)->last_turn_us &&
 			g_get_monotonic_time() - said->at < 180 * G_USEC_PER_SEC)
-			g_string_append_printf(talk, "[Assistant]: %s\n", said->text);
+			g_ptr_array_add(lines, g_strdup_printf("[Assistant]: %s", said->text));
 	}
-	for (l = self->room.head; l != NULL; l = l->next) {
-		g_string_append(talk, l->data);
-		g_string_append_c(talk, '\n');
-	}
-	system = g_strdup_printf(relevance_prompt,
-							 self->assistant_names != NULL && self->assistant_names[0] != NULL
-								 ? self->assistant_names[0]
-								 : "the assistant");
+	heard = ai_voice_room_get_lines(P(self)->room);
+	for (i = 0; heard[i] != NULL; i++)
+		g_ptr_array_add(lines, g_strdup(heard[i]));
+	g_ptr_array_add(lines, NULL);
 	sc = g_new0(Scoring, 1);
 	sc->session = g_object_ref(self);
 	sc->cancel = g_cancellable_new();
-	sc->revision = self->room_revision;
-	sc->messages = g_list_append(NULL, ai_message_new_user(talk->str));
-	g_string_free(talk, TRUE);
-	self->scoring = g_object_ref(sc->cancel);
-	ai_provider_chat_async(AI_PROVIDER(self->relevance_provider), sc->messages, system, 200,
-						   NULL, sc->cancel, scored, sc);
+	sc->revision = ai_voice_room_get_revision(P(self)->room);
+	P(self)->scoring = g_object_ref(sc->cancel);
+	P(self)->rescore = FALSE;
+	ai_relevance_judge_judge_async(P(self)->judge,
+								   P(self)->assistant_names != NULL &&
+										   P(self)->assistant_names[0] != NULL
+									   ? P(self)->assistant_names[0]
+									   : "the assistant",
+								   (const gchar *const *)lines->pdata, sc->cancel, scored, sc);
 }
-static void
-hear_room(AiVoiceSession *self, const gchar *name, const gchar *text)
+static gboolean
+debounce_fire(gpointer data)
 {
-	g_queue_push_tail(&self->room, g_strdup_printf("[%s]: %s", name, text));
-	while (g_queue_get_length(&self->room) > ROOM_LINES)
-		g_free(g_queue_pop_head(&self->room));
-	self->room_revision++;
-	maybe_score(self);
+	AiVoiceSession *self = data;
+	g_clear_pointer(&P(self)->debounce, g_source_unref);
+	start_score(self);
+	return G_SOURCE_REMOVE;
+}
+/* Score the room, after relevance-debounce-ms of quiet when that is set.
+ * Nothing is scored in the cooldown after a turn. */
+static void
+maybe_score(AiVoiceSession *self)
+{
+	if (!can_score(self))
+		return;
+	if (P(self)->relevance_debounce_ms == 0) {
+		start_score(self);
+		return;
+	}
+	if (P(self)->debounce != NULL) {
+		g_source_destroy(P(self)->debounce);
+		g_clear_pointer(&P(self)->debounce, g_source_unref);
+	}
+	P(self)->debounce = g_timeout_source_new(P(self)->relevance_debounce_ms);
+	g_source_set_callback(P(self)->debounce, debounce_fire, self, NULL);
+	g_source_attach(P(self)->debounce, P(self)->context);
 }
 static void
 confirm_barge(AiVoiceSession *self, Participant *p)
 {
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "barge-in by %s confirmed by speech, cancelling %s",
-		  p->name, self->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
+		  p->name, P(self)->state == AI_VOICE_SPEAKING ? "speaking" : "thinking");
 	p->pending_barge = FALSE;
 	interrupt_turn(self);
 	state(self, AI_VOICE_TRANSCRIBING);
@@ -1520,25 +1650,24 @@ confirm_barge(AiVoiceSession *self, Participant *p)
 static void
 deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
 {
-	if (self->stopped)
+	if (P(self)->stopped)
 		return;
 	/* Muted while this final was being named: it was said to a deaf session. */
-	if (self->muted) {
+	if (P(self)->muted) {
 		g_debug("voice: muted; not hearing %s", name);
 		pump(self);
 		return;
 	}
-	if (self->room_mode && *text != '\0' && !addressed(self, text)) {
+	if (P(self)->room_mode && *text != '\0' && !addressed(self, name, text)) {
 		g_signal_emit_by_name(self, "transcript", name, text, TRUE);
-		hear_room(self, name, text);
+		ai_voice_room_hear(P(self)->room, name, text);
+		maybe_score(self);
 		pump(self);
 		return;
 	}
-	if (*text != '\0' && g_queue_get_length(&self->turns) < 32) {
-		g_autofree gchar *line = g_strdup_printf("[%s]: %s", name, text);
+	if (*text != '\0' && g_queue_get_length(&P(self)->turns) < 32) {
 		cancel_scoring(self);
-		self->room_revision++;
-		g_queue_push_tail(&self->turns, room_turn(self, line));
+		g_queue_push_tail(&P(self)->turns, ai_voice_room_take_turn(P(self)->room, name, text));
 	}
 	if (*text != '\0')
 		g_signal_emit_by_name(self, "transcript", name, text, TRUE);
@@ -1566,7 +1695,7 @@ typedef struct {
 	AiVoiceSession *session; /* borrowed; owned while identification is in flight */
 	gchar *speaker, *text, *name;
 	gboolean done, too_short, failed, dropped;
-	gdouble score;
+	AiSpeakerMatch *match; /* the identifier's answer, when it gave one */
 	GCancellable *cancel;
 	GSource *timeout;
 } Naming;
@@ -1589,7 +1718,7 @@ naming_unref(gpointer data)
 	g_clear_object(&n->cancel);
 	g_free(n->speaker);
 	g_free(n->text);
-	g_free(n->name);
+	g_clear_object(&n->match);
 	g_free(n);
 }
 /* Named, or given up on: the deadline is no longer needed. */
@@ -1608,31 +1737,44 @@ static void
 deliver_named(AiVoiceSession *self)
 {
 	Naming *n;
-	while ((n = g_queue_peek_head(&self->naming)) != NULL && n->done) {
-		Participant *p = g_hash_table_lookup(self->participants, n->speaker);
+	while ((n = g_queue_peek_head(&P(self)->naming)) != NULL && n->done) {
+		Participant *p = g_hash_table_lookup(P(self)->participants, n->speaker);
 		gint64 now = g_get_monotonic_time();
+		const gchar *named_as = n->match != NULL ? ai_speaker_match_get_name(n->match) : NULL;
+		g_autoptr(AiSpeakerMatch) final = NULL;
 		const gchar *name;
-		g_queue_pop_head(&self->naming);
-		if (n->name != NULL) {
-			name = n->name;
+		g_queue_pop_head(&P(self)->naming);
+		if (named_as != NULL) {
+			final = g_object_ref(n->match);
 			if (p != NULL) {
 				g_free(p->last_named);
-				p->last_named = g_strdup(n->name);
+				p->last_named = g_strdup(named_as);
 				p->last_named_us = now;
 			}
 		} else if ((n->too_short || n->failed) && p != NULL && p->last_named != NULL &&
 				   now - p->last_named_us < NAME_MEMORY_US)
-			name = p->last_named;
-		else if (!n->failed && !n->too_short && self->unknown_speaker_name != NULL)
-			name = self->unknown_speaker_name;
-		else
-			name = p != NULL ? p->name : n->speaker;
-		g_log("ai-glib", G_LOG_LEVEL_INFO, "Speaker: %s (%.2f)", name, n->score);
+			final = ai_speaker_match_new(AI_SPEAKER_MATCH_INHERITED, p->last_named, 0);
+		else if (n->match != NULL) {
+			/* A stranger: unknown-speaker-name, or the participant. */
+			final = ai_speaker_match_new(AI_SPEAKER_MATCH_UNKNOWN,
+										 P(self)->unknown_speaker_name != NULL
+											 ? P(self)->unknown_speaker_name
+											 : p != NULL ? p->name : n->speaker,
+										 ai_speaker_match_get_score(n->match));
+			ai_speaker_match_set_voiceprint(final, ai_speaker_match_get_voiceprint(n->match));
+		} else
+			final = ai_speaker_match_new(AI_SPEAKER_MATCH_FALLBACK,
+										 p != NULL ? p->name : n->speaker, 0);
+		name = ai_speaker_match_get_name(final);
+		g_log("ai-glib", G_LOG_LEVEL_INFO, "Speaker: %s (%.2f)", name,
+			  ai_speaker_match_get_score(final));
+		if (!P(self)->stopped)
+			g_signal_emit_by_name(self, "speaker-named", n->speaker, final);
 		if (n->dropped) {
 			/* Said before a stop or a mute: on the record, never a turn. */
-			if (!self->stopped)
+			if (!P(self)->stopped)
 				g_signal_emit_by_name(self, "transcript", name, n->text, TRUE);
-		} else if (!self->stopped)
+		} else if (!P(self)->stopped)
 			deliver(self, name, n->text);
 		naming_unref(n);
 	}
@@ -1643,7 +1785,7 @@ static void
 drop_pending_namings(AiVoiceSession *self)
 {
 	GList *l;
-	for (l = self->naming.head; l != NULL; l = l->next) {
+	for (l = P(self)->naming.head; l != NULL; l = l->next) {
 		Naming *n = l->data;
 		n->dropped = TRUE;
 		if (!n->done) {
@@ -1660,19 +1802,16 @@ named(GObject *source, GAsyncResult *result, gpointer data)
 	Naming *n = data;
 	AiVoiceSession *self = n->session;
 	g_autoptr(GError) error = NULL;
-	gchar *name;
-	gdouble score = 0;
-	name = ai_speaker_identifier_identify_finish(AI_SPEAKER_IDENTIFIER(source), result, &score,
-												 &error);
+	AiSpeakerMatch *match;
+	match = ai_speaker_identifier_identify_finish(AI_SPEAKER_IDENTIFIER(source), result, &error);
 	/* Settled already -- by its deadline, a stop or a mute: too late to count. */
 	if (n->done) {
-		g_free(name);
+		g_clear_object(&match);
 		naming_unref(n);
 		g_object_unref(self);
 		return;
 	}
-	n->name = name;
-	n->score = score;
+	n->match = match;
 	n->too_short = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 	/* The service down or refusing: the participant, not "a stranger". */
 	n->failed = error != NULL && !n->too_short;
@@ -1690,7 +1829,7 @@ naming_expired(gpointer data)
 	Naming *n = data;
 	AiVoiceSession *self = n->session;
 	g_log("ai-glib", G_LOG_LEVEL_INFO,
-		  "Speaker not named within %u ms; using who spoke last", self->naming_timeout_ms);
+		  "Speaker not named within %u ms; using who spoke last", P(self)->naming_timeout_ms);
 	g_clear_pointer(&n->timeout, g_source_unref);
 	n->failed = TRUE;
 	n->done = TRUE;
@@ -1710,14 +1849,14 @@ name_then_deliver(AiVoiceSession *self, const gchar *speaker, Participant *p,
 	n->speaker = g_strdup(speaker);
 	n->text = g_strdup(text);
 	n->cancel = g_cancellable_new();
-	g_queue_push_tail(&self->naming, n);
-	if (self->naming_timeout_ms > 0) {
-		n->timeout = g_timeout_source_new(self->naming_timeout_ms);
+	g_queue_push_tail(&P(self)->naming, n);
+	if (P(self)->naming_timeout_ms > 0) {
+		n->timeout = g_timeout_source_new(P(self)->naming_timeout_ms);
 		g_source_set_callback(n->timeout, naming_expired, n, NULL);
-		g_source_attach(n->timeout, self->context);
+		g_source_attach(n->timeout, P(self)->context);
 	}
 	g_object_ref(self);
-	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(self->identifier), pcm, n->cancel,
+	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(P(self)->identifier), pcm, n->cancel,
 										 named, naming_ref(n));
 }
 
@@ -1726,12 +1865,12 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 		   gboolean final, gpointer data)
 {
 	AiVoiceSession *self = data;
-	Participant *p = g_hash_table_lookup(self->participants, speaker);
+	Participant *p = g_hash_table_lookup(P(self)->participants, speaker);
 	g_autofree gchar *trimmed = NULL;
 	gboolean pending;
-	if (self->stopped || p == NULL)
+	if (P(self)->stopped || p == NULL)
 		return;
-	if (!final && self->muted)
+	if (!final && P(self)->muted)
 		return;
 	if (!final) {
 		g_autofree gchar *words = strip_annotations(text);
@@ -1748,33 +1887,42 @@ transcript(AiSpeechRecognizer *recognizer, const gchar *speaker, const gchar *te
 	p->pending_barge = FALSE;
 	p->speech_ms = 0;
 	g_byte_array_set_size(p->onset, 0);
-	ai_voice_activity_reset(self->activity, speaker);
-	if (*text != '\0' && (pending || self->state == AI_VOICE_SPEAKING) &&
+	ai_voice_activity_reset(P(self)->activity, speaker);
+	if (*text != '\0' && (pending || P(self)->state == AI_VOICE_SPEAKING) &&
 		is_echo(self, text)) {
 		g_log("ai-glib", G_LOG_LEVEL_INFO,
 			  "ignoring transcript from %s: it repeats our own recent speech", p->name);
 		pump(self);
 		return;
 	}
-	if (pending && has_words(text) && !self->muted)
+	if (pending && has_words(text) && !P(self)->muted)
 		confirm_barge(self, p);
-	if (self->voice_commands && has_words(text)) {
+	if (P(self)->voice_commands && has_words(text)) {
 		const gchar *command = match_command(self, text);
 		/* Muted, only a way back is heard: nothing else reaches the model or
 		 * is reported as said. */
 		if (command != NULL &&
-			(!self->muted || g_str_equal(command, "unmute") || g_str_equal(command, "hangup"))) {
+			(!P(self)->muted || g_str_equal(command, "unmute") || g_str_equal(command, "hangup"))) {
 			run_command(self, command);
 			pump(self);
 			return;
 		}
+		/* "Guest two is Kim": only with an identifier that knows guests. */
+		if (!P(self)->muted && P(self)->identifier != NULL) {
+			g_autofree gchar *guest = NULL, *name = NULL;
+			if (match_promotion(self, text, &guest, &name)) {
+				run_promotion(self, guest, name);
+				pump(self);
+				return;
+			}
+		}
 	}
-	if (self->muted) {
+	if (P(self)->muted) {
 		g_debug("voice: muted; not hearing %s", p->name);
 		pump(self);
 		return;
 	}
-	if (self->identifier != NULL && *text != '\0') {
+	if (P(self)->identifier != NULL && *text != '\0') {
 		name_then_deliver(self, speaker, p, text);
 		return;
 	}
@@ -1785,10 +1933,10 @@ stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
 		  gpointer data)
 {
 	AiVoiceSession *self = data;
-	Participant *p = g_hash_table_lookup(self->participants, speaker);
-	if (self->stopped)
+	Participant *p = g_hash_table_lookup(P(self)->participants, speaker);
+	if (P(self)->stopped)
 		return;
-	ai_voice_activity_reset(self->activity, speaker);
+	ai_voice_activity_reset(P(self)->activity, speaker);
 	if (p != NULL) {
 		p->recognizing = FALSE;
 		p->ended = FALSE;
@@ -1797,19 +1945,19 @@ stt_error(AiSpeechRecognizer *recognizer, const gchar *speaker, GError *error,
 		g_byte_array_set_size(p->onset, 0);
 	}
 	report(self, error);
-	queue_line(self, self->transcription_error_message, FALSE);
+	queue_line(self, P(self)->transcription_error_message, FALSE);
 	pump(self);
 }
 static void
 transport_reconnecting(AiAudioTransport *transport, gpointer data)
 {
 	AiVoiceSession *self = data;
-	if (self->stopped || self->media_recovering)
+	if (P(self)->stopped || P(self)->media_recovering)
 		return;
-	self->media_recovering = TRUE;
-	if (self->deadline != NULL) {
-		self->paused_deadline_us = MAX(
-			(gint64)1, g_source_get_ready_time(self->deadline) - g_get_monotonic_time());
+	P(self)->media_recovering = TRUE;
+	if (P(self)->deadline != NULL) {
+		P(self)->paused_deadline_us = MAX(
+			(gint64)1, g_source_get_ready_time(P(self)->deadline) - g_get_monotonic_time());
 		clear_deadline(self);
 	}
 }
@@ -1817,14 +1965,14 @@ static void
 transport_reconnected(AiAudioTransport *transport, gpointer data)
 {
 	AiVoiceSession *self = data;
-	self->media_recovering = FALSE;
-	if (!self->stopped && self->provider_pending && self->paused_deadline_us > 0) {
-		self->deadline =
-			g_timeout_source_new((guint)((self->paused_deadline_us + 999) / 1000));
-		g_source_set_callback(self->deadline, deadline, self, NULL);
-		g_source_attach(self->deadline, self->context);
+	P(self)->media_recovering = FALSE;
+	if (!P(self)->stopped && P(self)->provider_pending && P(self)->paused_deadline_us > 0) {
+		P(self)->deadline =
+			g_timeout_source_new((guint)((P(self)->paused_deadline_us + 999) / 1000));
+		g_source_set_callback(P(self)->deadline, deadline, self, NULL);
+		g_source_attach(P(self)->deadline, P(self)->context);
 	}
-	self->paused_deadline_us = 0;
+	P(self)->paused_deadline_us = 0;
 	pump(self);
 }
 static void
@@ -1848,29 +1996,29 @@ ai_voice_session_stop(AiVoiceSession *self)
 	gpointer key;
 	Naming *n;
 	g_return_if_fail(AI_IS_VOICE_SESSION(self));
-	if (self->stopped)
+	if (P(self)->stopped)
 		return;
-	self->stopped = TRUE;
-	self->media_recovering = TRUE;
+	P(self)->stopped = TRUE;
+	P(self)->media_recovering = TRUE;
 	cancel_scoring(self);
 	/* Settle every naming before dropping the queue, so no deadline fires
 	 * later on a session that has stopped; a reply still on its way finds
 	 * its naming done and is ignored. */
-	while ((n = g_queue_pop_head(&self->naming)) != NULL) {
+	while ((n = g_queue_pop_head(&P(self)->naming)) != NULL) {
 		naming_settle(n);
 		g_cancellable_cancel(n->cancel);
 		naming_unref(n);
 	}
 	interrupt_turn(self);
-	g_hash_table_iter_init(&iter, self->participants);
+	g_hash_table_iter_init(&iter, P(self)->participants);
 	while (g_hash_table_iter_next(&iter, &key, NULL)) {
-		ai_speech_recognizer_cancel(self->recognizer, key);
-		ai_voice_activity_reset(self->activity, key);
+		ai_speech_recognizer_cancel(P(self)->recognizer, key);
+		ai_voice_activity_reset(P(self)->activity, key);
 	}
-	g_hash_table_remove_all(self->participants);
-	if (self->worker != NULL) {
-		ai_voice_worker_stop(self->worker);
-		self->worker = NULL;
+	g_hash_table_remove_all(P(self)->participants);
+	if (P(self)->worker != NULL) {
+		ai_voice_worker_stop(P(self)->worker);
+		P(self)->worker = NULL;
 	}
 	state(self, AI_VOICE_LISTENING);
 }
@@ -1879,51 +2027,54 @@ dispose(GObject *object)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	ai_voice_session_stop(self);
-	if (self->transport != NULL)
-		g_signal_handlers_disconnect_by_data(self->transport, self);
-	if (self->recognizer != NULL)
-		g_signal_handlers_disconnect_by_data(self->recognizer, self);
-	if (self->synthesizer != NULL)
-		g_signal_handlers_disconnect_by_data(self->synthesizer, self);
-	g_clear_object(&self->transport);
-	g_clear_object(&self->recognizer);
-	g_clear_object(&self->synthesizer);
-	g_clear_object(&self->activity);
-	g_clear_object(&self->conversation);
-	g_clear_object(&self->turn_cancel);
-	g_clear_object(&self->relevance_provider);
-	g_clear_object(&self->identifier);
+	if (P(self)->transport != NULL)
+		g_signal_handlers_disconnect_by_data(P(self)->transport, self);
+	if (P(self)->recognizer != NULL)
+		g_signal_handlers_disconnect_by_data(P(self)->recognizer, self);
+	if (P(self)->synthesizer != NULL)
+		g_signal_handlers_disconnect_by_data(P(self)->synthesizer, self);
+	g_clear_object(&P(self)->transport);
+	g_clear_object(&P(self)->recognizer);
+	g_clear_object(&P(self)->synthesizer);
+	g_clear_object(&P(self)->activity);
+	g_clear_object(&P(self)->conversation);
+	g_clear_object(&P(self)->turn_cancel);
+	g_clear_object(&P(self)->judge);
+	g_clear_object(&P(self)->detector);
+	g_clear_object(&P(self)->name_detector);
+	g_clear_object(&P(self)->room);
+	g_clear_object(&P(self)->identifier);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->dispose(object);
 }
 static void
 finalize(GObject *object)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
-	g_hash_table_unref(self->participants);
-	g_hash_table_unref(self->notices);
-	g_hash_table_unref(self->repeats);
-	g_string_free(self->span, TRUE);
-	g_strfreev(self->assistant_names);
-	g_strfreev(self->soundalikes);
-	g_queue_clear_full(&self->room, g_free);
-	g_free(self->unknown_speaker_name);
-	g_free(self->logged_tool);
-	g_free(self->mute_message);
-	g_free(self->unmute_message);
-	g_free(self->repeat_message);
-	g_main_context_unref(self->context);
-	g_queue_clear_full(&self->lines, line_free);
-	g_queue_clear_full(&self->turns, g_free);
-	g_queue_clear_full(&self->pending_notices, line_free);
-	g_queue_clear_full(&self->said, said_free);
-	g_string_free(self->pending_text, TRUE);
-	g_string_free(self->spoken, TRUE);
-	g_free(self->deadline_message);
-	g_free(self->transcription_error_message);
-	g_free(self->synthesis_error_message);
-	g_free(self->empty_reply_message);
-	g_free(self->tool_progress_message);
-	g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
+	g_hash_table_unref(P(self)->participants);
+	g_hash_table_unref(P(self)->notices);
+	g_hash_table_unref(P(self)->repeats);
+	g_string_free(P(self)->span, TRUE);
+	g_strfreev(P(self)->assistant_names);
+	g_free(P(self)->promoted_message);
+	g_free(P(self)->promotion_refused_message);
+	g_free(P(self)->unknown_speaker_name);
+	g_free(P(self)->logged_tool);
+	g_free(P(self)->mute_message);
+	g_free(P(self)->unmute_message);
+	g_free(P(self)->repeat_message);
+	g_main_context_unref(P(self)->context);
+	g_queue_clear_full(&P(self)->lines, line_free);
+	g_queue_clear_full(&P(self)->turns, g_free);
+	g_queue_clear_full(&P(self)->pending_notices, line_free);
+	g_queue_clear_full(&P(self)->said, said_free);
+	g_string_free(P(self)->pending_text, TRUE);
+	g_string_free(P(self)->spoken, TRUE);
+	g_free(P(self)->deadline_message);
+	g_free(P(self)->transcription_error_message);
+	g_free(P(self)->synthesis_error_message);
+	g_free(P(self)->empty_reply_message);
+	g_free(P(self)->tool_progress_message);
+	g_clear_pointer(&P(self)->fallback_pcm, g_bytes_unref);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->finalize(object);
 }
 static void
@@ -1931,78 +2082,90 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	if (id == PROP_TURN_DEADLINE)
-		g_value_set_uint(value, self->deadline_ms);
+		g_value_set_uint(value, P(self)->deadline_ms);
 	else if (id == PROP_BARGE_IN)
-		g_value_set_uint(value, self->barge_in_ms);
+		g_value_set_uint(value, P(self)->barge_in_ms);
 	else if (id == PROP_BARGE_IN_CONFIRM)
-		g_value_set_boolean(value, self->barge_in_confirm);
+		g_value_set_boolean(value, P(self)->barge_in_confirm);
 	else if (id == PROP_STATE)
-		g_value_set_enum(value, self->state);
+		g_value_set_enum(value, P(self)->state);
 	else if (id == PROP_TRANSPORT)
-		g_value_set_object(value, self->transport);
+		g_value_set_object(value, P(self)->transport);
 	else if (id == PROP_RECOGNIZER)
-		g_value_set_object(value, self->recognizer);
+		g_value_set_object(value, P(self)->recognizer);
 	else if (id == PROP_SYNTHESIZER)
-		g_value_set_object(value, self->synthesizer);
+		g_value_set_object(value, P(self)->synthesizer);
 	else if (id == PROP_SYNTHESIS_ERROR_MESSAGE)
-		g_value_set_string(value, self->synthesis_error_message);
+		g_value_set_string(value, P(self)->synthesis_error_message);
 	else if (id == PROP_EMPTY_REPLY_MESSAGE)
-		g_value_set_string(value, self->empty_reply_message);
+		g_value_set_string(value, P(self)->empty_reply_message);
 	else if (id == PROP_TOOL_PROGRESS_MESSAGE)
-		g_value_set_string(value, self->tool_progress_message);
+		g_value_set_string(value, P(self)->tool_progress_message);
 	else if (id == PROP_TOOL_PROGRESS_DELAY)
-		g_value_set_uint(value, self->tool_progress_delay_ms);
+		g_value_set_uint(value, P(self)->tool_progress_delay_ms);
 	else if (id == PROP_TRIM_AFTER)
-		g_value_set_uint(value, self->trim_after);
+		g_value_set_uint(value, P(self)->trim_after);
 	else if (id == PROP_SPEAK_CODE)
-		g_value_set_boolean(value, self->speak_code);
+		g_value_set_boolean(value, P(self)->speak_code);
 	else if (id == PROP_REPEAT_LIMIT)
-		g_value_set_uint(value, self->repeat_limit);
+		g_value_set_uint(value, P(self)->repeat_limit);
 	else if (id == PROP_REPEAT_MESSAGE)
-		g_value_set_string(value, self->repeat_message);
+		g_value_set_string(value, P(self)->repeat_message);
 	else if (id == PROP_VOICE_COMMANDS)
-		g_value_set_boolean(value, self->voice_commands);
+		g_value_set_boolean(value, P(self)->voice_commands);
 	else if (id == PROP_ASSISTANT_NAMES) {
 		g_autofree gchar *joined =
-			self->assistant_names != NULL ? g_strjoinv(",", self->assistant_names) : NULL;
+			P(self)->assistant_names != NULL ? g_strjoinv(",", P(self)->assistant_names) : NULL;
 		g_value_set_string(value, joined);
 	} else if (id == PROP_MUTED)
-		g_value_set_boolean(value, self->muted);
+		g_value_set_boolean(value, P(self)->muted);
 	else if (id == PROP_MUTE_MESSAGE)
-		g_value_set_string(value, self->mute_message);
+		g_value_set_string(value, P(self)->mute_message);
 	else if (id == PROP_UNMUTE_MESSAGE)
-		g_value_set_string(value, self->unmute_message);
+		g_value_set_string(value, P(self)->unmute_message);
 	else if (id == PROP_ROOM_MODE)
-		g_value_set_boolean(value, self->room_mode);
-	else if (id == PROP_RELEVANCE_PROVIDER)
-		g_value_set_object(value, self->relevance_provider);
+		g_value_set_boolean(value, P(self)->room_mode);
+	else if (id == PROP_RELEVANCE_PROVIDER) {
+		g_autoptr(AiProvider) provider = NULL;
+		if (AI_IS_PROVIDER_RELEVANCE_JUDGE(P(self)->judge))
+			g_object_get(P(self)->judge, "provider", &provider, NULL);
+		g_value_set_object(value, provider);
+	} else if (id == PROP_RELEVANCE_JUDGE)
+		g_value_set_object(value, P(self)->judge);
+	else if (id == PROP_RELEVANCE_DEBOUNCE)
+		g_value_set_uint(value, P(self)->relevance_debounce_ms);
+	else if (id == PROP_ROOM)
+		g_value_set_object(value, P(self)->room);
+	else if (id == PROP_ADDRESS_DETECTOR)
+		g_value_set_object(value, detector_of(self));
+	else if (id == PROP_PROMOTED_MESSAGE)
+		g_value_set_string(value, P(self)->promoted_message);
+	else if (id == PROP_PROMOTION_REFUSED_MESSAGE)
+		g_value_set_string(value, P(self)->promotion_refused_message);
 	else if (id == PROP_CHIME_IN_THRESHOLD)
-		g_value_set_uint(value, self->chime_threshold);
+		g_value_set_uint(value, P(self)->chime_threshold);
 	else if (id == PROP_CHIME_IN_COOLDOWN)
-		g_value_set_uint(value, self->chime_cooldown_ms);
+		g_value_set_uint(value, P(self)->chime_cooldown_ms);
 	else if (id == PROP_SPEAKER_IDENTIFIER)
-		g_value_set_object(value, self->identifier);
+		g_value_set_object(value, P(self)->identifier);
 	else if (id == PROP_NAMING_TIMEOUT)
-		g_value_set_uint(value, self->naming_timeout_ms);
+		g_value_set_uint(value, P(self)->naming_timeout_ms);
 	else if (id == PROP_UNKNOWN_SPEAKER_NAME)
-		g_value_set_string(value, self->unknown_speaker_name);
-	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
-		g_autofree gchar *joined =
-			self->soundalikes != NULL ? g_strjoinv(",", self->soundalikes) : NULL;
-		g_value_set_string(value, joined);
-	}
+		g_value_set_string(value, P(self)->unknown_speaker_name);
+	else if (id == PROP_ASSISTANT_SOUNDALIKES)
+		g_object_get_property(G_OBJECT(P(self)->name_detector), "soundalikes", value);
 	else if (id == PROP_FALLBACK_PCM)
-		g_value_set_boxed(value, self->fallback_pcm);
+		g_value_set_boxed(value, P(self)->fallback_pcm);
 	else if (id == PROP_FALLBACK_SAMPLE_RATE)
-		g_value_set_uint(value, self->fallback_sample_rate);
+		g_value_set_uint(value, P(self)->fallback_sample_rate);
 	else if (id == PROP_ACTIVITY)
-		g_value_set_object(value, self->activity);
+		g_value_set_object(value, P(self)->activity);
 	else if (id == PROP_CONVERSATION)
-		g_value_set_object(value, self->conversation);
+		g_value_set_object(value, P(self)->conversation);
 	else if (id == PROP_DEADLINE_MESSAGE)
-		g_value_set_string(value, self->deadline_message);
+		g_value_set_string(value, P(self)->deadline_message);
 	else if (id == PROP_TRANSCRIPTION_ERROR_MESSAGE)
-		g_value_set_string(value, self->transcription_error_message);
+		g_value_set_string(value, P(self)->transcription_error_message);
 	else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -2011,104 +2174,120 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	if (id == PROP_TURN_DEADLINE)
-		self->deadline_ms = g_value_get_uint(value);
+		P(self)->deadline_ms = g_value_get_uint(value);
 	else if (id == PROP_BARGE_IN)
-		self->barge_in_ms = g_value_get_uint(value);
+		P(self)->barge_in_ms = g_value_get_uint(value);
 	else if (id == PROP_BARGE_IN_CONFIRM)
-		self->barge_in_confirm = g_value_get_boolean(value);
+		P(self)->barge_in_confirm = g_value_get_boolean(value);
 	else if (id == PROP_TRANSPORT)
-		g_set_object(&self->transport, g_value_get_object(value));
+		g_set_object(&P(self)->transport, g_value_get_object(value));
 	else if (id == PROP_RECOGNIZER)
-		g_set_object(&self->recognizer, g_value_get_object(value));
+		g_set_object(&P(self)->recognizer, g_value_get_object(value));
 	else if (id == PROP_SYNTHESIZER)
-		g_set_object(&self->synthesizer, g_value_get_object(value));
+		g_set_object(&P(self)->synthesizer, g_value_get_object(value));
 	else if (id == PROP_FALLBACK_PCM) {
 		GBytes *pcm = g_value_get_boxed(value);
 		g_return_if_fail(pcm == NULL || (g_bytes_get_size(pcm) > 0 &&
 										 g_bytes_get_size(pcm) <= 4 * 1024 * 1024 &&
 										 g_bytes_get_size(pcm) % 2 == 0));
-		g_clear_pointer(&self->fallback_pcm, g_bytes_unref);
-		self->fallback_pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
+		g_clear_pointer(&P(self)->fallback_pcm, g_bytes_unref);
+		P(self)->fallback_pcm = pcm != NULL ? g_bytes_ref(pcm) : NULL;
 	} else if (id == PROP_FALLBACK_SAMPLE_RATE)
-		self->fallback_sample_rate = g_value_get_uint(value);
+		P(self)->fallback_sample_rate = g_value_get_uint(value);
 	else if (id == PROP_TOOL_PROGRESS_MESSAGE) {
-		g_free(self->tool_progress_message);
-		self->tool_progress_message = g_value_dup_string(value);
+		g_free(P(self)->tool_progress_message);
+		P(self)->tool_progress_message = g_value_dup_string(value);
 	} else if (id == PROP_TOOL_PROGRESS_DELAY)
-		self->tool_progress_delay_ms = g_value_get_uint(value);
+		P(self)->tool_progress_delay_ms = g_value_get_uint(value);
 	else if (id == PROP_SPEAK_CODE)
-		self->speak_code = g_value_get_boolean(value);
+		P(self)->speak_code = g_value_get_boolean(value);
 	else if (id == PROP_REPEAT_LIMIT)
-		self->repeat_limit = g_value_get_uint(value);
+		P(self)->repeat_limit = g_value_get_uint(value);
 	else if (id == PROP_REPEAT_MESSAGE) {
-		g_free(self->repeat_message);
-		self->repeat_message = g_value_dup_string(value);
+		g_free(P(self)->repeat_message);
+		P(self)->repeat_message = g_value_dup_string(value);
 	} else if (id == PROP_VOICE_COMMANDS)
-		self->voice_commands = g_value_get_boolean(value);
+		P(self)->voice_commands = g_value_get_boolean(value);
 	else if (id == PROP_ASSISTANT_NAMES) {
 		const gchar *names = g_value_get_string(value);
-		g_clear_pointer(&self->assistant_names, g_strfreev);
+		g_clear_pointer(&P(self)->assistant_names, g_strfreev);
 		if (names != NULL && *names != '\0') {
 			guint i;
-			self->assistant_names = g_strsplit(names, ",", -1);
-			for (i = 0; self->assistant_names[i] != NULL; i++)
-				g_strstrip(self->assistant_names[i]);
+			P(self)->assistant_names = g_strsplit(names, ",", -1);
+			for (i = 0; P(self)->assistant_names[i] != NULL; i++)
+				g_strstrip(P(self)->assistant_names[i]);
 		}
+		/* The names also tell the default detector what to listen for. */
+		g_object_set(P(self)->name_detector, "names", names, NULL);
 	} else if (id == PROP_MUTED)
 		set_muted(self, g_value_get_boolean(value));
 	else if (id == PROP_MUTE_MESSAGE) {
-		g_free(self->mute_message);
-		self->mute_message = g_value_dup_string(value);
+		g_free(P(self)->mute_message);
+		P(self)->mute_message = g_value_dup_string(value);
 	} else if (id == PROP_UNMUTE_MESSAGE) {
-		g_free(self->unmute_message);
-		self->unmute_message = g_value_dup_string(value);
+		g_free(P(self)->unmute_message);
+		P(self)->unmute_message = g_value_dup_string(value);
 	} else if (id == PROP_ROOM_MODE)
-		self->room_mode = g_value_get_boolean(value);
+		P(self)->room_mode = g_value_get_boolean(value);
 	else if (id == PROP_RELEVANCE_PROVIDER) {
+		AiProvider *provider = g_value_get_object(value);
 		cancel_scoring(self);
-		g_set_object(&self->relevance_provider, g_value_get_object(value));
+		g_clear_object(&P(self)->judge);
+		if (provider != NULL)
+			P(self)->judge = AI_RELEVANCE_JUDGE(ai_provider_relevance_judge_new(provider));
+	} else if (id == PROP_RELEVANCE_JUDGE) {
+		cancel_scoring(self);
+		g_set_object(&P(self)->judge, g_value_get_object(value));
+	} else if (id == PROP_RELEVANCE_DEBOUNCE)
+		P(self)->relevance_debounce_ms = g_value_get_uint(value);
+	else if (id == PROP_ROOM) {
+		AiVoiceRoom *room = g_value_get_object(value);
+		/* NULL keeps the room there is: a session always has one. */
+		if (room != NULL)
+			g_set_object(&P(self)->room, room);
+	} else if (id == PROP_ADDRESS_DETECTOR)
+		g_set_object(&P(self)->detector, g_value_get_object(value));
+	else if (id == PROP_PROMOTED_MESSAGE) {
+		g_free(P(self)->promoted_message);
+		P(self)->promoted_message = g_value_dup_string(value);
+	} else if (id == PROP_PROMOTION_REFUSED_MESSAGE) {
+		g_free(P(self)->promotion_refused_message);
+		P(self)->promotion_refused_message = g_value_dup_string(value);
 	} else if (id == PROP_CHIME_IN_THRESHOLD)
-		self->chime_threshold = g_value_get_uint(value);
+		P(self)->chime_threshold = g_value_get_uint(value);
 	else if (id == PROP_CHIME_IN_COOLDOWN)
-		self->chime_cooldown_ms = g_value_get_uint(value);
+		P(self)->chime_cooldown_ms = g_value_get_uint(value);
 	else if (id == PROP_SPEAKER_IDENTIFIER)
-		g_set_object(&self->identifier, g_value_get_object(value));
+		g_set_object(&P(self)->identifier, g_value_get_object(value));
 	else if (id == PROP_NAMING_TIMEOUT)
-		self->naming_timeout_ms = g_value_get_uint(value);
-	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
-		const gchar *words = g_value_get_string(value);
-		g_clear_pointer(&self->soundalikes, g_strfreev);
-		if (words != NULL && *words != '\0') {
-			guint i;
-			self->soundalikes = g_strsplit(words, ",", -1);
-			for (i = 0; self->soundalikes[i] != NULL; i++)
-				g_strstrip(self->soundalikes[i]);
-		}
-	} else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
+		P(self)->naming_timeout_ms = g_value_get_uint(value);
+	else if (id == PROP_ASSISTANT_SOUNDALIKES)
+		g_object_set_property(G_OBJECT(P(self)->name_detector), "soundalikes", value);
+	else if (id == PROP_UNKNOWN_SPEAKER_NAME) {
 		const gchar *name = g_value_get_string(value);
-		g_free(self->unknown_speaker_name);
-		self->unknown_speaker_name = name != NULL && *name != '\0' ? g_strdup(name) : NULL;
+		g_free(P(self)->unknown_speaker_name);
+		P(self)->unknown_speaker_name = name != NULL && *name != '\0' ? g_strdup(name) : NULL;
 	} else if (id == PROP_TRIM_AFTER) {
-		self->trim_after = g_value_get_uint(value);
-		if (self->worker != NULL)
-			ai_voice_worker_set_trim_after(self->worker, self->trim_after);
+		P(self)->trim_after = g_value_get_uint(value);
+		if (P(self)->worker != NULL)
+			ai_voice_worker_set_trim_after(P(self)->worker, P(self)->trim_after);
 	}
 	else if (id == PROP_EMPTY_REPLY_MESSAGE) {
-		g_free(self->empty_reply_message);
-		self->empty_reply_message = g_value_dup_string(value);
+		g_free(P(self)->empty_reply_message);
+		P(self)->empty_reply_message = g_value_dup_string(value);
 	} else if (id == PROP_SYNTHESIS_ERROR_MESSAGE) {
-		g_free(self->synthesis_error_message);
-		self->synthesis_error_message = g_value_dup_string(value);
+		g_free(P(self)->synthesis_error_message);
+		P(self)->synthesis_error_message = g_value_dup_string(value);
 	} else if (id == PROP_ACTIVITY)
-		g_set_object(&self->activity, g_value_get_object(value));
+		g_set_object(&P(self)->activity, g_value_get_object(value));
 	else if (id == PROP_CONVERSATION)
-		g_set_object(&self->conversation, g_value_get_object(value));
+		g_set_object(&P(self)->conversation, g_value_get_object(value));
 	else if (id == PROP_DEADLINE_MESSAGE) {
-		g_free(self->deadline_message);
-		self->deadline_message = g_value_dup_string(value);
+		g_free(P(self)->deadline_message);
+		P(self)->deadline_message = g_value_dup_string(value);
 	} else if (id == PROP_TRANSCRIPTION_ERROR_MESSAGE) {
-		g_free(self->transcription_error_message);
-		self->transcription_error_message = g_value_dup_string(value);
+		g_free(P(self)->transcription_error_message);
+		P(self)->transcription_error_message = g_value_dup_string(value);
 	} else
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 }
@@ -2117,28 +2296,43 @@ constructed(GObject *object)
 {
 	AiVoiceSession *self = AI_VOICE_SESSION(object);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->constructed(object);
-	g_return_if_fail(self->transport != NULL && self->recognizer != NULL &&
-					 self->synthesizer != NULL && self->activity != NULL &&
-					 self->conversation != NULL);
-	g_signal_connect(self->transport, "audio", G_CALLBACK(audio_in), self);
-	g_signal_connect(self->transport, "participant-joined", G_CALLBACK(joined), self);
-	g_signal_connect(self->transport, "participant-left", G_CALLBACK(left), self);
-	g_signal_connect(self->transport, "reconnecting", G_CALLBACK(transport_reconnecting),
+	g_return_if_fail(P(self)->transport != NULL && P(self)->recognizer != NULL &&
+					 P(self)->synthesizer != NULL && P(self)->activity != NULL &&
+					 P(self)->conversation != NULL);
+	g_signal_connect(P(self)->transport, "audio", G_CALLBACK(audio_in), self);
+	g_signal_connect(P(self)->transport, "participant-joined", G_CALLBACK(joined), self);
+	g_signal_connect(P(self)->transport, "participant-left", G_CALLBACK(left), self);
+	g_signal_connect(P(self)->transport, "reconnecting", G_CALLBACK(transport_reconnecting),
 					 self);
-	g_signal_connect(self->transport, "reconnected", G_CALLBACK(transport_reconnected),
+	g_signal_connect(P(self)->transport, "reconnected", G_CALLBACK(transport_reconnected),
 					 self);
-	g_signal_connect(self->transport, "error", G_CALLBACK(transport_error), self);
-	g_signal_connect(self->recognizer, "transcript", G_CALLBACK(transcript), self);
-	g_signal_connect(self->recognizer, "error", G_CALLBACK(stt_error), self);
-	g_signal_connect(self->synthesizer, "audio", G_CALLBACK(audio_out), self);
-	self->worker = ai_voice_worker_new(self->conversation, G_OBJECT(self), self->context,
+	g_signal_connect(P(self)->transport, "error", G_CALLBACK(transport_error), self);
+	g_signal_connect(P(self)->recognizer, "transcript", G_CALLBACK(transcript), self);
+	g_signal_connect(P(self)->recognizer, "error", G_CALLBACK(stt_error), self);
+	g_signal_connect(P(self)->synthesizer, "audio", G_CALLBACK(audio_out), self);
+	P(self)->worker = ai_voice_worker_new(P(self)->conversation, G_OBJECT(self), P(self)->context,
 									   worker_mail);
-	ai_voice_worker_set_trim_after(self->worker, self->trim_after);
+	ai_voice_worker_set_trim_after(P(self)->worker, P(self)->trim_after);
+}
+/* Every handler must say yes: the first FALSE stops the emission. */
+static gboolean
+all_agree(GSignalInvocationHint *hint, GValue *accumulated, const GValue *handler_return,
+		  gpointer data)
+{
+	gboolean yes = g_value_get_boolean(handler_return);
+	g_value_set_boolean(accumulated, yes);
+	return yes;
+}
+static gboolean
+default_allow_promotion(AiVoiceSession *self, const gchar *guest, const gchar *name)
+{
+	return TRUE;
 }
 static void
 ai_voice_session_class_init(AiVoiceSessionClass *klass)
 {
 	GObjectClass *oc = G_OBJECT_CLASS(klass);
+	klass->allow_promotion = default_allow_promotion;
 	oc->dispose = dispose;
 	oc->constructed = constructed;
 	oc->finalize = finalize;
@@ -2281,6 +2475,79 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							AI_TYPE_SPEAKER_IDENTIFIER,
 							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	/**
+	 * AiVoiceSession:room:
+	 *
+	 * What the session remembers of the room between turns: the talk that
+	 * was not a turn, and who has been speaking. Replace it with a
+	 * configured or subclassed #AiVoiceRoom to change the limits or how
+	 * talk reaches the model.
+	 */
+	g_object_class_install_property(
+		oc, PROP_ROOM,
+		g_param_spec_object("room", "Room", "What is remembered of the room between turns",
+							AI_TYPE_VOICE_ROOM, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:address-detector:
+	 *
+	 * In room mode, decides which utterances are said to the assistant.
+	 * Unset (or set to %NULL), an #AiNameAddressDetector built from
+	 * #AiVoiceSession:assistant-names and #AiVoiceSession:assistant-soundalikes.
+	 */
+	g_object_class_install_property(
+		oc, PROP_ADDRESS_DETECTOR,
+		g_param_spec_object("address-detector", "Address detector",
+							"Decides which utterances are said to the assistant",
+							AI_TYPE_ADDRESS_DETECTOR,
+							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:relevance-judge:
+	 *
+	 * Scores unaddressed room talk for chiming in. Setting
+	 * #AiVoiceSession:relevance-provider replaces it with an
+	 * #AiProviderRelevanceJudge for that provider. %NULL never chimes in.
+	 */
+	g_object_class_install_property(
+		oc, PROP_RELEVANCE_JUDGE,
+		g_param_spec_object("relevance-judge", "Relevance judge",
+							"Scores unaddressed room talk for chiming in",
+							AI_TYPE_RELEVANCE_JUDGE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:relevance-debounce-ms:
+	 *
+	 * Wait this long after the last unaddressed line before scoring, so a
+	 * burst of talk is scored once. 0 scores at once; a score in flight is
+	 * never cancelled by new talk, only redone with it.
+	 */
+	g_object_class_install_property(
+		oc, PROP_RELEVANCE_DEBOUNCE,
+		g_param_spec_uint("relevance-debounce-ms", "Relevance debounce",
+						  "Quiet before room talk is scored", 0, 60000, 0,
+						  G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:promoted-message:
+	 *
+	 * Spoken when a voice command saves a guest's voice under a name.
+	 * "{name}" and "{guest}" are replaced. Empty says nothing.
+	 */
+	g_object_class_install_property(
+		oc, PROP_PROMOTED_MESSAGE,
+		g_param_spec_string("promoted-message", "Promoted message",
+							"Spoken when a guest's voice is saved under a name",
+							"Okay, I'll remember {name}.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:promotion-refused-message:
+	 *
+	 * Spoken when a guest's voice cannot be saved under a name. "{name}",
+	 * "{guest}" and "{reason}" are replaced. Empty says nothing.
+	 */
+	g_object_class_install_property(
+		oc, PROP_PROMOTION_REFUSED_MESSAGE,
+		g_param_spec_string("promotion-refused-message", "Promotion refused message",
+							"Spoken when a guest's voice cannot be saved under a name",
+							"I can't save that voice as {name}: {reason}.",
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	/**
 	 * AiVoiceSession:naming-timeout-ms:
 	 *
 	 * The longest a final transcript waits for #AiVoiceSession:speaker-identifier
@@ -2409,14 +2676,16 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 * @text: recognized text
 	 * @final: whether the utterance is complete
 	 */
-	g_signal_new("transcript", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+	g_signal_new("transcript", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, transcript), NULL, NULL,
 				 NULL, G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN);
 	/**
 	 * AiVoiceSession::reply:
 	 * @self: the session
 	 * @text: a segment submitted for synthesis
 	 */
-	g_signal_new("reply", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+	g_signal_new("reply", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, reply), NULL, NULL,
 				 NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 	/**
 	 * AiVoiceSession::tool:
@@ -2435,13 +2704,14 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	/**
 	 * AiVoiceSession::command:
 	 * @session: the session
-	 * @name: "stop", "mute", "unmute" or "hangup"
+	 * @name: "stop", "mute", "unmute", "hangup" or "promote"
 	 *
 	 * A caller spoke a command while #AiVoiceSession:voice-commands is set.
 	 * The session has already acted on stop, mute and unmute; hang-up is the
 	 * application's to carry out.
 	 */
-	g_signal_new("command", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+	g_signal_new("command", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, command), NULL, NULL, NULL,
 				 G_TYPE_NONE, 1, G_TYPE_STRING);
 	/**
 	 * AiVoiceSession::spoken:
@@ -2464,8 +2734,49 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 	 * Room talk was scored. Emitted for every score, above the threshold or
 	 * not, so a host can log them and tune #AiVoiceSession:chime-in-threshold.
 	 */
-	g_signal_new("relevance", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+	g_signal_new("relevance", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, relevance), NULL, NULL,
 				 NULL, G_TYPE_NONE, 3, G_TYPE_UINT, G_TYPE_STRING, G_TYPE_BOOLEAN);
+	/**
+	 * AiVoiceSession::speaker-named:
+	 * @session: the session
+	 * @participant: the transport's participant whose microphone heard it
+	 * @match: who said it, and how that was decided
+	 *
+	 * With #AiVoiceSession:speaker-identifier, emitted for each final once it
+	 * is named, in the order heard, before it is delivered. A match of kind
+	 * %AI_SPEAKER_MATCH_INHERITED or %AI_SPEAKER_MATCH_FALLBACK is the
+	 * session's own decision when the identifier could not say.
+	 */
+	g_signal_new("speaker-named", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, speaker_named), NULL, NULL, NULL,
+				 G_TYPE_NONE, 2, G_TYPE_STRING, AI_TYPE_SPEAKER_MATCH);
+	/**
+	 * AiVoiceSession::allow-promotion:
+	 * @session: the session
+	 * @guest: the guest's name ("Guest 2")
+	 * @name: the name asked for
+	 *
+	 * Someone asked, by voice, for a guest's voice to be saved as @name.
+	 * Return %FALSE to refuse. Every handler must agree; the first %FALSE
+	 * wins. The identifier itself still refuses a name already enrolled.
+	 *
+	 * Returns: whether the promotion may go ahead
+	 */
+	g_signal_new("allow-promotion", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, allow_promotion), all_agree, NULL, NULL,
+				 G_TYPE_BOOLEAN, 2, G_TYPE_STRING, G_TYPE_STRING);
+	/**
+	 * AiVoiceSession::guest-promoted:
+	 * @session: the session
+	 * @guest: the guest's name as it was
+	 * @name: the name the voice now has
+	 *
+	 * A guest's voice was saved under a lasting name by voice command.
+	 */
+	g_signal_new("guest-promoted", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+				 G_STRUCT_OFFSET(AiVoiceSessionClass, guest_promoted), NULL, NULL, NULL,
+				 G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
 	/**
 	 * AiVoiceSession::state-changed:
 	 * @self: the session
@@ -2484,18 +2795,20 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 static void
 ai_voice_session_init(AiVoiceSession *self)
 {
-	self->context = g_main_context_ref_thread_default();
-	self->participants =
+	P(self)->context = g_main_context_ref_thread_default();
+	P(self)->participants =
 		g_hash_table_new_full(g_str_hash, g_str_equal, g_free, participant_free);
-	self->notices = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-	self->repeats = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-	self->speak_code = TRUE;
-	self->span = g_string_new(NULL);
-	self->pending_text = g_string_new(NULL);
-	self->spoken = g_string_new(NULL);
-	self->deadline_ms = 20000;
-	self->barge_in_ms = 250;
-	self->barge_in_confirm = TRUE;
+	P(self)->notices = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	P(self)->repeats = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	P(self)->speak_code = TRUE;
+	P(self)->span = g_string_new(NULL);
+	P(self)->pending_text = g_string_new(NULL);
+	P(self)->spoken = g_string_new(NULL);
+	P(self)->deadline_ms = 20000;
+	P(self)->barge_in_ms = 250;
+	P(self)->barge_in_confirm = TRUE;
+	P(self)->room = ai_voice_room_new();
+	P(self)->name_detector = ai_name_address_detector_new(NULL, NULL);
 }
 /**
  * ai_voice_session_new:
@@ -2538,7 +2851,7 @@ AiVoiceState
 ai_voice_session_get_state(AiVoiceSession *self)
 {
 	g_return_val_if_fail(AI_IS_VOICE_SESSION(self), AI_VOICE_LISTENING);
-	return self->state;
+	return P(self)->state;
 }
 /**
  * ai_voice_session_say:

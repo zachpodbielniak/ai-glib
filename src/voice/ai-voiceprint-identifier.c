@@ -1,269 +1,117 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include "voice/ai-voiceprint-identifier.h"
-#include "model/ai-embedding.h"
-#include "core/ai-json-util.h"
-#include "core/ai-http-redirect-private.h"
-#include <math.h>
-#include <libsoup/soup.h>
-#include <glib/gstdio.h>
-#include <errno.h>
+#include "voice/ai-http-speaker-embedder.h"
+#include "voice/ai-file-voiceprint-store.h"
 #include <string.h>
 
 /*
- * Speaker identification by voiceprint. A service turns audio into a
- * unit-length vector (POST raw 16 kHz mono S16LE, answered with
- * {"model":..., "embedding":[...]}); everything else is here. Voiceprints are
- * files in a directory the caller chooses, one per person, readable only by
- * their owner: they are biometric data, and the service keeps none.
+ * Speaker identification by voiceprint: an AiSpeakerEmbedder turns each
+ * utterance into a vector, which is compared with those an
+ * AiVoiceprintStore holds.
  *
- * The model travels with every voiceprint. Vectors from two models are not
- * comparable -- the cosine between them reads like a weak match rather than
- * like an error -- so a voiceprint from another model is never compared.
+ * Embeddings come back in any order, but who is "Guest 1" depends on who
+ * was heard first. So identifications wait in a queue in the order they
+ * were asked for, and are matched from its head only: a fast reply for a
+ * later utterance waits for the earlier one. An identification whose
+ * cancellable fires leaves the queue at once, so one stuck embedding never
+ * holds the rest.
+ *
+ * Guests are voices nobody enrolled, numbered as first heard and kept in
+ * memory for the identifier's lifetime only: they are never saved unless
+ * promoted, deliberately, under a real name.
  */
-#define MIN_BYTES (16000 * 2 / 2) /* half a second */
-/* A stranger's first utterance must be this long to start a guest: a short
- * clip's voiceprint is too noisy to tell a new voice from a known one said
- * briefly, and every false guest splits someone in two. */
-#define MIN_NEW_GUEST_BYTES (16000 * 2 * 3 / 2)
-#define MAX_GUESTS 32
-#define MAX_NAME 64
+#define MAX_GUEST_WEIGHT 50 /* a guest keeps adapting as the room changes */
 
 typedef struct {
-	gchar *name, *model;
-	gfloat *vector;
-	gsize dims;
-	guint count;
-} Voice;
-
-struct _AiVoiceprintIdentifier {
-	GObject parent_instance;
-	gchar *url, *directory;
+	AiSpeakerEmbedder *embedder;
+	AiVoiceprintStore *store;
+	gulong store_changed_id;
+	GPtrArray *voices; /* AiVoiceprint: enrolled, cached from the store */
 	gdouble threshold;
-	guint timeout_ms;
-	SoupSession *http;
-	GPtrArray *voices;
-	/* track-guests: voices matching nobody enrolled, numbered as first heard;
-	 * kept in memory only, for this identifier's lifetime */
 	gboolean track_guests;
 	gdouble guest_threshold;
-	GPtrArray *guests;
-};
+	guint max_guests, min_guest_ms;
+	GPtrArray *guests; /* AiVoiceprint "Guest N", in the order first heard */
+	guint next_guest;
+	GQueue pending; /* Pending*, in the order asked */
+	GMainContext *context;
+} AiVoiceprintIdentifierPrivate;
 
 enum {
 	PROP_0,
-	PROP_URL,
-	PROP_DIRECTORY,
+	PROP_EMBEDDER,
+	PROP_STORE,
 	PROP_THRESHOLD,
-	PROP_TIMEOUT,
 	PROP_TRACK_GUESTS,
-	PROP_GUEST_THRESHOLD
+	PROP_GUEST_THRESHOLD,
+	PROP_MAX_GUESTS,
+	PROP_MIN_GUEST_MS,
+	N_PROPS
 };
+static GParamSpec *props[N_PROPS];
+enum { SIGNAL_PROMOTED, N_SIGNALS };
+static guint signals[N_SIGNALS];
 
 static void identifier_iface_init(AiSpeakerIdentifierInterface *iface);
 G_DEFINE_TYPE_WITH_CODE(AiVoiceprintIdentifier, ai_voiceprint_identifier, G_TYPE_OBJECT,
-						G_IMPLEMENT_INTERFACE(AI_TYPE_SPEAKER_IDENTIFIER, identifier_iface_init))
+						G_ADD_PRIVATE(AiVoiceprintIdentifier)
+							G_IMPLEMENT_INTERFACE(AI_TYPE_SPEAKER_IDENTIFIER,
+												  identifier_iface_init))
 
-static void
-voice_free(gpointer data)
+static AiVoiceprintIdentifierPrivate *
+private_of(AiVoiceprintIdentifier *self)
 {
-	Voice *v = data;
-	g_free(v->name);
-	g_free(v->model);
-	g_free(v->vector);
-	g_free(v);
-}
-/* A name is a file name here, so it may not leave the directory or hide. */
-static gboolean
-valid_name(const gchar *name)
-{
-	return name != NULL && *name != '\0' && *name != '.' && strlen(name) <= MAX_NAME &&
-		   g_utf8_validate(name, -1, NULL) && strchr(name, '/') == NULL &&
-		   strchr(name, '\\') == NULL;
-}
-/* Every element a finite number that fits a float, at least one of them, and
- * not all zero; NULL otherwise. A zero or non-finite vector has no direction:
- * it matches nobody, and averaged into a voiceprint it poisons it. */
-static gfloat *
-read_vector(JsonArray *array, gsize *dims)
-{
-	guint i, n = array != NULL ? json_array_get_length(array) : 0;
-	gfloat *vector;
-	gdouble norm = 0;
-	if (n == 0 || n > 8192)
-		return NULL;
-	vector = g_new(gfloat, n);
-	for (i = 0; i < n; i++) {
-		JsonNode *node = json_array_get_element(array, i);
-		GType type = JSON_NODE_HOLDS_VALUE(node) ? json_node_get_value_type(node) : G_TYPE_INVALID;
-		gdouble value;
-		if (type == G_TYPE_DOUBLE)
-			value = json_node_get_double(node);
-		else if (type == G_TYPE_INT64)
-			value = (gdouble)json_node_get_int(node);
-		else {
-			g_free(vector);
-			return NULL;
-		}
-		if (!isfinite(value) || fabs(value) > 1e30) {
-			g_free(vector);
-			return NULL;
-		}
-		vector[i] = (gfloat)value;
-		norm += value * value;
-	}
-	if (!(norm > 0) || !isfinite(norm)) {
-		g_free(vector);
-		return NULL;
-	}
-	*dims = n;
-	return vector;
-}
-static void
-load(AiVoiceprintIdentifier *self)
-{
-	GDir *dir;
-	const gchar *entry;
-	g_ptr_array_set_size(self->voices, 0);
-	if (self->directory == NULL || (dir = g_dir_open(self->directory, 0, NULL)) == NULL)
-		return;
-	while ((entry = g_dir_read_name(dir)) != NULL) {
-		g_autofree gchar *path = NULL, *stem = NULL;
-		g_autoptr(JsonParser) parser = json_parser_new();
-		g_autoptr(GError) error = NULL;
-		JsonObject *o;
-		const gchar *name, *model;
-		Voice *v;
-		if (!g_str_has_suffix(entry, ".json") || *entry == '.')
-			continue;
-		path = g_build_filename(self->directory, entry, NULL);
-		if (!json_parser_load_from_file(parser, path, &error)) {
-			g_debug("voiceprint %s: %s", path, error->message);
-			continue;
-		}
-		o = ai_json_root_object(parser);
-		name = ai_json_get_string(o, "name", NULL);
-		model = ai_json_get_string(o, "model", NULL);
-		stem = g_strndup(entry, strlen(entry) - 5);
-		if (!valid_name(name) || g_strcmp0(name, stem) != 0 || model == NULL) {
-			g_debug("voiceprint %s: not a voiceprint; skipped", path);
-			continue;
-		}
-		v = g_new0(Voice, 1);
-		v->vector = read_vector(ai_json_get_array(o, "embedding"), &v->dims);
-		if (v->vector == NULL) {
-			g_debug("voiceprint %s: no usable embedding; skipped", path);
-			g_free(v);
-			continue;
-		}
-		ai_embedding_normalize(v->vector, v->dims);
-		v->name = g_strdup(name);
-		v->model = g_strdup(model);
-		v->count = (guint)CLAMP(ai_json_get_int(o, "count", 1), 1, G_MAXINT);
-		g_ptr_array_add(self->voices, v);
-	}
-	g_dir_close(dir);
+	return ai_voiceprint_identifier_get_instance_private(self);
 }
 
-/* ---- the service ---- */
+/* ---- the enrolled voices ---- */
 
-typedef struct {
-	gchar *model;
-	gfloat *vector;
-	gsize dims;
-	gchar *name; /* enrolling: whose */
-	gsize bytes; /* how much audio it came from */
-} Print;
 static void
-print_free(gpointer data)
+load_voices(AiVoiceprintIdentifier *self)
 {
-	Print *p = data;
-	g_free(p->model);
-	g_free(p->vector);
-	g_free(p->name);
-	g_free(p);
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	g_clear_pointer(&priv->voices, g_ptr_array_unref);
+	priv->voices = priv->store != NULL ? ai_voiceprint_store_list(priv->store)
+									   : g_ptr_array_new_with_free_func(g_object_unref);
 }
 static void
-embedded(GObject *source, GAsyncResult *result, gpointer data)
+store_changed(AiVoiceprintStore *store, gpointer data)
 {
-	GTask *task = data;
-	SoupMessage *message = soup_session_get_async_result_message(SOUP_SESSION(source), result);
-	g_autoptr(GError) error = NULL;
-	g_autoptr(GBytes) body = soup_session_send_and_read_finish(SOUP_SESSION(source), result, &error);
-	g_autoptr(JsonParser) parser = json_parser_new();
-	Print *print = g_task_get_task_data(task);
-	JsonObject *o = NULL;
-	gsize size = 0;
-	const gchar *raw;
-	guint status;
-	if (body == NULL || ai_http_redirect_refused(message, &error)) {
-		g_task_return_error(task, g_steal_pointer(&error));
-		g_object_unref(task);
-		return;
-	}
-	raw = g_bytes_get_data(body, &size);
-	status = soup_message_get_status(message);
-	if (size > 0 && size < 1024 * 1024 && json_parser_load_from_data(parser, raw, size, NULL))
-		o = ai_json_root_object(parser);
-	if (!SOUP_STATUS_IS_SUCCESSFUL(status)) {
-		const gchar *why = ai_json_get_string(o, "error", NULL);
-		g_task_return_new_error(task, G_IO_ERROR,
-								status == 422 ? G_IO_ERROR_INVALID_DATA : G_IO_ERROR_FAILED,
-								"Voiceprint service: HTTP %u%s%s", status, why ? ": " : "",
-								why ? why : "");
-		g_object_unref(task);
-		return;
-	}
-	print->model = g_strdup(ai_json_get_string(o, "model", NULL));
-	print->vector = read_vector(ai_json_get_array(o, "embedding"), &print->dims);
-	if (print->model == NULL || print->vector == NULL) {
-		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-								"Voiceprint service answered without a model and embedding");
-		g_object_unref(task);
-		return;
-	}
-	ai_embedding_normalize(print->vector, print->dims);
-	g_task_return_boolean(task, TRUE);
-	g_object_unref(task);
+	AiVoiceprintIdentifier *self = data;
+	load_voices(self);
+	g_debug("voiceprints reloaded: %u enrolled", private_of(self)->voices->len);
 }
-/* Takes TASK; its data is a Print, filled in once the service has answered. */
 static void
-embed(AiVoiceprintIdentifier *self, GBytes *pcm, GTask *task)
+set_store(AiVoiceprintIdentifier *self, AiVoiceprintStore *store)
 {
-	g_autoptr(SoupMessage) message = NULL;
-	if (g_bytes_get_size(pcm) < MIN_BYTES || g_bytes_get_size(pcm) % 2 != 0) {
-		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-								"Too little audio to tell who spoke");
-		g_object_unref(task);
-		return;
-	}
-	if (self->url == NULL ||
-		(message = ai_http_message_new("POST", self->url, AI_HTTP_NO_CREDENTIALS)) == NULL) {
-		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-								"No usable voiceprint service URL");
-		g_object_unref(task);
-		return;
-	}
-	((Print *)g_task_get_task_data(task))->bytes = g_bytes_get_size(pcm);
-	soup_message_set_request_body_from_bytes(message, "application/octet-stream", pcm);
-	soup_session_send_and_read_async(self->http, message, G_PRIORITY_DEFAULT,
-									 g_task_get_cancellable(task), embedded, task);
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	if (priv->store != NULL && priv->store_changed_id != 0)
+		g_signal_handler_disconnect(priv->store, priv->store_changed_id);
+	priv->store_changed_id = 0;
+	g_set_object(&priv->store, store);
+	if (priv->store != NULL)
+		priv->store_changed_id =
+			g_signal_connect(priv->store, "changed", G_CALLBACK(store_changed), self);
+	load_voices(self);
 }
 
-/* ---- identify ---- */
-
-/* The closest voice in LIST made by the same model, and how close. */
-static Voice *
-closest(GPtrArray *list, const Print *print, gdouble *score)
+/* The closest voiceprint in LIST comparable with HEARD, and how close;
+ * EXCLUDE (nullable) is passed over. */
+static AiVoiceprint *
+closest_in(AiVoiceprintIdentifier *self, GPtrArray *list, AiVoiceprint *heard,
+		   const gchar *exclude, gdouble *score)
 {
-	Voice *best = NULL;
+	AiVoiceprintIdentifierClass *klass = AI_VOICEPRINT_IDENTIFIER_GET_CLASS(self);
+	AiVoiceprint *best = NULL;
 	guint i;
-	*score = 0;
+	*score = -1;
 	for (i = 0; i < list->len; i++) {
-		Voice *v = g_ptr_array_index(list, i);
+		AiVoiceprint *v = g_ptr_array_index(list, i);
 		gdouble similarity;
-		if (v->dims != print->dims || g_strcmp0(v->model, print->model) != 0)
+		if (!ai_voiceprint_is_comparable(v, heard) ||
+			g_strcmp0(ai_voiceprint_get_name(v), exclude) == 0)
 			continue;
-		similarity = ai_embedding_cosine(v->vector, print->vector, v->dims);
+		similarity = klass->score(self, v, heard);
 		if (best == NULL || similarity > *score) {
 			best = v;
 			*score = similarity;
@@ -271,222 +119,376 @@ closest(GPtrArray *list, const Print *print, gdouble *score)
 	}
 	return best;
 }
-/* A guest's voiceprint is the running mean of everything heard from them. */
-static void
-absorb(Voice *v, const Print *print)
+
+/* ---- default policy ---- */
+
+static gdouble
+default_score(AiVoiceprintIdentifier *self, AiVoiceprint *known, AiVoiceprint *heard)
 {
-	gsize k;
-	for (k = 0; k < v->dims; k++)
-		v->vector[k] = (v->vector[k] * v->count + print->vector[k]) / (v->count + 1);
-	ai_embedding_normalize(v->vector, v->dims);
-	if (v->count < 50) /* keep adapting as the room changes */
-		v->count++;
+	return ai_voiceprint_similarity(known, heard);
 }
-/* Who a voice that matches nobody enrolled is: a guest already heard, a new
- * one, or -- too short to start a guest on -- nobody yet (NULL). */
-static const gchar *
-guest(AiVoiceprintIdentifier *self, const Print *print, gdouble *score)
+static AiSpeakerMatch *
+matched(AiSpeakerMatchKind kind, const gchar *name, gdouble score, AiVoiceprint *heard)
 {
-	Voice *v = closest(self->guests, print, score);
-	if (v != NULL && (*score >= self->guest_threshold || self->guests->len >= MAX_GUESTS)) {
-		absorb(v, print);
-		return v->name;
+	AiSpeakerMatch *match = ai_speaker_match_new(kind, name, score);
+	ai_speaker_match_set_voiceprint(match, heard);
+	return match;
+}
+static AiSpeakerMatch *
+default_match(AiVoiceprintIdentifier *self, AiVoiceprint *heard, gsize audio_bytes,
+			  GError **error)
+{
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	AiVoiceprint *best, *guest;
+	gdouble score = -1, guest_score = -1;
+	g_autofree gchar *name = NULL;
+	best = closest_in(self, priv->voices, heard, NULL, &score);
+	if (best != NULL && score >= priv->threshold)
+		return matched(AI_SPEAKER_MATCH_ENROLLED, ai_voiceprint_get_name(best), score, heard);
+	if (!priv->track_guests)
+		return matched(AI_SPEAKER_MATCH_UNKNOWN, NULL, MAX(score, 0.0), heard);
+	/* A guest already heard: their voiceprint adapts to what they say. */
+	guest = closest_in(self, priv->guests, heard, NULL, &guest_score);
+	if (guest != NULL && guest_score >= priv->guest_threshold) {
+		ai_voiceprint_absorb(guest, heard, MAX_GUEST_WEIGHT);
+		return matched(AI_SPEAKER_MATCH_GUEST, ai_voiceprint_get_name(guest), guest_score,
+					   heard);
 	}
-	if (print->bytes < MIN_NEW_GUEST_BYTES)
+	/* A new guest needs enough audio: a short clip's voiceprint is too noisy
+	 * to tell a new voice from a known one said briefly, and every false
+	 * guest splits someone in two. 32 bytes is a millisecond. */
+	if (audio_bytes < (gsize)priv->min_guest_ms * 32) {
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+							"Too little audio to tell a new voice");
 		return NULL;
-	v = g_new0(Voice, 1);
-	v->name = g_strdup_printf("Guest %u", self->guests->len + 1);
-	v->model = g_strdup(print->model);
-	v->dims = print->dims;
-	v->vector = g_memdup2(print->vector, print->dims * sizeof(gfloat));
-	v->count = 1;
-	g_ptr_array_add(self->guests, v);
-	*score = 1.0;
-	return v->name;
+	}
+	/* Full: a stranger beyond the cap is unknown, never folded into a guest
+	 * it does not sound like. */
+	if (priv->guests->len >= priv->max_guests)
+		return matched(AI_SPEAKER_MATCH_UNKNOWN, NULL, MAX(guest_score, 0.0), heard);
+	name = g_strdup_printf("Guest %u", ++priv->next_guest);
+	g_ptr_array_add(priv->guests, ai_voiceprint_copy(heard, name));
+	return matched(AI_SPEAKER_MATCH_GUEST, name, 1.0, heard);
 }
 
+/* ---- identify, in the order asked ----
+ *
+ * A Pending lives in the queue until it is answered. When its caller
+ * cancels, it is answered at once and leaves the queue, but its embedding
+ * still owes a callback: the shell is then owned by that callback, which
+ * frees it. */
+typedef struct {
+	GTask *task; /* NULL once answered early, on cancel */
+	AiVoiceprint *heard;
+	GError *error;
+	gsize bytes;
+	gboolean ready;
+	GCancellable *cancellable;
+	gulong cancel_id;
+} Pending;
 static void
-identify_embedded(GObject *source, GAsyncResult *result, gpointer data)
+pending_disconnect(Pending *p)
 {
-	GTask *outer = data;
-	g_autoptr(GError) error = NULL;
-	AiVoiceprintIdentifier *self = g_task_get_source_object(outer);
-	Print *print = g_task_get_task_data(G_TASK(result));
-	const Voice *best;
-	const gchar *name = NULL;
-	gdouble best_score = 0;
-	if (!g_task_propagate_boolean(G_TASK(result), &error)) {
-		g_task_return_error(outer, g_steal_pointer(&error));
-		g_object_unref(outer);
-		return;
-	}
-	best = closest(self->voices, print, &best_score);
-	if (best != NULL && best_score >= self->threshold)
-		name = best->name;
-	else if (self->track_guests) {
-		name = guest(self, print, &best_score);
-		if (name == NULL) {
-			g_task_return_new_error(outer, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-									"Too little audio to tell a new voice");
-			g_object_unref(outer);
-			return;
+	if (p->cancel_id != 0)
+		g_cancellable_disconnect(p->cancellable, p->cancel_id);
+	p->cancel_id = 0;
+}
+static void
+pending_free(Pending *p)
+{
+	pending_disconnect(p);
+	g_clear_object(&p->cancellable);
+	g_clear_object(&p->task);
+	g_clear_object(&p->heard);
+	g_clear_error(&p->error);
+	g_free(p);
+}
+/* Match and answer every identification at the head that is ready. */
+static void
+drain_pending(AiVoiceprintIdentifier *self)
+{
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	Pending *p;
+	while ((p = g_queue_peek_head(&priv->pending)) != NULL && p->ready) {
+		g_queue_pop_head(&priv->pending);
+		pending_disconnect(p);
+		/* No match for a caller who gave up: matching would grow a guest. */
+		if (p->error == NULL && p->cancellable != NULL &&
+			g_cancellable_is_cancelled(p->cancellable))
+			p->error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED,
+										   "Operation was cancelled");
+		if (p->error != NULL)
+			g_task_return_error(p->task, g_steal_pointer(&p->error));
+		else {
+			GError *error = NULL;
+			AiSpeakerMatch *match =
+				AI_VOICEPRINT_IDENTIFIER_GET_CLASS(self)->match(self, p->heard, p->bytes, &error);
+			if (match != NULL)
+				g_task_return_pointer(p->task, match, g_object_unref);
+			else
+				g_task_return_error(p->task,
+									error != NULL ? error
+												  : g_error_new_literal(G_IO_ERROR,
+																		G_IO_ERROR_INVALID_DATA,
+																		"Too little audio to tell"));
 		}
+		pending_free(p);
 	}
-	g_task_set_task_data(outer, g_memdup2(&best_score, sizeof(best_score)), g_free);
-	g_task_return_pointer(outer, g_strdup(name), g_free);
-	g_object_unref(outer);
+}
+typedef struct {
+	AiVoiceprintIdentifier *self; /* owned */
+	Pending *pending;
+} Embedding;
+static void
+embedded(GObject *source, GAsyncResult *result, gpointer data)
+{
+	Embedding *e = data;
+	AiVoiceprintIdentifier *self = e->self;
+	Pending *p = e->pending;
+	GError *error = NULL;
+	AiVoiceprint *heard = ai_speaker_embedder_embed_finish(AI_SPEAKER_EMBEDDER(source), result,
+														   &error);
+	g_free(e);
+	if (p->task == NULL) {
+		/* Answered already, on cancel: drop the late embedding. */
+		g_clear_object(&heard);
+		g_clear_error(&error);
+		pending_free(p);
+	} else {
+		p->heard = heard;
+		p->error = error;
+		p->ready = TRUE;
+		drain_pending(self);
+	}
+	g_object_unref(self);
+}
+/* The caller gave up: answer now and leave the queue, rather than wait for
+ * the embedder, so a stuck embedding never holds later utterances. The
+ * pending is looked up by pointer before it is touched: it may have been
+ * answered and freed in the meantime. */
+typedef struct {
+	AiVoiceprintIdentifier *self; /* owned */
+	Pending *pending;			  /* maybe freed: compare only */
+} Cancel;
+static gboolean
+cancelled_idle(gpointer data)
+{
+	Cancel *c = data;
+	AiVoiceprintIdentifierPrivate *priv = private_of(c->self);
+	Pending *p = c->pending;
+	if (g_queue_find(&priv->pending, p) == NULL || p->ready)
+		return G_SOURCE_REMOVE;
+	g_queue_remove(&priv->pending, p);
+	pending_disconnect(p);
+	g_task_return_new_error(p->task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+							"Operation was cancelled");
+	g_clear_object(&p->task);
+	drain_pending(c->self);
+	return G_SOURCE_REMOVE;
+}
+static void
+cancel_free(gpointer data)
+{
+	Cancel *c = data;
+	g_object_unref(c->self);
+	g_free(c);
+}
+/* Any thread: whoever cancelled. Hands the work to the identifier's context. */
+static void
+on_cancelled(GCancellable *cancellable, gpointer data)
+{
+	Cancel *c = data;
+	Cancel *copy = g_new0(Cancel, 1);
+	GSource *idle = g_idle_source_new();
+	copy->self = g_object_ref(c->self);
+	copy->pending = c->pending;
+	g_source_set_callback(idle, cancelled_idle, copy, cancel_free);
+	g_source_attach(idle, private_of(c->self)->context);
+	g_source_unref(idle);
 }
 static void
 identify_async(AiSpeakerIdentifier *identifier, GBytes *pcm, GCancellable *cancellable,
 			   GAsyncReadyCallback callback, gpointer user_data)
 {
 	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(identifier);
-	GTask *outer = g_task_new(self, cancellable, callback, user_data);
-	GTask *inner = g_task_new(self, cancellable, identify_embedded, outer);
-	g_task_set_task_data(inner, g_new0(Print, 1), print_free);
-	embed(self, pcm, inner);
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	Pending *p = g_new0(Pending, 1);
+	Embedding *e;
+	p->task = g_task_new(self, cancellable, callback, user_data);
+	p->bytes = g_bytes_get_size(pcm);
+	if (priv->embedder == NULL) {
+		g_task_return_new_error(p->task, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
+								"No speaker embedder");
+		pending_free(p);
+		return;
+	}
+	g_queue_push_tail(&priv->pending, p);
+	if (cancellable != NULL) {
+		Cancel *c = g_new0(Cancel, 1);
+		c->self = g_object_ref(self);
+		c->pending = p;
+		p->cancellable = g_object_ref(cancellable);
+		p->cancel_id =
+			g_cancellable_connect(cancellable, G_CALLBACK(on_cancelled), c, cancel_free);
+	}
+	e = g_new0(Embedding, 1);
+	e->self = g_object_ref(self);
+	e->pending = p;
+	ai_speaker_embedder_embed_async(priv->embedder, pcm, cancellable, embedded, e);
 }
-static gchar *
-identify_finish(AiSpeakerIdentifier *identifier, GAsyncResult *result, gdouble *score,
-				GError **error)
+static AiSpeakerMatch *
+identify_finish(AiSpeakerIdentifier *identifier, GAsyncResult *result, GError **error)
 {
-	gdouble *best;
-	gchar *name;
 	g_return_val_if_fail(g_task_is_valid(result, identifier), NULL);
-	best = g_task_get_task_data(G_TASK(result));
-	name = g_task_propagate_pointer(G_TASK(result), error);
-	if (score != NULL)
-		*score = best != NULL ? *best : 0;
-	return name;
+	return g_task_propagate_pointer(G_TASK(result), error);
+}
+static gboolean
+has_name(AiSpeakerIdentifier *identifier, const gchar *name)
+{
+	AiVoiceprintIdentifierPrivate *priv = private_of(AI_VOICEPRINT_IDENTIFIER(identifier));
+	g_autoptr(AiVoiceprint) found = NULL;
+	if (priv->store == NULL)
+		return FALSE;
+	found = ai_voiceprint_store_lookup(priv->store, name);
+	return found != NULL;
+}
+
+/* ---- promotion ---- */
+
+static gboolean
+promote(AiSpeakerIdentifier *identifier, const gchar *guest_name, const gchar *name,
+		gboolean merge, GError **error)
+{
+	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(identifier);
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	g_autoptr(AiVoiceprint) existing = NULL;
+	g_autoptr(AiVoiceprint) saved = NULL;
+	g_autofree gchar *was = NULL;
+	AiVoiceprint *guest = NULL;
+	guint i;
+	if (priv->store == NULL) {
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+							"No voiceprint store to save a voice in");
+		return FALSE;
+	}
+	if (!ai_voiceprint_name_is_valid(name)) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+					"Not a usable voiceprint name: \"%s\"", name);
+		return FALSE;
+	}
+	for (i = 0; i < priv->guests->len && guest == NULL; i++)
+		if (g_ascii_strcasecmp(ai_voiceprint_get_name(g_ptr_array_index(priv->guests, i)),
+							   guest_name) == 0)
+			guest = g_ptr_array_index(priv->guests, i);
+	if (guest == NULL) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No voice called %s was heard",
+					guest_name);
+		return FALSE;
+	}
+	/* One person must never silently take over another's voiceprint. */
+	existing = ai_voiceprint_store_lookup(priv->store, name);
+	if (existing != NULL && !merge) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "%s is already enrolled", name);
+		return FALSE;
+	}
+	if (existing != NULL && ai_voiceprint_is_comparable(existing, guest)) {
+		ai_voiceprint_absorb(existing, guest, 0);
+		saved = g_object_ref(existing);
+	} else
+		saved = ai_voiceprint_copy(guest, name);
+	if (!ai_voiceprint_store_save(priv->store, saved, error))
+		return FALSE;
+	/* The guest's name goes with them; the number is not reused. */
+	was = g_strdup(ai_voiceprint_get_name(guest));
+	g_ptr_array_remove(priv->guests, guest);
+	load_voices(self);
+	g_signal_emit(self, signals[SIGNAL_PROMOTED], 0, was, name);
+	return TRUE;
 }
 static void
 identifier_iface_init(AiSpeakerIdentifierInterface *iface)
 {
 	iface->identify_async = identify_async;
 	iface->identify_finish = identify_finish;
+	iface->promote = promote;
+	iface->has_name = has_name;
 }
 
 /* ---- enroll ---- */
 
-static gboolean
-save(AiVoiceprintIdentifier *self, const Voice *v, GError **error)
-{
-	g_autoptr(JsonBuilder) builder = json_builder_new();
-	g_autoptr(JsonNode) root = NULL;
-	g_autofree gchar *json = NULL, *file = NULL, *path = NULL;
-	gsize i;
-	if (g_mkdir_with_parents(self->directory, 0700) != 0) {
-		gint saved = errno;
-		g_set_error(error, G_IO_ERROR, g_io_error_from_errno(saved), "Cannot create %s: %s",
-					self->directory, g_strerror(saved));
-		return FALSE;
-	}
-	json_builder_begin_object(builder);
-	json_builder_set_member_name(builder, "name");
-	json_builder_add_string_value(builder, v->name);
-	json_builder_set_member_name(builder, "model");
-	json_builder_add_string_value(builder, v->model);
-	json_builder_set_member_name(builder, "count");
-	json_builder_add_int_value(builder, v->count);
-	json_builder_set_member_name(builder, "embedding");
-	json_builder_begin_array(builder);
-	for (i = 0; i < v->dims; i++)
-		json_builder_add_double_value(builder, v->vector[i]);
-	json_builder_end_array(builder);
-	json_builder_end_object(builder);
-	root = json_builder_get_root(builder);
-	json = json_to_string(root, FALSE);
-	file = g_strconcat(v->name, ".json", NULL);
-	path = g_build_filename(self->directory, file, NULL);
-	return g_file_set_contents_full(path, json, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
-}
 static void
 enroll_embedded(GObject *source, GAsyncResult *result, gpointer data)
 {
-	GTask *outer = data;
-	AiVoiceprintIdentifier *self = g_task_get_source_object(outer);
-	Print *print = g_task_get_task_data(G_TASK(result));
-	g_autoptr(GError) error = NULL;
-	Voice *existing = NULL, *fresh;
-	guint i;
-	if (!g_task_propagate_boolean(G_TASK(result), &error)) {
-		g_task_return_error(outer, g_steal_pointer(&error));
-		g_object_unref(outer);
+	GTask *task = data;
+	AiVoiceprintIdentifier *self = g_task_get_source_object(task);
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	const gchar *name = g_task_get_task_data(task);
+	g_autoptr(AiVoiceprint) heard = NULL;
+	g_autoptr(AiVoiceprint) existing = NULL;
+	g_autoptr(AiVoiceprint) fresh = NULL;
+	GError *error = NULL;
+	heard = ai_speaker_embedder_embed_finish(AI_SPEAKER_EMBEDDER(source), result, &error);
+	if (heard == NULL) {
+		g_task_return_error(task, error);
+		g_object_unref(task);
 		return;
 	}
-	for (i = 0; i < self->voices->len; i++) {
-		Voice *v = g_ptr_array_index(self->voices, i);
-		if (g_str_equal(v->name, print->name))
-			existing = v;
-	}
-	fresh = g_new0(Voice, 1);
-	fresh->name = g_strdup(print->name);
-	fresh->model = g_strdup(print->model);
-	fresh->dims = print->dims;
-	fresh->vector = g_memdup2(print->vector, print->dims * sizeof(gfloat));
-	fresh->count = 1;
 	/* More of the same voice sharpens it; another model starts it over. */
-	if (existing != NULL && existing->dims == print->dims &&
-		g_str_equal(existing->model, print->model)) {
-		gsize k;
-		for (k = 0; k < fresh->dims; k++)
-			fresh->vector[k] = (existing->vector[k] * existing->count + print->vector[k]) /
-							   (existing->count + 1);
-		ai_embedding_normalize(fresh->vector, fresh->dims);
-		fresh->count = existing->count + 1;
-	}
-	if (!save(self, fresh, &error)) {
-		voice_free(fresh);
-		g_task_return_error(outer, g_steal_pointer(&error));
-		g_object_unref(outer);
+	existing = ai_voiceprint_store_lookup(priv->store, name);
+	if (existing != NULL && ai_voiceprint_is_comparable(existing, heard)) {
+		ai_voiceprint_absorb(existing, heard, 0);
+		fresh = g_object_ref(existing);
+	} else
+		fresh = ai_voiceprint_copy(heard, name);
+	if (!ai_voiceprint_store_save(priv->store, fresh, &error)) {
+		g_task_return_error(task, error);
+		g_object_unref(task);
 		return;
 	}
-	if (existing != NULL)
-		g_ptr_array_remove(self->voices, existing);
-	g_ptr_array_add(self->voices, fresh);
-	g_task_return_boolean(outer, TRUE);
-	g_object_unref(outer);
+	load_voices(self);
+	g_task_return_pointer(task, g_steal_pointer(&fresh), g_object_unref);
+	g_object_unref(task);
 }
 
 /**
  * ai_voiceprint_identifier_enroll_async:
  * @self: an #AiVoiceprintIdentifier
- * @name: who is speaking; also the voiceprint's file name
+ * @name: who is speaking; see ai_voiceprint_name_is_valid()
  * @pcm: some seconds of them talking, 16 kHz mono S16LE
  * @cancellable: (nullable): cancellation token
  * @callback: (scope async): completion callback
  * @user_data: data for @callback
  *
- * Saves @name's voiceprint in #AiVoiceprintIdentifier:directory, mode 0600.
- * Enrolling a name again averages the new audio into it.
+ * Saves @name's voiceprint in the store. Enrolling a name again averages
+ * the new audio into it, which makes it steadier; a voiceprint from another
+ * model is replaced.
  */
 void
 ai_voiceprint_identifier_enroll_async(AiVoiceprintIdentifier *self, const gchar *name,
 									  GBytes *pcm, GCancellable *cancellable,
 									  GAsyncReadyCallback callback, gpointer user_data)
 {
-	GTask *outer, *inner;
-	Print *print;
+	AiVoiceprintIdentifierPrivate *priv;
+	GTask *task;
 	g_return_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self));
 	g_return_if_fail(pcm != NULL);
-	outer = g_task_new(self, cancellable, callback, user_data);
-	if (self->directory == NULL) {
-		g_task_return_new_error(outer, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-								"No voiceprint directory");
-		g_object_unref(outer);
+	priv = private_of(self);
+	task = g_task_new(self, cancellable, callback, user_data);
+	g_task_set_source_tag(task, ai_voiceprint_identifier_enroll_async);
+	if (priv->store == NULL || priv->embedder == NULL) {
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
+								"Enrolling needs an embedder and a store");
+		g_object_unref(task);
 		return;
 	}
-	if (!valid_name(name)) {
-		g_task_return_new_error(outer, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+	if (!ai_voiceprint_name_is_valid(name)) {
+		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 								"Not a usable name: \"%s\"", name != NULL ? name : "");
-		g_object_unref(outer);
+		g_object_unref(task);
 		return;
 	}
-	inner = g_task_new(self, cancellable, enroll_embedded, outer);
-	print = g_new0(Print, 1);
-	print->name = g_strdup(name);
-	g_task_set_task_data(inner, print, print_free);
-	embed(self, pcm, inner);
+	g_task_set_task_data(task, g_strdup(name), g_free);
+	ai_speaker_embedder_embed_async(priv->embedder, pcm, cancellable, enroll_embedded, task);
 }
 
 /**
@@ -495,14 +497,42 @@ ai_voiceprint_identifier_enroll_async(AiVoiceprintIdentifier *self, const gchar 
  * @result: asynchronous result
  * @error: return location for an error
  *
- * Returns: whether the voiceprint was saved
+ * Returns: (transfer full) (nullable): the voiceprint as saved
  */
-gboolean
+AiVoiceprint *
 ai_voiceprint_identifier_enroll_finish(AiVoiceprintIdentifier *self, GAsyncResult *result,
 									   GError **error)
 {
-	g_return_val_if_fail(g_task_is_valid(result, self), FALSE);
-	return g_task_propagate_boolean(G_TASK(result), error);
+	g_return_val_if_fail(g_task_is_valid(result, self), NULL);
+	return g_task_propagate_pointer(G_TASK(result), error);
+}
+
+/* ---- the rest of the API ---- */
+
+/**
+ * ai_voiceprint_identifier_get_embedder:
+ * @self: an #AiVoiceprintIdentifier
+ *
+ * Returns: (transfer none) (nullable): the embedder
+ */
+AiSpeakerEmbedder *
+ai_voiceprint_identifier_get_embedder(AiVoiceprintIdentifier *self)
+{
+	g_return_val_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self), NULL);
+	return private_of(self)->embedder;
+}
+
+/**
+ * ai_voiceprint_identifier_get_store:
+ * @self: an #AiVoiceprintIdentifier
+ *
+ * Returns: (transfer none) (nullable): the store
+ */
+AiVoiceprintStore *
+ai_voiceprint_identifier_get_store(AiVoiceprintIdentifier *self)
+{
+	g_return_val_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self), NULL);
+	return private_of(self)->store;
 }
 
 /**
@@ -515,13 +545,94 @@ guint
 ai_voiceprint_identifier_get_n_voices(AiVoiceprintIdentifier *self)
 {
 	g_return_val_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self), 0);
-	return self->voices->len;
+	return private_of(self)->voices->len;
+}
+
+/**
+ * ai_voiceprint_identifier_reload:
+ * @self: an #AiVoiceprintIdentifier
+ *
+ * Reads the enrolled voices from the store again. A store that emits
+ * #AiVoiceprintStore::changed needs no call.
+ */
+void
+ai_voiceprint_identifier_reload(AiVoiceprintIdentifier *self)
+{
+	g_return_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self));
+	load_voices(self);
+}
+
+/**
+ * ai_voiceprint_identifier_closest:
+ * @self: an #AiVoiceprintIdentifier
+ * @heard: a voiceprint
+ * @exclude: (nullable): a name to pass over, such as the one being enrolled
+ * @score: (out) (optional): its similarity
+ *
+ * The enrolled voice most like @heard, at any similarity: enrolment uses it
+ * to warn that two people sound alike to the model.
+ *
+ * Returns: (transfer full) (nullable): the name, or %NULL with nobody
+ *   comparable enrolled
+ */
+gchar *
+ai_voiceprint_identifier_closest(AiVoiceprintIdentifier *self, AiVoiceprint *heard,
+								 const gchar *exclude, gdouble *score)
+{
+	AiVoiceprint *best;
+	gdouble s = -1;
+	g_return_val_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self), NULL);
+	g_return_val_if_fail(AI_IS_VOICEPRINT(heard), NULL);
+	best = closest_in(self, private_of(self)->voices, heard, exclude, &s);
+	if (score != NULL)
+		*score = s;
+	return best != NULL ? g_strdup(ai_voiceprint_get_name(best)) : NULL;
+}
+
+/**
+ * ai_voiceprint_identifier_list_guests:
+ * @self: an #AiVoiceprintIdentifier
+ *
+ * Returns: (transfer container) (element-type AiVoiceprint): copies of the
+ *   guests heard so far, in the order first heard
+ */
+GPtrArray *
+ai_voiceprint_identifier_list_guests(AiVoiceprintIdentifier *self)
+{
+	AiVoiceprintIdentifierPrivate *priv;
+	GPtrArray *out;
+	guint i;
+	g_return_val_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self), NULL);
+	priv = private_of(self);
+	out = g_ptr_array_new_with_free_func(g_object_unref);
+	for (i = 0; i < priv->guests->len; i++)
+		g_ptr_array_add(out, ai_voiceprint_copy(g_ptr_array_index(priv->guests, i), NULL));
+	return out;
+}
+
+/**
+ * ai_voiceprint_identifier_forget_guests:
+ * @self: an #AiVoiceprintIdentifier
+ *
+ * Drops every guest and starts numbering from 1 again, as for a new call.
+ */
+void
+ai_voiceprint_identifier_forget_guests(AiVoiceprintIdentifier *self)
+{
+	AiVoiceprintIdentifierPrivate *priv;
+	g_return_if_fail(AI_IS_VOICEPRINT_IDENTIFIER(self));
+	priv = private_of(self);
+	g_ptr_array_set_size(priv->guests, 0);
+	priv->next_guest = 0;
 }
 
 /**
  * ai_voiceprint_identifier_new:
- * @url: the voiceprint service's embedding endpoint
+ * @url: a voiceprint service's embedding endpoint
  * @directory: (nullable): where voiceprints are kept
+ *
+ * An identifier over an #AiHttpSpeakerEmbedder and a watched
+ * #AiFileVoiceprintStore.
  *
  * Returns: (transfer full): a new identifier, with the voiceprints in
  *   @directory already loaded
@@ -529,61 +640,109 @@ ai_voiceprint_identifier_get_n_voices(AiVoiceprintIdentifier *self)
 AiVoiceprintIdentifier *
 ai_voiceprint_identifier_new(const gchar *url, const gchar *directory)
 {
-	return g_object_new(AI_TYPE_VOICEPRINT_IDENTIFIER, "url", url, "directory", directory,
+	g_autoptr(AiHttpSpeakerEmbedder) embedder = ai_http_speaker_embedder_new(url);
+	g_autoptr(AiFileVoiceprintStore) store = NULL;
+	if (directory != NULL)
+		store = g_object_new(AI_TYPE_FILE_VOICEPRINT_STORE, "directory", directory, "monitor",
+							 TRUE, NULL);
+	return ai_voiceprint_identifier_new_full(AI_SPEAKER_EMBEDDER(embedder),
+											 store != NULL ? AI_VOICEPRINT_STORE(store) : NULL);
+}
+
+/**
+ * ai_voiceprint_identifier_new_full:
+ * @embedder: what turns audio into voiceprints
+ * @store: (nullable): where enrolled voiceprints are kept; %NULL: none
+ *   enrolled, guests only
+ *
+ * Returns: (transfer full): a new identifier
+ */
+AiVoiceprintIdentifier *
+ai_voiceprint_identifier_new_full(AiSpeakerEmbedder *embedder, AiVoiceprintStore *store)
+{
+	g_return_val_if_fail(AI_IS_SPEAKER_EMBEDDER(embedder), NULL);
+	g_return_val_if_fail(store == NULL || AI_IS_VOICEPRINT_STORE(store), NULL);
+	return g_object_new(AI_TYPE_VOICEPRINT_IDENTIFIER, "embedder", embedder, "store", store,
 						NULL);
 }
 
 static void
 get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 {
-	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(object);
-	if (id == PROP_URL)
-		g_value_set_string(value, self->url);
-	else if (id == PROP_DIRECTORY)
-		g_value_set_string(value, self->directory);
-	else if (id == PROP_THRESHOLD)
-		g_value_set_double(value, self->threshold);
-	else if (id == PROP_TIMEOUT)
-		g_value_set_uint(value, self->timeout_ms);
-	else if (id == PROP_TRACK_GUESTS)
-		g_value_set_boolean(value, self->track_guests);
-	else if (id == PROP_GUEST_THRESHOLD)
-		g_value_set_double(value, self->guest_threshold);
-	else
+	AiVoiceprintIdentifierPrivate *priv = private_of(AI_VOICEPRINT_IDENTIFIER(object));
+	switch (id) {
+	case PROP_EMBEDDER:
+		g_value_set_object(value, priv->embedder);
+		break;
+	case PROP_STORE:
+		g_value_set_object(value, priv->store);
+		break;
+	case PROP_THRESHOLD:
+		g_value_set_double(value, priv->threshold);
+		break;
+	case PROP_TRACK_GUESTS:
+		g_value_set_boolean(value, priv->track_guests);
+		break;
+	case PROP_GUEST_THRESHOLD:
+		g_value_set_double(value, priv->guest_threshold);
+		break;
+	case PROP_MAX_GUESTS:
+		g_value_set_uint(value, priv->max_guests);
+		break;
+	case PROP_MIN_GUEST_MS:
+		g_value_set_uint(value, priv->min_guest_ms);
+		break;
+	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+	}
 }
 static void
 set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 {
 	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(object);
-	if (id == PROP_URL) {
-		g_free(self->url);
-		self->url = g_value_dup_string(value);
-	} else if (id == PROP_DIRECTORY) {
-		g_free(self->directory);
-		self->directory = g_value_dup_string(value);
-		load(self);
-	} else if (id == PROP_THRESHOLD)
-		self->threshold = g_value_get_double(value);
-	else if (id == PROP_TIMEOUT) {
-		self->timeout_ms = g_value_get_uint(value);
-		g_object_set(self->http, "timeout", MAX(1u, (self->timeout_ms + 999) / 1000), NULL);
-	} else if (id == PROP_TRACK_GUESTS)
-		self->track_guests = g_value_get_boolean(value);
-	else if (id == PROP_GUEST_THRESHOLD)
-		self->guest_threshold = g_value_get_double(value);
-	else
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	switch (id) {
+	case PROP_EMBEDDER:
+		g_set_object(&priv->embedder, g_value_get_object(value));
+		break;
+	case PROP_STORE:
+		set_store(self, g_value_get_object(value));
+		break;
+	case PROP_THRESHOLD:
+		priv->threshold = g_value_get_double(value);
+		break;
+	case PROP_TRACK_GUESTS:
+		priv->track_guests = g_value_get_boolean(value);
+		break;
+	case PROP_GUEST_THRESHOLD:
+		priv->guest_threshold = g_value_get_double(value);
+		break;
+	case PROP_MAX_GUESTS:
+		priv->max_guests = g_value_get_uint(value);
+		break;
+	case PROP_MIN_GUEST_MS:
+		priv->min_guest_ms = g_value_get_uint(value);
+		break;
+	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
+	}
+}
+static void
+dispose(GObject *object)
+{
+	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(object);
+	set_store(self, NULL);
+	g_clear_object(&private_of(self)->embedder);
+	G_OBJECT_CLASS(ai_voiceprint_identifier_parent_class)->dispose(object);
 }
 static void
 finalize(GObject *object)
 {
-	AiVoiceprintIdentifier *self = AI_VOICEPRINT_IDENTIFIER(object);
-	g_free(self->url);
-	g_free(self->directory);
-	g_ptr_array_unref(self->voices);
-	g_ptr_array_unref(self->guests);
-	g_object_unref(self->http);
+	AiVoiceprintIdentifierPrivate *priv = private_of(AI_VOICEPRINT_IDENTIFIER(object));
+	/* Every embedding in flight holds a reference, so no Pending is left. */
+	g_ptr_array_unref(priv->voices);
+	g_ptr_array_unref(priv->guests);
+	g_main_context_unref(priv->context);
 	G_OBJECT_CLASS(ai_voiceprint_identifier_parent_class)->finalize(object);
 }
 static void
@@ -592,62 +751,97 @@ ai_voiceprint_identifier_class_init(AiVoiceprintIdentifierClass *klass)
 	GObjectClass *oc = G_OBJECT_CLASS(klass);
 	oc->get_property = get_property;
 	oc->set_property = set_property;
+	oc->dispose = dispose;
 	oc->finalize = finalize;
-	g_object_class_install_property(
-		oc, PROP_URL,
-		g_param_spec_string("url", "URL", "Voiceprint service embedding endpoint", NULL,
-							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
-	g_object_class_install_property(
-		oc, PROP_DIRECTORY,
-		g_param_spec_string("directory", "Directory", "Where voiceprints are kept", NULL,
-							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	klass->score = default_score;
+	klass->match = default_match;
+	/**
+	 * AiVoiceprintIdentifier:embedder:
+	 *
+	 * What turns audio into voiceprints.
+	 */
+	props[PROP_EMBEDDER] = g_param_spec_object(
+		"embedder", "Embedder", "Turns audio into voiceprints", AI_TYPE_SPEAKER_EMBEDDER,
+		G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
+	/**
+	 * AiVoiceprintIdentifier:store:
+	 *
+	 * Where enrolled voiceprints are kept. Reloaded whenever it emits
+	 * #AiVoiceprintStore::changed.
+	 */
+	props[PROP_STORE] =
+		g_param_spec_object("store", "Store", "Where enrolled voiceprints are kept",
+							AI_TYPE_VOICEPRINT_STORE,
+							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
 	/**
 	 * AiVoiceprintIdentifier:threshold:
 	 *
-	 * The cosine similarity a voice must reach to be named. Below it, the
-	 * speaker is nobody enrolled.
+	 * The similarity a voice must reach to be named as someone enrolled.
+	 * The right value belongs to the embedding model: measure it with the
+	 * device's own audio.
 	 */
-	g_object_class_install_property(
-		oc, PROP_THRESHOLD,
-		g_param_spec_double("threshold", "Threshold", "Similarity needed to name a speaker",
-							0.0, 1.0, 0.55,
-							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	props[PROP_THRESHOLD] = g_param_spec_double(
+		"threshold", "Threshold", "Similarity needed to name a speaker", 0.0, 1.0, 0.55,
+		G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
 	/**
 	 * AiVoiceprintIdentifier:track-guests:
 	 *
 	 * Name every voice, not only enrolled ones. A voice that matches nobody
-	 * enrolled becomes "Guest 1", "Guest 2", ... in the order first heard, and
-	 * later utterances in that voice are the same guest. Guests live in memory
-	 * for this identifier's lifetime and are never saved. A new guest needs
-	 * at least a second and a half of audio; a shorter unknown voice is
-	 * %G_IO_ERROR_INVALID_DATA, too short to tell.
+	 * enrolled becomes "Guest 1", "Guest 2", ... in the order first heard,
+	 * and later utterances in that voice are the same guest. Guests live in
+	 * memory and are never saved unless promoted. A new guest needs
+	 * #AiVoiceprintIdentifier:min-guest-ms of audio; a shorter unknown voice
+	 * is %G_IO_ERROR_INVALID_DATA, too short to tell.
 	 */
-	g_object_class_install_property(
-		oc, PROP_TRACK_GUESTS,
+	props[PROP_TRACK_GUESTS] =
 		g_param_spec_boolean("track-guests", "Track guests",
 							 "Number voices that match nobody enrolled", FALSE,
-							 G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+							 G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 	/**
 	 * AiVoiceprintIdentifier:guest-threshold:
 	 *
-	 * The similarity a voice needs to be a guest already heard rather than a
-	 * new one.
+	 * The similarity a voice needs to be a guest already heard rather than
+	 * a new one.
 	 */
-	g_object_class_install_property(
-		oc, PROP_GUEST_THRESHOLD,
-		g_param_spec_double("guest-threshold", "Guest threshold",
-							"Similarity needed to be a guest already heard", 0.0, 1.0, 0.35,
-							G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
-	g_object_class_install_property(
-		oc, PROP_TIMEOUT,
-		g_param_spec_uint("timeout-ms", "Timeout", "Voiceprint service request timeout", 1,
-						  600000, 5000,
-						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
+	props[PROP_GUEST_THRESHOLD] = g_param_spec_double(
+		"guest-threshold", "Guest threshold", "Similarity needed to be a guest already heard",
+		0.0, 1.0, 0.35, G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
+	/**
+	 * AiVoiceprintIdentifier:max-guests:
+	 *
+	 * The most guests tracked at once. A stranger beyond it is unknown.
+	 */
+	props[PROP_MAX_GUESTS] = g_param_spec_uint(
+		"max-guests", "Maximum guests", "Most guests tracked at once", 1, 1024, 32,
+		G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
+	/**
+	 * AiVoiceprintIdentifier:min-guest-ms:
+	 *
+	 * The least audio that may start a new guest.
+	 */
+	props[PROP_MIN_GUEST_MS] = g_param_spec_uint(
+		"min-guest-ms", "Minimum guest audio", "Least audio that starts a new guest", 0,
+		60000, 1500, G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS);
+	g_object_class_install_properties(oc, N_PROPS, props);
+	/**
+	 * AiVoiceprintIdentifier::promoted:
+	 * @self: the identifier
+	 * @guest: the guest's name, as it was ("Guest 2")
+	 * @name: the name the voice is now enrolled as
+	 *
+	 * A guest's voice was saved under a lasting name.
+	 */
+	signals[SIGNAL_PROMOTED] = g_signal_new(
+		"promoted", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST,
+		G_STRUCT_OFFSET(AiVoiceprintIdentifierClass, promoted), NULL, NULL, NULL, G_TYPE_NONE,
+		2, G_TYPE_STRING, G_TYPE_STRING);
 }
 static void
 ai_voiceprint_identifier_init(AiVoiceprintIdentifier *self)
 {
-	self->voices = g_ptr_array_new_with_free_func(voice_free);
-	self->guests = g_ptr_array_new_with_free_func(voice_free);
-	self->http = ai_http_session_new();
+	AiVoiceprintIdentifierPrivate *priv = private_of(self);
+	priv->voices = g_ptr_array_new_with_free_func(g_object_unref);
+	priv->guests = g_ptr_array_new_with_free_func(g_object_unref);
+	priv->context = g_main_context_ref_thread_default();
+	g_queue_init(&priv->pending);
 }
