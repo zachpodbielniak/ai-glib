@@ -509,6 +509,8 @@ static void
 test_identifier_finalize(GObject *object)
 {
 	g_free(((TestIdentifier *)object)->promoted);
+	/* Script entries are static; only the queue's links are ours. */
+	g_queue_clear(&((TestIdentifier *)object)->script);
 	G_OBJECT_CLASS(test_identifier_parent_class)->finalize(object);
 }
 static void
@@ -964,6 +966,7 @@ promotion_setup(Fixture *f, TestIdentifier **id)
 static void
 on_guest_promoted(AiVoiceSession *s, const gchar *guest, const gchar *name, gpointer data)
 {
+	g_free(*(gchar **)data);
 	*(gchar **)data = g_strdup_printf("%s=%s", guest, name);
 }
 /* "Ada, guest two is Kim" saves the guest's voice as Kim's and says so; it

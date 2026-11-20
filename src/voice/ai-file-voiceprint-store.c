@@ -56,7 +56,8 @@ path_for(AiFileVoiceprintStorePrivate *priv, const gchar *name)
 static gboolean
 ensure_directory(AiFileVoiceprintStorePrivate *priv, GError **error)
 {
-	GStatBuf st;
+	struct stat st;
+	gint fd;
 	if (priv->directory == NULL) {
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 							"No voiceprint directory");
@@ -68,26 +69,34 @@ ensure_directory(AiFileVoiceprintStorePrivate *priv, GError **error)
 					priv->directory, g_strerror(saved));
 		return FALSE;
 	}
-	if (g_lstat(priv->directory, &st) != 0 || !S_ISDIR(st.st_mode)) {
+	/* Judged by the descriptor that was opened, never by the path again: a
+	 * symlink swapped in after a check must not be what gets chmod'ed. */
+	fd = open(priv->directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) {
 		g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY,
 					"%s is not a directory", priv->directory);
+		if (fd >= 0)
+			close(fd);
 		return FALSE;
 	}
 	if (st.st_uid != getuid()) {
 		g_set_error(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
 					"%s belongs to another user", priv->directory);
+		close(fd);
 		return FALSE;
 	}
 	if ((st.st_mode & 077) != 0) {
 		g_log("ai-glib", G_LOG_LEVEL_INFO,
 			  "Voiceprint directory %s was readable by others; now 0700", priv->directory);
-		if (g_chmod(priv->directory, 0700) != 0) {
+		if (fchmod(fd, 0700) != 0) {
 			gint saved = errno;
 			g_set_error(error, G_IO_ERROR, g_io_error_from_errno(saved), "Cannot protect %s: %s",
 						priv->directory, g_strerror(saved));
+			close(fd);
 			return FALSE;
 		}
 	}
+	close(fd);
 	return TRUE;
 }
 /* One voiceprint file, or NULL (logged at debug) when it is not one. */
@@ -232,21 +241,64 @@ file_rename(AiVoiceprintStore *store, const gchar *from, const gchar *to, GError
 	AiFileVoiceprintStorePrivate *priv = private_of(store);
 	g_autoptr(AiVoiceprint) old = file_lookup(store, from);
 	g_autoptr(AiVoiceprint) renamed = NULL;
-	g_autofree gchar *target = NULL;
+	g_autoptr(JsonNode) root = NULL;
+	g_autofree gchar *target = NULL, *json = NULL, *temp = NULL;
+	gsize len, done;
+	gint fd;
 	if (old == NULL) {
 		g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "Nobody called %s is enrolled",
 					from);
 		return FALSE;
 	}
+	if (!ensure_directory(priv, error))
+		return FALSE;
 	target = path_for(priv, to);
-	if (g_file_test(target, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_SYMLINK)) {
-		g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "%s is already enrolled", to);
+	/* The name lives inside the file too, so this is a write, not a move:
+	 * the new file is written in full under a temporary name, then linked
+	 * into place. link() refuses an existing target atomically, so a file
+	 * that appeared after any check is never replaced. */
+	renamed = ai_voiceprint_copy(old, to);
+	root = ai_voiceprint_to_json(renamed);
+	json = json_to_string(root, FALSE);
+	temp = g_build_filename(priv->directory, ".rename-XXXXXX", NULL);
+	fd = g_mkstemp_full(temp, O_RDWR | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		gint saved = errno;
+		g_set_error(error, G_IO_ERROR, g_io_error_from_errno(saved), "Cannot write in %s: %s",
+					priv->directory, g_strerror(saved));
 		return FALSE;
 	}
-	/* The name lives inside the file too, so this is a write, not a move. */
-	renamed = ai_voiceprint_copy(old, to);
-	if (!file_save(store, renamed, error))
+	len = strlen(json);
+	for (done = 0; done < len;) {
+		gssize wrote = write(fd, json + done, len - done);
+		if (wrote < 0 && errno == EINTR)
+			continue;
+		if (wrote <= 0)
+			break;
+		done += (gsize)wrote;
+	}
+	if (done != len || fsync(fd) != 0) {
+		gint saved = errno;
+		close(fd);
+		g_unlink(temp);
+		g_set_error(error, G_IO_ERROR, g_io_error_from_errno(saved), "Cannot write %s: %s",
+					temp, g_strerror(saved));
 		return FALSE;
+	}
+	close(fd);
+	if (link(temp, target) != 0) {
+		gint saved = errno;
+		g_unlink(temp);
+		if (saved == EEXIST)
+			g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "%s is already enrolled", to);
+		else
+			g_set_error(error, G_IO_ERROR, g_io_error_from_errno(saved), "Cannot create %s: %s",
+						target, g_strerror(saved));
+		return FALSE;
+	}
+	g_unlink(temp);
+	/* The new name exists now; if the old one cannot go, say so rather
+	 * than leave the caller believing the rename half-failed silently. */
 	return file_remove(store, from, error);
 }
 static void

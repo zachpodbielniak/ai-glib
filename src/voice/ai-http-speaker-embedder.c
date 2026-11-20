@@ -63,11 +63,37 @@ deadline_passed(gpointer data)
 	g_cancellable_cancel(r->cancel);
 	return G_SOURCE_REMOVE;
 }
-/* The caller's cancel, forwarded to ours. Any thread. */
+static gboolean
+forward_cancel(gpointer data)
+{
+	g_cancellable_cancel(G_CANCELLABLE(data));
+	return G_SOURCE_REMOVE;
+}
+/* The caller's cancel, forwarded to ours -- from an idle, never from inside
+ * the caller's own cancel emission: libsoup may finish the request at once,
+ * and whoever then disconnects from the caller's cancellable would deadlock
+ * inside its signal. Any thread. */
+typedef struct {
+	GCancellable *ours;
+	GMainContext *context; /* where the request was started */
+} Forward;
+static void
+forward_free(gpointer data)
+{
+	Forward *f = data;
+	g_object_unref(f->ours);
+	g_main_context_unref(f->context);
+	g_free(f);
+}
 static void
 caller_cancelled(GCancellable *caller, gpointer data)
 {
-	g_cancellable_cancel(G_CANCELLABLE(data));
+	Forward *f = data;
+	GSource *idle = g_idle_source_new();
+	g_source_set_priority(idle, G_PRIORITY_DEFAULT);
+	g_source_set_callback(idle, forward_cancel, g_object_ref(f->ours), g_object_unref);
+	g_source_attach(idle, f->context);
+	g_source_unref(idle);
 }
 /* Turn our own cancellation into the error the caller expects to see. */
 static void
@@ -106,11 +132,16 @@ body_read(GObject *source, GAsyncResult *result, gpointer data)
 	gsize got = 0;
 	guint status;
 	if (!g_input_stream_read_all_finish(G_INPUT_STREAM(source), result, &got, &error)) {
+		g_cancellable_cancel(r->cancel);
 		return_error(task, r, error);
 		return;
 	}
-	g_input_stream_close(G_INPUT_STREAM(source), NULL, NULL);
+	if (got <= AI_HTTP_SPEAKER_EMBEDDER_MAX_REPLY)
+		/* At end of stream already: closing reads nothing more. */
+		g_input_stream_close(G_INPUT_STREAM(source), NULL, NULL);
 	if (got > AI_HTTP_SPEAKER_EMBEDDER_MAX_REPLY) {
+		/* Abandon the connection rather than let closing it drain the rest. */
+		g_cancellable_cancel(r->cancel);
 		return_error(task, r,
 					 g_error_new(G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE,
 								 "Voiceprint service reply is larger than %" G_GSIZE_FORMAT
@@ -183,9 +214,12 @@ embed_async(AiSpeakerEmbedder *embedder, GBytes *pcm, GCancellable *cancellable,
 	ai_http_guard_message(r->message);
 	r->cancel = g_cancellable_new();
 	if (cancellable != NULL) {
+		Forward *f = g_new0(Forward, 1);
+		f->ours = g_object_ref(r->cancel);
+		f->context = g_main_context_ref_thread_default();
 		r->caller = g_object_ref(cancellable);
-		r->caller_cancel_id = g_cancellable_connect(cancellable, G_CALLBACK(caller_cancelled),
-													g_object_ref(r->cancel), g_object_unref);
+		r->caller_cancel_id = g_cancellable_connect(cancellable, G_CALLBACK(caller_cancelled), f,
+													forward_free);
 	}
 	if (priv->timeout_ms > 0) {
 		r->deadline = g_timeout_source_new(priv->timeout_ms);

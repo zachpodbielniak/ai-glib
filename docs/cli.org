@@ -768,6 +768,7 @@ curl --data-binary @speech.raw http://127.0.0.1:8095/embed
 | =-p=, =--port PORT= | Port (default 8095) |
 | =-t=, =--threads N= | Threads per embedding (default 1) |
 | =--max-seconds N= | Longest audio accepted (default 30) |
+| =--max-busy N= | Embeddings at once; more are answered 503 (default 4) |
 | =--version=, =--license= | Version or license information |
 
-=POST /embed= takes raw 16 kHz mono S16LE and answers ={"model":"...","dim":N,"embedding":[...]}=; under half a second is 422 and over =--max-seconds= is 413. =GET /health= reports the model. It keeps nothing and has no authentication: bind it to a network you trust. =contrib/ai-voiceprint-server.service= is a systemd user unit for it. See [[file:voice.org::*Naming speakers by voice][Naming speakers by voice]].
+=POST /embed= takes raw 16 kHz mono S16LE and answers ={"model":"...","dim":N,"embedding":[...]}=; under half a second is 422, over =--max-seconds= is 413 (refused before the body is read), a request without =Content-Length= 411, and one beyond =--max-busy= 503. =GET /health= reports the model. It keeps nothing and has no authentication: bind it to a network you trust. =contrib/ai-voiceprint-server.service= is a systemd user unit for it. See [[file:voice.org::*Naming speakers by voice][Naming speakers by voice]].

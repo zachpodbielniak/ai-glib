@@ -10,7 +10,9 @@
  *
  *   POST /embed   raw 16 kHz mono S16LE  ->  {"model":"...","dim":N,"embedding":[...]}
  *                 under half a second    ->  422 {"error":"..."}
- *                 over --max-seconds     ->  413 {"error":"..."}
+ *                 over --max-seconds     ->  413 {"error":"..."}, before the body is read
+ *                 no Content-Length      ->  411
+ *                 --max-busy running     ->  503, Retry-After: 1
  *   GET  /health                         ->  {"model":"...","dim":N}
  *
  * It keeps nothing: audio and embeddings live only for the request. It
@@ -21,6 +23,7 @@ typedef struct {
 	AiOnnxSpeakerEmbedder *embedder;
 	gsize max_bytes;
 	guint requests;
+	guint busy, max_busy; /* embeddings running, and how many may */
 } Server;
 
 static void
@@ -46,6 +49,7 @@ reply_error(SoupServerMessage *msg, guint status, const gchar *message)
 
 typedef struct {
 	SoupServerMessage *msg;
+	Server *server;
 	gint64 started;
 } Pending;
 /* The embedding is back from the worker thread: answer and resume. */
@@ -73,9 +77,39 @@ embedded(GObject *source, GAsyncResult *result, gpointer data)
 		g_log("ai-voiceprint-server", G_LOG_LEVEL_DEBUG, "embedded in %" G_GINT64_FORMAT " ms",
 			  (g_get_monotonic_time() - p->started) / 1000);
 	}
+	p->server->busy--;
 	soup_server_message_unpause(p->msg);
 	g_object_unref(p->msg);
 	g_free(p);
+}
+/*
+ * Before the body is read: refuse what would be too much to hold. libsoup
+ * buffers the whole body before a normal handler runs, so a size check
+ * there comes after the memory is spent. Only a declared length is
+ * accepted, and none while every worker is busy. Setting a status here
+ * means the body is never read.
+ */
+static void
+early_handler(SoupServer *soup, SoupServerMessage *msg, const gchar *path, GHashTable *query,
+			  gpointer data)
+{
+	Server *server = data;
+	SoupMessageHeaders *headers = soup_server_message_get_request_headers(msg);
+	if (g_strcmp0(soup_server_message_get_method(msg), SOUP_METHOD_POST) != 0)
+		return;
+	if (soup_message_headers_get_encoding(headers) != SOUP_ENCODING_CONTENT_LENGTH) {
+		reply_error(msg, 411, "send Content-Length");
+		return;
+	}
+	if ((guint64)soup_message_headers_get_content_length(headers) > server->max_bytes) {
+		reply_error(msg, 413, "too much audio");
+		return;
+	}
+	if (server->busy >= server->max_busy) {
+		soup_message_headers_replace(soup_server_message_get_response_headers(msg),
+									 "Retry-After", "1");
+		reply_error(msg, 503, "busy");
+	}
 }
 static void
 embed_handler(SoupServer *soup, SoupServerMessage *msg, const gchar *path, GHashTable *query,
@@ -98,9 +132,17 @@ embed_handler(SoupServer *soup, SoupServerMessage *msg, const gchar *path, GHash
 		reply_error(msg, 422, "need at least 0.5 s of S16LE audio");
 		return;
 	}
+	/* The early handler checked, but another request may have started
+	 * while this body was arriving. */
+	if (server->busy >= server->max_busy) {
+		reply_error(msg, 503, "busy");
+		return;
+	}
 	server->requests++;
+	server->busy++;
 	pcm = soup_message_body_flatten(body);
 	p = g_new0(Pending, 1);
+	p->server = server;
 	p->msg = g_object_ref(msg);
 	p->started = g_get_monotonic_time();
 	soup_server_message_pause(msg);
@@ -136,7 +178,7 @@ int
 main(int argc, char **argv)
 {
 	g_autofree gchar *model = NULL, *listen = NULL;
-	gint port = 8095, threads = 1, max_seconds = 30;
+	gint port = 8095, threads = 1, max_seconds = 30, max_busy = 4;
 	gboolean license = FALSE, version = FALSE;
 	g_autoptr(GOptionContext) options = g_option_context_new("- serve speaker voiceprints");
 	g_autoptr(GError) error = NULL;
@@ -153,6 +195,8 @@ main(int argc, char **argv)
 		{"threads", 't', 0, G_OPTION_ARG_INT, &threads, "Threads per embedding (1)", "N"},
 		{"max-seconds", 0, 0, G_OPTION_ARG_INT, &max_seconds,
 		 "Longest audio accepted, in seconds (30)", "N"},
+		{"max-busy", 0, 0, G_OPTION_ARG_INT, &max_busy,
+		 "Embeddings at once; more are answered 503 (4)", "N"},
 		{"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
 		{"license", 0, 0, G_OPTION_ARG_NONE, &license, "Show license", NULL},
 		{NULL}};
@@ -189,11 +233,13 @@ main(int argc, char **argv)
 		return 2;
 	}
 	if (port < 1 || port > 65535 || threads < 1 || threads > 64 || max_seconds < 1 ||
-		max_seconds > 600) {
-		g_printerr("ai-voiceprint-server: --port, --threads or --max-seconds out of range\n");
+		max_seconds > 600 || max_busy < 1 || max_busy > 256) {
+		g_printerr("ai-voiceprint-server: --port, --threads, --max-seconds or --max-busy out "
+				   "of range\n");
 		return 2;
 	}
 	server.max_bytes = (gsize)max_seconds * 16000 * 2;
+	server.max_busy = (guint)max_busy;
 	server.embedder = g_initable_new(AI_TYPE_ONNX_SPEAKER_EMBEDDER, NULL, &error, "model-path",
 									 model, "threads", (guint)threads, NULL);
 	if (server.embedder == NULL) {
@@ -208,6 +254,7 @@ main(int argc, char **argv)
 	}
 	socket_address = g_inet_socket_address_new(address, (guint16)port);
 	soup = soup_server_new("server-header", "ai-voiceprint-server", NULL);
+	soup_server_add_early_handler(soup, "/embed", early_handler, &server, NULL);
 	soup_server_add_handler(soup, "/embed", embed_handler, &server, NULL);
 	soup_server_add_handler(soup, "/health", health_handler, &server, NULL);
 	if (!soup_server_listen(soup, socket_address, 0, &error)) {

@@ -925,6 +925,7 @@ typedef struct {
 	gboolean done;
 	GError *error;
 	guint timer; /* 0 once it has fired */
+	gboolean joined; /* the join has called back, either way */
 } Recording;
 static void
 recorded_audio(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointer data)
@@ -938,6 +939,7 @@ static void
 recording_step(GObject *source, GAsyncResult *result, gpointer data)
 {
 	Recording *r = data;
+	r->joined = TRUE;
 	if (!ai_audio_transport_join_finish(AI_AUDIO_TRANSPORT(source), result, &r->error))
 		r->done = TRUE;
 }
@@ -975,6 +977,10 @@ record_microphone(App *app, guint seconds, GError **error)
 	while (!r.done)
 		g_main_context_iteration(context, TRUE);
 	g_clear_handle_id(&r.timer, g_source_remove);
+	/* The timer can beat a slow pipeline start: the join must call back
+	 * before R goes out of scope, so wait for it. */
+	while (!r.joined)
+		g_main_context_iteration(context, TRUE);
 	if (r.error == NULL) {
 		r.done = FALSE;
 		ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(transport), NULL, recording_left, &r);

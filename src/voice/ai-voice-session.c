@@ -1114,8 +1114,10 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 					gsize size;
 					const guint8 *samples = g_bytes_get_data(onset, &size);
 					g_byte_array_set_size(p->onset, 0);
+					/* The utterance's audio is kept only to be named. */
 					g_byte_array_set_size(p->utterance, 0);
-					g_byte_array_append(p->utterance, samples, size);
+					if (P(self)->identifier != NULL)
+						g_byte_array_append(p->utterance, samples, size);
 					recognizing =
 						ai_speech_recognizer_begin(P(self)->recognizer, speaker, &error);
 					if (P(self)->stopped ||
@@ -1149,7 +1151,7 @@ audio_in(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointe
 		if (p->preroll->len > PREROLL_BYTES)
 			g_byte_array_remove_range(p->preroll, 0, p->preroll->len - PREROLL_BYTES);
 		if (p->recognizing && !p->ended && error == NULL && !fed_onset) {
-			if (p->utterance->len < UTTERANCE_BYTES)
+			if (P(self)->identifier != NULL && p->utterance->len < UTTERANCE_BYTES)
 				g_byte_array_append(p->utterance, g_bytes_get_data(frame, NULL), 320);
 			ai_speech_recognizer_feed(P(self)->recognizer, speaker, frame, &error);
 		}
@@ -1694,7 +1696,7 @@ deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
 typedef struct {
 	gint refs;
 	AiVoiceSession *session; /* borrowed; owned while identification is in flight */
-	gchar *speaker, *text, *name;
+	gchar *speaker, *text;
 	gboolean done, too_short, failed, dropped;
 	AiSpeakerMatch *match; /* the identifier's answer, when it gave one */
 	GCancellable *cancel;

@@ -680,7 +680,9 @@ curl --data-binary @speech.raw http://127.0.0.1:8095/embed
 |---------+--------|
 | =POST /embed= with raw 16 kHz mono S16LE | =200= ={"model":"...","dim":N,"embedding":[...]}= |
 | under half a second of audio | =422= ={"error":"..."}= |
-| over =--max-seconds= (default 30) | =413= |
+| over =--max-seconds= (default 30) | =413=, before the body is read |
+| no =Content-Length= | =411= |
+| =--max-busy= (default 4) embeddings already running | =503= with =Retry-After: 1= |
 | =GET /health= | ={"model":"...","dim":N,"requests":N}= |
 
 It keeps nothing, listens on loopback unless told otherwise, and has no authentication of its own: put it on a network you trust, or behind something that authenticates. =contrib/ai-voiceprint-server.service= runs it as a systemd user service. The client side (=AiHttpSpeakerEmbedder=) bounds each request by =speaker-timeout-ms= from start to finish -- not merely a silence on the socket -- reads at most a megabyte of reply without buffering more, follows a redirect only to the same origin, and rejects a reply whose vector is empty, non-finite, out of a float's range or all zeros.

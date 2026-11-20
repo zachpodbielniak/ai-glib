@@ -464,6 +464,19 @@ test_onnx_server(void)
 	g_assert_cmpstr(ai_voiceprint_get_model(r.print), ==, ai_voiceprint_get_model(here));
 	g_assert_cmpfloat(ai_voiceprint_similarity(r.print, here), >, 0.9999);
 	g_object_unref(r.print);
+	/* Too much audio is refused before the body is read. */
+	{
+		g_autoptr(GBytes) long_audio = pcm_tone(300, 31.0);
+		Embedded big = {0};
+		ai_speaker_embedder_embed_async(AI_SPEAKER_EMBEDDER(remote), long_audio, NULL, embedded,
+										&big);
+		while (!big.done)
+			g_main_context_iteration(NULL, TRUE);
+		g_assert_null(big.print);
+		g_assert_nonnull(big.error);
+		g_assert_nonnull(strstr(big.error->message, "413"));
+		g_clear_error(&big.error);
+	}
 	g_subprocess_send_signal(child, SIGTERM);
 	g_subprocess_wait(child, NULL, NULL);
 	g_unlink(path);

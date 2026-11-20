@@ -805,6 +805,47 @@ test_cancel_unblocks_queue(void)
 	result_clear(&b);
 	service_stop(&s);
 }
+/* An identification that is ready but waiting behind a stuck one is
+ * answered as soon as it is cancelled, not when the stuck one gives up. */
+static void
+test_cancel_behind_stuck_head(void)
+{
+	Service s = {0};
+	g_autoptr(AiVoiceprintIdentifier) id = NULL;
+	g_autoptr(GBytes) stuck = voice(4500, 2.0);
+	g_autoptr(GBytes) quick = voice(3000, 2.0);
+	g_autoptr(GCancellable) stuck_cancel = g_cancellable_new();
+	g_autoptr(GCancellable) quick_cancel = g_cancellable_new();
+	Result a = {0}, b = {0};
+	gint64 limit;
+	service_start(&s);
+	id = ai_voiceprint_identifier_new(s.url, s.dir);
+	g_object_set(id, "track-guests", TRUE, NULL);
+	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(id), stuck, stuck_cancel,
+										 identified, &a);
+	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(id), quick, quick_cancel,
+										 identified, &b);
+	/* Let the quick one's voiceprint come back; it waits behind the head. */
+	limit = g_get_monotonic_time() + 300000;
+	while (g_get_monotonic_time() < limit)
+		g_main_context_iteration(NULL, FALSE);
+	g_assert_false(b.done);
+	g_cancellable_cancel(quick_cancel);
+	wait_done(&b);
+	g_assert_error(b.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+	g_assert_false(a.done);
+	/* No guest was grown from a cancelled one. */
+	{
+		g_autoptr(GPtrArray) guests = ai_voiceprint_identifier_list_guests(id);
+		g_assert_cmpuint(guests->len, ==, 0);
+	}
+	g_cancellable_cancel(stuck_cancel);
+	wait_done(&a);
+	g_assert_error(a.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+	result_clear(&a);
+	result_clear(&b);
+	service_stop(&s);
+}
 /* At the guest cap a new stranger is unknown -- never folded into a guest it
  * does not sound like. */
 static void
@@ -828,6 +869,7 @@ test_guest_cap(void)
 static void
 on_promoted(AiVoiceprintIdentifier *id, const gchar *guest, const gchar *name, gpointer data)
 {
+	g_free(*(gchar **)data);
 	*(gchar **)data = g_strdup_printf("%s=%s", guest, name);
 }
 /* A guest's voice can be saved under a name nobody has; a name already
@@ -943,6 +985,7 @@ main(int argc, char **argv)
 	g_test_add_func("/voice/speaker/guests-tracked", test_guests_tracked);
 	g_test_add_func("/voice/speaker/guests-in-heard-order", test_guests_in_heard_order);
 	g_test_add_func("/voice/speaker/cancel-unblocks-queue", test_cancel_unblocks_queue);
+	g_test_add_func("/voice/speaker/cancel-behind-stuck-head", test_cancel_behind_stuck_head);
 	g_test_add_func("/voice/speaker/guest-cap", test_guest_cap);
 	g_test_add_func("/voice/speaker/promote-guest", test_promote_guest);
 	g_test_add_func("/voice/speaker/subclass-score", test_subclass_score);

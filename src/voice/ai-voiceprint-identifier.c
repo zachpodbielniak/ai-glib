@@ -34,6 +34,7 @@ typedef struct {
 	GPtrArray *guests; /* AiVoiceprint "Guest N", in the order first heard */
 	guint next_guest;
 	GQueue pending; /* Pending*, in the order asked */
+	guint64 next_serial;
 	GMainContext *context;
 } AiVoiceprintIdentifierPrivate;
 
@@ -179,6 +180,7 @@ default_match(AiVoiceprintIdentifier *self, AiVoiceprint *heard, gsize audio_byt
  * frees it. */
 typedef struct {
 	GTask *task; /* NULL once answered early, on cancel */
+	guint64 serial; /* how a cancel finds it: a pointer may be reused */
 	AiVoiceprint *heard;
 	GError *error;
 	gsize bytes;
@@ -263,26 +265,36 @@ embedded(GObject *source, GAsyncResult *result, gpointer data)
 	g_object_unref(self);
 }
 /* The caller gave up: answer now and leave the queue, rather than wait for
- * the embedder, so a stuck embedding never holds later utterances. The
- * pending is looked up by pointer before it is touched: it may have been
- * answered and freed in the meantime. */
+ * the embedder or for the identifications ahead of it, so nothing stuck
+ * holds later utterances. The pending is found by its serial number, never
+ * by pointer: it may have been answered and freed in the meantime, and a
+ * new one allocated at the same address. */
 typedef struct {
 	AiVoiceprintIdentifier *self; /* owned */
-	Pending *pending;			  /* maybe freed: compare only */
+	guint64 serial;
 } Cancel;
 static gboolean
 cancelled_idle(gpointer data)
 {
 	Cancel *c = data;
 	AiVoiceprintIdentifierPrivate *priv = private_of(c->self);
-	Pending *p = c->pending;
-	if (g_queue_find(&priv->pending, p) == NULL || p->ready)
+	Pending *p = NULL;
+	GList *l;
+	for (l = priv->pending.head; l != NULL && p == NULL; l = l->next)
+		if (((Pending *)l->data)->serial == c->serial)
+			p = l->data;
+	if (p == NULL)
 		return G_SOURCE_REMOVE;
 	g_queue_remove(&priv->pending, p);
 	pending_disconnect(p);
 	g_task_return_new_error(p->task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
 							"Operation was cancelled");
-	g_clear_object(&p->task);
+	if (p->ready)
+		/* Embedded already, waiting behind the head: nothing else owes it. */
+		pending_free(p);
+	else
+		/* The embedding still owes a callback: keep the shell for it. */
+		g_clear_object(&p->task);
 	drain_pending(c->self);
 	return G_SOURCE_REMOVE;
 }
@@ -301,7 +313,7 @@ on_cancelled(GCancellable *cancellable, gpointer data)
 	Cancel *copy = g_new0(Cancel, 1);
 	GSource *idle = g_idle_source_new();
 	copy->self = g_object_ref(c->self);
-	copy->pending = c->pending;
+	copy->serial = c->serial;
 	g_source_set_callback(idle, cancelled_idle, copy, cancel_free);
 	g_source_attach(idle, private_of(c->self)->context);
 	g_source_unref(idle);
@@ -315,6 +327,7 @@ identify_async(AiSpeakerIdentifier *identifier, GBytes *pcm, GCancellable *cance
 	Pending *p = g_new0(Pending, 1);
 	Embedding *e;
 	p->task = g_task_new(self, cancellable, callback, user_data);
+	p->serial = ++priv->next_serial;
 	p->bytes = g_bytes_get_size(pcm);
 	if (priv->embedder == NULL) {
 		g_task_return_new_error(p->task, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
@@ -326,7 +339,7 @@ identify_async(AiSpeakerIdentifier *identifier, GBytes *pcm, GCancellable *cance
 	if (cancellable != NULL) {
 		Cancel *c = g_new0(Cancel, 1);
 		c->self = g_object_ref(self);
-		c->pending = p;
+		c->serial = p->serial;
 		p->cancellable = g_object_ref(cancellable);
 		p->cancel_id =
 			g_cancellable_connect(cancellable, G_CALLBACK(on_cancelled), c, cancel_free);
