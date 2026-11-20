@@ -1790,6 +1790,41 @@ Rules that are load-bearing:
   The LiveKit GStreamer elements come from gst-plugins-rs; they are not
   a library link. See `docs/voice.org`.
 
+Room mode and speaker naming are pieces behind interfaces, each with a
+subclassable default (see `docs/voice.org`, Room mode in an application):
+
+| Piece | Interface | Default(s) | File |
+|-------|-----------|------------|------|
+| who spoke | `AiSpeakerIdentifier` | `AiVoiceprintIdentifier` | `ai-speaker-identifier`, `ai-voiceprint-identifier` |
+| audio to voiceprint | `AiSpeakerEmbedder` | `AiOnnxSpeakerEmbedder`, `AiHttpSpeakerEmbedder` | `ai-speaker-embedder`, `ai-onnx-speaker-embedder`, `ai-http-speaker-embedder` |
+| voiceprint storage | `AiVoiceprintStore` | `AiFileVoiceprintStore`, `AiMemoryVoiceprintStore` | `ai-voiceprint-store`, `ai-file-voiceprint-store` |
+| said to the assistant? | `AiAddressDetector` | `AiNameAddressDetector` | `ai-address-detector` |
+| chime in? | `AiRelevanceJudge` | `AiProviderRelevanceJudge` | `ai-relevance-judge` |
+| memory between turns | -- | `AiVoiceRoom` | `ai-voice-room` |
+| values | -- | `AiVoiceprint`, `AiSpeakerMatch` | `ai-voiceprint`, `ai-speaker-match` |
+
+- **A voiceprint is validated once, in `ai_voiceprint_new()`.** Finite,
+  not all zero, at most 8192 values, unit length, tagged with its model.
+  Everything after trusts it. Never compare across models:
+  `ai_voiceprint_similarity()` returns -1 for that.
+- **Names are file names and prompt prefixes.** `ai_voiceprint_name_is_valid()`
+  is the one rule: no separators, brackets, colons, control characters,
+  and never `Guest N`.
+- **Identifications are matched in the order asked.** The identifier's
+  queue answers from its head only, so guest numbers follow who was heard
+  first; a cancelled one leaves the queue at once. The session's naming
+  queue does the same for delivery, with its own deadline
+  (`naming-timeout-ms`).
+- **Promotion never overwrites.** A voice command can only create a
+  voiceprint; merging into an enrolled name is `merge = TRUE` through the
+  API.
+- **onnxruntime is optional** (`HAVE_ONNXRUNTIME`, `AI_HAVE_ONNXRUNTIME`).
+  `AiOnnxSpeakerEmbedder` always exists so the API and the GIR do not
+  depend on the build; `ai-voiceprint-server` is built only with it. The
+  filterbanks are `ai-speech-features.c` (private, no dependency).
+- **`AiVoiceSession` is derivable.** Its fields are in
+  `AiVoiceSessionPrivate`, reached through `P(self)`.
+
 ## Versions and self-update
 
 `config.mk` holds the release number; `build-aux/gen-build-stamp.sh`

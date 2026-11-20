@@ -1,0 +1,115 @@
+* Speaker identification
+
+Naming who said an utterance from its audio, in three replaceable layers: an identifier decides who, an embedder turns audio into an [[file:ai-voiceprint.org][AiVoiceprint]], and a store keeps the enrolled ones. See [[file:../voice.org::*Naming speakers by voice][Naming speakers by voice]] and [[file:../voice.org::*Room mode in an application][Room mode in an application]].
+
+** AiSpeakerIdentifier (interface)
+
+#+begin_src C
+struct _AiSpeakerIdentifierInterface
+{
+    GTypeInterface parent_iface;
+    void            (*identify_async)  (AiSpeakerIdentifier *self, GBytes *pcm,
+                                        GCancellable *cancellable,
+                                        GAsyncReadyCallback callback, gpointer user_data);
+    AiSpeakerMatch *(*identify_finish) (AiSpeakerIdentifier *self, GAsyncResult *result,
+                                        GError **error);
+    /* optional */
+    gboolean (*promote)  (AiSpeakerIdentifier *self, const gchar *guest, const gchar *name,
+                          gboolean merge, GError **error);
+    gboolean (*has_name) (AiSpeakerIdentifier *self, const gchar *name);
+    gpointer _reserved[8];
+};
+#+end_src
+
+=pcm= is 16 kHz mono S16LE. A stranger is a match of kind =AI_SPEAKER_MATCH_UNKNOWN=; audio too short to tell is =G_IO_ERROR_INVALID_DATA=; anything else is a failure. =ai_speaker_identifier_promote()= gives a guest a lasting name: an enrolled =name= is =G_IO_ERROR_EXISTS= unless =merge=, an unknown guest =G_IO_ERROR_NOT_FOUND=, no implementation =G_IO_ERROR_NOT_SUPPORTED=.
+
+** AiVoiceprintIdentifier (derivable)
+
+#+begin_src C
+AiVoiceprintIdentifier *ai_voiceprint_identifier_new (const gchar *url, const gchar *directory);
+AiVoiceprintIdentifier *ai_voiceprint_identifier_new_full (AiSpeakerEmbedder *embedder,
+                                                           AiVoiceprintStore *store /* nullable */);
+void          ai_voiceprint_identifier_enroll_async (AiVoiceprintIdentifier *self, const gchar *name,
+                                                     GBytes *pcm, GCancellable *cancellable,
+                                                     GAsyncReadyCallback callback, gpointer user_data);
+AiVoiceprint *ai_voiceprint_identifier_enroll_finish (AiVoiceprintIdentifier *self,
+                                                      GAsyncResult *result, GError **error);
+gchar        *ai_voiceprint_identifier_closest (AiVoiceprintIdentifier *self, AiVoiceprint *heard,
+                                                const gchar *exclude, gdouble *score);
+GPtrArray    *ai_voiceprint_identifier_list_guests (AiVoiceprintIdentifier *self);
+void          ai_voiceprint_identifier_forget_guests (AiVoiceprintIdentifier *self);
+guint         ai_voiceprint_identifier_get_n_voices (AiVoiceprintIdentifier *self);
+void          ai_voiceprint_identifier_reload (AiVoiceprintIdentifier *self);
+#+end_src
+
+| Property | Default | Meaning |
+|----------+---------+---------|
+| =embedder= | | an =AiSpeakerEmbedder= |
+| =store= | | an =AiVoiceprintStore=; reloaded on its =changed= signal |
+| =threshold= | 0.55 | similarity needed to name someone enrolled |
+| =track-guests= | FALSE | number voices nobody enrolled: "Guest 1", "Guest 2", ... |
+| =guest-threshold= | 0.35 | similarity to be a guest already heard |
+| =max-guests= | 32 | a stranger beyond them is unknown |
+| =min-guest-ms= | 1500 | the least audio that starts a new guest |
+
+=ai_voiceprint_identifier_new()= is an =AiHttpSpeakerEmbedder= over a watched =AiFileVoiceprintStore=. Identifications are matched in the order they were asked for, so guests are numbered by who was heard first; a cancelled one leaves the queue at once. Signal =promoted (guest, name)= follows a promotion.
+
+| Class member | Default |
+|--------------+---------|
+| =score (self, known, heard)= | =ai_voiceprint_similarity()= |
+| =match (self, heard, audio_bytes, error)= | enrolled at =threshold=, else a guest, else unknown |
+| =promoted= | class handler of =promoted= |
+
+** AiSpeakerEmbedder (interface)
+
+#+begin_src C
+struct _AiSpeakerEmbedderInterface
+{
+    GTypeInterface parent_iface;
+    void          (*embed_async)   (AiSpeakerEmbedder *self, GBytes *pcm, GCancellable *cancellable,
+                                    GAsyncReadyCallback callback, gpointer user_data);
+    AiVoiceprint *(*embed_finish)  (AiSpeakerEmbedder *self, GAsyncResult *result, GError **error);
+    gsize         (*get_min_bytes) (AiSpeakerEmbedder *self);   /* optional; 16000 */
+    gpointer _reserved[8];
+};
+#+end_src
+
+The wrapper refuses audio shorter than =get_min_bytes()= or not a whole number of samples with =G_IO_ERROR_INVALID_DATA= before an implementation sees it.
+
+*** AiHttpSpeakerEmbedder (derivable)
+
+=ai_http_speaker_embedder_new(url)=. POSTs the audio and reads ={"model":"...","embedding":[...]}=. Properties =url= and =timeout-ms= (5000, the whole request; =G_IO_ERROR_TIMED_OUT=). A reply over =AI_HTTP_SPEAKER_EMBEDDER_MAX_REPLY= (1 MiB) is =G_IO_ERROR_MESSAGE_TOO_LARGE=; HTTP 422 is =G_IO_ERROR_INVALID_DATA=; a redirect is followed only to the same origin. Class members =prepare_message (self, SoupMessage*)= and =parse_reply (self, body, error)=.
+
+*** AiOnnxSpeakerEmbedder (derivable, GInitable)
+
+#+begin_src C
+gboolean               ai_onnx_speaker_embedder_is_available (void);
+AiOnnxSpeakerEmbedder *ai_onnx_speaker_embedder_new (const gchar *model_path, GError **error);
+AiVoiceprint          *ai_onnx_speaker_embedder_embed (AiOnnxSpeakerEmbedder *self, GBytes *pcm,
+                                                       GCancellable *cancellable, GError **error);
+const gchar           *ai_onnx_speaker_embedder_get_model_id (AiOnnxSpeakerEmbedder *self);
+guint                  ai_onnx_speaker_embedder_get_dimensions (AiOnnxSpeakerEmbedder *self);
+AiSpeakerFrontend      ai_onnx_speaker_embedder_get_frontend (AiOnnxSpeakerEmbedder *self);
+#+end_src
+
+Properties =model-path=, =frontend= (=AI_SPEAKER_FRONTEND_AUTO=, =_KALDI=, =_NEMO=), =threads= (1), =model-id= (read-only: the file name and the start of its SHA-256). The asynchronous interface method runs =embed()= on a worker thread; cancelling stops a run in progress. Without onnxruntime the type exists, =is_available()= is FALSE and construction fails with =G_IO_ERROR_NOT_SUPPORTED=. Class member =features (self, samples, n, bins, frames)= computes the model's input.
+
+** AiVoiceprintStore (interface)
+
+#+begin_src C
+struct _AiVoiceprintStoreInterface
+{
+    GTypeInterface parent_iface;
+    GPtrArray    *(*list)   (AiVoiceprintStore *self);
+    AiVoiceprint *(*lookup) (AiVoiceprintStore *self, const gchar *name);
+    gboolean      (*save)   (AiVoiceprintStore *self, AiVoiceprint *voiceprint, GError **error);
+    gboolean      (*remove) (AiVoiceprintStore *self, const gchar *name, GError **error);
+    gboolean      (*rename) (AiVoiceprintStore *self, const gchar *from, const gchar *to, GError **error);
+    gpointer _reserved[8];
+};
+#+end_src
+
+The wrappers validate names first (=G_IO_ERROR_INVALID_ARGUMENT=). =remove= and =rename= of an unknown name are =G_IO_ERROR_NOT_FOUND=; =rename= onto an enrolled name is =G_IO_ERROR_EXISTS=; a missing =save= is =G_IO_ERROR_READ_ONLY=. Implementations emit =changed= after any change, through =ai_voiceprint_store_emit_changed()=.
+
+- =AiFileVoiceprintStore= (=ai_file_voiceprint_store_new(directory)=): one =NAME.json= per person; the directory 0700 and files 0600 (tightened when found looser), atomic writes, and no symlinks, other users' files, files over =AI_FILE_VOICEPRINT_STORE_MAX_FILE= (256 KiB) or misnamed files read. =monitor= watches the directory for other processes' changes.
+- =AiMemoryVoiceprintStore= (=ai_memory_voiceprint_store_new()=): for the life of the process.

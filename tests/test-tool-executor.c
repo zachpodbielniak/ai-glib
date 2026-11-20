@@ -750,6 +750,92 @@ test_executor_run_full_error_clears_out (void)
     g_list_free (messages);
 }
 
+typedef struct
+{
+    GMainLoop *loop;
+    gchar     *reply;
+    GError    *error;
+    gint64     done_us;
+} AbandonRun;
+
+static void
+on_abandon_run (GObject *source, GAsyncResult *result, gpointer data)
+{
+    AbandonRun *run = data;
+
+    run->reply = ai_tool_executor_run_finish (AI_TOOL_EXECUTOR (source),
+                                              result, &run->error);
+    run->done_us = g_get_monotonic_time ();
+    g_main_loop_quit (run->loop);
+}
+
+static gboolean
+cancel_soon (gpointer data)
+{
+    g_cancellable_cancel (data);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+quit_loop (gpointer data)
+{
+    g_main_loop_quit (data);
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * A cancelled run ends when it is cancelled, not when the provider gets
+ * round to answering.
+ *
+ * The mock ignores its cancellable and replies two seconds later, which is
+ * what a provider slow to unwind looks like. The run has to return
+ * CANCELLED long before that, the executor has to take a second run in the
+ * meantime, and the late reply has to land on nothing.
+ */
+static void
+test_executor_cancel_does_not_wait_for_provider (void)
+{
+    g_autoptr (AiToolExecutor) exec = ai_tool_executor_new_empty ();
+    g_autoptr (AiMockProvider) mock = ai_mock_provider_new ();
+    g_autoptr (AiMessage) user = ai_message_new_user ("hello");
+    g_autoptr (GCancellable) cancel = g_cancellable_new ();
+    g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+    AbandonRun first = { 0 };
+    AbandonRun second = { 0 };
+    GList *messages = g_list_append (NULL, user);
+    gint64 started = g_get_monotonic_time ();
+
+    first.loop = second.loop = loop;
+    ai_mock_provider_set_delay_ms (mock, 2000);
+    ai_mock_provider_push_text (mock, "too late");
+    ai_tool_executor_run_async (exec, AI_PROVIDER (mock), messages, NULL, 0, 0,
+                                cancel, on_abandon_run, &first);
+    g_timeout_add (50, cancel_soon, cancel);
+    g_main_loop_run (loop);
+
+    g_assert_null (first.reply);
+    g_assert_error (first.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    g_assert_cmpint (first.done_us - started, <, 1000000);
+
+    ai_mock_provider_set_delay_ms (mock, 0);
+    ai_mock_provider_push_text (mock, "on time");
+    ai_tool_executor_run_async (exec, AI_PROVIDER (mock), messages, NULL, 0, 0,
+                                NULL, on_abandon_run, &second);
+    g_main_loop_run (loop);
+    g_assert_no_error (second.error);
+    g_assert_cmpstr (second.reply, ==, "on time");
+
+    /* Let the abandoned reply arrive; it must change nothing. */
+    g_timeout_add (2300, quit_loop, loop);
+    g_main_loop_run (loop);
+    g_assert_cmpstr (second.reply, ==, "on time");
+
+    g_free (first.reply);
+    g_clear_error (&first.error);
+    g_free (second.reply);
+    g_list_free (messages);
+}
+
 /*
  * ai_tool_executor_new_empty() must hand the model nothing at all.
  *
@@ -1313,6 +1399,8 @@ main (
                      test_executor_run_full_null_out_is_plain_run);
     g_test_add_func ("/ai-glib/tool-executor/run-full/error-clears-out",
                      test_executor_run_full_error_clears_out);
+    g_test_add_func ("/ai-glib/tool-executor/cancel-does-not-wait-for-provider",
+                     test_executor_cancel_does_not_wait_for_provider);
 
     return g_test_run ();
 }

@@ -75,7 +75,7 @@ typedef struct {
 	App app;
 	SoupServer *server;
 	gchar *url;
-	guint publications, clears, jwt_requests, summaries;
+	guint publications, clears, jwt_requests, summaries, embeds;
 	guint fail_clear; /* 1: one 503; 2: 403 every time */
 	GPtrArray *sent; /* m.room.message bodies; event id "$live<index>" */
 } MatrixFixture;
@@ -86,9 +86,12 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 	MatrixFixture *f = data;
 	const gchar *body = "{}";
 	guint status = 200;
-	g_assert_cmpstr(soup_message_headers_get_one(
-						soup_server_message_get_request_headers(message), "User-Agent"),
-					==, USER_AGENT);
+	/* Matrix and JWT requests carry ai-call's agent; the voiceprint service
+	 * is the library's own client. */
+	if (!g_str_has_suffix(path, "/embed"))
+		g_assert_cmpstr(soup_message_headers_get_one(
+							soup_server_message_get_request_headers(message), "User-Agent"),
+						==, USER_AGENT);
 	if (strstr(path, "/sfu/get") != NULL) {
 		g_autoptr(JsonParser) parser = json_parser_new();
 		SoupMessageBody *request_body = soup_server_message_get_request_body(message);
@@ -111,6 +114,12 @@ matrix_request(SoupServer *server, SoupServerMessage *message, const gchar *path
 		soup_server_message_set_response(message, "application/json", SOUP_MEMORY_COPY,
 										 reply, strlen(reply));
 		return;
+	} else if (g_str_has_suffix(path, "/embed")) {
+		SoupMessageBody *request_body = soup_server_message_get_request_body(message);
+		f->embeds++;
+		status = request_body->length >= 16000 ? 200 : 422;
+		body = status == 200 ? "{\"model\":\"test-voices\",\"embedding\":[0.6,0.8]}"
+							 : "{\"error\":\"too short\"}";
 	} else if (strstr(path, "/messages") != NULL)
 		body = "{\"chunk\":[]}";
 	else if (strstr(path, "/state/" MEMBER) != NULL) {
@@ -178,6 +187,7 @@ matrix_teardown(MatrixFixture *f, gconstpointer data)
 	g_assert_cmpuint(g_hash_table_size(a->calls), ==, 0);
 	g_hash_table_unref(a->calls);
 	g_object_unref(a->config);
+	g_clear_object(&a->call_config);
 	g_object_unref(a->http);
 	g_object_unref(a->sync_cancel);
 	soup_server_disconnect(f->server);
@@ -260,6 +270,288 @@ stale_clear(MatrixFixture *f, gconstpointer data)
 		g_main_loop_run(a->loop);
 		g_source_remove(timeout);
 	}
+}
+/* Room mode reaches the session with a relevance judge of its own -- never
+ * the conversation's provider, which the worker thread is using -- and every
+ * score is in the transcript, so the threshold can be tuned from real calls. */
+static void
+room_mode_call(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("call-room-XXXXXX", NULL);
+	g_autofree gchar *path = NULL, *contents = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	g_autoptr(GObject) judge = NULL;
+	gboolean room = FALSE;
+	guint threshold = 0, cooldown = 0, timeout;
+	Call *call;
+	a->transcript_dir = dir;
+	a->room_mode = TRUE;
+	a->chime_threshold = 7;
+	a->chime_cooldown_ms = 30000;
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while ((!call->greeted || call->transcript == NULL) && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_assert_nonnull(call->voice);
+	g_object_get(call->voice, "room-mode", &room, "chime-in-threshold", &threshold,
+				 "chime-in-cooldown-ms", &cooldown, "relevance-provider", &judge, NULL);
+	g_assert_true(room);
+	g_assert_cmpuint(threshold, ==, 7);
+	g_assert_cmpuint(cooldown, ==, 30000);
+	g_assert_nonnull(judge);
+	{
+		g_autoptr(AiConversation) conversation = NULL;
+		g_object_get(call->voice, "conversation", &conversation, NULL);
+		g_assert_true(judge != (GObject *)ai_conversation_get_provider(conversation));
+	}
+	/* The judge and the room's memory follow the call settings. */
+	{
+		g_autoptr(AiRelevanceJudge) relevance = NULL;
+		g_autoptr(AiVoiceRoom) memory = NULL;
+		guint tokens = 0, lines = 0, chars = 0;
+		gboolean roster = TRUE;
+		g_object_get(call->voice, "relevance-judge", &relevance, "room", &memory, NULL);
+		g_assert_true(AI_IS_PROVIDER_RELEVANCE_JUDGE(relevance));
+		g_object_get(relevance, "max-tokens", &tokens, NULL);
+		g_assert_cmpuint(tokens, ==, 200);
+		g_object_get(memory, "max-lines", &lines, "max-chars", &chars, "announce-roster",
+					 &roster, NULL);
+		g_assert_cmpuint(lines, ==, 40);
+		g_assert_cmpuint(chars, ==, 6000);
+		/* Nobody is told apart without an embedder, so no roster. */
+		g_assert_false(roster);
+	}
+	path = g_strdup(ai_call_transcript_get_path(call->transcript));
+	g_signal_emit_by_name(call->voice, "relevance", 8, "an unanswered question", TRUE);
+	g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+	g_assert_nonnull(strstr(contents, "\"type\":\"relevance\""));
+	g_assert_nonnull(strstr(contents, "\"score\":8"));
+	g_assert_nonnull(strstr(contents, "\"reason\":\"an unanswered question\""));
+	g_assert_nonnull(strstr(contents, "\"chimed\":true"));
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	a->transcript_dir = NULL;
+}
+/* Enrolling a voice from a recording: raw PCM or a 16 kHz mono WAV, saved as
+ * the named voiceprint; a call then names speakers with it. */
+static void
+enroll_and_name(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("voiceprints-XXXXXX", NULL);
+	g_autofree gchar *raw = g_build_filename(dir, "zach.pcm", NULL);
+	g_autofree gchar *wav = g_build_filename(dir, "ada.wav", NULL);
+	g_autofree gchar *print = g_build_filename(dir, "Sam.json", NULL);
+	g_autofree gchar *adas = g_build_filename(dir, "Ada.json", NULL);
+	g_autofree gchar *url = g_strconcat(f->url, "embed", NULL);
+	g_autofree gchar *pcm = g_malloc0(128000);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GObject) identifier = NULL;
+	g_autofree gchar *unknown = NULL;
+	gint64 limit = g_get_monotonic_time() + 3000000;
+	guint timeout;
+	Call *call;
+	static const guchar header[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E',
+									  'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 1, 0,
+									  0x80, 0x3e, 0, 0, 0, 0x7d, 0, 0, 2, 0, 16, 0,
+									  'd', 'a', 't', 'a', 0, 0x7d, 0, 0};
+	GString *wave = NULL;
+	gsize i;
+	/* Four seconds of something loud enough to count as speech. */
+	for (i = 0; i < 64000; i++) {
+		gint16 s = GINT16_TO_LE((gint16)((i / 20) % 2 ? 9000 : -9000));
+		memcpy(pcm + 2 * i, &s, 2);
+	}
+	wave = g_string_new_len((const gchar *)header, 44);
+	g_string_append_len(wave, pcm, 32000);
+	g_assert_true(g_file_set_contents(raw, pcm, 128000, NULL));
+	g_assert_true(g_file_set_contents(wav, wave->str, wave->len, NULL));
+	g_string_free(wave, TRUE);
+	a->speaker_url = url;
+	a->voiceprint_dir = dir;
+	a->unknown_speaker_name = "Guest";
+	a->speaker_threshold = 55;
+	a->track_guests = TRUE;
+	a->guest_threshold = 40;
+	/* Without an embedder there is nothing to enroll with. */
+	g_assert_false(enroll_voice(a, "Sam", raw, 0, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	a->store = AI_VOICEPRINT_STORE(ai_file_voiceprint_store_new(dir));
+	g_assert_true(speaker_backend(a, &error));
+	g_assert_no_error(error);
+	g_assert_true(AI_IS_HTTP_SPEAKER_EMBEDDER(a->embedder));
+	g_assert_true(enroll_voice(a, "Sam", raw, 0, &error));
+	g_assert_no_error(error);
+	/* The WAV holds one second: too little speech to enroll from. */
+	g_assert_false(enroll_voice(a, "Ada", wav, 0, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+	g_assert_nonnull(strstr(error->message, "speech"));
+	g_clear_error(&error);
+	{
+		static const guchar more[4] = {0, 0xf4, 1, 0}; /* data: 128000 bytes */
+		GString *longer = g_string_new_len((const gchar *)header, 40);
+		g_string_append_len(longer, (const gchar *)more, 4);
+		g_string_append_len(longer, pcm, 128000);
+		g_assert_true(g_file_set_contents(wav, longer->str, longer->len, NULL));
+		g_string_free(longer, TRUE);
+	}
+	g_assert_true(enroll_voice(a, "Ada", wav, 0, &error));
+	g_assert_no_error(error);
+	g_assert_true(g_file_test(print, G_FILE_TEST_EXISTS));
+	g_assert_true(g_file_test(adas, G_FILE_TEST_EXISTS));
+	g_assert_cmpuint(f->embeds, ==, 2);
+	/* Silence is nobody, and saves nothing; neither does a bad name. */
+	{
+		g_autofree gchar *quiet = g_malloc0(128000);
+		g_assert_true(g_file_set_contents(raw, quiet, 128000, NULL));
+	}
+	g_assert_false(enroll_voice(a, "Short", raw, 0, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+	g_clear_error(&error);
+	g_assert_false(enroll_voice(a, "Guest 4", wav, 0, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	g_assert_cmpuint(f->embeds, ==, 2);
+
+	call = start_call(a, "!room:test", NULL, NULL, FALSE);
+	while (!call->greeted && g_get_monotonic_time() < limit) {
+		while (g_main_context_iteration(NULL, FALSE)) {
+		}
+		g_usleep(1000);
+	}
+	g_object_get(call->voice, "speaker-identifier", &identifier, "unknown-speaker-name",
+				 &unknown, NULL);
+	g_assert_true(AI_IS_VOICEPRINT_IDENTIFIER(identifier));
+	g_assert_cmpuint(
+		ai_voiceprint_identifier_get_n_voices(AI_VOICEPRINT_IDENTIFIER(identifier)), ==, 2);
+	g_assert_cmpstr(unknown, ==, "Guest");
+	{
+		gboolean guests = FALSE;
+		gdouble threshold = 0;
+		g_object_get(identifier, "track-guests", &guests, "guest-threshold", &threshold, NULL);
+		g_assert_true(guests);
+		g_assert_cmpfloat_with_epsilon(threshold, 0.40, 1e-9);
+	}
+	/* Naming speakers by voice turns the roster on by default. */
+	{
+		g_autoptr(AiVoiceRoom) memory = NULL;
+		gboolean roster = FALSE;
+		g_object_get(call->voice, "room", &memory, NULL);
+		g_object_get(memory, "announce-roster", &roster, NULL);
+		g_assert_true(roster);
+	}
+	/* How each speaker was named, and a promotion, are in the transcript. */
+	if (call->transcript != NULL) {
+		g_autoptr(AiSpeakerMatch) match = ai_speaker_match_new(AI_SPEAKER_MATCH_GUEST, "Guest 1", 0.876);
+		g_autofree gchar *contents = NULL;
+		g_signal_emit_by_name(call->voice, "speaker-named", "caller", match);
+		g_signal_emit_by_name(call->voice, "guest-promoted", "Guest 1", "Kim");
+		g_assert_true(g_file_get_contents(ai_call_transcript_get_path(call->transcript),
+										  &contents, NULL, NULL));
+		g_assert_nonnull(strstr(contents, "\"type\":\"speaker\""));
+		g_assert_nonnull(strstr(contents, "\"kind\":\"guest\""));
+		g_assert_nonnull(strstr(contents, "\"score\":0.88"));
+		g_assert_nonnull(strstr(contents, "\"type\":\"promotion\""));
+		g_assert_nonnull(strstr(contents, "\"speaker\":\"Kim\""));
+	}
+	timeout = g_timeout_add_seconds(5, matrix_timeout, NULL);
+	shutdown_app(a);
+	g_main_loop_run(a->loop);
+	g_source_remove(timeout);
+	g_unlink(raw);
+	g_unlink(wav);
+	g_unlink(print);
+	g_unlink(adas);
+	g_rmdir(dir);
+	g_clear_object(&a->embedder);
+	g_clear_object(&a->store);
+	a->speaker_url = a->voiceprint_dir = a->unknown_speaker_name = NULL;
+}
+/* Voiceprints are listed, renamed to a free name only, and forgotten. */
+static void
+manage_voiceprints(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autofree gchar *dir = g_dir_make_tmp("voiceprints-XXXXXX", NULL);
+	g_autofree gchar *sam = g_build_filename(dir, "Sam.json", NULL);
+	g_autofree gchar *kim = g_build_filename(dir, "Kim.json", NULL);
+	g_autofree gchar *kimberly = g_build_filename(dir, "Kimberly.json", NULL);
+	g_autoptr(GError) error = NULL;
+	g_assert_true(g_file_set_contents(sam, "{\"name\":\"Sam\",\"model\":\"m\",\"embedding\":[1,0]}",
+									  -1, NULL));
+	g_assert_true(g_file_set_contents(kim, "{\"name\":\"Kim\",\"model\":\"m\",\"embedding\":[0,1]}",
+									  -1, NULL));
+	a->voiceprint_dir = dir;
+	a->store = AI_VOICEPRINT_STORE(ai_file_voiceprint_store_new(dir));
+	g_assert_true(list_voiceprints(a, &error));
+	g_assert_false(rename_voiceprint(a, "Kim", &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	g_assert_false(rename_voiceprint(a, "Kim:Sam", &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS);
+	g_clear_error(&error);
+	g_assert_true(rename_voiceprint(a, "Kim:Kimberly", &error));
+	g_assert_false(g_file_test(kim, G_FILE_TEST_EXISTS));
+	g_assert_true(g_file_test(kimberly, G_FILE_TEST_EXISTS));
+	g_assert_false(forget_voiceprint(a, "Nobody", &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+	g_clear_error(&error);
+	g_assert_false(forget_voiceprint(a, "../Sam", &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	g_assert_true(forget_voiceprint(a, "Sam", &error));
+	g_assert_false(g_file_test(sam, G_FILE_TEST_EXISTS));
+	g_unlink(kimberly);
+	g_rmdir(dir);
+	g_clear_object(&a->store);
+	a->voiceprint_dir = NULL;
+}
+/* Which embedder names speakers comes from the call settings; a backend
+ * asked for but unusable stops startup instead of naming nobody. */
+static void
+speaker_backends(MatrixFixture *f, gconstpointer data)
+{
+	App *a = &f->app;
+	g_autoptr(GError) error = NULL;
+	a->call_config = ai_call_config_new();
+	/* Nothing configured: nobody is named, and that is fine. */
+	g_assert_true(speaker_backend(a, &error));
+	g_assert_null(a->embedder);
+	g_object_set(a->call_config, "speaker-backend", "carrier-pigeon", NULL);
+	g_assert_false(speaker_backend(a, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	g_object_set(a->call_config, "speaker-backend", "onnx", NULL);
+	g_assert_false(speaker_backend(a, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	g_clear_error(&error);
+	g_object_set(a->call_config, "speaker-backend", "http", NULL);
+	g_assert_false(speaker_backend(a, &error));
+	g_clear_error(&error);
+	/* A model that is not there: unavailable or unloadable, never silent. */
+	g_object_set(a->call_config, "speaker-backend", NULL, "speaker-model",
+				 "/nonexistent/speaker.onnx", NULL);
+	g_assert_false(speaker_backend(a, &error));
+	g_assert_nonnull(error);
+	g_assert_null(a->embedder);
+	g_clear_error(&error);
+	g_object_set(a->call_config, "speaker-model", "/nonexistent/speaker.onnx",
+				 "speaker-frontend", "fourier", NULL);
+	g_assert_false(speaker_backend(a, &error));
+	g_assert_nonnull(error);
+	g_clear_error(&error);
+	g_object_set(a->call_config, "speaker-model", NULL, "speaker-frontend", NULL, NULL);
+	a->speaker_url = "http://127.0.0.1:1/embed";
+	g_assert_true(speaker_backend(a, &error));
+	g_assert_true(AI_IS_HTTP_SPEAKER_EMBEDDER(a->embedder));
+	g_clear_object(&a->embedder);
+	a->speaker_url = NULL;
 }
 /* An outbound drop file too large to be a request is removed, not reread
  * every second for the life of the process, and starts no call. */
@@ -920,6 +1212,14 @@ main(int argc, char **argv)
 			   transcript_write_failure, matrix_teardown);
 	g_test_add("/voice/matrix/drop-oversized", MatrixFixture, NULL, matrix_setup,
 			   drop_oversized, matrix_teardown);
+	g_test_add("/voice/matrix/room-mode", MatrixFixture, NULL, matrix_setup, room_mode_call,
+			   matrix_teardown);
+	g_test_add("/voice/matrix/enroll-and-name", MatrixFixture, NULL, matrix_setup,
+			   enroll_and_name, matrix_teardown);
+	g_test_add("/voice/matrix/manage-voiceprints", MatrixFixture, NULL, matrix_setup,
+			   manage_voiceprints, matrix_teardown);
+	g_test_add("/voice/matrix/speaker-backends", MatrixFixture, NULL, matrix_setup,
+			   speaker_backends, matrix_teardown);
 	g_test_add("/voice/matrix/stale-membership", MatrixFixture, NULL, matrix_setup,
 			   stale_membership, matrix_teardown);
 	return g_test_run();

@@ -4,6 +4,30 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.13.0 - 2026-11-20
+
+Room mode, chiming in and speaker naming for a voice device shared by a room (Forgejo #18, from Ben Doty's branch, finished and hardened). See =docs/voice.org=.
+
+** Added
+- Room mode: an utterance is a turn only when it is said to the assistant (by name, or a sound-alike in a name's place); everything else is heard and given to the next turn, bounded by =room-history-lines=, =-chars= and =-age-ms=, optionally with a "[Present: ...]" roster.
+- Chiming in: a relevance judge scores unaddressed talk and the assistant speaks up at =chime-in-threshold=; one score in flight, redone when stale rather than cancelled, with debounce, robust answer parsing and back-off after failures. Every score is in the transcript.
+- Speaker naming by voiceprint: in process with ONNX Runtime (=AiOnnxSpeakerEmbedder=; TitaNet, wespeaker and 3D-Speaker exports, front-end read from the model's metadata, Kaldi and NeMo filterbanks in plain C) or through a service (=AiHttpSpeakerEmbedder=). Guests numbered in the order heard, a guest cap, a naming deadline, and "stop" or "mute" never followed by an answer to something said before them.
+- =ai-voiceprint-server=, a model behind the HTTP protocol, and =contrib/ai-voiceprint-server.service=. Built only with onnxruntime (optional; =HAVE_ONNXRUNTIME=0= opts out).
+- Promoting a guest to a lasting name by voice ("Ada, guest two is Kim"), never over an enrolled name; =AiVoiceSession::allow-promotion= can veto it.
+- =ai-call=: =--list-voiceprints=, =--rename OLD:NEW=, =--forget NAME=; enrolment refuses under three seconds of speech and warns about clipping and about voices the model confuses; =speaker-backend=, =speaker-model=, =speaker-frontend=, =speaker-threads=, =speaker-timeout-ms=, =max-guests=, =min-guest-ms=, =name-memory-ms=, =naming-timeout-ms=, =promoted-message=, =promotion-refused-message=, =relevance-debounce-ms=, =relevance-max-tokens=, =room-history-*= and =room-roster=; =speaker= and =promotion= transcript records.
+- Public interfaces with subclassable defaults: =AiVoiceprint=, =AiSpeakerMatch=, =AiSpeakerEmbedder=, =AiVoiceprintStore= (=AiFileVoiceprintStore=, =AiMemoryVoiceprintStore=), =AiVoiceprintIdentifier= (derivable), =AiAddressDetector= (=AiNameAddressDetector=), =AiRelevanceJudge= (=AiProviderRelevanceJudge=) and =AiVoiceRoom=. =AiVoiceSession= gains =room=, =address-detector=, =relevance-judge=, =relevance-debounce-ms=, =naming-timeout-ms=, =name-memory-ms= and the =speaker-named=, =allow-promotion= and =guest-promoted= signals.
+- Tests: =test-voice-room=, =test-voice-onnx=, and much wider =test-voice-speaker=, =test-voice-session= and =test-voice-matrix=.
+
+** Changed
+- =AiVoiceSession= is derivable (it was final), with class handlers for its signals.
+- =AiSpeakerIdentifier.identify_finish= returns an =AiSpeakerMatch= instead of a name and score. This interface is new in this release, but an implementation written against the #18 branch must be updated.
+- The pkg-config file requires GLib 2.70, which libsoup 3 already did, and lists onnxruntime in =Requires.private= when it is used.
+
+** Fixed
+- A cancelled =ai_tool_executor_run_async()= returns as soon as the cancel reaches it instead of waiting on a slow provider, and stops forwarding that request's stream events (#17).
+- A finished background agent's result is spoken without the caller asking for it.
+- Voiceprint files are 0600 in a 0700 directory, written atomically, and never read through a symlink, from another user, oversized or misnamed; a voiceprint vector that is non-finite or all zero is refused.
+
 * 0.12.1 - 2026-11-15
 
 ** Fixed

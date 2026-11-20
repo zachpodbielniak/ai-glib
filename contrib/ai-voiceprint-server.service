@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ai-voiceprint-server as a systemd user service.
+#
+#   install -Dm644 contrib/ai-voiceprint-server.service \
+#       ~/.config/systemd/user/ai-voiceprint-server.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ai-voiceprint-server
+#
+# Put the model at %h/.local/share/ai-glib/models/speaker.onnx, or change
+# --model below. It listens on loopback only; to serve another machine,
+# change --listen and keep it on a network you trust: it has no
+# authentication of its own.
+
+[Unit]
+Description=ai-glib speaker voiceprint service
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/ai-voiceprint-server --model %h/.local/share/ai-glib/models/speaker.onnx --listen 127.0.0.1 --port 8095 --threads 2
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

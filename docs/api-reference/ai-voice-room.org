@@ -1,0 +1,64 @@
+* Room mode: AiVoiceRoom, AiAddressDetector and AiRelevanceJudge
+
+The pieces of an =AiVoiceSession= in room mode besides speaker naming (for that, see [[file:ai-speaker-identifier.org][Speaker identification]]). Each is a session property: =room=, =address-detector= and =relevance-judge=. See [[file:../voice.org::*Room mode and chiming in][Room mode and chiming in]].
+
+** AiVoiceRoom (derivable)
+
+What the session remembers between turns: unaddressed talk, and who has been speaking.
+
+#+begin_src C
+AiVoiceRoom *ai_voice_room_new (void);
+void     ai_voice_room_hear (AiVoiceRoom *self, const gchar *speaker, const gchar *text);
+void     ai_voice_room_note_speaker (AiVoiceRoom *self, const gchar *speaker);
+void     ai_voice_room_rename_speaker (AiVoiceRoom *self, const gchar *from, const gchar *to);
+gchar  **ai_voice_room_get_lines (AiVoiceRoom *self);    /* "[Name]: text", oldest first */
+guint    ai_voice_room_get_n_lines (AiVoiceRoom *self);
+gchar  **ai_voice_room_get_present (AiVoiceRoom *self);  /* least recently heard first */
+guint64  ai_voice_room_get_revision (AiVoiceRoom *self); /* changes with every line and turn */
+gchar   *ai_voice_room_take_turn (AiVoiceRoom *self, const gchar *speaker /* NULL: a note */,
+                                  const gchar *text);
+void     ai_voice_room_clear (AiVoiceRoom *self);
+#+end_src
+
+| Property | Default | Meaning |
+|----------+---------+---------|
+| =max-lines= | 40 | most lines kept |
+| =max-chars= | 6000 | most bytes kept; 0 no limit |
+| =max-age-ms= | 900000 | oldest talk kept; 0 no limit |
+| =roster-window-ms= | 600000 | how recently someone spoke to be present; 0 everyone |
+| =announce-roster= | FALSE | start each turn with "[Present: ...]" |
+
+Class members =format_line (self, speaker, text)= and =format_turn (self, present, heard, line)=.
+
+** AiAddressDetector (interface) and AiNameAddressDetector
+
+#+begin_src C
+gboolean ai_address_detector_is_addressed (AiAddressDetector *self, const gchar *speaker,
+                                           const gchar *text);
+AiNameAddressDetector *ai_name_address_detector_new (const gchar *names, const gchar *soundalikes);
+#+end_src
+
+=AiNameAddressDetector= (properties =names= and =soundalikes=, comma-separated) says an utterance is addressed when it holds a name as whole words, or a sound-alike in a name's place: after a greeting, before an opening comma, after a closing one. With no names, everything is addressed. The session builds one from =assistant-names= and =assistant-soundalikes= unless =address-detector= is set.
+
+** AiRelevanceJudge (interface) and AiProviderRelevanceJudge
+
+#+begin_src C
+void ai_relevance_judge_judge_async (AiRelevanceJudge *self, const gchar *assistant,
+                                     const gchar *const *lines, GCancellable *cancellable,
+                                     GAsyncReadyCallback callback, gpointer user_data);
+gint ai_relevance_judge_judge_finish (AiRelevanceJudge *self, GAsyncResult *result,
+                                      gchar **reason, GError **error);  /* 0-10, or -1 */
+guint ai_relevance_judge_parse_reply (const gchar *text, gchar **reason);
+AiProviderRelevanceJudge *ai_provider_relevance_judge_new (AiProvider *provider);
+#+end_src
+
+=ai_relevance_judge_parse_reply()= reads =SCORE: N= / =REASON: ...=, a JSON object with =score= and =reason=, or prose ("a score of 7"); above 10 is 10, no score is 0.
+
+| =AiProviderRelevanceJudge= property | Default | Meaning |
+|-------------------------------------+---------+---------|
+| =provider= | | the model that scores; not one another thread uses |
+| =max-tokens= | 200 | longest answer asked for |
+| =failure-limit= | 3 | failures in a row before pausing; 0 never |
+| =backoff-ms= | 60000 | first pause, doubling to eight times; a paused judge answers =G_IO_ERROR_BUSY= |
+
+Signal =failed (GError)=, not for cancellation. Class members =build_system_prompt (self, assistant)=, =build_message (self, lines)= and =parse (self, text, reason)=. Setting the session's =relevance-provider= replaces its judge with one of these.

@@ -141,6 +141,17 @@ disk can take minutes. They stop at the next entry once the turn is
 cancelled and return =G_IO_ERROR_CANCELLED=, so a stop button or a voice
 call's turn deadline ends the turn instead of waiting for the walk.
 
+The loop around the tools follows the same rule. A cancelled
+=ai_tool_executor_run_async()= returns =G_IO_ERROR_CANCELLED= as soon as the
+cancel reaches it, without waiting for a provider that is slow to notice; a
+reply that arrives afterwards is dropped, and the executor is free for the
+next run in the meantime.
+
+The event handler that forwards the provider's stream events is disconnected
+at the same moment, so an abandoned request still streaming cannot reach the
+next run. A provider that ignores the cancel entirely keeps its own request
+running until it replies; that reply is dropped.
+
 *** Where a walk stops
 
 A walk with no =path= starts in the working directory, and a host that never

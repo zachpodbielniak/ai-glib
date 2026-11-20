@@ -38,6 +38,7 @@ A GLib/GObject-based C library for interacting with AI providers.
   tmux session per project) and ai-gui (see [[file:docs/projects.org][docs/projects.org]])
 - *Voice*: =AiVoiceSession= and =ai-call=, a MatrixRTC call or one local
   session with =--local= (see [[file:docs/voice.org][docs/voice.org]])
+- *Rooms*: room mode answers only when named and can chime in when talk is relevant; speakers sharing one microphone are named by voiceprint, in process with an ONNX model or through =ai-voiceprint-server=, and every piece is an interface an application can replace (see [[file:docs/voice.org::*Room mode in an application][Room mode in an application]])
 - *Account usage*: remaining plan allowance for Codex, Grok Build, Claude Code
   and Antigravity in =ai --usage= and both front-ends (see [[file:docs/cli-reporting.org][docs/cli-reporting.org]])
 - *GObject Introspection*: Use from Python, JavaScript, etc.
