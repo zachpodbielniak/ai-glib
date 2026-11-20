@@ -23,6 +23,13 @@ Complete API documentation for ai-glib.
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface             |
 | [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface                   |
 
+** Voice: room mode and speaker naming
+| Page | Types |
+|------+-------|
+| [[file:ai-voiceprint.org][AiVoiceprint and AiSpeakerMatch]] | The values: a model-tagged voiceprint, and who said an utterance |
+| [[file:ai-speaker-identifier.org][Speaker identification]] | =AiSpeakerIdentifier=, =AiVoiceprintIdentifier=, =AiSpeakerEmbedder= (HTTP, ONNX), =AiVoiceprintStore= (file, memory) |
+| [[file:ai-voice-room.org][Room mode]] | =AiVoiceRoom=, =AiAddressDetector=, =AiRelevanceJudge= |
+
 ** Benchmarks
 | Class                                                   | Description                                         |
 |---------------------------------------------------------+-----------------------------------------------------|

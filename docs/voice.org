@@ -14,6 +14,8 @@ tools, tool history and background agents. The library has no Matrix dependency.
 | =AiSpeechSynthesizer= | Text request, streamed PCM, cancellable completion | =AiHttpSynthesizer= |
 | =AiVoiceActivity= | Per-participant speech and utterance-end decisions | =AiWebrtcVoiceActivity=, vendored WebRTC VAD through libfvad |
 
+For a room with several people the session takes four more, each optional and each a property: an =AiSpeakerIdentifier= names who spoke an utterance (=AiVoiceprintIdentifier=, over an =AiSpeakerEmbedder= and an =AiVoiceprintStore=), an =AiAddressDetector= decides whether it was said to the assistant, an =AiRelevanceJudge= decides whether to speak up unasked, and an =AiVoiceRoom= holds what was said between turns. =AiVoiceSession= itself is derivable. See [[*Room mode in an application][Room mode in an application]].
+
 All PCM is signed 16-bit *little-endian*, mono. Transport input, VAD and STT
 use 16 kHz. Synthesizer output retains its native sample rate: the =audio=
 signal carries =(pcm, sample_rate)=. The session forwards both through
@@ -394,13 +396,29 @@ ai_call:
   chime-in-cooldown-ms: 60000
   relevance-provider: ""   # unset: the call's own provider, as a separate client
   relevance-model: ""      # unset: the call's own model; a small fast one is enough
+  relevance-debounce-ms: 0 # quiet before room talk is scored; 0 at once
+  relevance-max-tokens: 200
+  room-history-lines: 40   # what room mode keeps of unaddressed talk for the next turn
+  room-history-chars: 6000 # 0: no limit
+  room-history-age-ms: 900000  # 0: no limit
+  room-roster: ""          # yes: each turn starts "[Present: ...]"; unset: yes when naming speakers
+  speaker-model: ""        # set: name speakers by voice with this ONNX model, in process
+  speaker-frontend: ""     # auto|kaldi|nemo; unset: auto, from the model's metadata
+  speaker-threads: 1
   speaker-url: ""          # set: name speakers by voice with this voiceprint service
+  speaker-timeout-ms: 5000 # the longest one request to speaker-url may take
+  speaker-backend: ""      # http|onnx; unset: onnx with speaker-model, else http with speaker-url
   voiceprint-dir: ""       # unset: $XDG_DATA_HOME/ai-glib/voiceprints
   speaker-threshold: 55    # similarity, in percent, a voice needs to be named
   unknown-speaker-name: Guest
   naming-timeout-ms: 8000  # the longest a final waits for its speaker to be named
+  name-memory-ms: 120000   # a short utterance is whoever was last named, this recently
   track-guests: no         # yes: every voice is named; strangers are Guest 1, Guest 2, ...
   guest-threshold: 35      # similarity, in percent, to be a guest already heard
+  max-guests: 32           # a stranger beyond them is unknown-speaker-name
+  min-guest-ms: 1500       # the least audio that may start a new guest
+  promoted-message: "Okay, I'll remember {name}."
+  promotion-refused-message: "I can't save that voice as {name}: {reason}."
 #+end_src
 
 Precedence: built-in defaults, standard system/admin/user YAML files, explicit
@@ -586,123 +604,183 @@ application. ai-call writes each command to the transcript as
 
 ** Room mode and chiming in
 
-For a device in a room with several people, most of what is said is not
-for the assistant. =room-mode= (=AI_VOICE_ROOM_MODE=, =yes= or =no=, unset:
-no) makes a turn only of an utterance that names the assistant -- any of
-=assistant-names=, anywhere in it, as whole words: "Ada, what do you think?"
-and "what does Ada think?" both do. Everything else is heard: it is reported
-as a transcript like any other line, kept (the last 40 lines), and given to
-the model at the start of the next turn, so the reply knows what was said
-before it was asked. Without =assistant-names=, every utterance names it.
-Voice commands work as before; each is a whole utterance.
+For a device in a room with several people, most of what is said is not for the assistant. =room-mode= (=AI_VOICE_ROOM_MODE=, =yes= or =no=, unset: no) makes a turn only of an utterance that is said to the assistant. By default that means one that names it -- any of =assistant-names=, anywhere in it, as whole words: "Ada, what do you think?" and "what does Ada think?" both do. Without =assistant-names=, every utterance names it. Voice commands work as before; each is a whole utterance.
 
-Speech recognition hears a short name as a common word: "Kay" at the end of
-a question comes out as "..., say?". =assistant-soundalikes=
-(=AI_VOICE_ASSISTANT_SOUNDALIKES=, comma-separated) lists such words, and
-one counts as naming the assistant only where a name would be -- after a
-greeting ("Hi, say."), before a comma that opens the utterance ("Say, could
-you..."), or after a comma that ends it ("What do you think, say?"). "Say
-that again" and "I say we ship it" stay talk. A server that takes hotwords
-should be given the name too; the sound-alikes catch what it still mishears.
+Everything else is heard: it is reported as a transcript like any other line, kept, and given to the model at the start of the next turn, so the reply knows what was said before it was asked. Three limits keep that from growing into a transcript of the whole afternoon, oldest line first:
 
-=chime-in-threshold= (=AI_VOICE_CHIME_IN_THRESHOLD=, 0-10, unset: 0) lets
-the assistant speak up unasked. After each unaddressed line, what has been
-said since the assistant last spoke is scored from 0 to 10 by a separate
-model: high when a question went unanswered, something said is wrong, or the
-group is stuck on something the assistant is likely to know; low for chat,
-jokes, personal talk, or a point already settled. The judge also sees what
-the assistant itself said last, marked =[Assistant]=, so a follow-up to it --
-"and thirty-five times twelve?" after it answered one sum -- reads as meant
-for it rather than as a remark out of nowhere. At or above the threshold,
-and only when nobody is speaking and no turn is under way, the talk becomes a
-turn with a note saying why the assistant is joining in. A score for talk
-that has since moved on is dropped: only the latest counts, and an answer
-the judge could not format is a zero.
+| Setting               | Environment                     | Default | Meaning                                  |
+|-----------------------+---------------------------------+---------+------------------------------------------|
+| =room-history-lines=  | =AI_VOICE_ROOM_HISTORY_LINES=   |      40 | most lines kept for the next turn        |
+| =room-history-chars=  | =AI_VOICE_ROOM_HISTORY_CHARS=   |    6000 | most bytes of talk kept; 0 no limit      |
+| =room-history-age-ms= | =AI_VOICE_ROOM_HISTORY_AGE_MS=  |  900000 | talk older than this is dropped; 0 never |
 
-=chime-in-cooldown-ms= (=AI_VOICE_CHIME_IN_COOLDOWN_MS=, default 60000)
-stops scoring for that long after any turn, so the assistant does not answer
-its own answer. =relevance-provider= and =relevance-model=
-(=AI_VOICE_RELEVANCE_PROVIDER=, =AI_VOICE_RELEVANCE_MODEL=) choose the judge;
-unset, it is the call's own provider and model, built as a separate client
-because the conversation's is in use on the session's worker thread. A judge
-that cannot be built turns chiming in off for the call and is logged; it
-never fails the call.
+With =room-roster= (=AI_VOICE_ROOM_ROSTER=, =yes= or =no=; unset: yes when speakers are named by voice, see below) each turn starts with who has spoken in the last ten minutes, addressed or not, so the model knows whom it is answering in front of:
 
-Each tool call's start is logged at INFO ("Tool started: NAME"): a tool that
-never finishes never reaches the transcript, and the log then says what a
-stuck turn was waiting on.
+#+begin_example
+[Present: Sam, Kim, Guest 1]
+[Sam]: We could ship Friday.
+[Guest 1]: Friday is tight.
+[Kim]: Ada, what do you think?
+#+end_example
 
-Every score is logged at INFO, emitted as =AiVoiceSession::relevance=, and
-written to the call transcript as a =relevance= record with =score=,
-=reason= and =chimed=: the numbers to tune the threshold from. The library
-properties are =room-mode=, =relevance-provider=, =chime-in-threshold= and
-=chime-in-cooldown-ms=; a =NULL= provider or a zero threshold never chimes in.
+Speech recognition hears a short name as a common word: "Kay" at the end of a question comes out as "..., say?". =assistant-soundalikes= (=AI_VOICE_ASSISTANT_SOUNDALIKES=, comma-separated) lists such words, and one counts as naming the assistant only where a name would be -- after a greeting ("Hi, say."), before a comma that opens the utterance ("Say, could you..."), or after a comma that ends it ("What do you think, say?"). "Say that again" and "I say we ship it" stay talk. A server that takes hotwords should be given the name too; the sound-alikes catch what it still mishears.
+
+*** Chiming in
+
+=chime-in-threshold= (=AI_VOICE_CHIME_IN_THRESHOLD=, 0-10, unset: 0) lets the assistant speak up unasked. After each unaddressed line, what has been said since the assistant last spoke is scored from 0 to 10 by a separate model, the relevance judge: high when a question went unanswered, something said is wrong, or the group is stuck on something the assistant is likely to know; low for chat, jokes, personal talk, or a point already settled. The judge also sees what the assistant itself said last, marked =[Assistant]=, so a follow-up to it -- "and thirty-five times twelve?" after it answered one sum -- reads as meant for it rather than as a remark out of nowhere.
+
+At or above the threshold the talk becomes a turn with a note saying why the assistant is joining in -- but only when nobody is speaking, nobody's words are still being named, the session is not muted, and no turn is under way. One score is in flight at a time. Talk heard while it is on its way does not cancel it (in a busy room that would mean no score ever finished); it makes that score stale, and when the stale score comes back the latest talk is scored instead. =relevance-debounce-ms= (=AI_VOICE_RELEVANCE_DEBOUNCE_MS=, default 0) waits for that much quiet after the last line before asking at all, so a burst of talk costs one request.
+
+The judge's answer is read in any shape a model gives one: =SCORE: 7= with =REASON: ...=, a JSON object ={"score": 7, "reason": "..."}= (also inside a code fence), or prose such as "a score of 7 out of 10". A score above 10 is 10; an answer with no score in it is a zero, since a judge that cannot answer is not a reason to speak. A judge that fails three times in a row (a revoked key, a model that no longer exists) pauses for a minute, doubling with each further failure up to eight minutes, rather than costing one request per line said in the room.
+
+=chime-in-cooldown-ms= (=AI_VOICE_CHIME_IN_COOLDOWN_MS=, default 60000) stops scoring for that long after any turn, so the assistant does not answer its own answer. =relevance-provider= and =relevance-model= (=AI_VOICE_RELEVANCE_PROVIDER=, =AI_VOICE_RELEVANCE_MODEL=) choose the judge's model, and =relevance-max-tokens= (=AI_VOICE_RELEVANCE_MAX_TOKENS=, default 200) its answer length. Unset, it is the call's own provider and model, built as a separate client because the conversation's is in use on the session's worker thread. A judge that cannot be built turns chiming in off for the call and is logged; it never fails the call.
+
+Each tool call's start is logged at INFO ("Tool started: NAME"): a tool that never finishes never reaches the transcript, and the log then says what a stuck turn was waiting on.
+
+Every score is logged at INFO, emitted as =AiVoiceSession::relevance=, and written to the call transcript as a =relevance= record with =score=, =reason= and =chimed=: the numbers to tune the threshold from.
 
 ** Naming speakers by voice
 
-One microphone in a room hears everyone as one participant. With
-=speaker-url= (=AI_VOICE_SPEAKER_URL=) set, each final transcript waits for
-its own audio to be named before it is delivered, so the model sees
-"[Sam]: ..." and "[Kim]: ..." rather than one name for the whole room, and
-can answer people by name. Transcripts, live text and room mode all use the
-name. Finals are delivered in the order they were heard, whatever order the
-naming finishes in.
+One microphone in a room hears everyone as one participant. With a speaker embedder configured, each final transcript waits for its own audio to be named before it is delivered, so the model sees "[Sam]: ..." and "[Kim]: ..." rather than one name for the whole room, and can answer people by name. Transcripts, live text and room mode all use the name. Finals are delivered in the order they were heard, whatever order the naming finishes in.
 
-- *Too short to tell* (under half a second: "yes", "stop") is whoever that
-  microphone was last named, for two minutes.
-- *Nobody enrolled matches*: with =track-guests= (=AI_VOICE_TRACK_GUESTS=,
-  =yes= or =no=), the voice is numbered -- "Guest 1", "Guest 2", in the order
-  first heard -- and later utterances in it are the same guest, so a room of
-  strangers is still a room of distinct people. A guest's voiceprint is the
-  running mean of what they said; guests live in memory for the call and are
-  never saved. An utterance joins a guest at =guest-threshold= (percent,
-  default 35); a new guest needs a second and a half of audio, and a shorter
-  unknown voice is treated as too short to tell. Without =track-guests=:
-  =unknown-speaker-name= (default =Guest=).
-- *The service is down, refuses, or is slow*: whoever that microphone was
-  last named (within two minutes), else the participant's own name. A final
-  waits at most =naming-timeout-ms= (=AI_VOICE_NAMING_TIMEOUT_MS=, default
-  8000) for its name; a name that arrives later is ignored. Naming never
-  fails a call.
-- Voice commands are recognised before naming and do not wait for it. A
-  "stop" or "mute" also settles every final still being named: those are
-  reported as transcripts but never become turns, so nothing said before the
-  command is answered after it.
+*** Where voiceprints come from
 
-The library side is =AiSpeakerIdentifier= (an interface: PCM in, name out)
-and =AiVoiceprintIdentifier=, which asks a service for a voiceprint and
-matches it against enrolled ones by cosine similarity, at
-=speaker-threshold= (percent, default 55). The right thresholds belong to the
-model. Measured on a far-field device microphone, with echo cancellation, a
-person against a podcast playing in the same room: a model that mostly
-recognises the room (wespeaker ResNet34) scored the podcast /above/ the
-enrolled person and cannot be thresholded at all, while NeMo TitaNet-large
-kept the podcast below 0.1 and the person above 0.35, with its hosts
-clustering apart from each other at 0.35. Measure with the device's own
-audio before trusting a model. The service is one HTTP endpoint:
-=POST= raw 16 kHz mono S16LE, answered with
-={"model":"...","embedding":[...]}=; less than half a second may be refused
-with 422. It keeps nothing. Voiceprints live in =voiceprint-dir=
-(=AI_VOICE_VOICEPRINT_DIR=, default =$XDG_DATA_HOME/ai-glib/voiceprints=),
-one =NAME.json= per person, mode =0600=: they are biometric data. Each
-records the model that made it, and one from another model is never
-compared, since the similarity between vectors from two models is noise that
-reads like a weak match. A file that is not a voiceprint is skipped.
+A voiceprint is a vector a speaker-embedding model makes from a few seconds of someone talking; two recordings of one voice make vectors pointing the same way. There are two ways to make them:
 
-Enroll each person once, on the device that will hear them:
+| Backend | Settings | What runs where |
+|---------+----------+-----------------|
+| =onnx= | =speaker-model= (path to an ONNX file), =speaker-frontend=, =speaker-threads= | the model, in the =ai-call= process, with ONNX Runtime: no service, no network, and the audio never leaves the machine |
+| =http= | =speaker-url=, =speaker-timeout-ms= | a voiceprint service (=ai-voiceprint-server=, below, or anything speaking its protocol) |
+
+=speaker-backend= (=AI_VOICE_SPEAKER_BACKEND=) picks one; unset, it is =onnx= when =speaker-model= is set and =http= when =speaker-url= is. A backend asked for that cannot be built -- no model at that path, a model that is not a speaker model, an =ai-glib= built without onnxruntime -- stops =ai-call= at startup with the reason, rather than quietly naming nobody.
+
+The in-process backend needs =ai-glib= built with onnxruntime (Fedora: =onnxruntime-devel= to build, =onnxruntime= to run). It is optional, like ncurses and GTK: without it everything else builds, =AiOnnxSpeakerEmbedder= still exists and says it is unavailable, and =ai-voiceprint-server= is not built. =make HAVE_ONNXRUNTIME=0= builds without it even where it is installed.
+
+*Models.* The speaker-recognition ONNX exports published by sherpa-onnx carry metadata saying how to feed them, which is read automatically (=speaker-frontend= =auto=); =kaldi= or =nemo= overrides it for a model without metadata.
+
+| Model | Front-end | Embedding | Notes |
+|-------+-----------+-----------+-------|
+| =nemo_en_titanet_small.onnx= / =nemo_en_titanet_large.onnx= | NeMo mel | 192 | the best separation measured on a far-field device, below |
+| =wespeaker_en_voxceleb_resnet34.onnx= | Kaldi fbank, 16-bit samples | 256 | |
+| =3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx= | Kaldi fbank | 512 | |
+
+They are downloaded from the =speaker-recongition-models= release of =k2-fsa/sherpa-onnx= on GitHub (the spelling is theirs). With synthetic voices -- three flite voices, two espeak-ng voices, and the ALSA test recordings -- each model scored the same voice saying two different sentences at 0.82 to 0.96 and different voices at 0.61 or less. One embedding of five seconds of audio, on one thread of an Intel Core Ultra X9 388H, took about 50 ms with TitaNet-small or 3D-Speaker and 170 ms with wespeaker ResNet34.
+
+The right thresholds belong to the model. Measured on a far-field device microphone, with echo cancellation, a person against a podcast playing in the same room: wespeaker ResNet34 scored the podcast /above/ the enrolled person and could not be thresholded at all, while NeMo TitaNet-large kept the podcast below 0.1 and the person above 0.35, with its hosts clustering apart from each other at 0.35. Measure with the device's own audio before trusting a model.
+
+*The service.* =ai-voiceprint-server= puts a model behind HTTP so a small device can have its voiceprints made on a bigger machine:
+
+#+begin_example
+ai-voiceprint-server --model nemo_en_titanet_small.onnx              # http://127.0.0.1:8095/embed
+ai-voiceprint-server -m wespeaker_en_voxceleb_resnet34.onnx -l 0.0.0.0 -p 9000 -t 2
+curl --data-binary @speech.raw http://127.0.0.1:8095/embed
+#+end_example
+
+| Request | Answer |
+|---------+--------|
+| =POST /embed= with raw 16 kHz mono S16LE | =200= ={"model":"...","dim":N,"embedding":[...]}= |
+| under half a second of audio | =422= ={"error":"..."}= |
+| over =--max-seconds= (default 30) | =413= |
+| =GET /health= | ={"model":"...","dim":N,"requests":N}= |
+
+It keeps nothing, listens on loopback unless told otherwise, and has no authentication of its own: put it on a network you trust, or behind something that authenticates. =contrib/ai-voiceprint-server.service= runs it as a systemd user service. The client side (=AiHttpSpeakerEmbedder=) bounds each request by =speaker-timeout-ms= from start to finish -- not merely a silence on the socket -- reads at most a megabyte of reply without buffering more, follows a redirect only to the same origin, and rejects a reply whose vector is empty, non-finite, out of a float's range or all zeros.
+
+*** Who is who
+
+- *An enrolled voice* at =speaker-threshold= (percent, default 55) or above is named.
+- *Too short to tell* (under half a second: "yes", "stop") is whoever that microphone was last named, within =name-memory-ms= (=AI_VOICE_NAME_MEMORY_MS=, default 120000).
+- *Nobody enrolled matches*: with =track-guests= (=AI_VOICE_TRACK_GUESTS=, =yes= or =no=), the voice is numbered -- "Guest 1", "Guest 2", in the order first /heard/, whatever order the voiceprints come back in -- and later utterances in it are the same guest, so a room of strangers is still a room of distinct people. A guest's voiceprint is the running mean of what they said; guests live in memory for the call and are never saved unless promoted (below). An utterance joins a guest at =guest-threshold= (percent, default 35); a new guest needs =min-guest-ms= (=AI_VOICE_MIN_GUEST_MS=, default 1500) of audio, and a shorter unknown voice is treated as too short to tell. At most =max-guests= (=AI_VOICE_MAX_GUESTS=, default 32) are tracked; a stranger beyond them is =unknown-speaker-name=, never folded into a guest it does not sound like. Without =track-guests=: =unknown-speaker-name= (default =Guest=).
+- *The embedder is down, refuses, or is slow*: whoever that microphone was last named (within =name-memory-ms=), else the participant's own name. A final waits at most =naming-timeout-ms= (=AI_VOICE_NAMING_TIMEOUT_MS=, default 8000) for its name; a name that arrives later is ignored. Naming never fails a call.
+- Voice commands are recognised before naming and do not wait for it. A "stop" or "mute" also settles every final still being named: those are reported as transcripts but never become turns, so nothing said before the command is answered after it.
+
+Each naming is in the call transcript as a =speaker= record, just before the utterance it names: ={"type":"speaker","participant":"caller","speaker":"Guest 1","kind":"guest","score":0.88}=, where =kind= is =enrolled=, =guest=, =unknown=, =inherited= (too short; the last name) or =fallback= (naming failed). Those are the numbers to tune =speaker-threshold= and =guest-threshold= from.
+
+*** Enrolling and managing voiceprints
+
+Enroll each person on the device that will hear them:
 
 #+begin_example
 ai-call --config config.yaml --enroll Sam                 # 20 s of the microphone
 ai-call --config config.yaml --enroll Sam --enroll-seconds 30
-ai-call --config config.yaml --enroll Kim --enroll-file kim.wav   # 16 kHz mono 16-bit
+ai-call --config config.yaml --enroll Kim --enroll-file kim.wav   # 16 kHz mono 16-bit, or raw S16LE
+ai-call --config config.yaml --list-voiceprints
+ai-call --config config.yaml --rename Kim:Kimberly
+ai-call --config config.yaml --forget Kimberly
 #+end_example
 
-Enrolling a name again averages the new audio into it, which makes it
-steadier. Enroll with audio that went through the same processing a call's
-does -- echo cancellation and noise suppression change a voiceprint -- which
-=--enroll-file= allows with a recording taken from the call path. Delete the file to forget someone. A voice can be imitated or
-replayed; a name from a voiceprint says who is probably talking, and is not a
-login. Nothing here gates what a speaker may ask for.
+A recording with less than three seconds of speech in it (counted in 30 ms windows louder than about -40 dBFS) is refused; one with more than half a percent of its samples clipped is enrolled with a warning to turn the input down. After enrolling, =ai-call= says how many recordings the voiceprint now holds and warns when the new voice is within =speaker-threshold= of someone already enrolled: those two will be named as each other. Enrolling a name again averages the new audio into it, which makes it steadier; a voiceprint from another model is replaced. Enroll with audio that went through the same processing a call's does -- echo cancellation and noise suppression change a voiceprint -- which =--enroll-file= allows with a recording taken from the call path.
+
+A name is 1 to 64 bytes of UTF-8 with no control characters, slashes, brackets or colons, not starting or ending with a space or starting with a dot, and not of the form "Guest N": it becomes a file name and the "[Name]:" prefix the model reads, and must be able to fake neither. =--rename= moves a voiceprint only to a name that is free. Voiceprints live in =voiceprint-dir= (=AI_VOICE_VOICEPRINT_DIR=, default =$XDG_DATA_HOME/ai-glib/voiceprints=), one =NAME.json= per person; they are biometric data, so the directory is kept 0700 and each file 0600 (a looser one found there is tightened), files are written atomically, and a symlink, a file owned by someone else, a file over 256 KiB or one whose name is not its own file name is not read. Each records the model that made it, and one from another model is never compared, since the similarity between vectors from two models is noise that reads like a weak match. A running call watches the directory, so a voice enrolled during a call is recognised from the next utterance.
+
+*** Giving a guest a name, by voice
+
+With =voice-commands= on and speakers named by voice, a guest can be given a lasting name in the call: "Ada, guest two is Kim", "call guest 2 Kim", or "guest number two's name is Kim". The guest's voiceprint is saved as Kim's, the session speaks =promoted-message= (=AI_VOICE_PROMOTED_MESSAGE=, default "Okay, I'll remember {name}."), what the room remembers is renamed, and the transcript gets a =promotion= record. It only ever creates a voiceprint: a name already enrolled is refused aloud with =promotion-refused-message= (=AI_VOICE_PROMOTION_REFUSED_MESSAGE=, default "I can't save that voice as {name}: {reason}."), so nobody can take over someone else's voice by saying so. A sentence that only mentions a guest ("guest two is not here yet") is not a command. An application can refuse any promotion through =AiVoiceSession::allow-promotion= or its class handler.
+
+A voice can be imitated or replayed; a name from a voiceprint says who is probably talking, and is not a login. Nothing here gates what a speaker may ask for.
+
+** Room mode in an application
+
+Every piece of a room session is a public interface with a default implementation an application can subclass or replace, so a host decides how much of this it uses and where its data lives. All of them are GObject types, usable from C and through GObject Introspection.
+
+| Piece | Interface or class | Default | Session property |
+|-------+--------------------+---------+------------------|
+| Who spoke | =AiSpeakerIdentifier= | =AiVoiceprintIdentifier= (derivable) | =speaker-identifier= |
+| Audio to voiceprint | =AiSpeakerEmbedder= | =AiOnnxSpeakerEmbedder=, =AiHttpSpeakerEmbedder= (both derivable) | via the identifier's =embedder= |
+| Where voiceprints live | =AiVoiceprintStore= | =AiFileVoiceprintStore=, =AiMemoryVoiceprintStore= (derivable) | via the identifier's =store= |
+| Said to the assistant? | =AiAddressDetector= | =AiNameAddressDetector= (derivable), from =assistant-names= and =assistant-soundalikes= | =address-detector= |
+| Speak up unasked? | =AiRelevanceJudge= | =AiProviderRelevanceJudge= (derivable), from =relevance-provider= | =relevance-judge= |
+| What is remembered between turns | =AiVoiceRoom= (derivable) | limits as above, roster off | =room= |
+| The session itself | =AiVoiceSession= (derivable) | | |
+
+The values passed between them are =AiVoiceprint= (a validated, model-tagged, unit-length vector with JSON round-tripping, similarity and a weighted running mean) and =AiSpeakerMatch= (who, how sure, and how it was decided: =AI_SPEAKER_MATCH_ENROLLED=, =GUEST=, =UNKNOWN=, =INHERITED= or =FALLBACK=).
+
+The extension points, briefly:
+
+- =AiVoiceprintIdentifierClass.score= compares voiceprints (cosine by default); =match= decides who an utterance is, called in the order utterances were heard. =promoted= is the class handler of =AiVoiceprintIdentifier::promoted=. =ai_voiceprint_identifier_closest()= finds the nearest enrolled voice, =list_guests()= and =forget_guests()= manage the call's guests, and =reload()= rereads the store (automatic on =AiVoiceprintStore::changed=).
+- =AiSpeakerIdentifierInterface.promote= and =has_name= are optional: an identifier without them refuses promotion with =G_IO_ERROR_NOT_SUPPORTED=.
+- =AiHttpSpeakerEmbedderClass.prepare_message= adjusts the request (an authentication header, say: a credential header stops the request following any redirect); =parse_reply= reads a different reply format.
+- =AiOnnxSpeakerEmbedderClass.features= computes a model's input from samples in [-1, 1], for a model trained on other features.
+- =AiProviderRelevanceJudgeClass.build_system_prompt=, =build_message= and =parse= change what the judge model is asked and how its answer is read; =AiProviderRelevanceJudge::failed= reports each failure, and =failure-limit= and =backoff-ms= tune the pause.
+- =AiVoiceRoomClass.format_line= and =format_turn= change how talk and the roster reach the model.
+- =AiVoiceSessionClass= has a class handler for =transcript=, =reply=, =command=, =relevance=, =speaker-named=, =allow-promotion= and =guest-promoted=.
+
+A voiceprint store in an application's own database, and a session that will never let a guest be renamed:
+
+#+begin_src c
+/* Keep voiceprints in the application's database, not in files. */
+static void my_store_iface_init(AiVoiceprintStoreInterface *iface)
+{
+	iface->list = my_store_list;     /* GPtrArray of AiVoiceprint, sorted by name */
+	iface->lookup = my_store_lookup; /* transfer full, or NULL */
+	iface->save = my_store_save;     /* then ai_voiceprint_store_emit_changed() */
+	iface->remove = my_store_remove;
+	iface->rename = my_store_rename;
+}
+
+static gboolean
+strict_allow_promotion(AiVoiceSession *self, const gchar *guest, const gchar *name)
+{
+	return FALSE; /* names are assigned by an administrator, not by voice */
+}
+
+static void
+strict_session_class_init(StrictSessionClass *klass)
+{
+	AI_VOICE_SESSION_CLASS(klass)->allow_promotion = strict_allow_promotion;
+}
+
+/* Wiring it together: */
+g_autoptr(AiOnnxSpeakerEmbedder) embedder =
+	ai_onnx_speaker_embedder_new("/var/lib/app/titanet_small.onnx", &error);
+g_autoptr(AiVoiceprintIdentifier) identifier =
+	ai_voiceprint_identifier_new_full(AI_SPEAKER_EMBEDDER(embedder), my_store);
+g_object_set(identifier, "threshold", 0.45, "track-guests", TRUE, NULL);
+g_object_set(session, "room-mode", TRUE, "assistant-names", "Ada",
+             "speaker-identifier", identifier, NULL);
+g_signal_connect(session, "speaker-named", G_CALLBACK(on_speaker_named), app);
+#+end_src
+
+The defaults are built only when nothing is set: =assistant-names= and =assistant-soundalikes= configure the default address detector, and setting =relevance-provider= replaces the judge with an =AiProviderRelevanceJudge= for that provider (reading =relevance-provider= back gives the judge's provider when the judge is one). A session's room always exists; setting =room= to %NULL keeps the current one.
 
 ** Local audio: a device instead of a call
 
@@ -816,7 +894,14 @@ read/error tools, agent notification/retrieval), =test-voice-wire= (ready/EOS,
 ready timeout, framing, malformed responses, native-rate PCM), =test-voice-config=,
 =test-voice-activity= and
 =test-voice-matrix= (answer, cleanup retry and refusal, a late clear after a
-new call, drop files, transcript write failure, stale state).
+new call, drop files, transcript write failure, stale state, room settings,
+enrolment checks, voiceprint management and the choice of speaker backend).
+
+Room mode and speaker naming have suites of their own. =test-voice-room=: the room's memory limits, roster and subclassing, the name detector and its sound-alikes, reading every shape of judge answer, and the judge's back-off. =test-voice-speaker=: voiceprint validation, JSON and arithmetic, name rules, both stores' contract, the file store's refusals (symlinks, other owners, oversized and misnamed files) and its directory watch, every way a voiceprint service can fail (HTTP errors, non-JSON, overflowing or zero vectors, oversized replies, a service that never answers, a redirect off its origin), guests numbered in the order heard, a cancelled identification not holding the queue, the guest cap, promotion, and a subclass's own scoring. =test-voice-session= adds stop, mute and a naming deadline while finals are being named, no chime while muted or while someone is being named, a busy room that still gets scored, an application's own detector and judge, the roster, how each speaker is reported, promotion by voice (accepted, refused, vetoed) and a session subclass. =test-voice-onnx=: the FFT and both front-ends (frame counts, where a tone lands, normalisation), and, with onnxruntime, a model the test writes itself, models that are refused at load, an identifier over the in-process embedder, and =ai-voiceprint-server= giving the same voiceprint over HTTP. Point =AI_TEST_SPEAKER_MODEL= at a real speaker model to check it too:
+
+#+begin_src sh
+AI_TEST_SPEAKER_MODEL=~/models/nemo_en_titanet_small.onnx build/release/tests/test-voice-onnx
+#+end_src
 Additional offline tests cover speech-service failure and successful next-turn
 recovery (=test-voice-failures=), complete-only fallback caching
 (=test-call-speech-cache=), and live-call signal shutdown with a stalled goodbye.

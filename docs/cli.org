@@ -675,7 +675,12 @@ local tools and background agents. Built by =make= and installed by
 ai-call --config /path/to/config.yaml --identity /path/to/identity.md
 ai-call --config /path/to/config.yaml --credentials /path/to/matrix.json
 ai-call --config /path/to/config.yaml --identity /path/to/identity.md --local
+ai-call --config /path/to/config.yaml --enroll Sam
+ai-call --config /path/to/config.yaml --list-voiceprints
+ai-call --config /path/to/config.yaml --rename Kim:Kimberly
 #+end_example
+
+Enrolling refuses a recording with under three seconds of speech, warns about clipping, and warns when the new voice is within =speaker-threshold= of someone already enrolled.
 
 | Option | Purpose |
 |--------+---------|
@@ -688,6 +693,9 @@ ai-call --config /path/to/config.yaml --identity /path/to/identity.md --local
 | =--enroll NAME= | Save NAME's voiceprint from 20 s of the microphone, then exit |
 | =--enroll-file PATH= | With =--enroll=: from a 16 kHz mono 16-bit WAV or raw PCM file |
 | =--enroll-seconds N= | With =--enroll=: record N seconds (3-60) |
+| =--list-voiceprints= | List the enrolled voiceprints (recordings, last change, model), then exit |
+| =--rename OLD:NEW= | Rename a voiceprint to a name nobody has, then exit |
+| =--forget NAME= | Delete NAME's voiceprint, then exit |
 | =-p=, =--provider NAME= | Existing provider factory selection |
 | =-m=, =--model NAME= | Provider model |
 | =--version=, =--license= | Version or license information |
@@ -702,11 +710,7 @@ the following environment names: =AI_CALL_CREDENTIALS=, =AI_CALL_DEVICE=,
 =AI_CALL_LOCAL_SPEAKER_NAME=. Room mode and chiming in use =AI_VOICE_ROOM_MODE=, =AI_VOICE_ASSISTANT_SOUNDALIKES=,
 =AI_VOICE_CHIME_IN_THRESHOLD=, =AI_VOICE_CHIME_IN_COOLDOWN_MS=,
 =AI_VOICE_RELEVANCE_PROVIDER= and =AI_VOICE_RELEVANCE_MODEL=; see
-[[file:voice.org::*Room mode and chiming in][Room mode and chiming in]]. Naming speakers by
-voice uses =AI_VOICE_SPEAKER_URL=, =AI_VOICE_VOICEPRINT_DIR=,
-=AI_VOICE_SPEAKER_THRESHOLD=, =AI_VOICE_UNKNOWN_SPEAKER_NAME=,
-=AI_VOICE_TRACK_GUESTS= and =AI_VOICE_GUEST_THRESHOLD=; see
-[[file:voice.org::*Naming speakers by voice][Naming speakers by voice]]. Speech/media endpoints use =AI_VOICE_STT_URL=,
+[[file:voice.org::*Room mode and chiming in][Room mode and chiming in]]; =AI_VOICE_RELEVANCE_DEBOUNCE_MS=, =AI_VOICE_RELEVANCE_MAX_TOKENS=, =AI_VOICE_ROOM_HISTORY_LINES=, =AI_VOICE_ROOM_HISTORY_CHARS=, =AI_VOICE_ROOM_HISTORY_AGE_MS= and =AI_VOICE_ROOM_ROSTER= tune it. Naming speakers by voice uses =AI_VOICE_SPEAKER_MODEL=, =AI_VOICE_SPEAKER_FRONTEND=, =AI_VOICE_SPEAKER_THREADS= (in process) or =AI_VOICE_SPEAKER_URL= and =AI_VOICE_SPEAKER_TIMEOUT_MS= (a service), chosen by =AI_VOICE_SPEAKER_BACKEND=, with =AI_VOICE_VOICEPRINT_DIR=, =AI_VOICE_SPEAKER_THRESHOLD=, =AI_VOICE_UNKNOWN_SPEAKER_NAME=, =AI_VOICE_NAMING_TIMEOUT_MS=, =AI_VOICE_NAME_MEMORY_MS=, =AI_VOICE_TRACK_GUESTS=, =AI_VOICE_GUEST_THRESHOLD=, =AI_VOICE_MAX_GUESTS=, =AI_VOICE_MIN_GUEST_MS=, =AI_VOICE_PROMOTED_MESSAGE= and =AI_VOICE_PROMOTION_REFUSED_MESSAGE=; see [[file:voice.org::*Naming speakers by voice][Naming speakers by voice]]. Speech/media endpoints use =AI_VOICE_STT_URL=,
 =AI_VOICE_TTS_URL= and =AI_VOICE_LIVEKIT_URL=.
 
 =SIGUSR1= toggles mute on every live session, as the spoken commands do; a
@@ -746,3 +750,24 @@ if startup prewarming also failed, spoken fallback cannot be guaranteed.
 =AI_VOICE_SYNTHESIS_ERROR_MESSAGE= and =AI_CALL_GOODBYE_MESSAGE= override the
 corresponding text. Call summaries report duration, transcripts, errors,
 reconnects and dropped/late buffers at INFO.
+
+* ai-voiceprint-server
+
+=ai-voiceprint-server= runs a speaker-embedding ONNX model behind the HTTP protocol =ai-call='s =speaker-url= (=AiHttpSpeakerEmbedder=) speaks, so a small device can have its voiceprints made on a bigger machine. It is built only when =ai-glib= is built with onnxruntime.
+
+#+begin_example
+ai-voiceprint-server --model nemo_en_titanet_small.onnx
+ai-voiceprint-server -m wespeaker_en_voxceleb_resnet34.onnx -l 0.0.0.0 -p 9000 -t 2
+curl --data-binary @speech.raw http://127.0.0.1:8095/embed
+#+end_example
+
+| Option | Purpose |
+|--------+---------|
+| =-m=, =--model PATH= | The speaker-embedding ONNX model (required) |
+| =-l=, =--listen ADDRESS= | Address to listen on (default =127.0.0.1=) |
+| =-p=, =--port PORT= | Port (default 8095) |
+| =-t=, =--threads N= | Threads per embedding (default 1) |
+| =--max-seconds N= | Longest audio accepted (default 30) |
+| =--version=, =--license= | Version or license information |
+
+=POST /embed= takes raw 16 kHz mono S16LE and answers ={"model":"...","dim":N,"embedding":[...]}=; under half a second is 422 and over =--max-seconds= is 413. =GET /health= reports the model. It keeps nothing and has no authentication: bind it to a network you trust. =contrib/ai-voiceprint-server.service= is a systemd user unit for it. See [[file:voice.org::*Naming speakers by voice][Naming speakers by voice]].

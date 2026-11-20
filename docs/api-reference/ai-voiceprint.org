@@ -1,0 +1,56 @@
+* AiVoiceprint and AiSpeakerMatch
+
+The two values room mode passes around. Both are derivable GObjects. See [[file:../voice.org::*Naming speakers by voice][Naming speakers by voice]] for how they are used.
+
+** AiVoiceprint
+
+A person's name (or none, for an utterance not yet named), the embedding model that made it, and a unit-length vector. The vector is validated once, by the constructor: at least one value and at most =AI_VOICEPRINT_MAX_DIMENSIONS= (8192), every one finite, not all zero. Everything downstream can trust it.
+
+#+begin_src C
+AiVoiceprint *ai_voiceprint_new (const gchar *name,      /* nullable */
+                                 const gchar *model,
+                                 const gfloat *embedding, gsize dimensions,
+                                 GError **error);        /* G_IO_ERROR_INVALID_DATA */
+AiVoiceprint *ai_voiceprint_new_from_json (JsonNode *node, GError **error);
+JsonNode     *ai_voiceprint_to_json (AiVoiceprint *self);   /* name, model, count, updated, embedding */
+AiVoiceprint *ai_voiceprint_copy (AiVoiceprint *self, const gchar *name /* nullable: keep */);
+
+const gchar  *ai_voiceprint_get_name (AiVoiceprint *self);
+const gchar  *ai_voiceprint_get_model (AiVoiceprint *self);
+const gfloat *ai_voiceprint_get_embedding (AiVoiceprint *self, gsize *dimensions);
+guint         ai_voiceprint_get_count (AiVoiceprint *self);   /* recordings averaged in */
+gint64        ai_voiceprint_get_updated (AiVoiceprint *self); /* Unix seconds */
+
+gboolean ai_voiceprint_is_comparable (AiVoiceprint *self, AiVoiceprint *other);
+gdouble  ai_voiceprint_similarity (AiVoiceprint *self, AiVoiceprint *other); /* -1 when not comparable */
+void     ai_voiceprint_absorb (AiVoiceprint *self, AiVoiceprint *other, guint max_count);
+
+gboolean ai_voiceprint_name_is_valid (const gchar *name);
+gboolean ai_voiceprint_name_is_guest (const gchar *name, guint *number);
+#+end_src
+
+- Voiceprints from two models are never compared: =ai_voiceprint_similarity()= returns -1 for them, and =ai_voiceprint_absorb()= leaves them alone.
+- =ai_voiceprint_absorb()= is a running mean weighted by both counts; =max_count= caps the weight of the history so a voiceprint keeps adapting.
+- =AiVoiceprintClass.similarity= is cosine similarity by default; a subclass may measure it differently.
+- A valid name is 1 to =AI_VOICEPRINT_NAME_MAX= (64) bytes of UTF-8, with no control or format characters, =/=, =\=, =[=, =]= or =:=, not starting with =.= or a space or ending with a space, and not "Guest N".
+
+** AiSpeakerMatch
+
+Who said an utterance, how sure, and how that was decided.
+
+| =AiSpeakerMatchKind= | Meaning |
+|----------------------+---------|
+| =AI_SPEAKER_MATCH_ENROLLED= | an enrolled voice matched |
+| =AI_SPEAKER_MATCH_GUEST= | a voice nobody enrolled, numbered for the call |
+| =AI_SPEAKER_MATCH_UNKNOWN= | a voice that matches nobody, not tracked |
+| =AI_SPEAKER_MATCH_INHERITED= | too short to tell; whoever that microphone was last named (set by the session) |
+| =AI_SPEAKER_MATCH_FALLBACK= | naming failed or timed out; the participant (set by the session) |
+
+#+begin_src C
+AiSpeakerMatch     *ai_speaker_match_new (AiSpeakerMatchKind kind, const gchar *name, gdouble score);
+AiSpeakerMatchKind  ai_speaker_match_get_kind (AiSpeakerMatch *self);
+const gchar        *ai_speaker_match_get_name (AiSpeakerMatch *self);   /* NULL: unknown */
+gdouble             ai_speaker_match_get_score (AiSpeakerMatch *self);  /* -1 to 1 */
+guint               ai_speaker_match_get_guest_number (AiSpeakerMatch *self); /* N of "Guest N", else 0 */
+AiVoiceprint       *ai_speaker_match_get_voiceprint (AiSpeakerMatch *self); /* the utterance's own */
+#+end_src

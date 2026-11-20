@@ -51,6 +51,7 @@ see their provider pages.
 | Guide | Description |
 |-------+-------------|
 | [[file:voice.org][Live voice sessions]] | Audio interfaces, barge-in, agents, wire protocols and =ai-call= |
+| [[file:voice.org::*Room mode and chiming in][Room mode and speaker naming]] | Answering only when named, chiming in, voiceprints (ONNX or a service), enrolment, guests and the interfaces behind them |
 
 *** Providers
 - [[file:providers/index.org][Providers Overview]] - Common provider interface
