@@ -2,6 +2,8 @@
 #include "voice/ai-voiceprint-identifier.h"
 #include "model/ai-embedding.h"
 #include "core/ai-json-util.h"
+#include "core/ai-http-redirect-private.h"
+#include <math.h>
 #include <libsoup/soup.h>
 #include <glib/gstdio.h>
 #include <errno.h>
@@ -78,26 +80,40 @@ valid_name(const gchar *name)
 		   g_utf8_validate(name, -1, NULL) && strchr(name, '/') == NULL &&
 		   strchr(name, '\\') == NULL;
 }
-/* Every element a number, at least one of them; NULL otherwise. */
+/* Every element a finite number that fits a float, at least one of them, and
+ * not all zero; NULL otherwise. A zero or non-finite vector has no direction:
+ * it matches nobody, and averaged into a voiceprint it poisons it. */
 static gfloat *
 read_vector(JsonArray *array, gsize *dims)
 {
 	guint i, n = array != NULL ? json_array_get_length(array) : 0;
 	gfloat *vector;
+	gdouble norm = 0;
 	if (n == 0 || n > 8192)
 		return NULL;
 	vector = g_new(gfloat, n);
 	for (i = 0; i < n; i++) {
 		JsonNode *node = json_array_get_element(array, i);
 		GType type = JSON_NODE_HOLDS_VALUE(node) ? json_node_get_value_type(node) : G_TYPE_INVALID;
+		gdouble value;
 		if (type == G_TYPE_DOUBLE)
-			vector[i] = (gfloat)json_node_get_double(node);
+			value = json_node_get_double(node);
 		else if (type == G_TYPE_INT64)
-			vector[i] = (gfloat)json_node_get_int(node);
+			value = (gdouble)json_node_get_int(node);
 		else {
 			g_free(vector);
 			return NULL;
 		}
+		if (!isfinite(value) || fabs(value) > 1e30) {
+			g_free(vector);
+			return NULL;
+		}
+		vector[i] = (gfloat)value;
+		norm += value * value;
+	}
+	if (!(norm > 0) || !isfinite(norm)) {
+		g_free(vector);
+		return NULL;
 	}
 	*dims = n;
 	return vector;
@@ -179,7 +195,7 @@ embedded(GObject *source, GAsyncResult *result, gpointer data)
 	gsize size = 0;
 	const gchar *raw;
 	guint status;
-	if (body == NULL) {
+	if (body == NULL || ai_http_redirect_refused(message, &error)) {
 		g_task_return_error(task, g_steal_pointer(&error));
 		g_object_unref(task);
 		return;
@@ -220,7 +236,8 @@ embed(AiVoiceprintIdentifier *self, GBytes *pcm, GTask *task)
 		g_object_unref(task);
 		return;
 	}
-	if (self->url == NULL || (message = soup_message_new("POST", self->url)) == NULL) {
+	if (self->url == NULL ||
+		(message = ai_http_message_new("POST", self->url, AI_HTTP_NO_CREDENTIALS)) == NULL) {
 		g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 								"No usable voiceprint service URL");
 		g_object_unref(task);
@@ -632,5 +649,5 @@ ai_voiceprint_identifier_init(AiVoiceprintIdentifier *self)
 {
 	self->voices = g_ptr_array_new_with_free_func(voice_free);
 	self->guests = g_ptr_array_new_with_free_func(voice_free);
-	self->http = soup_session_new();
+	self->http = ai_http_session_new();
 }

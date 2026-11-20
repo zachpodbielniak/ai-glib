@@ -118,7 +118,7 @@ struct _AiVoiceSession {
 	GObject *identifier;
 	gchar *unknown_speaker_name;
 	GQueue naming;
-	GCancellable *naming_cancel;
+	guint naming_timeout_ms; /* the longest a final waits to be named */
 };
 enum {
 	PROP_0,
@@ -154,7 +154,8 @@ enum {
 	PROP_CHIME_IN_COOLDOWN,
 	PROP_SPEAKER_IDENTIFIER,
 	PROP_UNKNOWN_SPEAKER_NAME,
-	PROP_ASSISTANT_SOUNDALIKES
+	PROP_ASSISTANT_SOUNDALIKES,
+	PROP_NAMING_TIMEOUT
 };
 G_DEFINE_TYPE(AiVoiceSession, ai_voice_session, G_TYPE_OBJECT)
 /* A word that starts softly -- "f", "h", "th" -- is not speech to the
@@ -1241,11 +1242,18 @@ match_command(AiVoiceSession *self, const gchar *text)
 	return NULL;
 }
 static void
+cancel_scoring(AiVoiceSession *self);
+static void
+drop_pending_namings(AiVoiceSession *self);
+static void
 set_muted(AiVoiceSession *self, gboolean muted)
 {
 	if (self->muted == muted)
 		return;
 	self->muted = muted;
+	/* A score on its way was asked before the mute; it must not chime. */
+	if (muted)
+		cancel_scoring(self);
 	g_object_notify(G_OBJECT(self), "muted");
 }
 static void
@@ -1263,6 +1271,9 @@ run_command(AiVoiceSession *self, const gchar *name)
 			self->speech->notice = FALSE;
 		interrupt_turn(self);
 		g_queue_clear_full(&self->turns, g_free);
+		/* Finals said before the command and still being named must not
+		 * become turns after it: "stop" would be followed by an answer. */
+		drop_pending_namings(self);
 	}
 	if (g_str_equal(name, "mute")) {
 		set_muted(self, TRUE);
@@ -1420,16 +1431,18 @@ scored(GObject *source, GAsyncResult *result, gpointer data)
 		return;
 	}
 	if (response == NULL) {
-		g_debug("voice: relevance not scored: %s", error->message);
+		g_debug("voice: relevance not scored: %s",
+				error != NULL ? error->message : "the judge returned nothing");
 		scoring_free(sc);
 		return;
 	}
 	text = ai_response_get_text(response);
 	score = parse_relevance(text, &reason);
 	/* Never over anyone, and never on top of a turn already under way. */
-	chime = score >= self->chime_threshold && !self->provider_pending &&
+	chime = score >= self->chime_threshold && !self->provider_pending && !self->muted &&
 			self->speech == NULL && g_queue_is_empty(&self->turns) &&
-			!recognizing(self) && !g_queue_is_empty(&self->room);
+			g_queue_is_empty(&self->naming) && !recognizing(self) &&
+			!g_queue_is_empty(&self->room);
 	g_log("ai-glib", G_LOG_LEVEL_INFO, "Relevance %u/10 (threshold %u)%s: %s", score,
 		  self->chime_threshold, chime ? ", chiming in" : "", reason);
 	g_signal_emit_by_name(self, "relevance", score, reason, chime);
@@ -1507,6 +1520,14 @@ confirm_barge(AiVoiceSession *self, Participant *p)
 static void
 deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
 {
+	if (self->stopped)
+		return;
+	/* Muted while this final was being named: it was said to a deaf session. */
+	if (self->muted) {
+		g_debug("voice: muted; not hearing %s", name);
+		pump(self);
+		return;
+	}
 	if (self->room_mode && *text != '\0' && !addressed(self, text)) {
 		g_signal_emit_by_name(self, "transcript", name, text, TRUE);
 		hear_room(self, name, text);
@@ -1532,21 +1553,54 @@ deliver(AiVoiceSession *self, const gchar *name, const gchar *text)
  * whoever that participant was last named, for a while; a voice that matches
  * nobody is unknown-speaker-name, or the participant's own name. */
 #define NAME_MEMORY_US (120 * G_USEC_PER_SEC)
+/*
+ * One final waiting for its name. The queue holds one reference and an
+ * identification in flight holds another, so a reply that arrives after the
+ * naming deadline, or after the session dropped the queue, still has
+ * somewhere to land. Only the in-flight reference keeps the session alive:
+ * a queued naming must not, or a session whose identifier never answers
+ * could never be freed.
+ */
 typedef struct {
-	AiVoiceSession *session;
+	gint refs;
+	AiVoiceSession *session; /* borrowed; owned while identification is in flight */
 	gchar *speaker, *text, *name;
-	gboolean done, too_short, failed;
+	gboolean done, too_short, failed, dropped;
 	gdouble score;
+	GCancellable *cancel;
+	GSource *timeout;
 } Naming;
+static Naming *
+naming_ref(Naming *n)
+{
+	n->refs++;
+	return n;
+}
 static void
-naming_free(gpointer data)
+naming_unref(gpointer data)
 {
 	Naming *n = data;
-	g_object_unref(n->session);
+	if (--n->refs > 0)
+		return;
+	if (n->timeout != NULL) {
+		g_source_destroy(n->timeout);
+		g_source_unref(n->timeout);
+	}
+	g_clear_object(&n->cancel);
 	g_free(n->speaker);
 	g_free(n->text);
 	g_free(n->name);
 	g_free(n);
+}
+/* Named, or given up on: the deadline is no longer needed. */
+static void
+naming_settle(Naming *n)
+{
+	n->done = TRUE;
+	if (n->timeout != NULL) {
+		g_source_destroy(n->timeout);
+		g_clear_pointer(&n->timeout, g_source_unref);
+	}
 }
 /* Names are settled here, in the order things were said, so "too short to
  * tell" means whoever spoke just before -- not whoever was named first. */
@@ -1566,7 +1620,7 @@ deliver_named(AiVoiceSession *self)
 				p->last_named = g_strdup(n->name);
 				p->last_named_us = now;
 			}
-		} else if (n->too_short && p != NULL && p->last_named != NULL &&
+		} else if ((n->too_short || n->failed) && p != NULL && p->last_named != NULL &&
 				   now - p->last_named_us < NAME_MEMORY_US)
 			name = p->last_named;
 		else if (!n->failed && !n->too_short && self->unknown_speaker_name != NULL)
@@ -1574,10 +1628,31 @@ deliver_named(AiVoiceSession *self)
 		else
 			name = p != NULL ? p->name : n->speaker;
 		g_log("ai-glib", G_LOG_LEVEL_INFO, "Speaker: %s (%.2f)", name, n->score);
-		if (!self->stopped)
+		if (n->dropped) {
+			/* Said before a stop or a mute: on the record, never a turn. */
+			if (!self->stopped)
+				g_signal_emit_by_name(self, "transcript", name, n->text, TRUE);
+		} else if (!self->stopped)
 			deliver(self, name, n->text);
-		naming_free(n);
+		naming_unref(n);
 	}
+}
+/* Stop or mute: what is still being named is heard but not answered, and
+ * its identification is no longer worth waiting for. */
+static void
+drop_pending_namings(AiVoiceSession *self)
+{
+	GList *l;
+	for (l = self->naming.head; l != NULL; l = l->next) {
+		Naming *n = l->data;
+		n->dropped = TRUE;
+		if (!n->done) {
+			n->failed = TRUE;
+			naming_settle(n);
+			g_cancellable_cancel(n->cancel);
+		}
+	}
+	deliver_named(self);
 }
 static void
 named(GObject *source, GAsyncResult *result, gpointer data)
@@ -1585,15 +1660,43 @@ named(GObject *source, GAsyncResult *result, gpointer data)
 	Naming *n = data;
 	AiVoiceSession *self = n->session;
 	g_autoptr(GError) error = NULL;
-	n->name = ai_speaker_identifier_identify_finish(AI_SPEAKER_IDENTIFIER(source), result,
-													&n->score, &error);
+	gchar *name;
+	gdouble score = 0;
+	name = ai_speaker_identifier_identify_finish(AI_SPEAKER_IDENTIFIER(source), result, &score,
+												 &error);
+	/* Settled already -- by its deadline, a stop or a mute: too late to count. */
+	if (n->done) {
+		g_free(name);
+		naming_unref(n);
+		g_object_unref(self);
+		return;
+	}
+	n->name = name;
+	n->score = score;
 	n->too_short = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 	/* The service down or refusing: the participant, not "a stranger". */
 	n->failed = error != NULL && !n->too_short;
 	if (n->failed)
 		g_debug("voice: speaker not identified: %s", error->message);
-	n->done = TRUE;
+	naming_settle(n);
 	deliver_named(self);
+	naming_unref(n);
+	g_object_unref(self);
+}
+/* An identifier that never answers must not hold every later final. */
+static gboolean
+naming_expired(gpointer data)
+{
+	Naming *n = data;
+	AiVoiceSession *self = n->session;
+	g_log("ai-glib", G_LOG_LEVEL_INFO,
+		  "Speaker not named within %u ms; using who spoke last", self->naming_timeout_ms);
+	g_clear_pointer(&n->timeout, g_source_unref);
+	n->failed = TRUE;
+	n->done = TRUE;
+	g_cancellable_cancel(n->cancel);
+	deliver_named(self);
+	return G_SOURCE_REMOVE;
 }
 static void
 name_then_deliver(AiVoiceSession *self, const gchar *speaker, Participant *p,
@@ -1602,14 +1705,20 @@ name_then_deliver(AiVoiceSession *self, const gchar *speaker, Participant *p,
 	Naming *n = g_new0(Naming, 1);
 	g_autoptr(GBytes) pcm = g_bytes_new(p->utterance->data, p->utterance->len);
 	g_byte_array_set_size(p->utterance, 0);
-	n->session = g_object_ref(self);
+	n->refs = 1;
+	n->session = self;
 	n->speaker = g_strdup(speaker);
 	n->text = g_strdup(text);
+	n->cancel = g_cancellable_new();
 	g_queue_push_tail(&self->naming, n);
-	if (self->naming_cancel == NULL)
-		self->naming_cancel = g_cancellable_new();
-	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(self->identifier), pcm,
-										 self->naming_cancel, named, n);
+	if (self->naming_timeout_ms > 0) {
+		n->timeout = g_timeout_source_new(self->naming_timeout_ms);
+		g_source_set_callback(n->timeout, naming_expired, n, NULL);
+		g_source_attach(n->timeout, self->context);
+	}
+	g_object_ref(self);
+	ai_speaker_identifier_identify_async(AI_SPEAKER_IDENTIFIER(self->identifier), pcm, n->cancel,
+										 named, naming_ref(n));
 }
 
 static void
@@ -1737,14 +1846,21 @@ ai_voice_session_stop(AiVoiceSession *self)
 {
 	GHashTableIter iter;
 	gpointer key;
+	Naming *n;
 	g_return_if_fail(AI_IS_VOICE_SESSION(self));
 	if (self->stopped)
 		return;
 	self->stopped = TRUE;
 	self->media_recovering = TRUE;
 	cancel_scoring(self);
-	if (self->naming_cancel != NULL)
-		g_cancellable_cancel(self->naming_cancel);
+	/* Settle every naming before dropping the queue, so no deadline fires
+	 * later on a session that has stopped; a reply still on its way finds
+	 * its naming done and is ignored. */
+	while ((n = g_queue_pop_head(&self->naming)) != NULL) {
+		naming_settle(n);
+		g_cancellable_cancel(n->cancel);
+		naming_unref(n);
+	}
 	interrupt_turn(self);
 	g_hash_table_iter_init(&iter, self->participants);
 	while (g_hash_table_iter_next(&iter, &key, NULL)) {
@@ -1777,7 +1893,6 @@ dispose(GObject *object)
 	g_clear_object(&self->turn_cancel);
 	g_clear_object(&self->relevance_provider);
 	g_clear_object(&self->identifier);
-	g_clear_object(&self->naming_cancel);
 	G_OBJECT_CLASS(ai_voice_session_parent_class)->dispose(object);
 }
 static void
@@ -1867,6 +1982,8 @@ get_property(GObject *object, guint id, GValue *value, GParamSpec *pspec)
 		g_value_set_uint(value, self->chime_cooldown_ms);
 	else if (id == PROP_SPEAKER_IDENTIFIER)
 		g_value_set_object(value, self->identifier);
+	else if (id == PROP_NAMING_TIMEOUT)
+		g_value_set_uint(value, self->naming_timeout_ms);
 	else if (id == PROP_UNKNOWN_SPEAKER_NAME)
 		g_value_set_string(value, self->unknown_speaker_name);
 	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
@@ -1948,20 +2065,16 @@ set_property(GObject *object, guint id, const GValue *value, GParamSpec *pspec)
 	} else if (id == PROP_ROOM_MODE)
 		self->room_mode = g_value_get_boolean(value);
 	else if (id == PROP_RELEVANCE_PROVIDER) {
-		GObject *provider = g_value_get_object(value);
 		cancel_scoring(self);
-		if (provider != NULL && !AI_IS_PROVIDER(provider)) {
-			g_message("relevance-provider: a %s is not an AiProvider; ignored",
-					  G_OBJECT_TYPE_NAME(provider));
-			provider = NULL;
-		}
-		g_set_object(&self->relevance_provider, provider);
+		g_set_object(&self->relevance_provider, g_value_get_object(value));
 	} else if (id == PROP_CHIME_IN_THRESHOLD)
 		self->chime_threshold = g_value_get_uint(value);
 	else if (id == PROP_CHIME_IN_COOLDOWN)
 		self->chime_cooldown_ms = g_value_get_uint(value);
 	else if (id == PROP_SPEAKER_IDENTIFIER)
 		g_set_object(&self->identifier, g_value_get_object(value));
+	else if (id == PROP_NAMING_TIMEOUT)
+		self->naming_timeout_ms = g_value_get_uint(value);
 	else if (id == PROP_ASSISTANT_SOUNDALIKES) {
 		const gchar *words = g_value_get_string(value);
 		g_clear_pointer(&self->soundalikes, g_strfreev);
@@ -2119,7 +2232,7 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							 "Answer only utterances that name the assistant; hear the rest",
 							 FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	/**
-	 * AiVoiceSession:relevance-provider: (type GObject)
+	 * AiVoiceSession:relevance-provider:
 	 *
 	 * An #AiProvider that scores, from 0 to 10, how much the assistant should
 	 * speak up about talk it was not addressed in. A small fast model is
@@ -2130,7 +2243,7 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 		oc, PROP_RELEVANCE_PROVIDER,
 		g_param_spec_object("relevance-provider", "Relevance provider",
 							"Provider that scores unaddressed room talk for chiming in",
-							G_TYPE_OBJECT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+							AI_TYPE_PROVIDER, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	/**
 	 * AiVoiceSession:chime-in-threshold:
 	 *
@@ -2167,6 +2280,20 @@ ai_voice_session_class_init(AiVoiceSessionClass *klass)
 							"Names who spoke each utterance from its audio",
 							AI_TYPE_SPEAKER_IDENTIFIER,
 							G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	/**
+	 * AiVoiceSession:naming-timeout-ms:
+	 *
+	 * The longest a final transcript waits for #AiVoiceSession:speaker-identifier
+	 * to name it. Past it the final goes on as whoever that microphone was
+	 * last named, or as its participant, and a late name is ignored. 0 waits
+	 * as long as the identifier takes.
+	 */
+	g_object_class_install_property(
+		oc, PROP_NAMING_TIMEOUT,
+		g_param_spec_uint("naming-timeout-ms", "Naming timeout",
+						  "Longest a final waits to be named; 0 waits for the identifier",
+						  0, 600000, 8000,
+						  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 	/**
 	 * AiVoiceSession:assistant-soundalikes:
 	 *

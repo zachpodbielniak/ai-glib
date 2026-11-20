@@ -71,6 +71,8 @@ static const Setting settings[] = {
 	/* Similarity, in percent, a voice needs to be named. */
 	{"speaker-threshold", "AI_VOICE_SPEAKER_THRESHOLD", NULL, 55, 1, 100},
 	{"unknown-speaker-name", "AI_VOICE_UNKNOWN_SPEAKER_NAME", "Guest", 0, 0, 0},
+	/* The longest a final waits to be named; 0 waits as long as naming takes. */
+	{"naming-timeout-ms", "AI_VOICE_NAMING_TIMEOUT_MS", NULL, 8000, 0, 600000},
 	/* yes: every voice is named -- one matching nobody enrolled becomes
 	 * "Guest 1", "Guest 2", ... for the call. Unset or no: unknown-speaker-name. */
 	{"track-guests", "AI_VOICE_TRACK_GUESTS", NULL, 0, 0, 0},

@@ -398,6 +398,7 @@ ai_call:
   voiceprint-dir: ""       # unset: $XDG_DATA_HOME/ai-glib/voiceprints
   speaker-threshold: 55    # similarity, in percent, a voice needs to be named
   unknown-speaker-name: Guest
+  naming-timeout-ms: 8000  # the longest a final waits for its speaker to be named
   track-guests: no         # yes: every voice is named; strangers are Guest 1, Guest 2, ...
   guest-threshold: 35      # similarity, in percent, to be a guest already heard
 #+end_src
@@ -658,9 +659,15 @@ naming finishes in.
   default 35); a new guest needs a second and a half of audio, and a shorter
   unknown voice is treated as too short to tell. Without =track-guests=:
   =unknown-speaker-name= (default =Guest=).
-- *The service is down or refuses*: the participant's own name. Naming never
-  delays a call by more than its request timeout, and never fails it.
-- Voice commands are recognised before naming and do not wait for it.
+- *The service is down, refuses, or is slow*: whoever that microphone was
+  last named (within two minutes), else the participant's own name. A final
+  waits at most =naming-timeout-ms= (=AI_VOICE_NAMING_TIMEOUT_MS=, default
+  8000) for its name; a name that arrives later is ignored. Naming never
+  fails a call.
+- Voice commands are recognised before naming and do not wait for it. A
+  "stop" or "mute" also settles every final still being named: those are
+  reported as transcripts but never become turns, so nothing said before the
+  command is answered after it.
 
 The library side is =AiSpeakerIdentifier= (an interface: PCM in, name out)
 and =AiVoiceprintIdentifier=, which asks a service for a voiceprint and

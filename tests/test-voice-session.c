@@ -608,6 +608,117 @@ speakers_in_order(Fixture *f, gconstpointer data)
 	g_assert_true(first < second && second < third);
 	g_assert_nonnull(strstr(sent, "[Kim]: Ada, when is it?"));
 }
+static void
+said(Fixture *f, const gchar *text);
+/* Run the main context for MS milliseconds. */
+static void
+pass_ms(guint ms)
+{
+	gint64 until = g_get_monotonic_time() + (gint64)ms * 1000;
+	while (g_get_monotonic_time() < until) {
+		drain();
+		g_usleep(1000);
+	}
+}
+/* "Stop" while an earlier final is still being named: it stays on the record,
+ * as its participant since naming was abandoned, but never becomes a turn. */
+static void
+speakers_stop_pending(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 200}};
+	g_autoptr(TestIdentifier) id = naming(f, script, 1);
+	g_object_set(f->session, "voice-commands", TRUE, NULL);
+	ai_mock_provider_push_text(f->provider, "Should never be said.");
+	said(f, "What is the weather?");
+	said(f, "stop");
+	pass_ms(400);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpuint(f->tts->texts->len, ==, 0);
+	g_assert_cmpuint(f->speakers->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(f->speakers, 0), ==, "Caller");
+}
+/* "Mute" likewise: a final named after the mute was said to a deaf session. */
+static void
+speakers_mute_pending(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 200}};
+	g_autoptr(TestIdentifier) id = naming(f, script, 1);
+	g_object_set(f->session, "voice-commands", TRUE, "mute-message", "", NULL);
+	ai_mock_provider_push_text(f->provider, "Should never be said.");
+	said(f, "What is the weather?");
+	said(f, "mute");
+	pass_ms(400);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+}
+/* An identifier that never answers holds a final only until the naming
+ * deadline; it then goes on as its participant. */
+static void
+speakers_naming_timeout(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 5000}};
+	g_autoptr(TestIdentifier) id = naming(f, script, 1);
+	g_autofree gchar *sent = NULL;
+	g_object_set(f->session, "naming-timeout-ms", 100, NULL);
+	ai_mock_provider_push_text(f->provider, "Hello.");
+	said(f, "hello");
+	wait_replies(f, 1);
+	sent = last_user_text(f);
+	g_assert_cmpstr(sent, ==, "[Caller]: hello");
+}
+/* Stopping with namings in flight frees cleanly, and a late name does
+ * nothing. */
+static void
+speakers_stop_session(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 100}, {"Kim", -1, 150}};
+	g_autoptr(TestIdentifier) id = naming(f, script, 2);
+	said(f, "one");
+	said(f, "two");
+	ai_voice_session_stop(f->session);
+	pass_ms(300);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_assert_cmpuint(f->speakers->len, ==, 0);
+}
+/* A score that comes back while someone's words are still being named is
+ * somebody speaking: no chime over them. */
+static void
+room_no_chime_while_naming(Fixture *f, gconstpointer data)
+{
+	static const Naming script[] = {{"Sam", -1, 0}, {"Kim", -1, 400}};
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	g_autoptr(TestIdentifier) id = naming(f, script, 2);
+	Relevance r = {0};
+	g_object_set(f->session, "chime-in-cooldown-ms", 0, NULL);
+	ai_mock_provider_set_delay_ms(judge, 100);
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 9\nREASON: a question went unanswered");
+	ai_mock_provider_push_text(judge, "SCORE: 1\nREASON: chat");
+	said_by(f, "second", "Does anyone know when the release is?");
+	pass_ms(20);
+	said_by(f, "second", "I think it is soon.");
+	wait_relevance(&r, 1);
+	g_assert_cmpuint(r.score, ==, 9);
+	g_assert_false(r.chimed);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	pass_ms(600);
+	g_free(r.reason);
+}
+/* Muted after the judge was asked: its answer is never a chime. */
+static void
+room_mute_cancels_score(Fixture *f, gconstpointer data)
+{
+	g_autoptr(AiMockProvider) judge = room(f, 6);
+	Relevance r = {0};
+	ai_mock_provider_set_delay_ms(judge, 150);
+	g_signal_connect(f->session, "relevance", G_CALLBACK(on_relevance), &r);
+	ai_mock_provider_push_text(judge, "SCORE: 9\nREASON: unanswered");
+	said_by(f, "second", "Does anyone know when the release is?");
+	g_object_set(f->session, "muted", TRUE, NULL);
+	pass_ms(400);
+	g_assert_cmpuint(r.count, ==, 0);
+	g_assert_cmpuint(ai_mock_provider_get_call_count(f->provider), ==, 0);
+	g_free(r.reason);
+}
 /* The deadline gives up on a turn stuck in a tool, and the caller is heard
  * again: the next question is answered, not queued behind the stuck one. */
 static void
@@ -1810,6 +1921,18 @@ main(int argc, char **argv)
 			   teardown);
 	g_test_add("/voice/session/speakers-in-order", Fixture, NULL, setup, speakers_in_order,
 			   teardown);
+	g_test_add("/voice/session/speakers-stop-pending", Fixture, NULL, setup,
+			   speakers_stop_pending, teardown);
+	g_test_add("/voice/session/speakers-mute-pending", Fixture, NULL, setup,
+			   speakers_mute_pending, teardown);
+	g_test_add("/voice/session/speakers-naming-timeout", Fixture, NULL, setup,
+			   speakers_naming_timeout, teardown);
+	g_test_add("/voice/session/speakers-stop-session", Fixture, NULL, setup,
+			   speakers_stop_session, teardown);
+	g_test_add("/voice/session/room-no-chime-while-naming", Fixture, NULL, setup,
+			   room_no_chime_while_naming, teardown);
+	g_test_add("/voice/session/room-mute-cancels-score", Fixture, NULL, setup,
+			   room_mute_cancels_score, teardown);
 	g_test_add("/voice/session/room-unaddressed-heard", Fixture, NULL, setup,
 			   room_unaddressed_heard, teardown);
 	g_test_add("/voice/session/room-chime-in", Fixture, NULL, setup, room_chime_in, teardown);

@@ -146,6 +146,7 @@ The loop around the tools follows the same rule. A cancelled
 cancel reaches it, without waiting for a provider that is slow to notice; a
 reply that arrives afterwards is dropped, and the executor is free for the
 next run in the meantime.
+
 The event handler that forwards the provider's stream events is disconnected
 at the same moment, so an abandoned request still streaming cannot reach the
 next run. A provider that ignores the cancel entirely keeps its own request

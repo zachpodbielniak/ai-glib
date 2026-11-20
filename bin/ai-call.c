@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <ai-glib.h>
 #include <glib-unix.h>
+#include <glib/gstdio.h>
 #include <libsoup/soup.h>
 #include "core/ai-json-util.h"
 #include "core/ai-http-redirect-private.h"
@@ -35,7 +36,7 @@ struct _App {
 	guint chime_threshold, chime_cooldown_ms;
 	gchar *relevance_provider, *relevance_model;
 	gchar *speaker_url, *voiceprint_dir, *unknown_speaker_name;
-	guint speaker_threshold, guest_threshold;
+	guint speaker_threshold, guest_threshold, naming_timeout_ms;
 	gboolean track_guests;
 	/* --local: one session on this machine's audio devices, no Matrix. */
 	gboolean local, local_echo_cancel;
@@ -739,11 +740,30 @@ naming_settings(Call *call)
 	g_log("ai-call", G_LOG_LEVEL_INFO, "Naming speakers by voice: %u enrolled",
 		  ai_voiceprint_identifier_get_n_voices(identifier));
 	g_object_set(call->voice, "speaker-identifier", identifier, "unknown-speaker-name",
-				 call->app->unknown_speaker_name, NULL);
+				 call->app->unknown_speaker_name, "naming-timeout-ms",
+				 call->app->naming_timeout_ms, NULL);
 }
 
 /* ---- enrolling a voice ---- */
 
+/* Little-endian fields read through memcpy: a chunk can start on any byte,
+ * and a cast to a wider pointer there is undefined behaviour. */
+static guint16
+le16_at(const gchar *at)
+{
+	guint16 v;
+	memcpy(&v, at, sizeof(v));
+	return GUINT16_FROM_LE(v);
+}
+static guint32
+le32_at(const gchar *at)
+{
+	guint32 v;
+	memcpy(&v, at, sizeof(v));
+	return GUINT32_FROM_LE(v);
+}
+/* The most audio an enrolment file may hold: ten minutes of 16 kHz 16-bit. */
+#define RECORDING_MAX_BYTES ((gsize)600 * 16000 * 2 + 4096)
 /* Raw 16 kHz mono S16LE, or a WAV file holding exactly that. */
 static GBytes *
 read_recording(const gchar *path, GError **error)
@@ -751,6 +771,12 @@ read_recording(const gchar *path, GError **error)
 	g_autofree gchar *data = NULL;
 	gsize size = 0, at = 12;
 	gboolean format_ok = FALSE;
+	GStatBuf st;
+	if (g_stat(path, &st) == 0 && (gsize)st.st_size > RECORDING_MAX_BYTES) {
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+					"%s is longer than ten minutes of audio", path);
+		return NULL;
+	}
 	if (!g_file_get_contents(path, &data, &size, error))
 		return NULL;
 	if (size < 12 || memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0) {
@@ -762,15 +788,13 @@ read_recording(const gchar *path, GError **error)
 		return g_bytes_new_take(g_steal_pointer(&data), size);
 	}
 	while (at + 8 <= size) {
-		guint32 length = GUINT32_FROM_LE(*(guint32 *)(data + at + 4));
+		guint32 length = le32_at(data + at + 4);
 		const gchar *chunk = data + at + 8;
 		if (length > size - at - 8)
 			break;
 		if (memcmp(data + at, "fmt ", 4) == 0 && length >= 16)
-			format_ok = GUINT16_FROM_LE(*(guint16 *)chunk) == 1 &&
-						GUINT16_FROM_LE(*(guint16 *)(chunk + 2)) == 1 &&
-						GUINT32_FROM_LE(*(guint32 *)(chunk + 4)) == 16000 &&
-						GUINT16_FROM_LE(*(guint16 *)(chunk + 14)) == 16;
+			format_ok = le16_at(chunk) == 1 && le16_at(chunk + 2) == 1 &&
+						le32_at(chunk + 4) == 16000 && le16_at(chunk + 14) == 16;
 		else if (memcmp(data + at, "data", 4) == 0) {
 			if (!format_ok)
 				break;
@@ -786,6 +810,7 @@ typedef struct {
 	GByteArray *audio;
 	gboolean done;
 	GError *error;
+	guint timer; /* 0 once it has fired */
 } Recording;
 static void
 recorded_audio(AiAudioTransport *transport, const gchar *speaker, GBytes *pcm, gpointer data)
@@ -806,6 +831,7 @@ static gboolean
 recording_over(gpointer data)
 {
 	((Recording *)data)->done = TRUE;
+	((Recording *)data)->timer = 0;
 	return G_SOURCE_REMOVE;
 }
 static void
@@ -829,9 +855,12 @@ record_microphone(App *app, guint seconds, GError **error)
 	g_signal_connect(transport, "audio", G_CALLBACK(recorded_audio), &r);
 	ai_audio_transport_join_async(AI_AUDIO_TRANSPORT(transport), "enroll", NULL, NULL,
 								  recording_step, &r);
-	g_timeout_add_seconds(seconds, recording_over, &r);
+	/* The timer points at R on this stack: it must not outlive the call,
+	 * whichever way the recording ends. */
+	r.timer = g_timeout_add_seconds(seconds, recording_over, &r);
 	while (!r.done)
 		g_main_context_iteration(context, TRUE);
+	g_clear_handle_id(&r.timer, g_source_remove);
 	if (r.error == NULL) {
 		r.done = FALSE;
 		ai_audio_transport_leave_async(AI_AUDIO_TRANSPORT(transport), NULL, recording_left, &r);
@@ -2004,7 +2033,7 @@ devices:
 		g_object_get(call_config, "speaker-url", &app.speaker_url, "voiceprint-dir",
 					 &app.voiceprint_dir, "speaker-threshold", &app.speaker_threshold,
 					 "unknown-speaker-name", &app.unknown_speaker_name, "guest-threshold",
-					 &app.guest_threshold, NULL);
+					 &app.guest_threshold, "naming-timeout-ms", &app.naming_timeout_ms, NULL);
 		{
 			g_autofree gchar *guests = NULL;
 			g_object_get(call_config, "track-guests", &guests, NULL);
