@@ -310,6 +310,13 @@ BIN_SOURCES := $(filter-out $(BINDIR)/ai-tui.c,$(BIN_SOURCES))
 $(info Note: ncursesw not found, skipping ai-tui. Install ncurses-devel to build it.)
 endif
 
+# ai-voiceprint-server runs a speaker model in process; without onnxruntime
+# there is nothing for it to serve.
+ifneq ($(HAVE_ONNXRUNTIME),1)
+BIN_SOURCES := $(filter-out $(BINDIR)/ai-voiceprint-server.c,$(BIN_SOURCES))
+$(info Note: onnxruntime not found, skipping ai-voiceprint-server and in-process voiceprints. Install onnxruntime-devel to build them.)
+endif
+
 BIN_BINARIES = $(patsubst $(BINDIR)/%.c,$(OUTDIR)/bin/%,$(BIN_SOURCES))
 
 # The GTK4 desktop client.
@@ -446,9 +453,13 @@ $(PROJECT_NAME)-1.0.pc: $(PROJECT_NAME)-1.0.pc.in config.mk
 	     -e 's|@LIBDIR@|$(LIBDIR)|g' \
 	     -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' \
 	     -e 's|@VERSION@|$(VERSION)|g' \
+	     -e 's|@REQUIRES_PRIVATE@|$(if $(filter 1,$(HAVE_ONNXRUNTIME)),$(ONNXRUNTIME_DEPS))|g' \
 	     $< > $@
 
 # Tests
+# test-voice-onnx drives ai-voiceprint-server when onnxruntime builds it.
+$(OUTDIR)/tests/test-voice-onnx: | $(filter %/ai-voiceprint-server,$(BIN_BINARIES))
+
 # The CLI report tests execute the hermetic native-protocol fixture.
 $(OUTDIR)/tests/test-ai-cli: $(OUTDIR)/tests/test-cli-report
 # tests/test-ai-cli.c spawns the installed-shaped `ai` binary, so the test

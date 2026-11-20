@@ -81,6 +81,20 @@ GTK_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(GTK_PKG_DEPS))
 GTK_LIBS   := $(shell $(PKG_CONFIG) --libs $(GTK_PKG_DEPS))
 endif
 
+# onnxruntime, for AiOnnxSpeakerEmbedder: speaker voiceprints computed in
+# process instead of by a service.
+#
+# Optional, like ncurses and GTK: without it the type still exists and says
+# it is unavailable, so the public API and the GIR do not change with the
+# build. HAVE_ONNXRUNTIME=0 builds without it even where it is installed.
+ONNXRUNTIME_DEPS = libonnxruntime
+HAVE_ONNXRUNTIME ?= $(shell $(PKG_CONFIG) --exists $(ONNXRUNTIME_DEPS) && echo 1 || echo 0)
+
+ifeq ($(HAVE_ONNXRUNTIME),1)
+PKG_CFLAGS += $(shell $(PKG_CONFIG) --cflags $(ONNXRUNTIME_DEPS)) -DAI_HAVE_ONNXRUNTIME
+PKG_LIBS   += $(shell $(PKG_CONFIG) --libs $(ONNXRUNTIME_DEPS))
+endif
+
 MCP_GLIB_DIR = deps/mcp-glib
 MCP_GLIB_STATIC = $(MCP_GLIB_DIR)/build/libmcp-glib-1.0.a
 MCP_GLIB_CFLAGS = -I$(MCP_GLIB_DIR)/src

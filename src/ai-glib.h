@@ -150,6 +150,7 @@
 #include "voice/ai-speaker-identifier.h"
 #include "voice/ai-speaker-embedder.h"
 #include "voice/ai-http-speaker-embedder.h"
+#include "voice/ai-onnx-speaker-embedder.h"
 #include "voice/ai-voiceprint-store.h"
 #include "voice/ai-file-voiceprint-store.h"
 #include "voice/ai-address-detector.h"
