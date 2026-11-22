@@ -35,6 +35,7 @@
 
 #include "providers/ai-higgsfield-client.h"
 #include "core/ai-error.h"
+#include "core/ai-http-redirect-private.h"
 
 /* What a 4xx/5xx body is quoted to, at most, when it is not JSON. */
 #define HF_ERROR_EXCERPT (400)
@@ -604,9 +605,11 @@ hf_session_for(
 		return g_object_ref(self->session);
 	}
 
-	session = soup_session_new_with_options("timeout", self->timeout,
-	                                        "user-agent", "ai-glib/" AI_GLIB_PACKAGE_VERSION,
-	                                        NULL);
+	session = ai_http_session_new();
+	g_object_set(session,
+	             "timeout", self->timeout,
+	             "user-agent", "ai-glib/" AI_GLIB_PACKAGE_VERSION,
+	             NULL);
 	if (self->session == NULL)
 	{
 		self->session = g_object_ref(session);
@@ -687,7 +690,7 @@ hf_api_message(
 		return NULL;
 	}
 
-	message = soup_message_new_from_uri(method, uri);
+	message = ai_http_message_new_from_uri(method, uri, AI_HTTP_CARRIES_CREDENTIALS);
 	soup_message_add_flags(message, SOUP_MESSAGE_NO_REDIRECT);
 	headers = soup_message_get_request_headers(message);
 
@@ -1167,7 +1170,7 @@ hf_download_async(
 	}
 
 	/* The CDN is not the API: no Authorization header, redirects allowed. */
-	hf_send(task, soup_message_new_from_uri("GET", uri), hf_download_reply);
+	hf_send(task, ai_http_message_new_from_uri("GET", uri, AI_HTTP_PUBLIC_URL), hf_download_reply);
 }
 
 static GBytes *
@@ -1453,7 +1456,8 @@ hf_upload_url_reply(
 	}
 	op->public_url = g_strdup(public_url);
 
-	message = soup_message_new_from_uri("PUT", upload_uri);
+	/* A presigned URL's query is its signature: declared a credential, so no redirect. */
+	message = ai_http_message_new_from_uri("PUT", upload_uri, AI_HTTP_CARRIES_CREDENTIALS);
 	soup_message_add_flags(message, SOUP_MESSAGE_NO_REDIRECT);
 	headers = soup_message_get_request_headers(message);
 
