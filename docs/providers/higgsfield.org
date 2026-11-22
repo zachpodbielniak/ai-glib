@@ -1,0 +1,268 @@
+#+title: Higgsfield
+#+description: AiHiggsfieldClient: Higgsfield's hosted image and video generation API, as an AiMediaGenerator
+#+authors: ai-glib contributors
+#+categories: providers media image video
+#+created: 2026-11-21T00:00:00-05:00
+#+updated: 2026-11-21T00:00:00-05:00
+#+version: 1
+
+* Overview
+
+=AiHiggsfieldClient= drives [[https://docs.higgsfield.ai/docs/index.md][Higgsfield's REST API]]: one authenticated, asynchronous request lifecycle in front of a catalog of image and video models (Higgsfield's own SOUL family, plus Kling, MiniMax Hailuo, Seedance, Wan, Grok Imagine, Recraft, Qwen Image, Ideogram and others). It is a plain =GObject= that implements [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]]; it is not an =AiClient= and has no chat, and it is not an =AiProviderType=.
+
+Higgsfield is a *hosted, closed, pay-as-you-go service*. You top up a prepaid USD balance and each successful generation is charged to it. Nothing here runs locally. Read [[*Terms][Terms]] before using it for anything you care about.
+
+| | |
+|---+---|
+| Type | =AiHiggsfieldClient= (final, =GObject=) |
+| Interface | =AiMediaGenerator= (submit, poll, download, estimate, cancel) |
+| Extra | =ai_higgsfield_client_upload_async()= for input files |
+| Base URL | =https://api.higgsfield.ai= (=AI_HIGGSFIELD_DEFAULT_BASE_URL=) |
+| Auth | =Authorization: Key <key-id>:<key-secret>= |
+| Credentials | set by the caller; *never* read from the environment |
+| Header | =<ai-glib.h>= (=src/providers/ai-higgsfield-client.h=) |
+
+* Setup
+
+1. Create an account at [[https://console.higgsfield.ai][console.higgsfield.ai]] and add funds.
+2. Under API keys, create a key. You get two parts: a *key id* and a *key secret*.
+3. Store both where your application keeps secrets. ai-glib does not read =HF_API_KEY_ID= / =HF_API_KEY_SECRET= or any other variable; a host decides where a credential comes from and hands it over with =ai_higgsfield_client_set_credentials()=.
+4. Pick a model from [[https://docs.higgsfield.ai/docs/models.md][the model catalog]]. Its page gives the endpoint path (the model id here) and the JSON fields it accepts. Availability depends on your account.
+
+No extra build dependency: libsoup 3 and json-glib are already required.
+
+* API facts, verified
+
+Checked on 2026-11-21 against the official documentation. Where public sources disagreed, the official pages settle it.
+
+** Base URL: =api.higgsfield.ai=
+
+Every official page names =https://api.higgsfield.ai=: [[https://docs.higgsfield.ai/docs/quickstart.md][Quickstart]], [[https://docs.higgsfield.ai/docs/authentication.md][Authentication]], [[https://docs.higgsfield.ai/docs/how-to/introduction.md][How the API works]], [[https://docs.higgsfield.ai/docs/api-reference/overview.md][API reference]], [[https://docs.higgsfield.ai/docs/help/faq.md][FAQ]], and the =servers= entry of [[https://docs.higgsfield.ai/docs/openapi.json][the OpenAPI document]]. =platform.higgsfield.ai= is the host of an earlier revision of the same documentation (the pages still indexed at =docs.higgsfield.ai/how-to/introduction= and =docs.higgsfield.ai/guides/images=, without the =/docs/= prefix) and of third-party write-ups based on it; no current official page names it. Whether that host has been retired is unconfirmed, so it is not used here. =ai_higgsfield_client_set_base_url()= overrides the default if that ever changes.
+
+** Auth header: =Authorization: Key <id>:<secret>=
+
+[[https://docs.higgsfield.ai/docs/authentication.md][Authentication]] and [[https://docs.higgsfield.ai/docs/api-reference/headers.md][Headers]] give =Authorization: Key YOUR_KEY_ID:YOUR_KEY_SECRET=; the OpenAPI security scheme says the same. The separate =hf-api-key= and =hf-secret= headers are documented as a *legacy* alternative that is still accepted, and new integrations are told to use =Authorization=. The FAQ adds: not a Bearer token, and never in browser or mobile code. This client sends only the =Authorization= form.
+
+** Submitting a generation
+
+=POST https://api.higgsfield.ai/<model-path>= with a JSON body; the body is the model's own schema. Example, from the [[https://docs.higgsfield.ai/docs/quickstart.md][Quickstart]]: =POST /higgsfield-ai/soul/v2/standard= with ={"prompt": "Editorial portrait in soft daylight"}=. Other paths in the OpenAPI document: =/higgsfield-ai/soul/standard= (=prompt=, =num_images= 1–4, =resolution= =2K=/=4K=, =aspect_ratio=), =/kling-video/v2.5-turbo/pro/image-to-video= (=prompt= and =image_url= required, =duration= 5 or 10, =cfg_scale=, =negative_prompt=), =/minimax/hailuo-2.3/standard/text-to-video= and others.
+
+| Header / parameter | Sent | Notes |
+|---+---+---|
+| =Authorization= | always | =Key <id>:<secret>= |
+| =Content-Type= | with a body | =application/json= |
+| =Idempotency-Key= | always | 1–255 visible ASCII; a retry with the same key returns the original request ([[https://docs.higgsfield.ai/docs/concepts/idempotency.md][Idempotent requests]]) |
+| =Hf-Expires-After= | when set | seconds to keep data after it finishes, 3600 up to the account's retention; only shortens; out of range is 422 |
+| =hf_webhook= (query) | when set | URL-encoded HTTPS endpoint notified at a terminal state |
+
+The answer arrives at once: ={"status": "queued", "request_id": "<uuid>", "status_url": ..., "cancel_url": ...}= ([[https://docs.higgsfield.ai/docs/concepts/requests.md][Requests and lifecycle]]).
+
+*Input media* is a public URL in the model's own field (=image_url=, =image_urls=, =video_url=, =audio_url=). For a file that is not public, [[https://docs.higgsfield.ai/docs/concepts/file-uploads.md][File uploads]]: =POST /files/generate-upload-url= with ={"content_type": "image/jpeg"}= returns =public_url=, a presigned =upload_url= (valid one hour) and =upload_headers=; =PUT= the bytes to =upload_url= with exactly those headers and *without* Higgsfield credentials; then pass =public_url=. Types: JPEG, PNG, WebP, GIF, WAV, MP4.
+
+** Status endpoint and states
+
+=GET /requests/{request_id}/status= ([[https://docs.higgsfield.ai/docs/api-reference/requests/get-request-status.md][Get request status]]). States:
+
+| API status | Terminal | Meaning | =AiMediaJobState= |
+|---+---+---+---|
+| =queued= | no | waiting; can still be cancelled | =QUEUED= |
+| =in_progress= | no | started; can no longer be cancelled | =RUNNING= |
+| =completed= | yes | output URLs present | =DONE= |
+| =failed= | yes | failed; may carry =error=; not charged | =FAILED= |
+| =nsfw= | yes | rejected by moderation; not charged | =FAILED= (provider status =nsfw=) |
+| =canceled= | yes | cancelled before it started; refunded | =CANCELLED= |
+
+=POST /requests/{id}/cancel= answers 202, or 400 once the request has started. =DELETE /requests/{id}= removes a finished request's data (409 while running); this client does not wrap it yet.
+
+[[https://docs.higgsfield.ai/docs/concepts/polling.md][Polling]] recommends starting at two seconds, backing off to ten, with jitter, and retrying a status request after 5xx or a network failure but not after 401 or 404. =ai_media_generator_wait_async()= does exactly that by default. For production, the docs prefer [[https://docs.higgsfield.ai/docs/how-to/webhooks.md][webhooks]] (Standard Webhooks signatures with a =whsec_= secret, deliveries at =completed=, =failed= or =nsfw=, output nested under =payload=); this client can register one (=ai_media_request_set_webhook_url()=) but does not receive or verify deliveries -- that is the host's server.
+
+** How results come back
+
+A completed status response lists outputs by kind, each an object with a =url=: =images= (a list), =video= (one), =audio= (one) and =audios= (a list); some video and 3D operations add =zip=, =mov=, =jsx=, =fbx= or =ply=. =expires_at= says when the files are deleted -- seven days after the request finishes by default ([[https://docs.higgsfield.ai/docs/concepts/billing-and-retention.md][Billing and retention]]). =ai_media_job_get_result_urls()= returns all of them in that order, once each. Download promptly with =ai_media_generator_download_async()=; it sends no credential to the CDN.
+
+** Cost
+
+The status response carries *no* price, so a polled job's =ai_media_job_get_cost_micro_usd()= is =AI_MEDIA_COST_UNKNOWN= (-1, never "free"). The price is asked in advance: =POST /estimate/<model-path>= with the same body returns ={"usd": "0.094"}=, which [[https://docs.higgsfield.ai/docs/concepts/billing-and-retention.md][Billing and retention]] calls the authoritative amount for your account (the example value is illustrative). =ai_media_generator_estimate_async()= returns it in micro-USD, parsed from the decimal string without a float (=0.094= is =94000=). Other billing facts from that page: failed and nsfw requests are not charged and any reservation is refunded; a cancelled queued request is refunded; balance expires one year after it is added. Usage and spend are visible in the console (and, per [[https://docs.higgsfield.ai/docs/enterprise/overview.md][Enterprise API]], =GET /models/usage=, not wrapped here).
+
+** Errors
+
+FastAPI envelope ={"detail": "..."}=, or a list of ={"loc": [...], "msg": ...}= for validation ([[https://docs.higgsfield.ai/docs/concepts/errors.md][Errors and retries]]). Mapping:
+
+| HTTP | Meaning (docs) | =AiError= |
+|---+---+---|
+| 400 | invalid parameters; cancel too late | =INVALID_REQUEST= |
+| 401 | missing or invalid credentials | =INVALID_API_KEY= |
+| 403 | insufficient balance; disabled or expired key | =INSUFFICIENT_QUOTA= |
+| 404 | model (submit, estimate) or request (status, cancel) not found | =MODEL_NOT_FOUND= / =INVALID_REQUEST= |
+| 409, 422 | still running; validation, reused idempotency key, bad =Hf-Expires-After= | =INVALID_REQUEST= |
+| 423 | model temporarily blocked | =SERVICE_UNAVAILABLE= |
+| 429 | queue full or endpoint limit; =Retry-After= | =RATE_LIMITED= (message names the wait) |
+| 503 | model disabled or admission unavailable | =SERVICE_UNAVAILABLE= |
+| other 5xx | server error | =SERVER_ERROR= |
+| 3xx | (redirects are not followed on API calls) | =INVALID_RESPONSE= |
+
+A validation list is flattened to =field: message; field: message=. Every response carries =X-Correlation-ID=; keep it with the request id when contacting support.
+
+* Terms
+
+Re-verified on 2026-11-21. These are the vendor's own statements, summarised; read the [[https://higgsfield.ai/terms][Terms of Use]] themselves before relying on them, and note that the sources below are help-centre pages about the consumer product as well as the API.
+
+- *Closed service.* Hosted and proprietary; ai-glib's client is AGPL, the service is not. Requests, inputs and outputs go to Higgsfield.
+- *Training.* The Terms (s. 4.4, as summarised by [[https://higgsfield.ai/creator-hub/help-center/account-and-privacy/who-owns-my-generations-and-can-i-use-them-commercially][the help centre]]) allow Higgsfield to use content to train its models; deleting content or the account stops future use, and on Enterprise agreements customer content is not used for training. The API documentation's [[https://docs.higgsfield.ai/docs/enterprise/model-training.md][Model training opt-out]] page, however, says *any* personal account or organization can turn on "Exclude data from training" in Console settings, *off by default*. So: used for training by default, outside Enterprise, unless you turn that switch on. The two sources do not fully agree; the switch is the stronger claim.
+- *Watermark.* [[https://higgsfield.ai/creator-hub/help-center/credits-and-usage/watermark-and-how-to-remove][The help centre]] says free-plan generations can carry a visible watermark, paid plans add none to new generations, and invisible AI-content markers may be embedded on any plan. It says nothing about API generations specifically. [[https://higgsfield.ai/creator-hub/help-center/integrations/what-is-the-higgsfield-api][What is the Higgsfield API]] says the API and a higgsfield.ai subscription are separate products with separate billing: the API spends a prepaid USD balance (minimum top-up $5), not plan credits, and no free API tier is documented, so whether API output is ever watermarked is *unverified*.
+- *Commercial use.* Allowed: the help centre says s. 4.4 does not restrict commercial use of outputs and ties it to no plan; Higgsfield claims no ownership of inputs or outputs. Watermarked output may be unsuitable for publishing. Indemnification against third-party IP claims is Enterprise-only.
+- *Outputs may not train other models* (ss. 5.1(iii), 5.2(iv) as summarised): you may not use outputs to train or fine-tune any AI model without written approval.
+- *Retention.* Output files are kept at least seven days, then deleted; =Hf-Expires-After= and =DELETE /requests/{id}= shorten it.
+
+* Using it
+
+** Text to image, waited on
+
+#+begin_src C
+#include <ai-glib.h>
+
+typedef struct
+{
+	AiHiggsfieldClient *client;
+	GMainLoop          *loop;
+} Run;
+
+/* The job finished; print where the images are. */
+static void
+on_waited(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	Run *run = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiMediaJob) job = NULL;
+	const gchar * const *urls;
+	guint i;
+
+	job = ai_media_generator_wait_finish(AI_MEDIA_GENERATOR(source), result, &error);
+	if (job == NULL)
+		g_printerr("wait: %s\n", error->message);
+	else if (ai_media_job_get_state(job) != AI_MEDIA_JOB_STATE_DONE)
+		g_printerr("%s: %s\n", ai_media_job_get_provider_status(job),
+		           ai_media_job_get_error_message(job));
+	else
+	{
+		urls = ai_media_job_get_result_urls(job);
+		for (i = 0; urls[i] != NULL; i++)
+			g_print("%s\n", urls[i]);
+	}
+	g_main_loop_quit(run->loop);
+}
+
+/* Submitted; keep the id (it survives a restart) and wait. */
+static void
+on_submitted(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	Run *run = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *job_id = NULL;
+
+	job_id = ai_media_generator_submit_finish(AI_MEDIA_GENERATOR(source), result, &error);
+	if (job_id == NULL)
+	{
+		g_printerr("submit: %s\n", error->message);
+		g_main_loop_quit(run->loop);
+		return;
+	}
+	/* 0, 0: the documented 2 s to 10 s backoff; give up after ten minutes. */
+	ai_media_generator_wait_async(AI_MEDIA_GENERATOR(source), job_id, 0, 0, 600000,
+	                              NULL, on_waited, run);
+}
+
+int
+main(void)
+{
+	Run run;
+	g_autoptr(AiMediaRequest) request = NULL;
+
+	/* The host fetches these from its own secret store. */
+	run.client = ai_higgsfield_client_new_with_credentials(my_key_id(), my_key_secret());
+	run.loop = g_main_loop_new(NULL, FALSE);
+
+	request = ai_media_request_new(AI_HIGGSFIELD_MODEL_SOUL, "Editorial portrait in soft daylight");
+	ai_media_request_set_param_string(request, "aspect_ratio", "3:4");
+	ai_media_request_set_param_int(request, "num_images", 2);
+
+	ai_media_generator_submit_async(AI_MEDIA_GENERATOR(run.client), request, NULL,
+	                                on_submitted, &run);
+	g_main_loop_run(run.loop);
+
+	g_main_loop_unref(run.loop);
+	g_object_unref(run.client);
+	return 0;
+}
+#+end_src
+
+** Price it first
+
+#+begin_src C
+static void
+on_estimated(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	g_autoptr(GError) error = NULL;
+	gint64 micro_usd;
+
+	if (ai_media_generator_estimate_finish(AI_MEDIA_GENERATOR(source), result, &micro_usd, &error))
+		g_print("$%" G_GINT64_FORMAT ".%06" G_GINT64_FORMAT "\n",
+		        micro_usd / 1000000, micro_usd % 1000000);
+}
+
+/* Same request object as the submit; nothing is queued or charged. */
+ai_media_generator_estimate_async(AI_MEDIA_GENERATOR(client), request, NULL, on_estimated, NULL);
+#+end_src
+
+** Image to video from a local file
+
+#+begin_src C
+/* Upload the still, then animate it with Kling 2.5 Turbo Pro. */
+static void
+on_uploaded(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	AiHiggsfieldClient *client = AI_HIGGSFIELD_CLIENT(source);
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *public_url = NULL;
+	g_autoptr(AiMediaRequest) request = NULL;
+
+	public_url = ai_higgsfield_client_upload_finish(client, result, &error);
+	if (public_url == NULL)
+		return;
+
+	request = ai_media_request_new(AI_HIGGSFIELD_MODEL_KLING_2_5_TURBO_PRO_I2V,
+	                               "The heron lifts off the water");
+	ai_media_request_set_image_url(request, public_url);
+	ai_media_request_set_param_int(request, "duration", 5);
+	ai_media_generator_submit_async(AI_MEDIA_GENERATOR(client), request, NULL,
+	                                on_submitted, user_data);
+}
+
+g_autoptr(GBytes) still = NULL;   /* from g_file_load_bytes() */
+ai_higgsfield_client_upload_async(client, still, "image/jpeg", NULL, on_uploaded, run);
+#+end_src
+
+The video arrives as the job's single result URL; =ai_media_generator_download_async()= returns its bytes as a =GBytes=, ready for =g_file_replace_contents_bytes_async()=.
+
+** Retrying a submit safely
+
+The first submit of an =AiMediaRequest= gives it an idempotency key (=ai_media_request_ensure_idempotency_key()=, a random UUID) and keeps it. After a timeout, a dropped connection or a 5xx, submit *the same request object* again: Higgsfield returns the original request instead of starting, and charging for, a second one. Make a new request for new work.
+
+* Behaviour worth knowing
+
+- *The credential goes to the API origin only.* It is sent as =Authorization= on requests built from the configured base URL, which do not follow redirects (a 3xx is an error). Result downloads and the presigned upload get no credential, even if =upload_headers= names an =Authorization=. Status and cancel URLs are built from the base URL and a validated request id rather than taken from the server's =status_url=.
+- *The credential is never logged and never in an error.* Every message the client produces passes through a redaction of the key id and secret, including the server's own =detail=; the test suite has the mock server echo the credential in a 401 and asserts it is absent from the error and from every log line of the run. There is no getter and no property for it; the old value is overwritten in memory when replaced or when the client is finalised. A key id containing =:= or a value containing a line break is refused.
+- *Nothing from the environment.* =ai_higgsfield_client_new()= has no credential at all; every call then fails with =AI_ERROR_INVALID_API_KEY= before touching the network.
+- *Local refusals.* A model id that is not a plain endpoint path (=..=, =?=, =#=, empty segments), a request id that is not a UUID-shaped token, an idempotency key outside 1–255 visible ASCII, and =expires-after= below 3600 are refused before anything is sent.
+- *An unknown status word is an error*, not a guess: reading it as running would leave a waiter polling a finished job until its deadline.
+- *Contexts.* Each operation completes on the thread-default context of the thread that started it. The HTTP session is cached for the context it was made in; an operation started from another context gets its own.
+- *Timeouts.* =AiHiggsfieldClient:timeout= (seconds, default 60) bounds each HTTP request, downloads included. A job's total time is bounded by =wait_async='s =timeout_ms=.
+
+* Tests
+
+=tests/test-higgsfield-client.c= runs against a loopback =SoupServer= on its own thread that imitates the API: submit (with idempotency key, =Hf-Expires-After= and webhook query), queued → in_progress → completed, failed, nsfw, a 503 that recovers, a job that never finishes (timeout), cancellation, a wait started on a private context, an unknown status, the estimate, cancel accepted and refused, download from a "CDN", the upload handshake, every error envelope, a redirect, and the local refusals. No network.
+
+* See also
+
+- [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]] -- the interface, =AiMediaRequest= and =AiMediaJob=
+- [[file:../api-reference/ai-video-generator.org][AiVideoGenerator]] and [[file:../api-reference/ai-image-generator.org][AiImageGenerator]] -- the finished-artifact interfaces other providers implement

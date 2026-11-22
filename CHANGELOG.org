@@ -4,6 +4,29 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.11.0 - 2026-11-21
+
+** Added
+- =AiMediaGenerator=: an interface for media generated as a queued job.
+  Submit returns a job id, poll returns an =AiMediaJob= (state, the
+  service's own status word, result URLs, cost in micro-USD, expiry),
+  download returns the bytes; estimate and cancel are optional and answer
+  =AI_ERROR_NOT_SUPPORTED= when absent. =ai_media_generator_wait_async()=
+  polls with backoff and jitter (2 s to 10 s by default), retries transient
+  failures, honours a deadline and a =GCancellable=, and completes on the
+  caller's thread-default context. =AiMediaRequest= carries a model, a
+  prompt and an open JSON object of parameters, plus an idempotency key
+  that survives a resubmit, a webhook URL and a retention. See
+  =docs/api-reference/ai-media-generator.org=.
+- =AiHiggsfieldClient=: Higgsfield's hosted image and video API
+  (=https://api.higgsfield.ai=, =Authorization: Key <id>:<secret>=) as an
+  =AiMediaGenerator=, with cost estimates, cancellation and
+  =ai_higgsfield_client_upload_async()= for input files. Credentials are
+  set explicitly, never read from the environment, never sent to
+  download or upload storage, and redacted from every error. See
+  =docs/providers/higgsfield.org= for the verified API facts and the
+  service's terms.
+
 * 0.10.2 - 2026-11-07
 
 ** Fixed

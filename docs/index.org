@@ -89,6 +89,7 @@ see their provider pages.
 - [[file:api-reference/ai-image-generator.org][AiImageGenerator]] - Image generation interface
 - [[file:api-reference/ai-image.org][AiImage]] - Reference-image payload (boxed type)
 - [[file:api-reference/ai-image-capabilities.org][AiImageCapabilities]] - What a given image model accepts
+- [[file:api-reference/ai-media-generator.org][AiMediaGenerator]] - Queued media jobs: submit, poll, download, estimate, cancel, wait
 - [[file:api-reference/ai-message.org][AiMessage]] - Message class
 - [[file:api-reference/ai-response.org][AiResponse]] - Response class
 - [[file:api-reference/ai-tool.org][AiTool]] - Tool definition
@@ -188,6 +189,10 @@ configuration, supported APIs, examples and compatibility limits.
 * Video generation
 
 Generate MP4 artifacts with =ai --video-gen -p grok= or =-p grok-build=. The same functionality is available through =AiVideoGenerator= and =AiVideoRequest= for text-to-video, image animation and reference-conditioned video with optional preset voices. See [[file:api-reference/ai-video-generator.org][the video interface]], [[file:cli.org][CLI flags and examples]], and [[file:specs/xai-imagine-provenance.org][Imagine specification snapshots]]. Grok Build also implements =AiImageGenerator= through its =image_gen= and =image_edit= tools.
+
+* Media jobs
+
+=AiMediaGenerator= exposes a queued generation job instead of hiding it: submit returns an id, poll returns an =AiMediaJob= (state, result URLs, cost), download fetches a result, and the optional estimate and cancel price or stop a job; =ai_media_generator_wait_async()= polls with backoff until it finishes. =AiHiggsfieldClient= implements it for Higgsfield's hosted, prepaid image and video API. See [[file:api-reference/ai-media-generator.org][the media job interface]] and [[file:providers/higgsfield.org][the Higgsfield guide]], which records the verified API facts and the service's terms.
 
 - [[file:dashboard.org][Project dashboard and linked work]]
 - [[file:projects.org][Projects]] - One name and one order for every repository you work in, in every front-end

@@ -11,6 +11,13 @@ ai-glib provides a unified interface to multiple AI providers through the =AiPro
 | [[file:grok.org][Grok]]     | =AiGrokClient=   | =XAI_API_KEY= or =GROK_API_KEY=         | grok-4.7                 |
 | [[file:ollama.org][Ollama]] | =AiOllamaClient= | =OLLAMA_HOST= (optional)                | gpt-oss:20b              |
 
+*** Media Job Providers
+These implement =AiMediaGenerator= rather than =AiProvider=: no chat, a queued job per generation.
+
+| Provider | Client Class | Credentials | Models |
+|----------+--------------+-------------+--------|
+| [[file:higgsfield.org][Higgsfield]] | =AiHiggsfieldClient= | set by the caller (key id + secret); no environment variable | endpoint paths, e.g. =higgsfield-ai/soul/v2/standard= |
+
 *** CLI Wrapper Providers
 | Provider                                         | Client Class         | Environment Variable          | Default Model                      |
 |--------------------------------------------------+----------------------+-------------------------------+------------------------------------|

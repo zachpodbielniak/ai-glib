@@ -20,6 +20,8 @@ Complete API documentation for ai-glib.
 | AiStreamable                                     | Streaming response interface           |
 | [[file:ai-event-source.org][AiEventSource]]       | Structured turn events, any provider   |
 | [[file:ai-image-generator.org][AiImageGenerator]] | Image generation interface             |
+| [[file:ai-video-generator.org][AiVideoGenerator]] | Video generation interface             |
+| [[file:ai-media-generator.org][AiMediaGenerator]] | Queued media jobs (=AiMediaRequest=, =AiMediaJob=) |
 | [[file:ai-search-provider.org][AiSearchProvider]] | Web search interface                   |
 
 ** Benchmarks
