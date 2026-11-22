@@ -195,7 +195,7 @@ Generate MP4 artifacts with =ai --video-gen -p grok= or =-p grok-build=. The sam
 
 * Media jobs
 
-=AiMediaGenerator= exposes a queued generation job instead of hiding it: submit returns an id, poll returns an =AiMediaJob= (state, result URLs, cost), download fetches a result, and the optional estimate and cancel price or stop a job; =ai_media_generator_wait_async()= polls with backoff until it finishes. =AiHiggsfieldClient= implements it for Higgsfield's hosted, prepaid image and video API. See [[file:api-reference/ai-media-generator.org][the media job interface]] and [[file:providers/higgsfield.org][the Higgsfield guide]], which records the verified API facts and the service's terms.
+=AiMediaGenerator= exposes a queued generation job instead of hiding it: submit returns an id, poll returns an =AiMediaJob= (state, result URLs, cost), download fetches a result, and the optional estimate and cancel price or stop a job; =ai_media_generator_wait_async()= polls with backoff until it finishes. =AiHiggsfieldClient= implements it for Higgsfield's hosted, prepaid image and video API; =AiComfyuiClient= implements it for a ComfyUI server you run yourself, filling placeholders in your own workflow. See [[file:api-reference/ai-media-generator.org][the media job interface]], [[file:providers/higgsfield.org][the Higgsfield guide]], which records the verified API facts and the service's terms, and [[file:providers/comfyui.org][the ComfyUI guide]].
 
 - [[file:dashboard.org][Project dashboard and linked work]]
 - [[file:projects.org][Projects]] - One name and one order for every repository you work in, in every front-end

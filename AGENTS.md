@@ -848,6 +848,23 @@ implementation -- a plain `GObject`, not an `AiClient` and not an
 - **A `SoupSession` belongs to the context it was made in.** The client
   caches one for that context only and makes a fresh one for an operation
   started elsewhere.
+- **`AiComfyuiClient` (`src/providers/ai-comfyui-client.{h,c}`) runs the
+  operator's own workflow.** ComfyUI takes a node graph, not a model and a
+  prompt; the client fills `{{prompt}}`, `{{negative_prompt}}`, `{{seed}}`
+  and `{{image}}` in the nodes' *direct string inputs* by walking the parsed
+  graph, never by replacing text in the JSON, so a prompt cannot break or
+  add to the graph (`/comfyui/placeholders` proves it). A whole-input
+  `{{seed}}` becomes a JSON number. Downloads are refused unless under the
+  base URL (scheme, host, port, path prefix, no dot segments), because a
+  result URL is the server's answer and the request carries the proxy
+  token. Responses are read in chunks against a ceiling (`cf_read_cb()`),
+  never read whole and measured. Cost is always 0 -- "no charge", not
+  unknown. There is no cancel: `/interrupt` and `/queue` delete answer 200
+  whatever happened. See `docs/providers/comfyui.org`.
+- **Both clients build every message and session through
+  `ai-http-redirect-private.h`.** v0.14.0 shipped `AiHiggsfieldClient` with
+  four bare libsoup constructors, so `make test` failed at
+  `check-http-constructors` on the tagged release; 0.15.0 fixed it.
 
 ## Embedding Subsystem
 
