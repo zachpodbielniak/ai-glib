@@ -32,7 +32,7 @@ A final =GObject=: a model, an optional prompt, and an open JSON object of param
 | Call | Meaning |
 |---+---|
 | =ai_media_request_new(model, prompt)= | both nullable |
-| =get_model= / =set_model= | the service's model id; for Higgsfield the endpoint path |
+| =get_model= / =set_model= | the service's model id; for Higgsfield the endpoint path; ComfyUI ignores it (the workflow names its checkpoint) |
 | =get_prompt= / =set_prompt= | sent as =prompt=; wins over a =prompt= parameter |
 | =set_image_url(url)= | sets =image_url=; =NULL= removes it |
 | =set_param_string= / =_int= / =_double= / =_boolean= | one field |
@@ -116,5 +116,6 @@ on_done(GObject *source, GAsyncResult *result, gpointer user_data)
 
 * See also
 
-- [[file:../providers/higgsfield.org][Higgsfield]] -- the implementation, with the API facts and terms
+- [[file:../providers/higgsfield.org][Higgsfield]] -- the hosted implementation, with the API facts and terms
+- [[file:../providers/comfyui.org][ComfyUI]] -- the self-hosted implementation: your own workflow, placeholders, cost 0
 - [[file:ai-video-generator.org][AiVideoGenerator]], [[file:ai-image-generator.org][AiImageGenerator]]

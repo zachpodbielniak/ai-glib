@@ -1,0 +1,214 @@
+#+title: ComfyUI
+#+description: AiComfyuiClient: a self-hosted ComfyUI server as an AiMediaGenerator, running your own workflow with placeholders
+#+authors: ai-glib contributors
+#+categories: providers media image self-hosted
+#+created: 2026-11-22T00:00:00-05:00
+#+updated: 2026-11-22T00:00:00-05:00
+#+version: 1
+
+* Overview
+
+=AiComfyuiClient= drives a [[https://github.com/comfyanonymous/ComfyUI][ComfyUI]] server (GPL-3.0) that you run yourself, on your own GPU, through ComfyUI's own HTTP API. It is the free, self-hosted counterpart of [[file:higgsfield.org][AiHiggsfieldClient]]: a plain =GObject= implementing [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]], not an =AiClient= and not an =AiProviderType=.
+
+ComfyUI has no notion of "a model and a prompt". What it runs is a *workflow*: a graph of nodes (checkpoint loader, text encoders, sampler, decoder, save node) that you build in its editor. The client runs *your* workflow and changes only the placeholders you put in it, so everything else -- checkpoint, sampler, steps, resolution, LoRAs, upscalers -- stays exactly as you designed it.
+
+| | |
+|---+---|
+| Type | =AiComfyuiClient= (final, =GObject=) |
+| Interface | =AiMediaGenerator= (submit, poll, download, estimate; no cancel) |
+| Extra | =ai_comfyui_client_upload_async()= for a reference image |
+| Base URL | =http://127.0.0.1:8188= (=AI_COMFYUI_DEFAULT_BASE_URL=), any path prefix allowed |
+| Auth | none of its own; an optional bearer token for an authenticating proxy |
+| Cost | always 0 micro-USD: self-hosted, no charge |
+| Header | =<ai-glib.h>= (=src/providers/ai-comfyui-client.h=) |
+
+* Setup
+
+** 1. Run ComfyUI
+
+Install and start ComfyUI as its README describes; with no arguments it listens on =127.0.0.1:8188=. To reach it from another machine start it with =--listen= (and see [[*Behind an authenticating proxy][the proxy section]] -- ComfyUI itself has no authentication, so do not expose it bare). Put at least one checkpoint in =models/checkpoints=.
+
+No extra build dependency on the ai-glib side: libsoup 3 and json-glib are already required.
+
+** 2. Build the workflow and export it in API format
+
+1. Build and test the workflow in the ComfyUI editor until it makes the picture you want.
+2. Put placeholders into the text widgets you want each request to fill (next section). The editor treats them as ordinary text.
+3. Export with *Workflow -> Export (API)* -- in older versions enable "Dev mode options" in the settings and use *Save (API format)*. The file is a JSON object keyed by node id, each node with =class_type= and =inputs=.
+
+The editor's ordinary *Save* writes a different document (=nodes= and =links= arrays) that =/prompt= cannot run; =ai_comfyui_client_set_workflow()= refuses it with a message saying so.
+
+** 3. Hand it to the client
+
+#+begin_src C
+g_autoptr(AiComfyuiClient) client = ai_comfyui_client_new(NULL); /* http://127.0.0.1:8188 */
+g_autofree gchar *workflow = NULL;
+g_autoptr(GError) error = NULL;
+
+if (!g_file_get_contents("character-api.json", &workflow, NULL, &error) ||
+    !ai_comfyui_client_set_workflow(client, workflow, &error))
+{
+	g_printerr("workflow: %s\n", error->message);
+	return 1;
+}
+#+end_src
+
+=set_workflow= validates the graph (a non-empty object of nodes, each with a string =class_type= and, if present, an object of =inputs=) and keeps a compact copy; on failure the previous workflow stays. =ai_comfyui_client_get_workflow()= returns it, placeholders unfilled. =NULL= clears it.
+
+* Placeholders
+
+On each submit the client parses the workflow afresh and walks every node's *direct string inputs*. It never replaces text in the JSON document: a prompt containing quotes, braces, a newline or a fragment of JSON ends up as one string value and can neither break the graph nor add a node to it. Inputs that are links (=["4", 0]=), numbers, booleans or objects are never touched.
+
+| Placeholder | Filled with | When absent |
+|---+---+---|
+| ={{prompt}}= | the request's prompt (=ai_media_request_new(NULL, prompt)= or =set_prompt=) | the submit fails: =AI_ERROR_INVALID_REQUEST= naming the node and input |
+| ={{negative_prompt}}= | request parameter =negative_prompt= (a string) | empty string |
+| ={{seed}}= | request parameter =seed= (an integer, or a string of digits) | a random seed from =/dev/urandom=, below 2^53, the same for every ={{seed}}= in that submission |
+| ={{image}}= | the name of an image in the server's input folder, from =ai_media_request_set_image_url()= | the submit fails, telling you to upload one |
+
+Rules worth knowing:
+
+- *A placeholder can sit inside other text*: ="portrait of {{prompt}}, studio lighting"= keeps the surrounding words.
+- *A seed that is the whole input becomes a JSON number*, because a sampler's =seed= widget is an INT and ComfyUI refuses a string there. ={{seed}}= inside other text (=filename_prefix: "char-{{seed}}"=) is substituted as decimal text.
+- *One pass, left to right.* Substituted text is not scanned again, so a prompt that itself contains ={{seed}}= stays literal.
+- *Unknown ={{anything-else}}= is left as it is*, since a workflow may contain braces of its own.
+- *A workflow with no placeholders is valid* -- and then generates the same thing whatever the request says (with a fixed seed, the same picture). The client logs that at debug level; it is almost always a mistake, so check your export if every result looks alike.
+- *The request's model is ignored.* The graph names its own checkpoint; pass =NULL=.
+- *Per-request workflow.* A request parameter =workflow= -- a JSON object (=ai_media_request_set_param_json()=), or a string holding one -- replaces the stored workflow for that request only, and is validated the same way.
+
+The image is a *file name on the server*, never a URL: =set_image_url("https://...")= is refused, because a client that fetched whatever URL a request named would fetch arbitrary hosts. Upload the bytes first:
+
+#+begin_src C
+static void
+on_uploaded(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	AiMediaRequest *request = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autofree gchar *name = ai_comfyui_client_upload_finish(AI_COMFYUI_CLIENT(source),
+	                                                         result, &error);
+
+	if (name == NULL)
+	{
+		g_printerr("upload: %s\n", error->message);
+		return;
+	}
+	/* Use the returned name: ComfyUI may store it under a different one. */
+	ai_media_request_set_image_url(request, name);
+	/* ... ai_media_generator_submit_async(...) ... */
+}
+
+ai_comfyui_client_upload_async(client, png_bytes, "reference.png", NULL, on_uploaded, request);
+#+end_src
+
+The upload is =POST /upload/image= (multipart, field =image=, =overwrite= =true=); the MIME type is guessed from the name and the bytes. The file name must have no directory part, no leading dot, no =..=, no control characters and no quotes; ComfyUI's answer =subfolder/name= is returned as one string, which is what LoadImage takes.
+
+* Generating
+
+#+begin_src C
+static void
+on_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiMediaJob) job = ai_media_generator_wait_finish(AI_MEDIA_GENERATOR(source),
+	                                                           result, &error);
+
+	if (job == NULL)
+		g_printerr("no answer: %s\n", error->message);       /* unreachable, unknown id, ... */
+	else if (ai_media_job_get_state(job) != AI_MEDIA_JOB_STATE_DONE)
+		g_printerr("failed: %s\n", ai_media_job_get_error_message(job));
+	else
+		g_print("first image: %s\n", ai_media_job_get_result_urls(job)[0]);
+}
+
+g_autoptr(AiMediaRequest) request = ai_media_request_new(NULL, "a cheerful robot librarian");
+
+ai_media_request_set_param_string(request, "negative_prompt", "blurry, text, watermark");
+ai_media_request_set_param_int(request, "seed", 1234);
+/* submit_async -> job id, then: */
+ai_media_generator_wait_async(AI_MEDIA_GENERATOR(client), job_id, 1000, 5000, 600000,
+                              NULL, on_done, NULL);
+#+end_src
+
+A local GPU usually finishes in seconds, so shorter poll intervals than the 2 s / 10 s defaults (which were chosen for a hosted queue) are reasonable.
+
+* How the client uses the API
+
+Checked on 2026-11-22 against ComfyUI's source ([[https://github.com/comfyanonymous/ComfyUI/blob/master/server.py][server.py]], [[https://github.com/comfyanonymous/ComfyUI/blob/master/execution.py][execution.py]], [[https://github.com/comfyanonymous/ComfyUI/blob/master/nodes.py][nodes.py]]). Every route is also served under =/api=; the client uses the bare paths.
+
+| Operation | Request | Answer |
+|---+---+---|
+| submit | =POST /prompt= ={"prompt": <graph>, "client_id": <uuid>}= | ={"prompt_id", "number", "node_errors"}=; 400 ={"error": {type, message, details}, "node_errors": {id: {class_type, errors: [...]}}}= |
+| poll | =GET /history/<prompt_id>= | ={}= until finished, then ={id: {"outputs", "status": {"status_str", "completed", "messages"}}}= |
+| poll (not finished) | =GET /queue= | ={"queue_running": [...], "queue_pending": [...]}=, items =[number, prompt_id, prompt, extra_data, outputs]= |
+| download | =GET /view?filename=&subfolder=&type== | the file |
+| upload | =POST /upload/image= multipart =image=, =overwrite= | ={"name", "subfolder", "type"}= |
+
+*Poll.* =/history= first. While it is empty the prompt is unfinished and =/queue= tells running (=RUNNING=, provider status =running=) from waiting (=QUEUED=, =pending=). If =/queue= does not have it either, it finished in between -- ComfyUI moves a prompt from the queue to the history under one lock -- or the id is unknown, so =/history= is asked once more; still empty is =AI_ERROR_INVALID_REQUEST= ("an unknown id, or the server restarted or its history was cleared": ComfyUI keeps its history in memory).
+
+*States.*
+
+| ComfyUI says | =AiMediaJobState= | provider status | error message |
+|---+---+---+---|
+| in =queue_pending= | =QUEUED= | =pending= | |
+| in =queue_running= | =RUNNING= | =running= | |
+| =status_str: success= with outputs | =DONE= | =success= | |
+| =status_str: success=, no output files | =FAILED= | =success= | "... the workflow needs a SaveImage (or PreviewImage) node" |
+| an =execution_interrupted= message | =CANCELLED= | =interrupted= | "Interrupted on the ComfyUI server" |
+| =status_str: error= | =FAILED= | =error= | from =execution_error=: "node 3 (KSampler): RuntimeError: CUDA out of memory" |
+| any other =status_str= | -- | -- | =AI_ERROR_INVALID_RESPONSE= naming it |
+
+*Results.* Every output file of a finished prompt, as a =/view= URL on the base URL, in *node-id order* (numeric ids numerically, so node 9 before node 12; anything else after, by bytes), each file once. Files are read from each output node's =images= (SaveImage, PreviewImage) and, for video and audio nodes that use the same ={filename, subfolder, type}= shape, =gifs=, =videos= and =audio=. A PreviewImage's =type: temp= file is included too -- remove preview nodes from the exported workflow if you want only the saved images.
+
+*Cost.* Every job and every estimate is *0 micro-USD*, and here 0 means "self-hosted, no charge" -- not "unknown", which is =AI_MEDIA_COST_UNKNOWN= (-1). An estimate still builds the request, so it refuses what a submit would, without sending anything.
+
+*No cancel.* =POST /interrupt= and =POST /queue {"delete": [...]}= both answer 200 whether or not they did anything, so a cancel could not honestly report its outcome; =ai_media_generator_can_cancel()= is FALSE. Stopping the *wait* is still a =GCancellable= away.
+
+* Behind an authenticating proxy
+
+ComfyUI has *no authentication of its own*. Exposing it beyond loopback means putting it behind a reverse proxy that checks a token (Caddy, nginx, oauth2-proxy, a tailnet). For a proxy that takes a bearer token:
+
+#+begin_src C
+g_autoptr(AiComfyuiClient) client = ai_comfyui_client_new("https://gpu.example.net/comfy");
+
+ai_comfyui_client_set_token(client, token_from_your_secret_store);
+#+end_src
+
+- The token is sent as =Authorization: Bearer <token>= on every request, =/view= downloads included. It is not a property and has no getter; it is overwritten in memory when replaced and on finalize; a token containing a line break is refused (and the old one cleared). Nothing is read from the environment.
+- It is never logged, and every error string passes a redaction of it -- including a proxy's 401 page that quotes the header back, which the test suite does on purpose.
+- A path prefix in the base URL is kept: =https://gpu.example.net/comfy= submits to =/comfy/prompt= and builds result URLs under =/comfy/view=.
+
+* Behaviour worth knowing
+
+- *Downloads stay on the server.* A download URL must have the base URL's scheme, host and port, no userinfo, and a path under the base path; any =..=, =%2e=, =/./= or =//= is refused outright rather than normalised. A job's result URLs always satisfy this; anything else is =AI_ERROR_INVALID_REQUEST= before a byte is sent.
+- *No redirects.* Every request is declared as carrying a credential (its body is the prompt), so a 3xx is an error telling you to point the base URL at where ComfyUI really answers.
+- *Bounded reads.* Responses are read in 64 KiB chunks and refused once past a ceiling -- 16 MiB for JSON answers (=/queue= carries every queued graph), 512 MiB for a downloaded file -- and a declared =Content-Length= past it is refused before reading.
+- *Errors* are =AI_ERROR= with ComfyUI's own words: a refused submit says "Prompt outputs failed validation; node 5 (CheckpointLoaderSimple): Value not in list: ckpt_name: ..." A connection failure asks whether ComfyUI is running at the base URL. 401 is =AI_ERROR_INVALID_API_KEY=, 403 =AI_ERROR_PERMISSION_DENIED= (a proxy, or ComfyUI's own cross-origin refusal), 404 =AI_ERROR_INVALID_REQUEST=, 502--504 =AI_ERROR_SERVICE_UNAVAILABLE=.
+- *Contexts.* Each operation completes on the thread-default context of the thread that started it; the HTTP session is cached for the context it was made in, and every chained request and read is issued with that context pushed.
+- *Timeouts.* =AiComfyuiClient:timeout= (seconds, default 60) bounds each request's I/O. A long generation is bounded by =wait_async='s =timeout_ms=, not by this.
+- *client_id.* Each client sends a random UUID as =client_id=; ComfyUI uses it only to route websocket progress, which this client does not read.
+
+* Troubleshooting
+
+| Symptom | Cause and remedy |
+|---+---|
+| "workflow is in the editor's format" | Export with *Export (API)* / *Save (API format)*, not *Save*. |
+| "uses {{prompt}}, but the request has no prompt" | Pass a prompt, or take ={{prompt}}= out of that input. |
+| "uses {{image}}, but the request has no image" | Upload with =ai_comfyui_client_upload_async()= and pass the returned name to =ai_media_request_set_image_url()=. |
+| "Value not in list: ckpt_name ..." | The workflow names a checkpoint, LoRA or file the server does not have. Fix the export or add the file under =models/=. |
+| "Required input is missing" / "Exception when validating inner node" | A placeholder sits in an input that is not text (a combo, an INT other than a whole-input seed). Use placeholders only in text widgets and in a seed widget. |
+| "finished the prompt with no image output" | The workflow has no SaveImage or PreviewImage node, or ComfyUI cached every output from an identical earlier run. Add a save node; let the seed vary. |
+| Every result looks the same | The workflow has no placeholders, or a fixed seed: check the export. |
+| "Connection refused (is ComfyUI running at ...?)" | Start ComfyUI, or fix the base URL (host, port, =--listen=). |
+| HTTP 401 / 403 | A proxy wants a token (=ai_comfyui_client_set_token()=) or refused it; a 403 straight from ComfyUI is its cross-origin check -- do not send an =Origin= that differs from the host. |
+| "has no prompt ... in its queue or its history" | ComfyUI restarted (its history is in memory) or the id came from another server. |
+| "redirect ... not followed" | The base URL points at something that redirects (http to https, a login page). Use the final URL. |
+| =CUDA out of memory= in a FAILED job | Lower the resolution or batch size in the workflow, or free the GPU. |
+
+* Tests
+
+=tests/test-comfyui-client.c= runs against a loopback =SoupServer= on its own thread that imitates ComfyUI: placeholder substitution with a prompt full of quotes, braces and a literal ={{seed}}= (one string value, six nodes in, six out, links and numbers untouched); a seed as a number, random, or digits; the local refusals (no workflow, no image, a URL or a traversal as the image, no prompt, a bad =workflow= parameter, a bad prompt id) reaching no server; a per-request workflow; a 400 with =node_errors= surfaced; pending -> running -> success with result URLs in node order; the wait helper, including from a private context; the history/queue race and an unknown id; =error=, =interrupted= and empty-success histories; download, a 404, and seven off-base download URLs refused without a request; multipart upload and its name fed back through ={{image}}=; a bearer token under a path prefix, a proxy 401 echoing a wrong token (redacted), and no header without a token; a 17 MiB chunked answer refused; the 0 estimate; and a check that the token is in no log line. No network, no GPU.
+
+* See also
+
+- [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]] -- the interface, =AiMediaRequest= and =AiMediaJob=
+- [[file:higgsfield.org][Higgsfield]] -- the hosted implementation of the same interface

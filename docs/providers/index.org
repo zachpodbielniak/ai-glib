@@ -17,6 +17,7 @@ These implement =AiMediaGenerator= rather than =AiProvider=: no chat, a queued j
 | Provider | Client Class | Credentials | Models |
 |----------+--------------+-------------+--------|
 | [[file:higgsfield.org][Higgsfield]] | =AiHiggsfieldClient= | set by the caller (key id + secret); no environment variable | endpoint paths, e.g. =higgsfield-ai/soul/v2/standard= |
+| [[file:comfyui.org][ComfyUI]] (self-hosted) | =AiComfyuiClient= | none; optional bearer token for an authenticating proxy, set by the caller | your own workflow, exported in API format, with ={{prompt}}=-style placeholders |
 
 *** CLI Wrapper Providers
 | Provider                                         | Client Class         | Environment Variable          | Default Model                      |
@@ -189,3 +190,6 @@ No HTTP request that carries a credential follows a redirect, not even to its ow
 | Voice: HTTP synthesizer, websocket recognizer                         | none (configured endpoint)     | same origin                                   |
 | Generated image or video download, =web_fetch=, =web_search= page fetch | public URL                   | anywhere, unless a credential header is on it |
 | =ai-call= Matrix and JWT requests                                     | credentials                    | never                                         |
+| Higgsfield API requests and the presigned upload =PUT=               | credentials                    | never                                         |
+| Higgsfield result download                                            | public URL                     | anywhere, unless a credential header is on it |
+| ComfyUI: every request, =/view= downloads included                    | credentials (the body is the prompt; a bearer token when set) | never |

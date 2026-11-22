@@ -4,6 +4,13 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.15.0 - 2026-11-22
+
+** Added
+- =AiComfyuiClient=: a self-hosted [[https://github.com/comfyanonymous/ComfyUI][ComfyUI]] server as an =AiMediaGenerator=, over ComfyUI's own HTTP API (=/prompt=, =/history=, =/queue=, =/view=, =/upload/image=; default =http://127.0.0.1:8188=). It runs the operator's own workflow, exported in API format and set with =ai_comfyui_client_set_workflow()= or per request as a =workflow= parameter, and fills ={{prompt}}=, ={{negative_prompt}}=, ={{seed}}= and ={{image}}= in the nodes' string inputs by walking the parsed graph, so a prompt with quotes or braces stays one string value; a whole-input ={{seed}}= becomes a number, and an absent seed is random. Poll tells queued from running through =/queue= and reports ComfyUI's own failure text; results are =/view= URLs in node order; downloads are refused unless under the base URL; responses are read against a size ceiling; the estimate is 0 (self-hosted, no charge); there is no cancel, because ComfyUI's interrupt and delete cannot say whether they worked. =ai_comfyui_client_upload_async()= uploads a reference image, and =ai_comfyui_client_set_token()= sends a bearer token to an authenticating proxy, never logged and redacted from every error. See =docs/providers/comfyui.org=.
+
+** Fixed
+- =AiHiggsfieldClient= built its messages and sessions with bare libsoup constructors, so =make test= failed at =check-http-constructors= on 0.14.0. They now go through =ai-http-redirect-private.h=: API requests and the presigned upload =PUT= are declared as carrying a credential (never redirected), result downloads as public URLs.
 * 0.14.0 - 2026-11-21
 
 ** Added
