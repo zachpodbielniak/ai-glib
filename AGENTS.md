@@ -813,6 +813,42 @@ Three things to know before touching the send path:
    `tests/test-image-generator.c` (loopback server + `ai_config_set_base_url()`).
 7. Document it in `docs/providers/<name>.org` with a capability matrix.
 
+## Media Job Subsystem (`AiMediaGenerator`)
+
+`AiMediaGenerator` (`src/core/ai-media-generator.{h,c}`) is for services where
+a generation is a *queued job*: submit returns an id, poll returns an
+`AiMediaJob` snapshot (`src/model/ai-media-job.{h,c}`: state, provider status,
+result URLs, cost in micro-USD, expiry), download returns `GBytes`, and
+estimate and cancel are optional. `AiImageGenerator` and `AiVideoGenerator`
+hide that lifecycle and return a finished artifact; this one exposes it.
+`AiHiggsfieldClient` (`src/providers/ai-higgsfield-client.{h,c}`) is the first
+implementation -- a plain `GObject`, not an `AiClient` and not an
+`AiProviderType`. See `docs/api-reference/ai-media-generator.org` and
+`docs/providers/higgsfield.org`.
+
+- **A failed job is a result, not a `GError`.** `poll_finish` and
+  `wait_finish` return it with state `FAILED`/`CANCELLED`; an error means the
+  question went unanswered. `AI_MEDIA_COST_UNKNOWN` (-1) is never free.
+- **`ai_media_generator_wait_async()` is the one polling loop.** Backoff with
+  jitter, five transient retries, a deadline, a held `GSource *` on the
+  task's context, and the context pushed around each poll -- a timer
+  dispatch does not make its context thread-default. Do not write a second.
+- **`AiMediaRequest` is an open JSON object, not a superset struct.** Each
+  model takes its own fields; the service names the one it rejects.
+  `ensure_idempotency_key()` keeps the key on the request so a resubmit
+  reaches the original job.
+- **Higgsfield credentials are explicit and contained.** Set with
+  `ai_higgsfield_client_set_credentials()` (no property, no getter, wiped on
+  replace and finalize); never read from the environment; sent only on
+  requests built from `base-url`, which do not follow redirects; never on
+  downloads or the presigned upload, whatever `upload_headers` asks; every
+  error string passes `hf_redact()`. `tests/test-higgsfield-client.c` has the
+  mock echo the credential in a 401 and asserts it is in no error and no log
+  line. Keep those assertions when touching the client.
+- **A `SoupSession` belongs to the context it was made in.** The client
+  caches one for that context only and makes a fresh one for an operation
+  started elsewhere.
+
 ## Embedding Subsystem
 
 Embedding hangs off the `AiEmbedder` interface (`src/core/ai-embedder.{h,c}`),

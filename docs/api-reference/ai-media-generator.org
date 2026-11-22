@@ -1,0 +1,120 @@
+#+title: AiMediaGenerator
+#+description: Provider-neutral asynchronous media jobs: submit, poll, download, estimate, cancel, and a waiting loop
+#+authors: ai-glib contributors
+#+categories: api media image video
+#+created: 2026-11-21T00:00:00-05:00
+#+updated: 2026-11-21T00:00:00-05:00
+#+version: 1
+
+* Overview
+
+=AiMediaGenerator= is a GObject interface for services that generate media as a *queued job*: submitting returns an id at once, the work happens elsewhere, and the result is a set of URLs that expire. [[file:ai-image-generator.org][AiImageGenerator]] and [[file:ai-video-generator.org][AiVideoGenerator]] hide that lifecycle and return a finished artifact; this interface exposes it, so a caller can store the id and survive a restart, price a request before paying for it, cancel, or poll on its own schedule.
+
+It was added for [[file:../providers/higgsfield.org][AiHiggsfieldClient]], the first implementation. The two older interfaces were not reused: both are "request in, finished artifact out", with no job id, status, cost or cancel to return, and their request types are fixed superset structs while a job service's models each take their own JSON fields.
+
+| Operation | Required | Wrapper | Answers |
+|---+---+---+---|
+| submit | yes | =ai_media_generator_submit_async= / =_finish= | job id (=gchar *=) |
+| poll | yes | =ai_media_generator_poll_async= / =_finish= | =AiMediaJob= snapshot |
+| download | yes | =ai_media_generator_download_async= / =_finish= | =GBytes= |
+| estimate | no | =ai_media_generator_estimate_async= / =_finish= | price in micro-USD |
+| cancel | no | =ai_media_generator_cancel_async= / =_finish= | =gboolean= |
+| wait | (built on poll) | =ai_media_generator_wait_async= / =_finish= | finished =AiMediaJob= |
+
+=ai_media_generator_can_estimate()= and =ai_media_generator_can_cancel()= say whether the optional ones exist; without them, and for a required vfunc an implementation left NULL, the wrapper answers through the normal async contract with =AI_ERROR_NOT_SUPPORTED= -- never by not calling back.
+
+There are no synchronous variants. Every operation completes on the thread-default main context of the thread that started it, captured when it starts.
+
+* AiMediaRequest
+
+A final =GObject=: a model, an optional prompt, and an open JSON object of parameters. It is deliberately not a superset of every service's fields the way =AiImageRequest= is; the service validates its own model's schema and its error names the field.
+
+| Call | Meaning |
+|---+---|
+| =ai_media_request_new(model, prompt)= | both nullable |
+| =get_model= / =set_model= | the service's model id; for Higgsfield the endpoint path |
+| =get_prompt= / =set_prompt= | sent as =prompt=; wins over a =prompt= parameter |
+| =set_image_url(url)= | sets =image_url=; =NULL= removes it |
+| =set_param_string= / =_int= / =_double= / =_boolean= | one field |
+| =set_param_json(name, node)= | arrays and objects (copied) |
+| =has_param= / =remove_param= | |
+| =to_json()= | the body: parameters plus =prompt= |
+| =get_idempotency_key= / =set_idempotency_key= | |
+| =ensure_idempotency_key()= | generates a UUID once and keeps it |
+| =get_webhook_url= / =set_webhook_url= | notified at a terminal state |
+| =get_expires_after= / =set_expires_after= | retention in seconds, 0 for default |
+
+Model, idempotency key, webhook and retention are not in the body; an implementation sends them in the path, headers or query. All but the parameters are also properties (=model=, =prompt=, =idempotency-key=, =webhook-url=, =expires-after=).
+
+*Resubmitting is safe by design.* An implementation calls =ensure_idempotency_key()= on submit, so the request keeps its key; submitting the same object again after a timeout or a 5xx reaches the original job on a service that honours keys. Make a new request for new work.
+
+* AiMediaJob and AiMediaJobState
+
+A snapshot, not a live handle: each poll produces a new one.
+
+| =AiMediaJobState= | Terminal |
+|---+---|
+| =AI_MEDIA_JOB_STATE_QUEUED= | no |
+| =AI_MEDIA_JOB_STATE_RUNNING= | no |
+| =AI_MEDIA_JOB_STATE_DONE= | yes |
+| =AI_MEDIA_JOB_STATE_FAILED= | yes (includes a moderation refusal) |
+| =AI_MEDIA_JOB_STATE_CANCELLED= | yes |
+
+=ai_media_job_state_is_finished()= classifies every value with no =default:=, so a state added later is a =-Wswitch= warning rather than a waiter polling for ever. =ai_media_job_state_to_string()= returns the nickname.
+
+| Getter | Meaning |
+|---+---|
+| =get_id= | the service's job id |
+| =get_state= / =is_finished= | normalised state |
+| =get_provider_status= | the service's own word, e.g. Higgsfield's =nsfw= |
+| =get_error_message= | why a failed job failed, if said |
+| =get_result_urls= / =get_n_result_urls= | =NULL=-terminated, service order, each once |
+| =get_cost_micro_usd= | the job's price, or =AI_MEDIA_COST_UNKNOWN= (-1) |
+| =get_expires_at= | ISO 8601 time the files are deleted, if said |
+
+=AI_MEDIA_COST_UNKNOWN= is never "free": zero is a real price. Setters (=set_provider_status=, =set_error_message=, =add_result_url=, =set_cost_micro_usd=, =set_expires_at=) exist for implementations.
+
+*A job that failed is not a =GError=.* =poll_finish= and =wait_finish= return it with state =FAILED= or =CANCELLED=. An error means the question went unanswered: bad credentials, an unknown id, the service down, the wait's deadline.
+
+* Waiting
+
+#+begin_src C
+void ai_media_generator_wait_async(AiMediaGenerator *self, const gchar *job_id,
+                                   guint initial_interval_ms, guint max_interval_ms,
+                                   guint timeout_ms, GCancellable *cancellable,
+                                   GAsyncReadyCallback callback, gpointer user_data);
+#+end_src
+
+- The first poll is immediate. Each later delay grows by half, from =initial_interval_ms= up to =max_interval_ms=, plus up to a fifth of itself as jitter. =0= means =AI_MEDIA_WAIT_INITIAL_INTERVAL_MS= (2000) and =AI_MEDIA_WAIT_MAX_INTERVAL_MS= (10000) -- Higgsfield's documented polling guidance.
+- Transient poll failures (=SERVER_ERROR=, =SERVICE_UNAVAILABLE=, =NETWORK_ERROR=, =TIMEOUT=, =RATE_LIMITED=) are retried, up to five in a row; anything else ends the wait with that error.
+- =timeout_ms= bounds the whole wait (=AI_ERROR_TIMEOUT=); =0= waits until =cancellable=. The last delay is clipped to the deadline.
+- Cancelling wakes the wait at once and ends it with =G_IO_ERROR_CANCELLED=. It stops the *wait*, not the job; =ai_media_generator_cancel_async()= asks the service.
+- The timer is a held =GSource *= attached to the captured context and destroyed by pointer; each poll is issued with that context pushed, because dispatching a source does not make its context thread-default and the implementation's HTTP session takes whatever is.
+
+#+begin_src C
+static void
+on_done(GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	g_autoptr(GError) error = NULL;
+	g_autoptr(AiMediaJob) job = ai_media_generator_wait_finish(AI_MEDIA_GENERATOR(source),
+	                                                           result, &error);
+
+	if (job != NULL && ai_media_job_get_state(job) == AI_MEDIA_JOB_STATE_DONE)
+		ai_media_generator_download_async(AI_MEDIA_GENERATOR(source),
+		                                  ai_media_job_get_result_urls(job)[0],
+		                                  NULL, on_downloaded, user_data);
+}
+#+end_src
+
+* Implementing it
+
+1. Implement =submit=, =poll= and =download= (and =estimate=, =cancel= when the service has them) in the interface's =iface_init=.
+2. Make each =*_async= create its =GTask= first; the task captures the caller's context, and anything you attach (an HTTP session, a timer) belongs to that context.
+3. Map the service's status words onto =AiMediaJobState= in one function, and keep the original with =ai_media_job_set_provider_status()=. Treat an unknown word as an error, not a guess.
+4. Send no credential with =download=; result URLs are storage, not the API.
+5. Cover it against a loopback server, as =tests/test-higgsfield-client.c= does.
+
+* See also
+
+- [[file:../providers/higgsfield.org][Higgsfield]] -- the implementation, with the API facts and terms
+- [[file:ai-video-generator.org][AiVideoGenerator]], [[file:ai-image-generator.org][AiImageGenerator]]
