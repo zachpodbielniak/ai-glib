@@ -861,7 +861,27 @@ implementation -- a plain `GObject`, not an `AiClient` and not an
   never read whole and measured. Cost is always 0 -- "no charge", not
   unknown. There is no cancel: `/interrupt` and `/queue` delete answer 200
   whatever happened. See `docs/providers/comfyui.org`.
-- **Both clients build every message and session through
+- **`AiMeshyClient` and `AiPixellabClient` (`src/providers/ai-meshy-client.{h,c}`,
+  `ai-pixellab-client.{h,c}`) choose an endpoint by the request's
+  `operation` parameter (or its model)**, strip `operation`, and pass every
+  other parameter through untouched. Outputs are *named results*
+  (`ai_media_job_add_named_result()`; names in the provider docs), also
+  appended to the plain URL list so Higgsfield and ComfyUI callers are
+  unchanged. Job ids carry what a poll needs (`<operation>:<task>` for
+  Meshy; `<operation>:<object>:<group>:<jobs>` for PixelLab's background
+  jobs) so a fresh process resumes -- except two things held in memory on
+  purpose: a Meshy Text to 3D refine's parameters between preview and
+  refine (a lost plan is refused, never refined blind or twice; the
+  two-task id from a later poll resumes anywhere), and PixelLab's
+  synchronous results (`sync:<uuid>`, kept by the client that made them).
+  Shared plumbing -- redaction, error envelopes, USD parsing, data URLs --
+  is `src/providers/ai-media-shared.{h,c}` (private). Meshy bills credits
+  (`ai_media_job_get_credits()`, `ai_meshy_estimate_credits()` from one
+  table); micro-USD is unknown. PixelLab's size limits are checked before
+  submit. Write PixelLab code from its OpenAPI document only: its Python
+  client has no licence. See `docs/providers/meshy.org`,
+  `docs/providers/pixellab.org`.
+- **Every media client builds every message and session through
   `ai-http-redirect-private.h`.** v0.14.0 shipped `AiHiggsfieldClient` with
   four bare libsoup constructors, so `make test` failed at
   `check-http-constructors` on the tagged release; 0.15.0 fixed it.

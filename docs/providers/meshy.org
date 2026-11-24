@@ -1,0 +1,170 @@
+#+title: Meshy
+#+description: AiMeshyClient: Meshy's hosted 3D generation API (text, images, retexture, remesh, rigging, animation) as an AiMediaGenerator
+#+authors: ai-glib contributors
+#+categories: providers media 3d
+#+created: 2026-11-23T00:00:00-05:00
+#+updated: 2026-11-23T00:00:00-05:00
+#+version: 1
+
+* Overview
+
+=AiMeshyClient= drives [[https://www.meshy.ai][Meshy]], a hosted, closed, credit-billed service that turns text and images into textured 3D models and then rigs and animates them. It is a plain =GObject= implementing [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]], like [[file:higgsfield.org][AiHiggsfieldClient]]: not an =AiClient=, not an =AiProviderType=, no chat.
+
+Meshy is proprietary and paid. The client exists because the service is useful for 3D assets that nothing free produces at the same quality; nothing in ai-glib depends on it, and a self-hosted generator can stand behind the same interface.
+
+| | |
+|---+---|
+| Type | =AiMeshyClient= (final, =GObject=) |
+| Interface | =AiMediaGenerator= (submit, poll, download, estimate, cancel) |
+| Extras | =ai_meshy_client_balance_async()=, =ai_meshy_client_list_animations_async()=, =ai_meshy_estimate_credits()=, =ai_meshy_image_data_uri()= |
+| Base URL | =https://api.meshy.ai= (=AI_MESHY_DEFAULT_BASE_URL=); paths under it begin =openapi/= |
+| Auth | =Authorization: Bearer msy_...=, set by the caller; never read from the environment |
+| Cost | Meshy credits on the job (=ai_media_job_get_credits()=); micro-USD is always unknown |
+| Results | named: =glb=, =fbx=, =thumbnail=, =texture:base_color=, =rig:glb=, =anim:walking=, ... |
+| Header | =<ai-glib.h>= (=src/providers/ai-meshy-client.h=) |
+
+* Facts this client relies on
+
+Checked on 2026-11-23 against Meshy's own documentation: [[https://docs.meshy.ai/llms.txt][llms.txt]], [[https://docs.meshy.ai/llms-full.txt][llms-full.txt]] and the [[https://docs.meshy.ai/openapi.json][OpenAPI document]] (version 1.0.0). Re-check them before relying on a detail that matters; Meshy changes prices and models often.
+
+- *Every operation is a task.* =POST= a JSON body to the operation's path; the reply is =202= with ={"result": "<task id>"}=. =GET <path>/<id>= returns the task. There is no single status endpoint: each operation is polled on its own path.
+- *Statuses*: =PENDING=, =IN_PROGRESS=, =SUCCEEDED=, =FAILED=, =CANCELED=. A task can step back from =IN_PROGRESS= to =PENDING= when Meshy reschedules it. Only =FAILED= is a failure, and its credits are refunded; credits are charged when a task is created.
+- *Timing*: almost all of a task's time is =IN_PROGRESS=; Meshy says to wait at least an hour before giving up, because busy periods can hold a task for twenty minutes and more. A client timeout does not cancel a task -- keep the id.
+- *Timestamps* are Unix milliseconds. =expires_at= is when the signed result URLs stop working.
+- *Retention*: three days for every plan but Enterprise. Download what you want to keep.
+- *Errors* are ={"message": "..."}=. =402= is not enough credits (or the plan does not allow it). =429= is either the request rate -- with =Retry-After= -- or the limit on concurrent tasks, whose message begins =NoMorePendingTasks= (=NoMoreConcurrentTasks= on an unlimited plan with no credits) and which has *no* =Retry-After=. =409= answers a =DELETE= of a task that is already =IN_PROGRESS=.
+- *DELETE is the only cancel*: it removes a task that has not started; one that is running is left to finish, because its credits are spent.
+- *Images* may be a public URL or a base64 data URI (=data:image/png;base64,...=), PNG, JPEG or WebP, at most 20 MB.
+- *Test key*: Meshy's shared test key was retired on 2026-09-16. The tests here never contact Meshy; they run against a loopback mock.
+
+* Setup
+
+#+begin_src C
+g_autoptr(AiMeshyClient) client = ai_meshy_client_new_with_api_key(key); /* from your secrets store */
+#+end_src
+
+=ai_meshy_client_set_api_key()= is not a property and has no getter, so nothing holding the object can read the key back; the old key is overwritten before it is freed, and a key with a line break is refused. The key is sent only to the base URL's origin, on requests that never follow a redirect, and is redacted from every error message. Downloads go to Meshy's signed CDN URLs without it.
+
+=base-url= and =timeout= (seconds per HTTP request, default 60) are properties. The timeout bounds one request, not a task: give =ai_media_generator_wait_async()= an hour.
+
+* Operations
+
+The request's =operation= parameter names the operation; without one, its model does. =operation= is ai-glib's word and is removed before sending. *Every other parameter is passed to Meshy untouched*, so any field in Meshy's documentation can be set with =ai_media_request_set_param_*()=; Meshy validates them and its message names the field it refuses. The request's prompt is sent as =prompt=.
+
+| =operation= | Path | Meshy's main inputs |
+|---+---+---|
+| =text-to-3d= | =openapi/v2/text-to-3d= | =prompt=, =ai_model=, =topology=, =target_polycount=, ... |
+| =image-to-3d= | =openapi/v1/image-to-3d= | =image_url= (=ai_media_request_set_image_url()=) |
+| =multi-image-to-3d= | =openapi/v1/multi-image-to-3d= | =image_urls= (1-4) |
+| =retexture= | =openapi/v1/retexture= | =input_task_id= or =model_url=; =text_style_prompt= or =image_style_url= |
+| =remesh= | =openapi/v1/remesh= | =input_task_id= or =model_url=; =topology=, =target_polycount= |
+| =rig= | =openapi/v1/rigging= | =input_task_id= or =model_url=; =animation_type= |
+| =animate= | =openapi/v1/animations= | =rig_task_id= and one of =action_id=, =action_ids= (1-10), =motion_task_id= |
+
+#+begin_src C
+g_autoptr(AiMediaRequest) request = ai_media_request_new(AI_MESHY_OPERATION_IMAGE_TO_3D, NULL);
+g_autofree gchar *image = ai_meshy_image_data_uri("chair.png", &error);
+
+ai_media_request_set_image_url(request, image);
+ai_media_request_set_param_string(request, "ai_model", "meshy-6");
+ai_media_request_set_param_string(request, "texture_resolution", "2k");
+ai_media_generator_submit_async(AI_MEDIA_GENERATOR(client), request, NULL, on_submitted, NULL);
+#+end_src
+
+The client refuses, before sending anything: an operation it does not know (naming the ones it does), an inline image over 20 MB in =image_url=, =image_urls=, =texture_image_url=, =texture_image_urls=, =image_style_url= or =multiview_image_urls=, and a webhook or retention on the request -- Meshy registers webhooks on the account and keeps files three days, so either would be silently ignored.
+
+** Text to 3D: preview and refine as one job
+
+Meshy splits Text to 3D into a *preview* (the mesh) and a *refine* (the texture). A =text-to-3d= request with *no =mode=* runs both as one job:
+
+1. Submit sends the preview, with =mode: preview=, and returns =text-to-3d:<preview id>=. The texture-only parameters a preview refuses (=texture_resolution=, =hd_texture=, =texture_model=) are lifted out and held for the refine.
+2. The poll that sees the preview succeed creates the refine -- =mode: refine=, =preview_task_id=, and the held parameters: =enable_pbr=, =texture_resolution=, =hd_texture=, =texture_prompt=, =texture_image_url=, =moderation=, =remove_lighting=, =target_formats=, =alpha_thumbnail=, =name=, and =texture_model= sent as the refine's =ai_model= (on a refine, =ai_model= picks the texture model; the preview's =ai_model= is a mesh model). From then on the job's id is =text-to-3d:<preview id>:<refine id>=.
+3. Later polls read the refine. When it succeeds the job is done, its outputs are the refine's, and its credits are the sum of both tasks'.
+
+The provider status says which half a word describes: =preview:IN_PROGRESS=, =refine:PENDING=, =refine:SUCCEEDED=.
+
+*Store the id from the latest poll*, not the one submit returned. The refine's parameters live in the client's memory between the two steps, so a fresh process polling =text-to-3d:<preview id>= after the preview succeeded is refused with an error telling you to submit a refine yourself (=mode: refine=, =preview_task_id=) -- rather than refining with the wrong texture, or refining twice and paying twice. The two-task id resumes anywhere. Two polls of one job in flight at once create one refine: the claim is taken under a lock.
+
+To run one step yourself, set =mode= (=preview= or =refine=); the job is then that one task, under the id =text-to-3d.step:<id>=, and the request goes to Meshy as written.
+
+* Results
+
+Every output becomes a *named result* (=ai_media_job_get_result_url(job, name)=; =ai_media_job_get_result_names()= lists them) and is also in the plain URL list. The names are ai-glib's, so a caller asks for =glb= without knowing which family of response produced it.
+
+| Name | From |
+|---+---|
+| =glb=, =fbx=, =obj=, =usdz=, =gltf=, =mtl=, =stl=, =3mf=, =blend=, =vox=, =pre_remeshed_glb= | each non-empty member of =model_urls= |
+| =thumbnail=, =thumbnail:alpha= | =thumbnail_url=, =alpha_thumbnail_url= |
+| =texture:<kind>= | the first texture set: =texture:base_color=, =texture:normal=, =texture:metallic=, =texture:roughness=, =texture:emission=, =texture:metallic_roughness= |
+| =texture:<kind>:<n>= | the texture set at index n (one per material) |
+| =rig:glb=, =rig:fbx= | Rigging's =rigged_character_glb_url=, =rigged_character_fbx_url= |
+| =anim:walking=, =anim:running= | Rigging's free walk and run clips (GLB) |
+| =anim:walking:fbx=, =anim:walking:armature=, =anim:running:fbx=, =anim:running:armature= | the same clips as FBX and armature GLB |
+| =anim:glb=, =anim:fbx= | Animation's =animation_glb_url=, =animation_fbx_url= |
+| =anim:usdz=, =anim:armature-fbx=, =anim:fps-fbx= | Animation's post-processed files |
+
+Other job fields: =get_provider_status()= is Meshy's word (prefixed for a chained Text to 3D job); =get_error_message()= is =task_error.message=; =get_expires_at()= is =expires_at= as ISO 8601 (Text to 3D tasks have none); =get_credits()= is =consumed_credits=; =get_cost_micro_usd()= is always =AI_MEDIA_COST_UNKNOWN=, because a credit's price depends on the plan.
+
+=download= decodes a =data:= URL locally and fetches =http(s)= URLs without the key, following redirects; anything else is refused.
+
+* Credits and the estimate
+
+Meshy has no estimate endpoint. =ai_meshy_estimate_credits(operation, request, &error)= prices a request from the table on Meshy's pricing page (checked 2026-11-23):
+
+| Operation | Credits |
+|---+---|
+| Text to 3D preview | 20 (=meshy-7.1=, =meshy-7=, =latest=, =meshy-6=); 5 (=meshy-6-lite=, =meshy-t2=, =meshy-t2.5=) |
+| Text to 3D refine | 10; 15 at an 8K =texture_resolution= |
+| Image / Multi-Image to 3D | the mesh (20 or 5, as above) plus, unless =should_texture= is false, 10 for 2K or 4K textures or 15 for 8K |
+| Ultra geometry (=geometry_resolution= 2k or 4k) | +5, =meshy-7.1= only |
+| Retexture | 10; 15 at 8K |
+| Remesh, Rigging | 5 |
+| Animation | 3 per action (=action_ids=), or 3 for one =action_id= or =motion_task_id= |
+
+A chained =text-to-3d= job prices both steps (30 by default). Combinations the table marks "not supported" are refused with =AI_ERROR_INVALID_REQUEST= rather than priced: 4K or 8K textures from =meshy-6-lite= (without =texture_model: meshy-7=), =meshy-n1= or =meshy-6-lite= texture models; Ultra geometry on any model but =meshy-7.1=; =meshy-t2= for Multi-Image; an unknown =ai_model=. The arithmetic reproduces every cell of Meshy's tables, including the =texture_model= pairs (mesh price plus the Retexture price).
+
+The interface's =estimate_async= runs the same check -- so an unsupported request fails before any credit is spent -- and answers =AI_MEDIA_COST_UNKNOWN= micro-USD. Use =ai_meshy_estimate_credits()= for the number.
+
+=ai_meshy_client_balance_async()= / =_finish(&balance, &monthly, &permanent)= reads =GET /openapi/v1/balance=: the credits available, and how many of them expire at the next monthly refresh.
+
+* Animation library
+
+=animate= takes =action_id= values from Meshy's animation library. They are data, not constants -- stable but not contiguous -- so read them:
+
+#+begin_src C
+ai_meshy_client_list_animations_async(client, "WalkAndRun", NULL, NULL, on_library, NULL);
+/* _finish returns a JsonNode array of {action_id, name, key, category,
+ * sub_category, preview_url, rig_type}; a rig takes only its own rig_type. */
+#+end_src
+
+* Cancel
+
+=cancel_async= is Meshy's =DELETE <path>/<id>=, of the current stage for a chained job. A =PENDING= task is deleted and refunded. An =IN_PROGRESS= task answers =409=, reported as =AI_ERROR_INVALID_REQUEST= with a message saying the task runs to the end because its credits are spent. A deleted task is gone: a later poll answers "no such task".
+
+* Errors
+
+| HTTP | =AiError= | Message adds |
+|---+---+---|
+| 400, 422 | =INVALID_REQUEST= | Meshy's =message= |
+| 401 | =INVALID_API_KEY= | |
+| 402 | =INSUFFICIENT_QUOTA= | "not enough credits, or the plan does not allow this" |
+| 403 | =PERMISSION_DENIED= | |
+| 404 | =INVALID_REQUEST= | on a poll or cancel: Meshy deletes tasks after three days |
+| 409 | =INVALID_REQUEST= | the task is already =IN_PROGRESS= |
+| 429 with =Retry-After= | =RATE_LIMITED= | "(rate limited; retry after N s)" |
+| 429 without | =RATE_LIMITED= | the concurrent-task limit: wait for a task to finish |
+| 503 | =SERVICE_UNAVAILABLE= | |
+| other 5xx | =SERVER_ERROR= | |
+| 3xx | =INVALID_RESPONSE= | not followed, so the key stays on the API origin |
+
+=ai_media_generator_wait_async()= retries =RATE_LIMITED= and the 5xx codes while polling. An unknown status word is =INVALID_RESPONSE=, never a guess.
+
+* Tests
+
+=tests/test-meshy.c= runs against a loopback mock on its own thread and context (=tests/media-mock.h=): the request body of every operation (=operation= stripped, parameters untouched), the whole preview-then-refine chain including the refine body, the summed credits and resuming from the two-task id in a fresh client, refusing a preview whose plan is lost, every status word and an unknown one, every result name, rig and animation outputs through the wait loop, the 402, both 429s, 503 and an echoing 401 (redacted), local refusals, cancel and its 409, downloads (no key to storage, =data:= decoded, =file:= refused), every cell of the credit table and every refused combination, balance and the library query, and =ai_meshy_image_data_uri()= on a PNG with the wrong extension, a text file and a sparse 21 MB file. The last test checks that the key is in no log line the run produced.
+
+* See also
+
+- [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]] -- the interface, waiting, =AiMediaJob= and named results
+- [[file:pixellab.org][PixelLab]] -- pixel-art sprites and tiles through the same interface
+- [[file:higgsfield.org][Higgsfield]], [[file:comfyui.org][ComfyUI]]

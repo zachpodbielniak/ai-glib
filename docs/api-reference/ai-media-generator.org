@@ -3,8 +3,8 @@
 #+authors: ai-glib contributors
 #+categories: api media image video
 #+created: 2026-11-21T00:00:00-05:00
-#+updated: 2026-11-21T00:00:00-05:00
-#+version: 1
+#+updated: 2026-11-23T00:00:00-05:00
+#+version: 2
 
 * Overview
 
@@ -68,11 +68,21 @@ A snapshot, not a live handle: each poll produces a new one.
 | =get_state= / =is_finished= | normalised state |
 | =get_provider_status= | the service's own word, e.g. Higgsfield's =nsfw= |
 | =get_error_message= | why a failed job failed, if said |
-| =get_result_urls= / =get_n_result_urls= | =NULL=-terminated, service order, each once |
+| =get_result_urls= / =get_n_result_urls= | =NULL=-terminated, service order |
+| =get_result_names= / =get_result_url(name)= | named outputs, where the service's files are not interchangeable |
 | =get_cost_micro_usd= | the job's price, or =AI_MEDIA_COST_UNKNOWN= (-1) |
+| =get_credits= | the price in the service's own unit (Meshy credits, PixelLab generations), or =AI_MEDIA_COST_UNKNOWN= |
 | =get_expires_at= | ISO 8601 time the files are deleted, if said |
 
-=AI_MEDIA_COST_UNKNOWN= is never "free": zero is a real price. Setters (=set_provider_status=, =set_error_message=, =add_result_url=, =set_cost_micro_usd=, =set_expires_at=) exist for implementations.
+=AI_MEDIA_COST_UNKNOWN= is never "free": zero is a real price. Setters (=set_provider_status=, =set_error_message=, =add_result_url=, =add_named_result=, =set_cost_micro_usd=, =set_credits=, =set_expires_at=) exist for implementations.
+
+** Named results
+
+A 3D model comes with its thumbnail and texture maps; a sprite comes in eight directions. A position in a list cannot say which file is which, so an implementation may record each output under a name with =ai_media_job_add_named_result(job, name, url)=, and a caller asks =ai_media_job_get_result_url(job, "glb")=. =ai_media_job_get_result_names()= lists the names in the order they were first added. A named result is also appended to the plain list, so code that only reads =get_result_urls()= sees every file, and an implementation that only lists URLs (Higgsfield, ComfyUI) is unchanged. Names are unique: adding one again points it at the new URL, while the plain list keeps both.
+
+The names are each provider's vocabulary, documented on its page: [[file:../providers/meshy.org][Meshy]] (=glb=, =thumbnail=, =texture:base_color=, =rig:fbx=, =anim:walking=, ...) and [[file:../providers/pixellab.org][PixelLab]] (=image=, =frame:0=, =south=, =spritesheet=, =sheet=, ...).
+
+A result URL may be a =data:= URL when the service sent the bytes inline (PixelLab's synchronous endpoints); =download= decodes it without a request.
 
 *A job that failed is not a =GError=.* =poll_finish= and =wait_finish= return it with state =FAILED= or =CANCELLED=. An error means the question went unanswered: bad credentials, an unknown id, the service down, the wait's deadline.
 
@@ -112,10 +122,13 @@ on_done(GObject *source, GAsyncResult *result, gpointer user_data)
 2. Make each =*_async= create its =GTask= first; the task captures the caller's context, and anything you attach (an HTTP session, a timer) belongs to that context.
 3. Map the service's status words onto =AiMediaJobState= in one function, and keep the original with =ai_media_job_set_provider_status()=. Treat an unknown word as an error, not a guess.
 4. Send no credential with =download=; result URLs are storage, not the API.
-5. Cover it against a loopback server, as =tests/test-higgsfield-client.c= does.
+5. Record outputs that are not interchangeable with =ai_media_job_add_named_result()=, and document the names.
+6. Cover it against a loopback server, as =tests/test-higgsfield-client.c= does; =tests/media-mock.h= is a recording mock to start from.
 
 * See also
 
 - [[file:../providers/higgsfield.org][Higgsfield]] -- the hosted implementation, with the API facts and terms
 - [[file:../providers/comfyui.org][ComfyUI]] -- the self-hosted implementation: your own workflow, placeholders, cost 0
+- [[file:../providers/meshy.org][Meshy]] -- 3D models, retexturing, remeshing, rigging and animation; credits, named results
+- [[file:../providers/pixellab.org][PixelLab]] -- pixel art: images, eight-direction characters and animations, tilesets; jobs answered at once and in the background
 - [[file:ai-video-generator.org][AiVideoGenerator]], [[file:ai-image-generator.org][AiImageGenerator]]

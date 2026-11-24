@@ -26,7 +26,10 @@ struct _AiMediaJob
 	gchar           *provider_status;
 	gchar           *error_message;
 	GPtrArray       *result_urls;   /* NULL-terminated, of gchar * */
+	GPtrArray       *result_names;  /* NULL-terminated, of gchar *, unique */
+	GHashTable      *named_results; /* name -> URL */
 	gint64           cost_micro_usd;
+	gint64           credits;
 	gchar           *expires_at;
 };
 
@@ -120,6 +123,8 @@ ai_media_job_finalize(GObject *object)
 	g_clear_pointer(&self->provider_status, g_free);
 	g_clear_pointer(&self->error_message, g_free);
 	g_clear_pointer(&self->result_urls, g_ptr_array_unref);
+	g_clear_pointer(&self->result_names, g_ptr_array_unref);
+	g_clear_pointer(&self->named_results, g_hash_table_unref);
 	g_clear_pointer(&self->expires_at, g_free);
 
 	G_OBJECT_CLASS(ai_media_job_parent_class)->finalize(object);
@@ -137,7 +142,10 @@ static void
 ai_media_job_init(AiMediaJob *self)
 {
 	self->result_urls = g_ptr_array_new_null_terminated(2, g_free, TRUE);
+	self->result_names = g_ptr_array_new_null_terminated(2, g_free, TRUE);
+	self->named_results = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	self->cost_micro_usd = AI_MEDIA_COST_UNKNOWN;
+	self->credits = AI_MEDIA_COST_UNKNOWN;
 }
 
 /**
@@ -321,6 +329,113 @@ ai_media_job_get_n_result_urls(AiMediaJob *self)
 	g_return_val_if_fail(AI_IS_MEDIA_JOB(self), 0);
 
 	return self->result_urls->len;
+}
+
+/**
+ * ai_media_job_add_named_result:
+ * @self: an #AiMediaJob
+ * @name: what the file is, such as "glb", "thumbnail" or "south"
+ * @url: its URL
+ *
+ * Records an output under a name, for a service whose outputs are not
+ * interchangeable -- a mesh and its thumbnail, eight directions of a
+ * sprite.  The URL is also appended to the plain list, so a caller that
+ * only reads ai_media_job_get_result_urls() sees every file.
+ *
+ * Names are unique.  Adding a name a second time points it at the new
+ * URL; the old URL stays in the plain list, because that list is a
+ * record of what the service returned rather than a lookup.
+ */
+void
+ai_media_job_add_named_result(
+	AiMediaJob  *self,
+	const gchar *name,
+	const gchar *url
+){
+	g_return_if_fail(AI_IS_MEDIA_JOB(self));
+	g_return_if_fail(name != NULL && name[0] != '\0');
+	g_return_if_fail(url != NULL);
+
+	if (!g_hash_table_contains(self->named_results, name))
+	{
+		g_ptr_array_add(self->result_names, g_strdup(name));
+	}
+	g_hash_table_insert(self->named_results, g_strdup(name), g_strdup(url));
+	g_ptr_array_add(self->result_urls, g_strdup(url));
+}
+
+/**
+ * ai_media_job_get_result_names:
+ * @self: an #AiMediaJob
+ *
+ * The names of the outputs recorded with ai_media_job_add_named_result(),
+ * in the order they were first added.  Empty for a service that only
+ * lists URLs (Higgsfield, ComfyUI).
+ *
+ * Returns: (transfer none) (array zero-terminated=1): the result names
+ */
+const gchar * const *
+ai_media_job_get_result_names(AiMediaJob *self)
+{
+	g_return_val_if_fail(AI_IS_MEDIA_JOB(self), NULL);
+
+	return (const gchar * const *)self->result_names->pdata;
+}
+
+/**
+ * ai_media_job_get_result_url:
+ * @self: an #AiMediaJob
+ * @name: an output name
+ *
+ * Returns: (transfer none) (nullable): the URL recorded under @name, or
+ *   %NULL when the job has no output of that name
+ */
+const gchar *
+ai_media_job_get_result_url(
+	AiMediaJob  *self,
+	const gchar *name
+){
+	g_return_val_if_fail(AI_IS_MEDIA_JOB(self), NULL);
+	g_return_val_if_fail(name != NULL, NULL);
+
+	return g_hash_table_lookup(self->named_results, name);
+}
+
+/**
+ * ai_media_job_get_credits:
+ * @self: an #AiMediaJob
+ *
+ * What the job cost in the service's own unit, when it bills in one
+ * rather than in money: Meshy's credits, PixelLab's subscription
+ * generations.  Kept apart from ai_media_job_get_cost_micro_usd() because
+ * the exchange rate depends on the account's plan, which the job does
+ * not know.
+ *
+ * Returns: the amount, or %AI_MEDIA_COST_UNKNOWN
+ */
+gint64
+ai_media_job_get_credits(AiMediaJob *self)
+{
+	g_return_val_if_fail(AI_IS_MEDIA_JOB(self), AI_MEDIA_COST_UNKNOWN);
+
+	return self->credits;
+}
+
+/**
+ * ai_media_job_set_credits:
+ * @self: an #AiMediaJob
+ * @credits: the amount, or %AI_MEDIA_COST_UNKNOWN
+ *
+ * Records what the job cost in the service's own unit.
+ */
+void
+ai_media_job_set_credits(
+	AiMediaJob *self,
+	gint64      credits
+){
+	g_return_if_fail(AI_IS_MEDIA_JOB(self));
+
+	self->credits = credits;
 }
 
 /**

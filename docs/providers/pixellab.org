@@ -1,0 +1,167 @@
+#+title: PixelLab
+#+description: AiPixellabClient: PixelLab's hosted pixel-art API (v2) -- images, eight-direction characters and their animations, tilesets, isometric tiles, map objects -- as an AiMediaGenerator
+#+authors: ai-glib contributors
+#+categories: providers media image pixel-art
+#+created: 2026-11-23T00:00:00-05:00
+#+updated: 2026-11-23T00:00:00-05:00
+#+version: 1
+
+* Overview
+
+=AiPixellabClient= drives [[https://www.pixellab.ai][PixelLab]]'s v2 API, a hosted, closed, prepaid service for game pixel art: single images, characters drawn in four or eight directions, walk and attack animations for them, Wang tilesets for top-down maps and platformers, isometric tiles and map objects. It is a plain =GObject= implementing [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]], like [[file:meshy.org][AiMeshyClient]] and [[file:higgsfield.org][AiHiggsfieldClient]].
+
+The client is written from PixelLab's OpenAPI document alone. PixelLab's Python client carries no licence, so it was not read, and nothing here derives from it.
+
+| | |
+|---+---|
+| Type | =AiPixellabClient= (final, =GObject=) |
+| Interface | =AiMediaGenerator= (submit, poll, download, cancel; no estimate) |
+| Extras | =ai_pixellab_client_balance_async()=, =ai_pixellab_image_node_new()= |
+| Base URL | =https://api.pixellab.ai/v2= (=AI_PIXELLAB_DEFAULT_BASE_URL=) |
+| Auth | =Authorization: Bearer <token>=, set by the caller; never read from the environment |
+| Cost | micro-USD from =usage.usd=; subscription generations as the job's credits |
+| Results | named: =image=, =frame:0=, =south=, =spritesheet=, =south:0=, =sheet=, =tileset=, ... |
+| Header | =<ai-glib.h>= (=src/providers/ai-pixellab-client.h=) |
+
+* Facts this client relies on
+
+From [[https://api.pixellab.ai/v2/openapi.json][the v2 OpenAPI document]], checked on 2026-11-23. Re-check before relying on a limit that matters; the service adds endpoints often.
+
+- *Two kinds of endpoint.* Some answer in the response itself with base64 PNGs (={"image": {"type": "base64", "base64": "...", "format": "png"}}= or ={"images": [...]}=). The =base64= member is sometimes a bare payload and sometimes already a =data:image/png;base64,...= URL. Others start a *background job* and answer at once with =background_job_id= (or =background_job_ids=) and the id of the object being made.
+- *Background jobs*: =GET /background-jobs/{id}= answers =processing=, =completed= or =failed=, with =last_response= holding the latest data -- =queue_position= and =estimated_wait_seconds= while waiting for a GPU. Jobs are "automatically cleaned up after completion", so one may answer =404= once it is done. =DELETE /background-jobs/{id}= cancels one: =400= if it already finished, =409= if it finished while the cancel was applied.
+- *The objects*: =GET /characters/{id}= (rotation URLs, null until the character is complete; animations with per-direction frame URLs -- all public storage), =GET /characters/{id}/spritesheet= (a ZIP of one sheet PNG and its layout JSON; no authentication, the random character id is the access key; =423= while generating), =GET /tilesets/{id}= and =/tilesets-sidescroller/{id}= (=?layout= is needed for the whole sheet; =423= while generating), =GET /isometric-tiles/{id}=, =GET /map-objects/{id}= (=423= while generating, =410= when it failed for good; map objects are deleted eight hours after creation).
+- *A character animation's reply names no =character_id=* (=CreateCharacterAnimationResponse=): the character is the one the request named.
+- *Usage* is ={"type": "usd", "usd": 0.01}= on a credit balance or ={"type": "generations", "generations": 1}= on a subscription.
+- *Errors*: =401= invalid token, =402= insufficient credits, =422= validation (FastAPI's ={"detail": [{"loc", "msg"}]}=), =429= too many requests, =529= rate limit exceeded.
+- *Every request body refuses members it does not declare* (=additionalProperties: false=).
+
+* Setup
+
+#+begin_src C
+g_autoptr(AiPixellabClient) client = ai_pixellab_client_new_with_api_key(token); /* from your secrets store */
+#+end_src
+
+=ai_pixellab_client_set_api_key()= is not a property and has no getter; the old token is wiped before it is freed, and one with a line break is refused. The token goes only to the base URL's origin, on requests that never follow a redirect, and is redacted from every error. Downloads are fetched without it.
+
+=base-url= and =timeout= (seconds per HTTP request, default 180 -- a synchronous endpoint generates while the request is open) are properties.
+
+* Operations
+
+The request's =operation= parameter names the operation; without one, its model does. =operation= is removed before sending, and the request's prompt is sent as the endpoint's description field (below) -- an explicit parameter of that name wins. Every other parameter is passed through untouched; nest objects such as =image_size= with =ai_media_request_set_param_json()=.
+
+| =operation= | Endpoint | Answers | Prompt goes to | =image_size= |
+|---+---+---+---+---|
+| =image= | =create-image-pixflux= | at once | =description= | required, 16-400 |
+| =image= with model =pixen= | =create-image-pixen= | at once | =description= | required, 16-768, divisible by 4 |
+| =bitforge= | =create-image-bitforge= | at once | =description= | required, 16-200 |
+| =rotate= | =rotate= | at once | (refused) | required, 16-200 |
+| =inpaint= | =inpaint= | at once | =description= | required, 16-200 |
+| =animate= | =animate-with-text= | at once | =description= | required, exactly 64x64 |
+| =character-4= | =create-character-with-4-directions= | background | =description= | required, 16-128 |
+| =character-8= | =create-character-with-8-directions= | background | =description= | required, 16-128 |
+| =character-animate= | =characters/animations= | background, one job per direction | =action_description= | (the character's) |
+| =tileset-topdown= | =create-tileset= | background | (refused: use =lower_description=, =upper_description=) | (=tile_size=) |
+| =tileset-sidescroller= | =create-tileset-sidescroller= | background | (refused: use =lower_description=) | (=tile_size=) |
+| =isometric-tile= | =create-isometric-tile= | background | =description= | required, 16-64 |
+| =map-object= | =map-objects= | background | =description= | optional, 32-400 |
+
+The size limits are the OpenAPI document's, checked *before* anything is sent: a request outside them is refused with =AI_ERROR_INVALID_REQUEST= naming the endpoint and the range, rather than costing a round trip to a =422=. A prompt on an endpoint with no description field is refused rather than silently dropped.
+
+#+begin_src C
+g_autoptr(AiMediaRequest) request = ai_media_request_new(AI_PIXELLAB_OPERATION_CHARACTER_8,
+                                                         "a knight in dented plate armour");
+g_autoptr(JsonNode) size = json_from_string("{\"width\": 48, \"height\": 48}", NULL);
+
+ai_media_request_set_param_json(request, "image_size", size); /* copied */
+ai_media_request_set_param_string(request, "view", "low top-down");
+ai_media_generator_submit_async(AI_MEDIA_GENERATOR(client), request, NULL, on_submitted, NULL);
+#+end_src
+
+Input images (=init_image=, =reference_image=, =from_image=, =inpainting_image=, =mask_image=, ...) are base64 objects; =ai_pixellab_image_node_new(bytes, &error)= builds one from PNG, JPEG or WebP bytes, reading the format from the bytes:
+
+#+begin_src C
+g_autoptr(JsonNode) frame = ai_pixellab_image_node_new(png_bytes, &error);
+
+ai_media_request_set_param_json(request, "reference_image", frame);
+#+end_src
+
+PixelLab recommends running user-supplied art through its =/unzoom= endpoint first; that is not wrapped here.
+
+* Jobs and ids
+
+** Answered at once
+
+Submit returns =sync:<uuid>=. The job is already finished: the client keeps the snapshot, and =poll= answers with it without a request. Its results are =data:= URLs that =download= decodes locally, whether PixelLab sent a bare payload or one with its own =data:= prefix. Such an id belongs to the client that made it and lasts as long as that client; another client, or a fresh process, cannot poll it. There is nothing to cancel.
+
+** Background jobs
+
+Submit returns =<operation>:<object id>:<group>:<job id>[,<job id>...]=: everything a poll needs, so a fresh process resumes from the id alone. =<group>= is a character animation's =animation_group_id=, or =-=.
+
+A poll asks =GET /background-jobs/{id}= for each job, then:
+
+- any =failed= -> =FAILED=, with the job's =last_response= =error=/=message=/=detail= as the message;
+- any =processing= -> =QUEUED= when a job reports a =queue_position= above 0, else =RUNNING=;
+- all =completed= (or =404=, cleaned up) -> the object is fetched, and the job is =DONE= with its files -- or still =RUNNING= while the object answers =423= or has no files yet; a map object answering =410= is =FAILED=;
+- any other word -> =AI_ERROR_INVALID_RESPONSE=, never a guess.
+
+The provider status is =processing=, =completed= or =failed=.
+
+* Results
+
+| Operation | Named results |
+|---+---|
+| =image=, =bitforge=, =rotate=, =inpaint= | =image= (a =data:= URL) |
+| =animate= | =frame:0=, =frame:1=, ... (=data:= URLs) |
+| =character-4=, =character-8= | one per direction (=south=, =east=, =north=, =west=, and =south-east=, =north-east=, =north-west=, =south-west= for eight), public PNG URLs; =spritesheet= |
+| =character-animate= | =<direction>:<n>= for each frame of this animation (=south:0=, =south:1=, ...); =spritesheet=. With no group id in the job id, every animation of the character, as =<animation type>:<direction>:<n>= |
+| =tileset-topdown=, =tileset-sidescroller= | =sheet= (the whole sheet, =layout=tileset15=, as a =data:= URL) and =tileset= (the full reply -- tiles, corners, 4x4 patterns, metadata -- as =data:application/json;base64,...=) |
+| =isometric-tile= | =image= (a =data:= URL) |
+| =map-object= | =image= (its =download_url=; fetch it within eight hours) |
+
+=spritesheet= is =<base-url>/characters/{id}/spritesheet=: a ZIP holding the sheet PNG (row 0 the rotations, then one row per animation direction, every cell the same size, centred) and a layout JSON. It is fetched without the token, as PixelLab documents.
+
+=get_cost_micro_usd()= is the summed =usage.usd= of the background jobs, or of the synchronous reply; when the jobs report none it is the submit's, remembered by the client that submitted (unknown in a fresh process). =get_credits()= is the subscription generations charged, rounded, when billing was in generations.
+
+* Cancel
+
+=cancel_async= sends =DELETE /background-jobs/{id}= for each of the job's background jobs; one already cleaned up (=404=) counts as cancelled. =400= or =409= -- the job finished first -- is =AI_ERROR_INVALID_REQUEST= saying so. A =sync:= job finished at submit and has nothing to cancel.
+
+* Balance
+
+#+begin_src C
+gint64 micro_usd;
+gdouble generations, total;
+g_autofree gchar *status = NULL;
+
+ai_pixellab_client_balance_finish(client, result, &micro_usd, &generations, &total, &status, &error);
+#+end_src
+
+=GET /balance=: the prepaid credit in micro-USD, and the subscription's remaining and total generations for the period (-1 without a subscription block) and its status (=active=, =trial=, =expired=, =none=, ...).
+
+There is no estimate: PixelLab prices only its pro-flash endpoints in advance (=/pro-flash/cost=), which this client does not wrap. =ai_media_generator_can_estimate()= is false.
+
+* Errors
+
+| HTTP | =AiError= | Message adds |
+|---+---+---|
+| 400, 409, 422 | =INVALID_REQUEST= | the =detail=, flattened to "field: message" |
+| 401 | =INVALID_API_KEY= | "invalid API token" |
+| 402 | =INSUFFICIENT_QUOTA= | "insufficient credits" |
+| 403 | =PERMISSION_DENIED= | |
+| 404 | =INVALID_REQUEST= | on a poll or cancel: no such job or object for this account |
+| 423 | =SERVICE_UNAVAILABLE= | still being generated (a poll reads it as running instead) |
+| 429 | =RATE_LIMITED= | "too many requests", and =Retry-After= when sent |
+| 529 | =RATE_LIMITED= | "rate limit exceeded", and =Retry-After= when sent |
+| 503 | =SERVICE_UNAVAILABLE= | |
+| other 5xx | =SERVER_ERROR= | |
+| 3xx | =INVALID_RESPONSE= | not followed, so the token stays on the API origin |
+
+* Tests
+
+=tests/test-pixellab.c= runs against a loopback mock on its own thread and context (=tests/media-mock.h=) that answers in the OpenAPI document's shapes: the pixflux body (prompt as =description=, no =prompt= or =operation=), both base64 spellings decoded to the same bytes, pixen chosen by model, subscription billing as credits, animate's frames, every size refusal and that none of them was sent, prompt routing (refused on =rotate=, =action_description= for an animation, an explicit =description= winning), a character through queued, running and done with its eight directions, the spritesheet fetched without the token, an animation from two direction jobs with one cleaned up (=404=), with and without a group, a tileset with its =layout= query, =sheet= and =tileset= JSON, an isometric tile through =423=, a failed job and a =410=, an unknown status, the 402, 429 with =Retry-After=, 529, a 422 validation list and an echoing 401 (redacted), cancel and its refusals, the balance, =ai_pixellab_image_node_new()=, and that the token is in no log line.
+
+* See also
+
+- [[file:../api-reference/ai-media-generator.org][AiMediaGenerator]] -- the interface, waiting, =AiMediaJob= and named results
+- [[file:meshy.org][Meshy]] -- rigged and animated 3D models through the same interface
+- [[file:higgsfield.org][Higgsfield]], [[file:comfyui.org][ComfyUI]]

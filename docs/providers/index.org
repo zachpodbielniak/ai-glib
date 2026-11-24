@@ -18,6 +18,8 @@ These implement =AiMediaGenerator= rather than =AiProvider=: no chat, a queued j
 |----------+--------------+-------------+--------|
 | [[file:higgsfield.org][Higgsfield]] | =AiHiggsfieldClient= | set by the caller (key id + secret); no environment variable | endpoint paths, e.g. =higgsfield-ai/soul/v2/standard= |
 | [[file:comfyui.org][ComfyUI]] (self-hosted) | =AiComfyuiClient= | none; optional bearer token for an authenticating proxy, set by the caller | your own workflow, exported in API format, with ={{prompt}}=-style placeholders |
+| [[file:meshy.org][Meshy]] | =AiMeshyClient= | set by the caller (bearer key); no environment variable | operations: =text-to-3d=, =image-to-3d=, =multi-image-to-3d=, =retexture=, =remesh=, =rig=, =animate= |
+| [[file:pixellab.org][PixelLab]] | =AiPixellabClient= | set by the caller (bearer token); no environment variable | operations: =image= (pixflux, or pixen), =bitforge=, =rotate=, =inpaint=, =animate=, =character-4=, =character-8=, =character-animate=, =tileset-topdown=, =tileset-sidescroller=, =isometric-tile=, =map-object= |
 
 *** CLI Wrapper Providers
 | Provider                                         | Client Class         | Environment Variable          | Default Model                      |
@@ -188,6 +190,7 @@ No HTTP request that carries a credential follows a redirect, not even to its ow
 | =AiLibresearchSearch=                                                 | credentials with a bearer, none without | never / same origin                  |
 | DuckDuckGo                                                            | none                           | same origin                                   |
 | Voice: HTTP synthesizer, websocket recognizer                         | none (configured endpoint)     | same origin                                   |
+| Media job API (=AiHiggsfieldClient=, =AiMeshyClient=, =AiPixellabClient=) | credentials             | never                                         |
 | Generated image or video download, =web_fetch=, =web_search= page fetch | public URL                   | anywhere, unless a credential header is on it |
 | =ai-call= Matrix and JWT requests                                     | credentials                    | never                                         |
 | Higgsfield API requests and the presigned upload =PUT=               | credentials                    | never                                         |

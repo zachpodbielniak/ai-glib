@@ -38,6 +38,8 @@
 #include "providers/ai-laya-client.h"
 #include "providers/ai-higgsfield-client.h"
 #include "providers/ai-comfyui-client.h"
+#include "providers/ai-meshy-client.h"
+#include "providers/ai-pixellab-client.h"
 #include "providers/ai-typesafe-client.h"
 #include "agent/ai-mock-decider.h"
 #include "core/ai-image-generator.h"

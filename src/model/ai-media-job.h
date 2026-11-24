@@ -122,6 +122,35 @@ ai_media_job_get_n_result_urls(
 	AiMediaJob *self
 );
 
+void
+ai_media_job_add_named_result(
+	AiMediaJob  *self,
+	const gchar *name,
+	const gchar *url
+);
+
+const gchar * const *
+ai_media_job_get_result_names(
+	AiMediaJob *self
+);
+
+const gchar *
+ai_media_job_get_result_url(
+	AiMediaJob  *self,
+	const gchar *name
+);
+
+gint64
+ai_media_job_get_credits(
+	AiMediaJob *self
+);
+
+void
+ai_media_job_set_credits(
+	AiMediaJob *self,
+	gint64      credits
+);
+
 gint64
 ai_media_job_get_cost_micro_usd(
 	AiMediaJob *self

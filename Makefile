@@ -50,6 +50,8 @@ PUBLIC_HEADERS = \
 	$(SRCDIR)/providers/ai-laya-client.h \
 	$(SRCDIR)/providers/ai-higgsfield-client.h \
 	$(SRCDIR)/providers/ai-comfyui-client.h \
+	$(SRCDIR)/providers/ai-meshy-client.h \
+	$(SRCDIR)/providers/ai-pixellab-client.h \
 	$(SRCDIR)/providers/ai-typesafe-client.h \
 	$(SRCDIR)/agent/ai-mock-decider.h \
 	$(SRCDIR)/harness/ai-work-session.h \
@@ -162,6 +164,9 @@ LIB_SOURCES = \
 	$(SRCDIR)/providers/ai-laya-client.c \
 	$(SRCDIR)/providers/ai-higgsfield-client.c \
 	$(SRCDIR)/providers/ai-comfyui-client.c \
+	$(SRCDIR)/providers/ai-meshy-client.c \
+	$(SRCDIR)/providers/ai-pixellab-client.c \
+	$(SRCDIR)/providers/ai-media-shared.c \
 	$(SRCDIR)/providers/ai-typesafe-client.c \
 	$(SRCDIR)/providers/ai-systemone.c \
 	$(SRCDIR)/agent/ai-mock-decider.c \
