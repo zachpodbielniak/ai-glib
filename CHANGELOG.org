@@ -4,7 +4,7 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
-* Unreleased
+* 0.16.1 - 2026-11-28
 
 ** Fixed
 - A Claude Code turn the CLI runs *by itself* in the same process -- after a background sub-agent or shell it started finishes, or for a steer that arrived after the turn's =result= -- was read to EOF and then thrown away: the parser kept only the first =result='s text. A later =result='s text is now appended to the response after a blank line, so one run is one answer. VENTURE #58.
