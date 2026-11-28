@@ -1131,6 +1131,23 @@ check_and_emit_compaction(
 }
 
 /*
+ * How a result line ended the turn.
+ *
+ * "is_error": true is Claude Code saying the turn failed -- a login that
+ * is gone, an API error, a run cut off at --max-turns -- even though it
+ * still writes a result line, with the failure as its "result" text, and
+ * exits 1. Reported as AI_STOP_REASON_ERROR so a caller can tell that
+ * from an answer; the text is kept, since it is the only account of what
+ * went wrong.
+ */
+static AiStopReason
+cc_result_stop_reason(JsonObject *obj)
+{
+    return ai_json_get_boolean(obj, "is_error", FALSE)
+        ? AI_STOP_REASON_ERROR : AI_STOP_REASON_END_TURN;
+}
+
+/*
  * With --json-schema the CLI puts the constrained JSON in
  * "structured_output" and leaves "result" empty. That JSON is the
  * text the caller asked for. A schema may root an object, an array,
@@ -1260,7 +1277,7 @@ ai_claude_code_client_parse_json_output(
     /* Create response */
     session_id = ai_json_get_string(obj, "session_id", "");
     response = ai_response_new(session_id, ai_cli_client_get_model(client));
-    ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
+    ai_response_set_stop_reason(response, cc_result_stop_reason(obj));
 
     /* Store session ID for continuity - ONLY if persistence is enabled */
     if (session_id[0] != '\0' && ai_cli_client_get_session_persistence(client))
@@ -1897,7 +1914,7 @@ ai_claude_code_client_parse_stream_events(
             self->total_cost = cost;
         }
 
-        ai_response_set_stop_reason(response, AI_STOP_REASON_END_TURN);
+        ai_response_set_stop_reason(response, cc_result_stop_reason(obj));
 
         /*
          * The turn is over: close stdin so claude exits, unless a steer

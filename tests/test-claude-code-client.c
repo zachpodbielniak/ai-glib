@@ -1413,6 +1413,102 @@ assert_structured_output_text(const gchar *line, const gchar *needle)
 }
 
 /*
+ * A turn Claude Code itself says failed ends as an error, not a turn.
+ *
+ * When the login is gone the CLI does not exit before answering: it
+ * writes a synthetic assistant message whose text is the failure, then a
+ * result line with "is_error": true and "terminal_reason": "api_error",
+ * and exits 1. The text was taken as the model's answer and the turn as
+ * a normal end, so a consumer had nothing to tell a dead login from a
+ * reply. These are the lines a real `claude -p --output-format
+ * stream-json` wrote for a login that had reached its time limit (ids
+ * and usage trimmed). The text stays the answer -- it is the only
+ * account of what happened -- and the stop reason says it was an error.
+ */
+#define LOGIN_ENDED_TEXT \
+	"Failed to authenticate: this login reached its time limit and " \
+	"cannot be renewed. Run `claude auth login` to sign in again, or use " \
+	"`claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended " \
+	"jobs"
+
+static const gchar *LOGIN_ENDED_ASSISTANT =
+	"{\"type\":\"assistant\",\"message\":{\"id\":\"m1\","
+	"\"model\":\"<synthetic>\",\"role\":\"assistant\","
+	"\"stop_reason\":\"stop_sequence\",\"type\":\"message\","
+	"\"content\":[{\"type\":\"text\",\"text\":\"" LOGIN_ENDED_TEXT "\"}]},"
+	"\"session_id\":\"s1\",\"error\":\"authentication_failed\","
+	"\"is_api_error_message\":true}";
+
+static const gchar *LOGIN_ENDED_RESULT =
+	"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,"
+	"\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\","
+	"\"session_id\":\"s1\",\"total_cost_usd\":0,"
+	"\"terminal_reason\":\"api_error\",\"api_error_status\":null,"
+	"\"result\":\"" LOGIN_ENDED_TEXT "\"}";
+
+static void
+test_result_is_error_ends_the_turn_as_an_error(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	AiResponse *stream_response = ai_response_new("id", "sonnet");
+	AiResponse *json_response;
+	GError *error = NULL;
+	g_autofree gchar *stream_text = NULL;
+	g_autofree gchar *json_text = NULL;
+
+	/* streamed: the assistant line, then the result line */
+	parse_one_line(client, LOGIN_ENDED_ASSISTANT, stream_response);
+	parse_one_line(client, LOGIN_ENDED_RESULT, stream_response);
+	g_assert_cmpint(ai_response_get_stop_reason(stream_response), ==,
+	                AI_STOP_REASON_ERROR);
+	stream_text = ai_response_get_text(stream_response);
+	g_assert_cmpstr(stream_text, ==, LOGIN_ENDED_TEXT);
+
+	/* --output-format json: the result line alone */
+	json_response = klass->parse_json_output(AI_CLI_CLIENT(client),
+	                                         LOGIN_ENDED_RESULT, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(json_response);
+	g_assert_cmpint(ai_response_get_stop_reason(json_response), ==,
+	                AI_STOP_REASON_ERROR);
+	json_text = ai_response_get_text(json_response);
+	g_assert_cmpstr(json_text, ==, LOGIN_ENDED_TEXT);
+
+	g_object_unref(json_response);
+	g_object_unref(stream_response);
+	g_object_unref(client);
+}
+
+/* And a result that did not fail is still an ordinary end of turn. */
+static void
+test_result_without_is_error_ends_the_turn(void)
+{
+	AiClaudeCodeClient *client = ai_claude_code_client_new();
+	AiCliClientClass *klass = AI_CLI_CLIENT_GET_CLASS(client);
+	AiResponse *stream_response = ai_response_new("id", "sonnet");
+	AiResponse *json_response;
+	GError *error = NULL;
+	const gchar *line =
+		"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+		"\"session_id\":\"s1\",\"result\":\"fine\"}";
+
+	parse_one_line(client, line, stream_response);
+	g_assert_cmpint(ai_response_get_stop_reason(stream_response), ==,
+	                AI_STOP_REASON_END_TURN);
+
+	json_response = klass->parse_json_output(AI_CLI_CLIENT(client), line,
+	                                         &error);
+	g_assert_no_error(error);
+	g_assert_cmpint(ai_response_get_stop_reason(json_response), ==,
+	                AI_STOP_REASON_END_TURN);
+
+	g_object_unref(json_response);
+	g_object_unref(stream_response);
+	g_object_unref(client);
+}
+
+/*
  * With --json-schema the CLI puts the constrained JSON in
  * "structured_output" and leaves "result" empty. A caller who asked
  * for a schema reads the response text and must get that JSON back,
@@ -1575,6 +1671,10 @@ main(
 	                test_result_cost_is_the_cli_figure);
 	g_test_add_func("/ai-glib/claude-code-client/result-without-cost-is-unknown",
 	                test_result_without_cost_is_unknown);
+	g_test_add_func("/ai-glib/claude-code-client/result-is-error-ends-the-turn-as-an-error",
+	                test_result_is_error_ends_the_turn_as_an_error);
+	g_test_add_func("/ai-glib/claude-code-client/result-without-is-error-ends-the-turn",
+	                test_result_without_is_error_ends_the_turn);
 	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-is-the-text",
 	                test_result_structured_output_is_the_text);
 	g_test_add_func("/ai-glib/claude-code-client/result-structured-output-array-is-the-text",
