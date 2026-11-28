@@ -34,6 +34,14 @@ G_BEGIN_DECLS
  * @AI_EVENT_STATUS: something worth telling a human, in no fixed vocabulary
  * @AI_EVENT_ERROR: the turn failed
  * @AI_EVENT_STREAM_END: no further events for this turn
+ * @AI_EVENT_TURN_CONTINUED: the CLI ended a turn and then started another
+ *   one by itself in the same run -- background work it had launched
+ *   finished, or a steer arrived after the turn's result -- so what
+ *   follows belongs to that later turn.  The text says why.  Since: 0.16.1
+ * @AI_EVENT_BACKGROUND_ABANDONED: the CLI ended a turn with background work
+ *   still open, and the run stopped waiting for it at
+ *   #AiCliClient:background-wait-ms.  The text names the work; its result
+ *   was never delivered.  Since: 0.16.1
  *
  * What an #AiEvent describes.
  *
@@ -42,6 +50,9 @@ G_BEGIN_DECLS
  * `{type,part}` envelope --- and a consumer that had to learn all of them
  * would gain a new bug every time one changed.  A translator per provider is
  * written once; everything downstream reads only this.
+ *
+ * The last two are appended rather than placed beside the stream
+ * boundaries so that every earlier value keeps its number.
  */
 typedef enum
 {
@@ -54,7 +65,9 @@ typedef enum
     AI_EVENT_USAGE,
     AI_EVENT_STATUS,
     AI_EVENT_ERROR,
-    AI_EVENT_STREAM_END
+    AI_EVENT_STREAM_END,
+    AI_EVENT_TURN_CONTINUED,
+    AI_EVENT_BACKGROUND_ABANDONED
 } AiEventKind;
 
 #define AI_TYPE_EVENT (ai_event_get_type())
@@ -108,6 +121,12 @@ ai_event_new_status(const gchar *text);
 
 AiEvent *
 ai_event_new_error(const GError *error);
+
+AiEvent *
+ai_event_new_turn_continued(const gchar *reason);
+
+AiEvent *
+ai_event_new_background_abandoned(const gchar *text);
 
 AiEvent *
 ai_event_ref(AiEvent *self);

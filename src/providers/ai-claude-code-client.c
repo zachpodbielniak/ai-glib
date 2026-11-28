@@ -1581,6 +1581,208 @@ cc_note_session_limit(AiClaudeCodeClient *self, JsonObject *msg_obj)
 }
 
 /*
+ * What one streamed run has seen of its own turn boundaries.
+ *
+ * Claude Code can run more than one turn in a process.  It ends a turn
+ * with a `result` line; if a sub-agent or background shell it started
+ * is still going, it does not exit but waits for it, and when it
+ * finishes runs a second turn *by itself* -- no prompt arrives, the
+ * `<task-notification>` is enqueued inside the CLI -- and writes a
+ * second `result`.  A steer written too late for the first turn is run
+ * the same way.  The reader reads to EOF, so all of it arrives here; the
+ * parser has to know which turn a line belongs to.
+ *
+ * Kept on the response, which is the one object that is per run: the
+ * vfunc is handed the line and the response and nothing else, and the
+ * client outlives every run it makes.
+ *
+ * @results:      `result` lines seen so far
+ * @after_result: the last line was a turn boundary, and no line of a
+ *                later turn has arrived yet
+ * @open_tasks:   task_id -> description, background work started and
+ *                not yet reported back
+ * @finished:     what reported back since the last boundary, for the
+ *                reason a later turn gives
+ * @steered:      a steer was echoed since the last boundary
+ */
+typedef struct
+{
+    guint       results;
+    gboolean    after_result;
+    GHashTable *open_tasks;
+    GString    *finished;
+    gboolean    steered;
+} CcRunState;
+
+static void
+cc_run_state_free(gpointer data)
+{
+    CcRunState *state = data;
+
+    g_hash_table_unref(state->open_tasks);
+    g_string_free(state->finished, TRUE);
+    g_free(state);
+}
+
+static CcRunState *
+cc_run_state(AiResponse *response)
+{
+    static GQuark quark = 0;
+    CcRunState *state;
+
+    if (quark == 0)
+        quark = g_quark_from_static_string("ai-claude-code-run-state");
+
+    state = g_object_get_qdata(G_OBJECT(response), quark);
+
+    if (state == NULL)
+    {
+        state = g_new0(CcRunState, 1);
+        state->open_tasks = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                  g_free, g_free);
+        state->finished = g_string_new(NULL);
+        g_object_set_qdata_full(G_OBJECT(response), quark, state,
+                                cc_run_state_free);
+    }
+
+    return state;
+}
+
+static gint
+cc_compare_strings(gconstpointer a, gconstpointer b)
+{
+    return g_strcmp0(*(const gchar * const *)a, *(const gchar * const *)b);
+}
+
+/*
+ * "id (description), id (description)", sorted so the note reads the same
+ * every time.
+ */
+static gchar *
+cc_describe_open_tasks(CcRunState *state)
+{
+    g_autoptr(GPtrArray) parts = g_ptr_array_new_with_free_func(g_free);
+    GHashTableIter iter;
+    gpointer key;
+    gpointer value;
+
+    g_hash_table_iter_init(&iter, state->open_tasks);
+
+    while (g_hash_table_iter_next(&iter, &key, &value))
+    {
+        const gchar *description = value;
+
+        if (description != NULL && description[0] != '\0')
+            g_ptr_array_add(parts, g_strdup_printf("%s (%s)",
+                                                   (const gchar *)key,
+                                                   description));
+        else
+            g_ptr_array_add(parts, g_strdup(key));
+    }
+
+    g_ptr_array_sort(parts, cc_compare_strings);
+    g_ptr_array_add(parts, NULL);
+
+    return g_strjoinv(", ", (gchar **)parts->pdata);
+}
+
+/*
+ * Background work starting and finishing.
+ *
+ * task_started is emitted for foreground sub-agents too, and those report
+ * back before the turn's `result`.  Only work the CLI says is awaited, or
+ * says is not backgrounded, is left out; anything else is tracked, because
+ * a task wrongly tracked costs nothing when it finishes in time, and one
+ * wrongly ignored is the lost report this exists for.
+ */
+static void
+cc_note_task_line(
+    JsonObject  *obj,
+    const gchar *subtype,
+    AiResponse  *response
+){
+    CcRunState *state;
+    const gchar *task_id = ai_json_get_string(obj, "task_id", NULL);
+
+    if (task_id == NULL || task_id[0] == '\0' || response == NULL)
+        return;
+
+    state = cc_run_state(response);
+
+    if (g_strcmp0(subtype, "task_started") == 0)
+    {
+        const gchar *description = ai_json_get_string(obj, "description", NULL);
+
+        if (ai_json_get_boolean(obj, "awaited", FALSE))
+            return;
+
+        if (json_object_has_member(obj, "is_backgrounded") &&
+            !ai_json_get_boolean(obj, "is_backgrounded", TRUE))
+            return;
+
+        g_hash_table_replace(state->open_tasks, g_strdup(task_id),
+                             g_strdup(description != NULL ? description : ""));
+        return;
+    }
+
+    /* task_notification: the work reported back, whatever its status. */
+    if (!g_hash_table_remove(state->open_tasks, task_id))
+        return;
+
+    if (state->results > 0)
+    {
+        const gchar *status = ai_json_get_string(obj, "status", NULL);
+
+        if (state->finished->len > 0)
+            g_string_append(state->finished, ", ");
+
+        g_string_append(state->finished, task_id);
+
+        if (status != NULL && status[0] != '\0')
+            g_string_append_printf(state->finished, " (%s)", status);
+
+        /* Nothing left open: the run is no longer waiting on anything. */
+        if (g_hash_table_size(state->open_tasks) == 0)
+            ai_cli_stream_await_background(0, NULL);
+    }
+}
+
+/*
+ * A line of a turn that began after a `result`: say so, once.
+ */
+static void
+cc_note_turn_line(
+    AiResponse *response,
+    GPtrArray  *out_events
+){
+    CcRunState *state;
+    g_autofree gchar *reason = NULL;
+
+    if (response == NULL)
+        return;
+
+    state = cc_run_state(response);
+
+    if (!state->after_result)
+        return;
+
+    state->after_result = FALSE;
+
+    if (state->finished->len > 0)
+        reason = g_strdup_printf("background work finished: %s",
+                                 state->finished->str);
+    else if (state->steered)
+        reason = g_strdup("a steer arrived after the turn's result");
+    else
+        reason = g_strdup("the CLI started another turn by itself");
+
+    g_string_truncate(state->finished, 0);
+    state->steered = FALSE;
+
+    g_ptr_array_add(out_events, ai_event_new_turn_continued(reason));
+}
+
+/*
  * Translate a system line into at most one STATUS event.
  *
  * AI_EVENT_STATUS is "something worth telling a human". Claude Code
@@ -1730,6 +1932,10 @@ ai_claude_code_client_parse_stream_events(
             ai_cli_client_set_session_id(client, session_id);
         }
 
+        if (g_strcmp0(subtype, "task_started") == 0 ||
+            g_strcmp0(subtype, "task_notification") == 0)
+            cc_note_task_line(obj, subtype, response);
+
         cc_emit_system_status(obj, subtype, out_events);
     }
     else if (g_strcmp0(type, "assistant") == 0)
@@ -1739,6 +1945,8 @@ ai_claude_code_client_parse_stream_events(
 
         if (msg_obj == NULL)
             return TRUE;
+
+        cc_note_turn_line(response, out_events);
 
         cc_note_session_limit(self, msg_obj);
 
@@ -1773,11 +1981,18 @@ ai_claude_code_client_parse_stream_events(
             ai_cli_steer_channel_resolve(ai_cli_steer_current(),
                                          ai_json_get_string(obj, "uuid", NULL),
                                          AI_STEER_DELIVERED, NULL);
+
+            /* A late steer is the next turn's prompt: the reason for it. */
+            if (response != NULL && cc_run_state(response)->after_result)
+                cc_run_state(response)->steered = TRUE;
             return TRUE;
         }
 
         if (msg_obj != NULL)
+        {
+            cc_note_turn_line(response, out_events);
             cc_emit_message_content(msg_obj, out_events);
+        }
     }
     else if (g_strcmp0(type, "stream_event") == 0)
     {
@@ -1786,6 +2001,8 @@ ai_claude_code_client_parse_stream_events(
 
         if (event == NULL)
             return TRUE;
+
+        cc_note_turn_line(response, out_events);
 
         event_type = ai_json_get_string(event, "type", NULL);
 
@@ -1839,6 +2056,9 @@ ai_claude_code_client_parse_stream_events(
         const gchar *session_id = ai_json_get_string(obj, "session_id", NULL);
         JsonObject *usage_obj;
         gdouble cost;
+        CcRunState *state = cc_run_state(response);
+
+        state->results++;
 
         /* Store session ID - ONLY if persistence is enabled */
         if (session_id != NULL && session_id[0] != '\0' &&
@@ -1851,14 +2071,50 @@ ai_claude_code_client_parse_stream_events(
          * structured_output wins when present. Adding a content block
          * here also stops stream_run_complete() from flushing the
          * accumulated deltas as a second copy of the same JSON.
+         *
+         * A later turn's result is the exception to "only when there is
+         * no block yet".  That guard exists so the first result does
+         * not duplicate a block something else already added; applied
+         * to the second result too it threw away every turn after the
+         * first -- the report a background sub-agent's notification
+         * produced, the answer to a late steer -- while the reader went
+         * on reading them to EOF.  VENTURE #58.
          */
-        if (!cc_add_structured_output(response, obj) &&
-            result_text != NULL && result_text[0] != '\0' &&
-            ai_response_get_content_blocks(response) == NULL)
+        if (cc_add_structured_output(response, obj))
+        {
+            /* The structured value is the answer. */
+        }
+        else if (state->results > 1)
+        {
+            ai_cli_stream_append_turn_text(response, result_text);
+        }
+        else if (result_text != NULL && result_text[0] != '\0' &&
+                 ai_response_get_content_blocks(response) == NULL)
         {
             g_autoptr(AiTextContent) content = ai_text_content_new(result_text);
             ai_response_add_content_block(response,
                 (AiContentBlock *)g_steal_pointer(&content));
+        }
+
+        /*
+         * The boundary.  With background work still open the CLI is not
+         * about to exit: it will run another turn when that work is done,
+         * and the reader keeps going -- bounded by background-wait-ms.
+         */
+        state->after_result = TRUE;
+        state->steered = FALSE;
+        g_string_truncate(state->finished, 0);
+
+        if (g_hash_table_size(state->open_tasks) > 0)
+        {
+            g_autofree gchar *what = cc_describe_open_tasks(state);
+
+            ai_cli_stream_await_background(
+                g_hash_table_size(state->open_tasks), what);
+        }
+        else
+        {
+            ai_cli_stream_await_background(0, NULL);
         }
 
         /* Update usage and check for context compaction */

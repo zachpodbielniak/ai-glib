@@ -37,6 +37,7 @@ streaming mode.
 | =session-persistence= | boolean | TRUE    | Whether to capture and resume sessions at all                   |
 | =effort-level=        | string  | "medium" | Reasoning effort; spelled differently by each CLI (see below)   |
 | =process-timeout-ms=  | int     | 0       | Bounds synchronous and shared streaming calls. 0 disables the bound             |
+| =background-wait-ms=  | int     | 1800000 | How long a streamed run waits for background work the CLI left open at the end of a turn (since 0.16.1). 0 waits as long as the CLI runs |
 
 *** Accounts: a separate config directory
 =ai_cli_client_set_config_dir(client, dir, &error)= runs the CLI under another account by pointing the variables it reads for its login and settings at =dir=. Each class declares its variables in =AiCliClientClass.config_dir_env=:
@@ -82,6 +83,8 @@ One property, three spellings:
 =process-timeout-ms= bounds =ai_cli_client_chat_sync()= and the shared streaming subprocess reader. Expiry kills the child and returns =AI_ERROR_TIMEOUT=. Zero disables this deadline; a =GCancellable= can still stop the run. Providers using their own orchestration, such as tmux, have separate timeout controls.
 
 The library default is 0. A positive =--set process-timeout-ms=N= opts into a deadline. =ai=, =ai-tui= and =ai-gui= set 0 before applying that override. Runtime provider switches in =ai-tui= also use 0, without reapplying startup property overrides.
+
+=background-wait-ms= bounds something narrower: a streamed run whose CLI wrote a turn result while background work it started (a Claude Code sub-agent, a background shell) was still running. The CLI does not exit then; it runs another turn by itself when the work finishes, and the run reads on so that turn reaches the caller. On expiry the CLI is killed and the run ends successfully with the text it has plus a note naming the work, and =AI_EVENT_BACKGROUND_ABANDONED= is emitted. The default is =AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS= (30 minutes). See [[file:../providers/claude-code.org][Background work and late turns]].
 
 *** Native sessions during =AiConversation= switching
 The =session-id= property is continuity inside one CLI, not the portable

@@ -299,6 +299,50 @@ ai_event_new_error(const GError *error)
 }
 
 /**
+ * ai_event_new_turn_continued:
+ * @reason: (nullable): why the CLI started another turn, for a human
+ *
+ * Creates an %AI_EVENT_TURN_CONTINUED event: the CLI ended a turn and
+ * then began another one by itself in the same run.
+ *
+ * Returns: (transfer full): a new #AiEvent
+ *
+ * Since: 0.16.1
+ */
+AiEvent *
+ai_event_new_turn_continued(const gchar *reason)
+{
+    AiEvent *self;
+
+    self = ai_event_alloc(AI_EVENT_TURN_CONTINUED);
+    self->text = g_strdup(reason);
+
+    return self;
+}
+
+/**
+ * ai_event_new_background_abandoned:
+ * @text: (nullable): what was still running, for a human
+ *
+ * Creates an %AI_EVENT_BACKGROUND_ABANDONED event: the run stopped
+ * waiting for background work the CLI still had open.
+ *
+ * Returns: (transfer full): a new #AiEvent
+ *
+ * Since: 0.16.1
+ */
+AiEvent *
+ai_event_new_background_abandoned(const gchar *text)
+{
+    AiEvent *self;
+
+    self = ai_event_alloc(AI_EVENT_BACKGROUND_ABANDONED);
+    self->text = g_strdup(text);
+
+    return self;
+}
+
+/**
  * ai_event_ref:
  * @self: (nullable): an #AiEvent
  *
@@ -371,7 +415,8 @@ ai_event_get_kind(const AiEvent *self)
  * The text payload: prose for %AI_EVENT_TEXT_DELTA, reasoning for
  * %AI_EVENT_THINKING_DELTA, the argument fragment for
  * %AI_EVENT_TOOL_INPUT_DELTA, the message for %AI_EVENT_STATUS and
- * %AI_EVENT_ERROR.
+ * %AI_EVENT_ERROR, the reason for %AI_EVENT_TURN_CONTINUED and what was
+ * left running for %AI_EVENT_BACKGROUND_ABANDONED.
  *
  * Returns: (transfer none) (nullable): the text, or %NULL
  */
@@ -554,6 +599,8 @@ ai_event_kind_to_string(AiEventKind kind)
         case AI_EVENT_STATUS:           return "status";
         case AI_EVENT_ERROR:            return "error";
         case AI_EVENT_STREAM_END:       return "stream-end";
+        case AI_EVENT_TURN_CONTINUED:   return "turn-continued";
+        case AI_EVENT_BACKGROUND_ABANDONED: return "background-abandoned";
         default:                        return "unknown";
     }
 }

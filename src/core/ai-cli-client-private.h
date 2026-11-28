@@ -38,6 +38,23 @@ ai_cli_client_messages_for_prompt(
     GList       *messages
 );
 
+/*
+ * For stream parsers: a turn boundary inside one run.  See
+ * ai-cli-client.c and docs/providers/claude-code.org ("Background work
+ * and late turns").
+ */
+void
+ai_cli_stream_await_background(
+    guint        n_open,
+    const gchar *what
+);
+
+void
+ai_cli_stream_append_turn_text(
+    AiResponse  *response,
+    const gchar *text
+);
+
 AiResponse *
 ai_cli_client_chat_sync_pipeline(
     AiCliClient   *self,
