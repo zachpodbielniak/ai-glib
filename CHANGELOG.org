@@ -4,6 +4,11 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.16.2 - 2026-11-28
+
+** Fixed
+- A Claude Code result line marked ="is_error": true= -- a login that is gone, an API refusal, a run cut off at =--max-turns= -- now ends the turn with =AI_STOP_REASON_ERROR= instead of =AI_STOP_REASON_END_TURN=, on the =--output-format json= and the stream-json paths alike. The text is kept as the response's content, since it is the only account of what failed. A result with =is_error= and no text is now an empty error rather than an empty normal end. (#24)
+
 * 0.16.1 - 2026-11-28
 
 ** Fixed
