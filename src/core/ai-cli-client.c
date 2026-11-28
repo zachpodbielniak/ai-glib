@@ -251,6 +251,7 @@ typedef struct
     AiAgentEndpoint *tool_endpoint;    /* owned, may be NULL */
     gint      max_tokens;
     gint      process_timeout_ms;
+    gint      background_wait_ms;
     gboolean  session_persistence;
     gboolean  splits_text_at_tool_use;
     gboolean  portable_context;
@@ -331,6 +332,7 @@ enum
     PROP_PROCESS_TIMEOUT_MS,
     PROP_ENVIRONMENT,
     PROP_TOOL_ENDPOINT,
+    PROP_BACKGROUND_WAIT_MS,
     N_PROPS
 };
 
@@ -435,6 +437,9 @@ ai_cli_client_get_property(
         case PROP_TOOL_ENDPOINT:
             g_value_set_boxed(value, priv->tool_endpoint);
             break;
+        case PROP_BACKGROUND_WAIT_MS:
+            g_value_set_int(value, priv->background_wait_ms);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -493,6 +498,9 @@ ai_cli_client_set_property(
         case PROP_ENVIRONMENT:
             ai_cli_client_set_environment(AI_CLI_CLIENT(object),
                                           g_value_get_boxed(value));
+            break;
+        case PROP_BACKGROUND_WAIT_MS:
+            priv->background_wait_ms = g_value_get_int(value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -709,6 +717,38 @@ ai_cli_client_class_init(AiCliClientClass *klass)
                          0, G_MAXINT, 0,
                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    /**
+     * AiCliClient:background-wait-ms:
+     *
+     * How long a streamed run keeps reading after the CLI ended a turn
+     * with background work of its own still open.
+     *
+     * Claude Code can end a turn -- write its `result` -- while a
+     * sub-agent or a background shell it started is still running.  It
+     * does not exit then: it waits for that work, and when it finishes
+     * runs another turn by itself, with no new prompt, and writes a
+     * second `result`.  The run reads on through that later turn, so its
+     * text reaches the caller; this bounds the wait.  On expiry the CLI
+     * is stopped, the run ends with what it has and a note naming the
+     * work left open, and %AI_EVENT_BACKGROUND_ABANDONED is emitted.
+     *
+     * 0 waits for as long as the CLI keeps running (then only
+     * #AiCliClient:process-timeout-ms bounds the run).  The default is
+     * %AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS.  Only parsers that
+     * report open background work arm it; today that is Claude Code's.
+     *
+     * Since: 0.16.1
+     */
+    properties[PROP_BACKGROUND_WAIT_MS] =
+        g_param_spec_int("background-wait-ms",
+                         "Background Wait (ms)",
+                         "How long to wait for background work the CLI "
+                         "left open at the end of a turn (0 waits as long "
+                         "as the CLI runs)",
+                         0, G_MAXINT,
+                         AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS,
+                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(object_class, N_PROPS, properties);
 
     /**
@@ -787,6 +827,7 @@ ai_cli_client_init(AiCliClient *self)
     priv->session_id = NULL;
     priv->max_tokens = 4096;
     priv->process_timeout_ms = 0;
+    priv->background_wait_ms = AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS;
     priv->session_persistence = TRUE;
     priv->working_directory = NULL;
     priv->effort_level = g_strdup("medium");
@@ -1291,6 +1332,56 @@ ai_cli_client_set_process_timeout_ms(
 
     g_object_notify_by_pspec(G_OBJECT(self),
                              properties[PROP_PROCESS_TIMEOUT_MS]);
+}
+
+/**
+ * ai_cli_client_get_background_wait_ms:
+ * @self: an #AiCliClient
+ *
+ * Returns: how long (in ms) a streamed run waits for background work the
+ *   CLI left open at the end of a turn, or 0 for as long as the CLI runs.
+ *   See #AiCliClient:background-wait-ms.
+ *
+ * Since: 0.16.1
+ */
+gint
+ai_cli_client_get_background_wait_ms(AiCliClient *self)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_val_if_fail(AI_IS_CLI_CLIENT(self), 0);
+
+    priv = ai_cli_client_get_instance_private(self);
+    return priv->background_wait_ms;
+}
+
+/**
+ * ai_cli_client_set_background_wait_ms:
+ * @self: an #AiCliClient
+ * @wait_ms: the bound in milliseconds; 0 waits as long as the CLI runs
+ *
+ * Bounds how long a streamed run keeps reading after the CLI ended a turn
+ * with background work still open.  See #AiCliClient:background-wait-ms
+ * for what happens when it expires.
+ *
+ * Since: 0.16.1
+ */
+void
+ai_cli_client_set_background_wait_ms(
+    AiCliClient *self,
+    gint         wait_ms
+)
+{
+    AiCliClientPrivate *priv;
+
+    g_return_if_fail(AI_IS_CLI_CLIENT(self));
+    g_return_if_fail(wait_ms >= 0);
+
+    priv = ai_cli_client_get_instance_private(self);
+    priv->background_wait_ms = wait_ms;
+
+    g_object_notify_by_pspec(G_OBJECT(self),
+                             properties[PROP_BACKGROUND_WAIT_MS]);
 }
 
 /**
@@ -2420,7 +2511,32 @@ typedef struct
      */
     gboolean           steerable;
     AiCliSteerChannel *steer;
+
+    /*
+     * Background work the CLI left open at the end of a turn.
+     *
+     * Armed by the parser through ai_cli_stream_await_background() when a
+     * `result` arrives while work the CLI started is still running, and
+     * disarmed when the last of it reports back.  On expiry the run stops
+     * waiting: see on_stream_background_timeout().  @background_what is
+     * the parser's own description of the work, for the note.
+     */
+    GSource          *background_source;   /* owned; NULL when none is armed */
+    gchar            *background_what;
+    guint             background_open;
 } StreamRun;
+
+/*
+ * The run whose line is being parsed on this thread, for the parser.
+ *
+ * A parser is handed a line and a response, never the run, and the vfunc
+ * is public API that cannot grow a parameter.  The steer channel already
+ * reaches its parser this way (ai_cli_steer_current()); this is the same
+ * shape for the run itself.  Set only around the parse call, so a parser
+ * called from anywhere else -- the synchronous path, a test feeding it
+ * lines -- finds NULL and the calls that use it do nothing.
+ */
+static GPrivate current_stream_run;
 
 static void stream_run_read_next(StreamRun *run);
 static void stream_run_complete(StreamRun *run);
@@ -2478,6 +2594,14 @@ stream_run_free(StreamRun *run)
         g_clear_pointer(&run->timeout_source, g_source_unref);
     }
 
+    /* The same rule for the background wait, for the same reason. */
+    if (run->background_source != NULL)
+    {
+        g_source_destroy(run->background_source);
+        g_clear_pointer(&run->background_source, g_source_unref);
+    }
+    g_clear_pointer(&run->background_what, g_free);
+
     if (run->cancel_id != 0)
         g_cancellable_disconnect(run->cancellable, run->cancel_id);
     g_clear_object(&run->io_cancellable);
@@ -2534,6 +2658,17 @@ stream_run_finish_once(
     }
 
     run->finished = TRUE;
+
+    /*
+     * Nothing is waited for once the task is answered.  Destroyed here
+     * rather than left to stream_run_free(), which may be a read
+     * callback away: the wait must not fire into a finished run.
+     */
+    if (run->background_source != NULL)
+    {
+        g_source_destroy(run->background_source);
+        g_clear_pointer(&run->background_source, g_source_unref);
+    }
 
     /* Whatever was steered in and never answered is answered now. */
     if (run->steer != NULL)
@@ -2699,6 +2834,176 @@ stream_run_complete(StreamRun *run)
     stream_run_finish_once(run, g_object_ref(run->response), NULL);
 }
 
+/*
+ * ai_cli_stream_append_turn_text:
+ * @response: the run's response
+ * @text: (nullable): the text one later turn of the run ended with
+ *
+ * Adds the text of a turn after the first in the same run to @response.
+ *
+ * Appended to the last text block, after a blank line, rather than added
+ * as a block of its own.  A consumer that delivers each block as its own
+ * message (libreclaw does) would otherwise deliver the earlier turn as
+ * one reply and the later turn as another -- and a consumer that treats
+ * a reply as the answer to a task, as clawtilla does, would settle the
+ * task on the first and drop the second, which is the report.  One run
+ * is one answer to whoever is waiting on it.
+ */
+void
+ai_cli_stream_append_turn_text(
+    AiResponse  *response,
+    const gchar *text
+){
+    AiTextContent *last = NULL;
+    GList *l;
+
+    g_return_if_fail(AI_IS_RESPONSE(response));
+
+    if (text == NULL || text[0] == '\0')
+        return;
+
+    for (l = ai_response_get_content_blocks(response); l != NULL; l = l->next)
+    {
+        if (AI_IS_TEXT_CONTENT(l->data))
+            last = AI_TEXT_CONTENT(l->data);
+    }
+
+    if (last != NULL &&
+        ai_text_content_get_text(last) != NULL &&
+        ai_text_content_get_text(last)[0] != '\0')
+    {
+        g_autofree gchar *joined = g_strconcat(ai_text_content_get_text(last),
+                                               "\n\n", text, NULL);
+
+        ai_text_content_set_text(last, joined);
+    }
+    else if (last != NULL)
+    {
+        ai_text_content_set_text(last, text);
+    }
+    else
+    {
+        g_autoptr(AiTextContent) content = ai_text_content_new(text);
+
+        ai_response_add_content_block(response,
+            (AiContentBlock *)g_steal_pointer(&content));
+    }
+}
+
+/*
+ * The CLI ended a turn with background work open, and it has run for
+ * #AiCliClient:background-wait-ms without reporting back.
+ *
+ * The run stops waiting.  The child is killed -- it is only alive to run
+ * the turn that work would have started, and nothing is reading for that
+ * any more -- and the run ends *successfully* with what it has, plus a
+ * note naming the work.  Failing it instead would throw away the turn
+ * that did finish, which is the only answer there is; leaving it to run
+ * is the bug this exists to bound.  The note and the event are what tell
+ * the caller the answer is incomplete.
+ */
+static gboolean
+on_stream_background_timeout(gpointer user_data)
+{
+    StreamRun *run = user_data;
+    g_autofree gchar *note = NULL;
+    g_autoptr(AiEvent) event = NULL;
+    gint wait_ms;
+
+    g_clear_pointer(&run->background_source, g_source_unref);
+
+    if (run->finished)
+        return G_SOURCE_REMOVE;
+
+    wait_ms = ai_cli_client_get_background_wait_ms(run->client);
+
+    note = g_strdup_printf(
+        "[ai-glib] This turn ended with %u background task%s still "
+        "running: %s. Waited %d %s for %s to finish, then stopped the CLI; "
+        "%s result%s never delivered.",
+        run->background_open, run->background_open == 1 ? "" : "s",
+        run->background_what != NULL ? run->background_what : "(unnamed)",
+        wait_ms >= 1000 ? wait_ms / 1000 : wait_ms,
+        wait_ms >= 1000 ? "s" : "ms",
+        run->background_open == 1 ? "it" : "them",
+        run->background_open == 1 ? "its" : "their",
+        run->background_open == 1 ? " was" : "s were");
+
+    g_message("ai-cli: %s", note);
+
+    ai_cli_stream_append_turn_text(run->response, note);
+
+    event = ai_event_new_background_abandoned(note);
+    stream_run_dispatch_event(run, event);
+
+    g_cancellable_cancel(run->io_cancellable);
+    g_subprocess_force_exit(run->subprocess);
+
+    stream_run_complete(run);
+
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * ai_cli_stream_await_background:
+ * @n_open: how many background tasks the CLI still has open; 0 for none
+ * @what: (nullable): a description of them, for the note on expiry
+ *
+ * For a stream parser, at a turn boundary: the CLI ended a turn with
+ * @n_open pieces of background work still running, so the run should
+ * keep reading -- the CLI will run another turn when they finish -- but
+ * for no longer than #AiCliClient:background-wait-ms.  0 disarms the
+ * wait: the work reported back.
+ *
+ * The bound runs from the first boundary that left work open and is not
+ * extended by later ones, so a CLI that keeps starting work cannot hold
+ * the session past it.  Called from anywhere but a streamed run's parse,
+ * it does nothing.
+ */
+void
+ai_cli_stream_await_background(
+    guint        n_open,
+    const gchar *what
+){
+    StreamRun *run = g_private_get(&current_stream_run);
+    gint wait_ms;
+
+    if (run == NULL || run->finished)
+        return;
+
+    if (n_open == 0)
+    {
+        if (run->background_source != NULL)
+        {
+            g_source_destroy(run->background_source);
+            g_clear_pointer(&run->background_source, g_source_unref);
+        }
+
+        g_clear_pointer(&run->background_what, g_free);
+        run->background_open = 0;
+        return;
+    }
+
+    g_free(run->background_what);
+    run->background_what = g_strdup(what);
+    run->background_open = n_open;
+
+    if (run->background_source != NULL)
+        return;
+
+    wait_ms = ai_cli_client_get_background_wait_ms(run->client);
+
+    if (wait_ms <= 0)
+        return;
+
+    /* The thread-default context, for the reason the deadline gives. */
+    run->background_source = g_timeout_source_new(wait_ms);
+    g_source_set_callback(run->background_source,
+                          on_stream_background_timeout, run, NULL);
+    g_source_attach(run->background_source,
+                    g_main_context_get_thread_default());
+}
+
 static void
 on_stream_line_read(
     GObject      *source,
@@ -2763,7 +3068,9 @@ on_stream_line_read(
 
     /* A steerable parser finds its run's channel through this. */
     ai_cli_steer_set_current(run->steer);
+    g_private_set(&current_stream_run, run);
     ok = parse(run->client, line, run->response, events, &error);
+    g_private_set(&current_stream_run, NULL);
     ai_cli_steer_set_current(NULL);
 
     if (!ok)

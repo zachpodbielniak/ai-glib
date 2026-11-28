@@ -22,7 +22,9 @@ typedef enum
     AI_EVENT_USAGE,
     AI_EVENT_STATUS,
     AI_EVENT_ERROR,
-    AI_EVENT_STREAM_END
+    AI_EVENT_STREAM_END,
+    AI_EVENT_TURN_CONTINUED,
+    AI_EVENT_BACKGROUND_ABANDONED
 } AiEventKind;
 #+end_src
 
@@ -38,6 +40,11 @@ typedef enum
 | =AI_EVENT_STATUS=           | =text=                                     | something worth telling a human                  |
 | =AI_EVENT_ERROR=            | =error=, =text=                            | the turn failed                                  |
 | =AI_EVENT_STREAM_END=       | ---                                        | no further events for this turn                  |
+| =AI_EVENT_TURN_CONTINUED=   | =text=                                     | the CLI started another turn by itself in the same run; =text= says why (since 0.16.1) |
+| =AI_EVENT_BACKGROUND_ABANDONED= | =text=                                 | the run stopped waiting for background work the CLI left open; =text= names it (since 0.16.1) |
+
+The last two are appended so every earlier value keeps its number. Only
+=claude-code= emits them today; see [[file:../providers/claude-code.org][Background work and late turns]].
 
 The set is deliberately small and provider-neutral. Each provider speaks a
 different wire format --- Anthropic SSE, Claude Code's NDJSON, opencode's
@@ -76,6 +83,8 @@ AiEvent *ai_event_new_tool_finished (AiToolUse    *tool_use,
 AiEvent *ai_event_new_usage        (AiUsage *usage, gint64 cost_micros);
 AiEvent *ai_event_new_status       (const gchar *text);
 AiEvent *ai_event_new_error        (const GError *error);
+AiEvent *ai_event_new_turn_continued (const gchar *reason);
+AiEvent *ai_event_new_background_abandoned (const gchar *text);
 #+end_src
 
 =ai_event_new_usage()= copies its =AiUsage= and =ai_event_new_error()= copies

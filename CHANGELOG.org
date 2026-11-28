@@ -4,6 +4,15 @@ All notable changes to ai-glib. The format follows [[https://keepachangelog.com/
 and the project uses [[https://semver.org/][semantic versioning]]. Until 1.0.0, a minor
 release may change the API.
 
+* 0.16.1 - 2026-11-28
+
+** Fixed
+- A Claude Code turn the CLI runs *by itself* in the same process -- after a background sub-agent or shell it started finishes, or for a steer that arrived after the turn's =result= -- was read to EOF and then thrown away: the parser kept only the first =result='s text. A later =result='s text is now appended to the response after a blank line, so one run is one answer. VENTURE #58.
+
+** Added
+- =AiCliClient:background-wait-ms= (=ai_cli_client_get_background_wait_ms()=, =ai_cli_client_set_background_wait_ms()=, default =AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS=, 30 minutes): how long a streamed run keeps reading after the CLI ended a turn with background work open. On expiry the CLI is stopped and the run ends with what it has plus a note naming the work; =0= waits as long as the CLI runs.
+- =AI_EVENT_TURN_CONTINUED= and =AI_EVENT_BACKGROUND_ABANDONED= (appended to =AiEventKind=, so earlier values keep their numbers), with =ai_event_new_turn_continued()= and =ai_event_new_background_abandoned()=. =claude-code= tracks =task_started= / =task_notification= to know what is still open. See =docs/providers/claude-code.org=, "Background work and late turns".
+
 * 0.16.0 - 2026-11-23
 
 ** Added

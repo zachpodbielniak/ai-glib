@@ -45,6 +45,22 @@ G_BEGIN_DECLS
  */
 #define AI_CLI_ARG_LIMIT (131072)
 
+/**
+ * AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS:
+ *
+ * The default for #AiCliClient:background-wait-ms: thirty minutes.
+ *
+ * How long a streamed run keeps reading after the CLI ended a turn with
+ * background work of its own still open -- a sub-agent, a background
+ * shell -- before it stops the CLI and reports the work as abandoned.
+ * Long enough for a review sub-agent (the one that found this needed
+ * fourteen minutes), short enough that a background job that never ends
+ * does not hold the session for good.
+ *
+ * Since: 0.16.1
+ */
+#define AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS (30 * 60 * 1000)
+
 #define AI_TYPE_CLI_CLIENT (ai_cli_client_get_type())
 
 G_DECLARE_DERIVABLE_TYPE(AiCliClient, ai_cli_client, AI, CLI_CLIENT, GObject)
@@ -317,6 +333,15 @@ void
 ai_cli_client_set_process_timeout_ms(
     AiCliClient *self,
     gint         timeout_ms
+);
+
+gint
+ai_cli_client_get_background_wait_ms(AiCliClient *self);
+
+void
+ai_cli_client_set_background_wait_ms(
+    AiCliClient *self,
+    gint         wait_ms
 );
 
 const gchar *

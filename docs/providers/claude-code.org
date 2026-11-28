@@ -325,6 +325,70 @@ Session id is still captured from any =system= line that carries one,
 including the dropped heartbeats, so a run interrupted mid-think can
 still be resumed.
 
+*** Background work and late turns
+Claude Code can end a turn -- write its =result= line -- while work it
+started is still running: a sub-agent launched in the background (the
+=Agent= tool's default), or a =run_in_background= shell. It does not exit
+then. It waits, and when the work finishes it enqueues a
+=<task-notification>= inside the CLI and *runs another turn by itself*,
+with no prompt from us, ending in a second =result=. A steer written after
+the first =result= is run the same way (see [[file:../steering.org][Steering]]).
+
+The stream reader always read all of that to EOF. Until 0.16.1 the parser
+kept only the first =result='s text, so the later turn -- in the case
+that found it, a security review's full report, written nine minutes after
+an interim "the rest is still running in a sub-agent" -- was read and
+thrown away. VENTURE #58.
+
+What a streamed run does now:
+
+| Line                                     | Effect                                                                                     |
+|------------------------------------------+--------------------------------------------------------------------------------------------|
+| =system= / =task_started=                | the task is tracked as open background work, unless it says =awaited= or =is_backgrounded: false= |
+| =system= / =task_notification=           | that task is no longer open, whatever its =status=                                         |
+| =result= (the first)                     | as before: its text is the response's text block                                           |
+| =result= (a later one)                   | its text is *appended* to that block after a blank line -- one run is one answer            |
+| =result= with tasks still open           | the run keeps reading, for at most =background-wait-ms=                                    |
+| first =assistant= / =user= / =stream_event= line after a =result= | =AI_EVENT_TURN_CONTINUED=, once, its text saying why (the work that finished, or a late steer) |
+
+Appended rather than added as a second block on purpose: a consumer that
+delivers each block as its own message (libreclaw does) would deliver the
+two turns as two replies, and a consumer that settles a task on a reply
+(clawtilla) would settle it on the interim and drop the report.
+
+**** The bound: =background-wait-ms=
+A background task that never reports back must not hold the session for
+good. =AiCliClient:background-wait-ms= (default
+=AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS=, thirty minutes) runs from the
+first =result= that left work open, and is not extended by later ones.
+When it expires:
+
+- the CLI is killed (=g_subprocess_force_exit()=);
+- the run ends *successfully* with the turn it has, plus a note appended
+  to the text: =[ai-glib] This turn ended with N background task(s) still
+  running: <id> (<description>), .... Waited <n> s for it to finish, then
+  stopped the CLI; its result was never delivered.=;
+- =AI_EVENT_BACKGROUND_ABANDONED= is emitted with the same note, and
+  logged with =g_message()=.
+
+Failing the run instead would throw away the turn that did finish, which
+is the only answer there is. =0= waits as long as the CLI runs; then only
+=process-timeout-ms= bounds it (and that, as before, fails the run). A
+=GCancellable= still stops the run at once, and the wait never fires into
+a finished run.
+
+Only the streamed path does this. =chat_sync= and the one-shot JSON path
+parse a single =result=; they are unchanged. Other CLI backends never arm
+the wait.
+
+**** Showing the old behaviour
+=tests/test-cli-late-turn.c= drives a fake =claude= through all of the
+above. Its first case is the one that failed before the fix -- the
+response read ="INTERIM"= -- and it compiles against the old library
+(the rest is compiled out when =AI_CLI_CLIENT_DEFAULT_BACKGROUND_WAIT_MS=
+is absent), so the failure can be shown by building the test against a
+copy of the tree at the previous commit.
+
 ** Response Format
 The Claude Code CLI returns JSON in the following format:
 
